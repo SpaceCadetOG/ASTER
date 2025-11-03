@@ -1,0 +1,9 @@
+.env
+*.env
+.env.*
+.envrc
+.venv/
+<<<<<<< HEAD
+.DS_Store
+=======
+>>>>>>> e1fc888f (ack)

@@ -1,0 +1,78 @@
+name: CI/CD - Build, Test, Deploy
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
+
+      - name: Build linux/amd64 binaries
+        run: |
+          cd go-machine
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w" -o dist/go-machine-long ./cmd/long
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w" -o dist/go-machine-short ./cmd/short
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-binaries
+          path: go-machine/dist/*
+
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: go-binaries
+          path: dist
+
+      - name: Prepare SSH key (decode from base64)
+        run: |
+          echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > key.pem
+          chmod 600 key.pem
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keygen -y -f key.pem > key.pub
+
+      - name: Test SSH connectivity
+        run: |
+          ssh -i key.pem -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" "echo ok"
+
+      - name: Upload binaries via scp (as .new)
+        run: |
+          scp -i key.pem -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+            dist/go-machine-long  "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/${{ secrets.SSH_USER }}/TraderBot/go-machine/go-machine-long.new"
+          scp -i key.pem -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+            dist/go-machine-short "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/${{ secrets.SSH_USER }}/TraderBot/go-machine/go-machine-short.new"
+
+      - name: Atomic swap & restart services
+        run: |
+          ssh -i key.pem -o StrictHostKeyChecking=no -o IdentitiesOnly=yes \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" '
+              set -e
+              cd ~/TraderBot/go-machine
+              [ -f go-machine-long ]  && cp go-machine-long  go-machine-long.prev  || true
+              [ -f go-machine-short ] && cp go-machine-short go-machine-short.prev || true
+              mv go-machine-long.new  go-machine-long
+              mv go-machine-short.new go-machine-short
+              chmod +x go-machine-long go-machine-short
+              sudo systemctl restart traderbot || true
+              sudo systemctl restart traderbot-short || true
+              sleep 2
+              curl -fsS http://127.0.0.1:8080/health && echo "Long bot healthy ✅"  || echo "Long bot health FAIL ❌"
+              curl -fsS http://127.0.0.1:8081/health && echo "Short bot healthy ✅" || echo "Short bot health FAIL ❌"
+            '
