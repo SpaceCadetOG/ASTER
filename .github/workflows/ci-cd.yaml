@@ -1,0 +1,71 @@
+name: ASTER CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
+
+      - name: Build linux/amd64 binaries
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -o dist/aster-long ./cmd/long
+          GOOS=linux GOARCH=amd64 go build -o dist/aster-short ./cmd/short
+
+      - name: Start ssh-agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add host key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -p 22 -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Copy binaries to VM
+        run: |
+          scp -o IdentitiesOnly=yes dist/aster-long  \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/ASTER/aster-long.new"
+          scp -o IdentitiesOnly=yes dist/aster-short \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/opt/ASTER/aster-short.new"
+
+      - name: Activate new release on VM
+        run: |
+          ssh -o IdentitiesOnly=yes "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" '
+            set -e
+            cd /opt/ASTER
+
+            # backup existing
+            [ -f aster-long ]  && cp aster-long  aster-long.prev  || true
+            [ -f aster-short ] && cp aster-short aster-short.prev || true
+
+            # swap in new
+            mv aster-long.new  aster-long
+            mv aster-short.new aster-short
+            chmod +x aster-long aster-short
+
+            # restart services (keep your existing service names)
+            sudo systemctl restart traderbot || true
+            sudo systemctl restart traderbot-short || true
+
+            sleep 2
+
+            # health checks
+            curl -fsS http://127.0.0.1:8080/health && echo "Long bot healthy ✅"  || (echo "Long bot health FAIL ❌" && exit 1)
+            curl -fsS http://127.0.0.1:8081/health && echo "Short bot healthy ✅" || (echo "Short bot health FAIL ❌" && exit 1)
+          '
