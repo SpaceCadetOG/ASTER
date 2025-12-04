@@ -35,9 +35,11 @@ jobs:
             "${{ secrets.DEPLOY_HOST }}" "${{ secrets.DEPLOY_USER }}" >> ~/.ssh/config
 
       - name: Copy binaries to VM
+        env:
+          REMOTE_DIR: "/home/${{ secrets.DEPLOY_USER }}/ASTER/bin"
         run: |
-          ssh vm "mkdir -p ~/ASTER/bin"
-          scp bin/aster-long bin/aster-short vm:~/ASTER/bin/
+          ssh vm "mkdir -p $REMOTE_DIR"
+          scp bin/aster-long bin/aster-short vm:$REMOTE_DIR/
 
       - name: Restart systemd services on VM
         run: |
