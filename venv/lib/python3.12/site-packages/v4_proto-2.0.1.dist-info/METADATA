@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: v4-proto
+Version: 2.0.1
+Summary: Protos for dYdX v4 protocol
+Author: dYdX Trading Inc.
+Author-email: contact@dydx.exchange
+Requires-Python: >=3.8
+Requires-Dist: protobuf >=4.23
+Requires-Dist: grpcio-tools >=1.54
+Requires-Dist: grpcio >=1.54
+

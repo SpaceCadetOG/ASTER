@@ -1,0 +1,145 @@
+Metadata-Version: 2.1
+Name: dydx-v4-python
+Version: 0.0.4
+Summary: dYdX Chain Client
+Home-page: https://github.com/amiwrpremium/dydx-v4-python
+License: MIT
+Keywords: dydx,dydx-v4,dydx-v4-python,dydx-python,dydx-v4-client,dydx-client,dydx-v4-python-client,dydx-python-client,dydx-v4-python-sdk,dydx-python-sdk,dydx-v4-python-api,dydx-python-api
+Author: AMiWR
+Author-email: amiwrpremium@gmail.com
+Requires-Python: >=3.9,<4.0
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Topic :: Utilities
+Requires-Dist: Cython (>=0.29.0,<0.30.0)
+Requires-Dist: aiohttp (>=3.8.1,<4.0.0)
+Requires-Dist: bech32 (>=1.2.0,<2.0.0)
+Requires-Dist: bip_utils (>=2.7.0,<3.0.0)
+Requires-Dist: blspy (>=2.0.2,<3.0.0)
+Requires-Dist: brownie (>=0.5.0,<0.6.0)
+Requires-Dist: cytoolz (>=0.12.1,<0.13.0)
+Requires-Dist: dateparser (>=1.0.0,<2.0.0)
+Requires-Dist: ecdsa (>=0.18.0,<0.19.0)
+Requires-Dist: eth-account (>=0.9.0,<0.10.0)
+Requires-Dist: eth_keys (>=0.4.0,<0.5.0)
+Requires-Dist: grpcio (>=1.56,<2.0)
+Requires-Dist: grpcio-tools (>=1.56,<2.0)
+Requires-Dist: mpmath (>=1.3.0,<2.0.0)
+Requires-Dist: protobuf (>=4.23,<5.0)
+Requires-Dist: requests (>=2.31.0,<3.0.0)
+Requires-Dist: six (>=1.16,<2.0)
+Requires-Dist: sympy (>=1.12.0,<2.0.0)
+Requires-Dist: v4-proto (>=2.0.0,<3.0.0)
+Requires-Dist: web3 (>=6.5.0,<7.0.0)
+Requires-Dist: websocket_client (>=1.6.1,<2.0.0)
+Project-URL: Repository, https://github.com/amiwrpremium/dydx-v4-python
+Description-Content-Type: text/markdown
+
+<p align="center"><img src="https://dydx.exchange/icon.svg?" width="256" /></p>
+
+<h1 align="center">dYdX Chain Client for Python</h1>
+
+<div align="center">
+  <a href='https://pypi.org/project/v4-client-py'>
+    <img src='https://img.shields.io/pypi/v/v4-client-py.svg' alt='PyPI'/>
+  </a>
+  <a href='https://github.com/dydxprotocol/v4-clients/blob/main/v4-client-py/LICENSE'>
+    <img src='https://img.shields.io/badge/License-AGPL_v3-blue.svg' alt='License' />
+  </a>
+</div>
+
+Python client for dYdX (v4 API).
+
+The library is currently tested against Python versions 3.9, and 3.11.
+
+## Installation
+
+The `v4-client-py` package is available on [PyPI](https://pypi.org/project/v4-client-py). Install with `pip`:
+
+```bash
+pip install v4-client-py
+```
+
+## Getting Started
+
+Sample code is located in examples folder
+
+## Development Setup - VS Code
+
+Install Microsoft Python extensions
+```
+Shift-Command-P: Create Python Environment
+Select Venv
+Select Python 3.9 as interpreter
+Select requirements.txt as the dependencies to install
+```
+
+
+Install requirements
+```
+pip install -r requirements.txt
+```
+
+VS Code will automatically switch to .venv environment when running example code. Or you can manually switch
+
+```
+source ~/<project_dir>/.venv/bin/activate
+```
+
+Set PYTHONPATH
+
+```
+export PYTHONPATH=~/<project_dir>/.venv/lib/<Python version>/site-packages
+```
+
+## Troubleshootimg
+
+Cython and Brownie must be installed before cytoolz
+
+If there is any issue with cytoolz, uninstall cytoolz, Brownie and Cython, reinstall Cython, Brownie and cytoolz sequentially.
+
+VS Code may need to be restarted to have Cython functioning correctly
+
+
+## Running examples
+
+Select the file to be debugged
+Select the debug button on the left
+Select "Python: Current File" 
+
+## Running tests
+
+Integration tests uses testnet environment for testing. We use pytest.
+
+To install pytest
+
+```
+pip install pytest
+```
+
+For read-only integration tests, run:
+
+```
+pytest -v
+```
+
+For integration tests with transactions, a subaccount must exist for the specified address.
+This subaccount may be reset when testnet environment is reset. To create the subaccount, run
+
+examples/faucet_endpoint.py
+
+Wait for a few seconds for the faucet transaction to commit, then run
+
+```
+pytest -v -c pytest_integration.ini 
+```
+
