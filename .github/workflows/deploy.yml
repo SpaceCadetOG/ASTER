@@ -36,10 +36,15 @@ jobs:
 
       - name: Copy binaries to VM
         env:
-          REMOTE_DIR: "/home/${{ secrets.DEPLOY_USER }}/ASTER/bin"
+          REMOTE_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          ssh vm "mkdir -p $REMOTE_DIR"
-          scp bin/aster-long bin/aster-short vm:$REMOTE_DIR/
+          set -e
+          # 1) upload to /tmp on the VM
+          scp bin/aster-long bin/aster-short vm:/tmp/
+          # 2) move into place with sudo and fix ownership
+          ssh vm "sudo mkdir -p /home/$REMOTE_USER/ASTER/bin && \
+                  sudo mv /tmp/aster-long /tmp/aster-short /home/$REMOTE_USER/ASTER/bin/ && \
+                  sudo chown $REMOTE_USER:$REMOTE_USER /home/$REMOTE_USER/ASTER/bin/aster-long /home/$REMOTE_USER/ASTER/bin/aster-short"
 
       - name: Restart systemd services on VM
         run: |
