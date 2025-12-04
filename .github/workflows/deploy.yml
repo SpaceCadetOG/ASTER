@@ -1,0 +1,55 @@
+name: Deploy ASTER to GCP VM
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build long & short (linux/amd64)
+        run: |
+          mkdir -p bin
+          GOOS=linux GOARCH=amd64 go build -o bin/aster-long ./cmd/long
+          GOOS=linux GOARCH=amd64 go build -o bin/aster-short ./cmd/short
+          ls -l bin
+
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf "Host vm\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/id_ed25519\n  StrictHostKeyChecking no\n" \
+            "${{ secrets.DEPLOY_HOST }}" "${{ secrets.DEPLOY_USER }}" >> ~/.ssh/config
+
+      - name: Copy binaries to VM
+        run: |
+          ssh vm "mkdir -p ~/ASTER/bin"
+          scp bin/aster-long bin/aster-short vm:~/ASTER/bin/
+
+      - name: Restart scanners on VM
+        run: |
+          ssh vm << 'EOF'
+          set -e
+          pkill aster-long || true
+          pkill aster-short || true
+
+          cd ~/ASTER
+          nohup ./bin/aster-long  > long.log  2>&1 &
+          nohup ./bin/aster-short > short.log 2>&1 &
+
+          sleep 2
+          ps aux | grep "aster-" | grep -v grep || (echo "No scanners running" && exit 1)
+          EOF
