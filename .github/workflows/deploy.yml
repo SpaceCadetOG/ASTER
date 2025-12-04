@@ -39,17 +39,23 @@ jobs:
           ssh vm "mkdir -p ~/ASTER/bin"
           scp bin/aster-long bin/aster-short vm:~/ASTER/bin/
 
-      - name: Restart scanners on VM
+      - name: Restart systemd services on VM
         run: |
           ssh vm << 'EOF'
           set -e
-          pkill aster-long || true
-          pkill aster-short || true
+          echo "Stopping services..."
+          sudo systemctl stop aster-long.service || true
+          sudo systemctl stop aster-short.service || true
 
-          cd ~/ASTER
-          nohup ./bin/aster-long  > long.log  2>&1 &
-          nohup ./bin/aster-short > short.log 2>&1 &
+          echo "Starting services..."
+          sudo systemctl start aster-long.service
+          sudo systemctl start aster-short.service
 
-          sleep 2
-          ps aux | grep "aster-" | grep -v grep || (echo "No scanners running" && exit 1)
+          echo "Checking status..."
+          sudo systemctl --no-pager --full status aster-long.service | head -n 15 || true
+          sudo systemctl --no-pager --full status aster-short.service | head -n 15 || true
+
+          echo "Checking HTTP..."
+          curl -s http://localhost:8080 | head || echo "8080 not responding"
+          curl -s http://localhost:8081 | head || echo "8081 not responding"
           EOF
