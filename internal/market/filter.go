@@ -3,7 +3,7 @@ package market
 import "fmt"
 
 const (
-	MIN_CHANGE  = 5.0
+	MIN_CHANGE  = 1.5
 	MIN_VOL_USD = 1_000_000
 )
 
