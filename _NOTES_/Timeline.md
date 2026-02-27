@@ -1,0 +1,7 @@
+Setup & Basic Exchange Connectivity (Day 1-2)
+Simple Trading Strategy Logic (Day 3-7)
+Risk Management Implementation (Day 8-10)
+Execution Engine & Order Management (Day 11-13)
+Alerts, Monitoring & Basic Logging (Day 14-15)
+Backtesting and Optimization (Day 16-20)
+Paper Trading and Live Testing (Day 21-30)
