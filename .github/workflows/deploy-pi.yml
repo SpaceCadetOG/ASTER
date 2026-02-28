@@ -23,18 +23,12 @@ jobs:
 
       - name: Build binaries
         run: |
-          mkdir -p /opt/aster/bin
+          sudo mkdir -p /opt/aster/bin
+          sudo chown -R "$(id -u):$(id -g)" /opt/aster || true
           go build -o /opt/aster/bin/long  ./cmd/long
           go build -o /opt/aster/bin/short ./cmd/short
-          # optional:
-          # go build -o /opt/aster/bin/rr ./cmd/rr
 
       - name: Restart services
         run: |
           sudo systemctl restart aster-long
           sudo systemctl restart aster-short
-
-      - name: Status
-        run: |
-          systemctl --no-pager --full status aster-long || true
-          systemctl --no-pager --full status aster-short || true
