@@ -1,8 +1,8 @@
-// go-machine/cmd/short/main.go
 package main
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -17,6 +17,56 @@ import (
 	"go-machine/internal/ta"
 	"go-machine/internal/types"
 )
+
+// -------------------- Hot-gate rolling state (in-memory) --------------------
+var (
+	volHistS  = map[string][]float64{}
+	oiHistS   = map[string][]float64{}
+	fundPrevS = map[string]float64{}
+
+	lastHotAtS = map[string]time.Time{} // cooldown tracking per symbol
+)
+
+const hotCooldownS = 15 * time.Minute
+
+func maxf(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clampf(x, lo, hi float64) float64 {
+	if x < lo {
+		return lo
+	}
+	if x > hi {
+		return hi
+	}
+	return x
+}
+
+func medianf(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	cp := append([]float64(nil), xs...)
+	sort.Float64s(cp)
+	m := len(cp) / 2
+	if len(cp)%2 == 1 {
+		return cp[m]
+	}
+	return (cp[m-1] + cp[m]) / 2
+}
+
+func pushCapf(m map[string][]float64, k string, v float64, capN int) {
+	m[k] = append(m[k], v)
+	if len(m[k]) > capN {
+		m[k] = m[k][len(m[k])-capN:]
+	}
+}
+
+// -------------------- helpers (local) --------------------
 
 func calcVWAP(bars []types.Candle) float64 {
 	var pv, v float64
@@ -44,11 +94,11 @@ func symbolCandidates(ui string) []string {
 
 func confluenceLabel(c *aster.Client, symbol, side string) string {
 	const (
-		tf     = types.TF5m // was TF15m
+		tf     = types.TF5m
 		n      = 200
 		win    = 20
 		zmin   = 2.0
-		vmin   = 1_000_000.0 // was 5_000_000
+		vmin   = 1_000_000.0
 		levels = 50
 	)
 
@@ -79,7 +129,15 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 	return conf.Label
 }
 
-// --- scanner loop ---
+type hotPickS struct {
+	Symbol      string
+	Rank        float64
+	Score       float64
+	VolRatio    float64
+	OIChangePct float64
+}
+
+// -------------------- scanner loop --------------------
 
 func runOnce(st *status.Store, asterClient *aster.Client) {
 	now := time.Now().UTC()
@@ -98,21 +156,107 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 	confMap := make(map[string]string, len(scored))
 	eligible := make([]market.Scored, 0, len(scored))
 
-	for _, s := range scored {
-		if s.Eligible {
-			eligible = append(eligible, s)
-			lbl := confluenceLabel(asterClient, s.Symbol, "short")
-			if lbl == "" || lbl == "_" || lbl == "C" {
-				lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
-			}
-			confMap[s.Symbol] = lbl
+	best := hotPickS{Rank: -1}
 
-			// >>> colorized grade in terminal
-			col := market.GradeColor(lbl)
-			reset := market.ResetColor()
-			fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
-			// <<<
+	for _, s := range scored {
+		if !s.Eligible {
+			continue
 		}
+		eligible = append(eligible, s)
+
+		lbl := confluenceLabel(asterClient, s.Symbol, "short")
+		if lbl == "" || lbl == "_" || lbl == "C" {
+			lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
+		}
+		confMap[s.Symbol] = lbl
+
+		// -------------------- HOT gate (SHORT) --------------------
+		sym := s.Symbol
+
+		volNow := s.VolumeUSD
+
+		oiNow := 0.0
+		if s.OIUSD != nil {
+			oiNow = *s.OIUSD
+		}
+
+		fNow := 0.0
+		if s.FundingRate != nil {
+			fNow = *s.FundingRate
+		}
+
+		hv := volHistS[sym]
+		ho := oiHistS[sym]
+
+		volPrev := 0.0
+		if len(hv) > 0 {
+			volPrev = hv[len(hv)-1]
+		}
+		oiPrev := 0.0
+		if len(ho) > 0 {
+			oiPrev = ho[len(ho)-1]
+		}
+
+		volMed := medianf(hv)
+		volPrevMed := volMed
+
+		eps := 1e-9
+		volRatio := volNow / maxf(volMed, eps)
+		volPrevRatio := volPrev / maxf(volPrevMed, eps)
+
+		oiChg := 0.0
+		if oiPrev > 0 {
+			oiChg = (oiNow - oiPrev) / oiPrev
+		}
+
+		fp := fundPrevS[sym]
+		fundFlip := (fp >= 0 && fNow < 0) // SHORT flip
+		fundDelta := math.Abs(fNow - fp)
+
+		volPass := (volRatio >= 1.8) || (volRatio >= 1.5 && volPrevRatio >= 1.3)
+		oiPass := oiChg >= 0.01
+		fundPass := fundFlip && fundDelta >= 0.0002
+		scorePass := s.Score >= 85
+
+		onCooldown := false
+		if t, ok := lastHotAtS[sym]; ok && now.Sub(t) < hotCooldownS {
+			onCooldown = true
+		}
+
+		if scorePass && volPass && oiPass && fundPass && !onCooldown {
+			scoreTerm := clampf(s.Score/100.0, 0, 1)
+			volTerm := clampf(volRatio/3.0, 0, 1)
+			oiTerm := clampf(oiChg/0.05, 0, 1)
+			flipBonus := 0.10
+
+			rank := 0.45*scoreTerm + 0.30*volTerm + 0.20*oiTerm + 0.05*flipBonus
+
+			if rank > best.Rank {
+				best = hotPickS{
+					Symbol:      sym,
+					Rank:        rank,
+					Score:       s.Score,
+					VolRatio:    volRatio,
+					OIChangePct: oiChg * 100,
+				}
+			}
+		}
+
+		pushCapf(volHistS, sym, volNow, 24)
+		pushCapf(oiHistS, sym, oiNow, 24)
+		fundPrevS[sym] = fNow
+		// ---------------------------------------------------------
+
+		col := market.GradeColor(lbl)
+		reset := market.ResetColor()
+		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
+	}
+
+	if best.Rank >= 0 {
+		lastHotAtS[best.Symbol] = now
+		fmt.Printf("\n🔥 TOP HOT-SHORT: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
+			best.Symbol, best.Rank, best.Score, best.VolRatio, best.OIChangePct, hotCooldownS,
+		)
 	}
 
 	st.SetSnap(status.Snapshot{
@@ -153,7 +297,7 @@ func main() {
 <head><title>TraderBot SHORT Scanner</title></head>
 <body style="font-family:monospace;background:#111;color:#eee;">
 	<div style="margin-bottom:10px;">
-		<a href="http://34.174.250.99:8080/?symbol=%s&tf=%s" style="color:#7fffd4;">🟢 Long Scanner</a> |
+		<a href="http://localhost:8080/?symbol=%s&tf=%s" style="color:#7fffd4;">🟢 Long Scanner</a> |
 		&nbsp;&nbsp;|&nbsp;&nbsp;
 		<a href="/api/candles?symbol=%s&tf=%s&n=200" style="color:#9cf">candles (json)</a>
 		&nbsp;|&nbsp;
@@ -168,27 +312,28 @@ func main() {
 		<a href="/api/fusion?symbol=%s&tf=%s&n=200&left=3&right=3" style="color:#9cf">fusion (json)</a>
 	</div>
 
-<!-- 🔮 Grade Legend -->
-<div style="margin-bottom:10px;">
-	<span style="background:#a64eff;color:#fff;padding:2px 6px;border-radius:6px;">A+</span>
-	<span style="background:#4fc3ff;color:#fff;padding:2px 6px;border-radius:6px;">A</span>
-	<span style="background:#00cc66;color:#fff;padding:2px 6px;border-radius:6px;">B</span>
-	<span style="background:#ffb347;color:#000;padding:2px 6px;border-radius:6px;">C</span>
-	<span style="background:#ff3333;color:#fff;padding:2px 6px;border-radius:6px;">D</span>
-</div>
+	<div style="margin-bottom:10px;">
+		<span style="background:#a64eff;color:#fff;padding:2px 6px;border-radius:6px;">A+</span>
+		<span style="background:#4fc3ff;color:#fff;padding:2px 6px;border-radius:6px;">A</span>
+		<span style="background:#00cc66;color:#fff;padding:2px 6px;border-radius:6px;">B</span>
+		<span style="background:#ffb347;color:#000;padding:2px 6px;border-radius:6px;">C</span>
+		<span style="background:#ff3333;color:#fff;padding:2px 6px;border-radius:6px;">D</span>
+	</div>
 
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			symbol, tf, symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
+			// 7 links => 14 args total
+			symbol, tf, // long scanner link
+			symbol, tf, // candles
+			symbol, tf, // pivots
+			symbol, tf, // structure
+			symbol, tf, // volstats
+			symbol, tf, // confluence
+			symbol, tf, // fusion
 		)
 	})
+
 	http.Handle("/status", st.Handler())
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

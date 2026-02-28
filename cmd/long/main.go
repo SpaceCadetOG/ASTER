@@ -1,8 +1,8 @@
-// go-machine/cmd/long/main.go
 package main
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -18,7 +18,55 @@ import (
 	"go-machine/internal/types"
 )
 
-// --- helpers (local) ---
+// -------------------- Hot-gate rolling state (in-memory) --------------------
+var (
+	volHist  = map[string][]float64{}
+	oiHist   = map[string][]float64{}
+	fundPrev = map[string]float64{}
+
+	lastHotAt = map[string]time.Time{} // cooldown tracking per symbol
+)
+
+const hotCooldown = 15 * time.Minute // change to 30m if you want fewer signals
+
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clamp(x, lo, hi float64) float64 {
+	if x < lo {
+		return lo
+	}
+	if x > hi {
+		return hi
+	}
+	return x
+}
+
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	cp := append([]float64(nil), xs...)
+	sort.Float64s(cp)
+	m := len(cp) / 2
+	if len(cp)%2 == 1 {
+		return cp[m]
+	}
+	return (cp[m-1] + cp[m]) / 2
+}
+
+func pushCap(m map[string][]float64, k string, v float64, capN int) {
+	m[k] = append(m[k], v)
+	if len(m[k]) > capN {
+		m[k] = m[k][len(m[k])-capN:]
+	}
+}
+
+// -------------------- helpers (local) --------------------
 
 func calcVWAP(bars []types.Candle) float64 {
 	var pv, v float64
@@ -33,7 +81,6 @@ func calcVWAP(bars []types.Candle) float64 {
 	return pv / v
 }
 
-// generate possible symbol variants for Aster
 func symbolCandidates(ui string) []string {
 	base := strings.ReplaceAll(ui, "-", "")
 	cands := []string{}
@@ -55,7 +102,6 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 		levels = 50
 	)
 
-	// try multiple candidates until candles load
 	var useSym string
 	var bars []types.Candle
 	for _, cand := range symbolCandidates(symbol) {
@@ -83,7 +129,15 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 	return conf.Label
 }
 
-// --- scanner loop ---
+type hotPick struct {
+	Symbol      string
+	Rank        float64
+	Score       float64
+	VolRatio    float64
+	OIChangePct float64
+}
+
+// -------------------- scanner loop --------------------
 
 func runOnce(st *status.Store, asterClient *aster.Client) {
 	now := time.Now().UTC()
@@ -92,7 +146,6 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 	active := sessions.ActiveSessionLabels(now)
 	mkts := asterClient.FetchAllMarkets()
 
-	// Long bias scoring
 	scored := market.ScoreAndFilter(mkts)
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
@@ -103,21 +156,118 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 	confMap := make(map[string]string, len(scored))
 	eligible := make([]market.Scored, 0, len(scored))
 
-	for _, s := range scored {
-		if s.Eligible {
-			eligible = append(eligible, s)
-			lbl := confluenceLabel(asterClient, s.Symbol, "long")
-			if lbl == "" || lbl == "_" || lbl == "C" {
-				lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "long")
-			}
-			confMap[s.Symbol] = lbl
+	best := hotPick{Rank: -1}
 
-			// >>> colorized grade in terminal
-			col := market.GradeColor(lbl)
-			reset := market.ResetColor()
-			fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
-			// <<<
+	for _, s := range scored {
+		if !s.Eligible {
+			continue
 		}
+		eligible = append(eligible, s)
+
+		lbl := confluenceLabel(asterClient, s.Symbol, "long")
+		if lbl == "" || lbl == "_" || lbl == "C" {
+			lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "long")
+		}
+		confMap[s.Symbol] = lbl
+
+		// -------------------- HOT gate (LONG) --------------------
+		sym := s.Symbol
+
+		// field types in your struct:
+		// VolumeUSD: float64
+		// OIUSD:     *float64
+		// FundingRate:*float64
+		volNow := s.VolumeUSD
+
+		oiNow := 0.0
+		if s.OIUSD != nil {
+			oiNow = *s.OIUSD
+		}
+
+		fNow := 0.0
+		if s.FundingRate != nil {
+			fNow = *s.FundingRate
+		}
+
+		hv := volHist[sym]
+		ho := oiHist[sym]
+
+		volPrev := 0.0
+		if len(hv) > 0 {
+			volPrev = hv[len(hv)-1]
+		}
+		oiPrev := 0.0
+		if len(ho) > 0 {
+			oiPrev = ho[len(ho)-1]
+		}
+
+		volMed := median(hv)
+		volPrevMed := volMed
+
+		eps := 1e-9
+		volRatio := volNow / max(volMed, eps)
+		volPrevRatio := volPrev / max(volPrevMed, eps)
+
+		oiChg := 0.0
+		if oiPrev > 0 {
+			oiChg = (oiNow - oiPrev) / oiPrev
+		}
+
+		fp := fundPrev[sym]
+		fundFlip := (fp <= 0 && fNow > 0) // LONG flip
+		fundDelta := math.Abs(fNow - fp)
+
+		// Core rules
+		volPass := (volRatio >= 1.8) || (volRatio >= 1.5 && volPrevRatio >= 1.3)
+		oiPass := oiChg >= 0.01
+		fundPass := fundFlip && fundDelta >= 0.0002
+		scorePass := s.Score >= 85
+
+		// Cooldown
+		onCooldown := false
+		if t, ok := lastHotAt[sym]; ok && now.Sub(t) < hotCooldown {
+			onCooldown = true
+		}
+
+		if scorePass && volPass && oiPass && fundPass && !onCooldown {
+			// rank 0..~1
+			scoreTerm := clamp(s.Score/100.0, 0, 1)
+			volTerm := clamp(volRatio/3.0, 0, 1)
+			oiTerm := clamp(oiChg/0.05, 0, 1) // 5% OI change maps to 1
+			flipBonus := 0.10
+
+			rank := 0.45*scoreTerm + 0.30*volTerm + 0.20*oiTerm + 0.05*flipBonus
+
+			if rank > best.Rank {
+				best = hotPick{
+					Symbol:      sym,
+					Rank:        rank,
+					Score:       s.Score,
+					VolRatio:    volRatio,
+					OIChangePct: oiChg * 100,
+				}
+			}
+		}
+
+		// update histories AFTER checks
+		pushCap(volHist, sym, volNow, 24)
+		pushCap(oiHist, sym, oiNow, 24)
+		fundPrev[sym] = fNow
+		// -------------------------------------------------------
+
+		// >>> colorized grade in terminal
+		col := market.GradeColor(lbl)
+		reset := market.ResetColor()
+		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
+		// <<<
+	}
+
+	// announce top pick (only one)
+	if best.Rank >= 0 {
+		lastHotAt[best.Symbol] = now
+		fmt.Printf("\n🔥 TOP HOT-LONG: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
+			best.Symbol, best.Rank, best.Score, best.VolRatio, best.OIChangePct, hotCooldown,
+		)
 	}
 
 	st.SetSnap(status.Snapshot{
@@ -158,7 +308,7 @@ func main() {
 <head><title>TraderBot LONG Scanner</title></head>
 <body style="font-family:monospace;background:#111;color:#eee;">
 	<div style="margin-bottom:10px;">
-		<a href="http://34.174.250.99:8081/?symbol=%s&tf=%s" style="color:#ff7f7f;">🔴 Short Scanner</a>
+		<a href="http://localhost:8081/?symbol=%s&tf=%s" style="color:#ff7f7f;">🔴 Short Scanner</a>
 		&nbsp;&nbsp;|&nbsp;&nbsp;
 		<a href="/api/candles?symbol=%s&tf=%s&n=200" style="color:#9cf">candles (json)</a>
 		&nbsp;|&nbsp;
@@ -173,28 +323,25 @@ func main() {
 		<a href="/api/fusion?symbol=%s&tf=%s&n=200&left=3&right=3" style="color:#9cf">fusion (json)</a>
 	</div>
 
-	<!-- 🔮 Grade Legend -->
-<!-- 🔮 Grade Legend -->
-<div style="margin-bottom:10px;">
-	<span style="background:#a64eff;color:#fff;padding:2px 6px;border-radius:6px;">A+</span>
-	<span style="background:#4fc3ff;color:#fff;padding:2px 6px;border-radius:6px;">A</span>
-	<span style="background:#00cc66;color:#fff;padding:2px 6px;border-radius:6px;">B</span>
-	<span style="background:#ffb347;color:#000;padding:2px 6px;border-radius:6px;">C</span>
-	<span style="background:#ff3333;color:#fff;padding:2px 6px;border-radius:6px;">D</span>
-</div>
+	<div style="margin-bottom:10px;">
+		<span style="background:#a64eff;color:#fff;padding:2px 6px;border-radius:6px;">A+</span>
+		<span style="background:#4fc3ff;color:#fff;padding:2px 6px;border-radius:6px;">A</span>
+		<span style="background:#00cc66;color:#fff;padding:2px 6px;border-radius:6px;">B</span>
+		<span style="background:#ffb347;color:#000;padding:2px 6px;border-radius:6px;">C</span>
+		<span style="background:#ff3333;color:#fff;padding:2px 6px;border-radius:6px;">D</span>
+	</div>
 
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			// title + link args
-			symbol, tf, symbol, tf,
-			// query links:
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
+			// 7 links => 14 args total
+			symbol, tf, // short scanner link
+			symbol, tf, // candles
+			symbol, tf, // pivots
+			symbol, tf, // structure
+			symbol, tf, // volstats
+			symbol, tf, // confluence
+			symbol, tf, // fusion
 		)
 	})
 
