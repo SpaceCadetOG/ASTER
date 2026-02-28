@@ -1,4 +1,3 @@
-// go-machine/cmd/long/main.go
 package main
 
 import (
@@ -7,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,33 +28,6 @@ var (
 )
 
 const hotCooldown = 15 * time.Minute
-
-type hotPick struct {
-	Symbol      string
-	Rank        float64
-	Score       float64
-	VolRatio    float64
-	OIChangePct *float64 // nil if unavailable
-}
-
-// -------------------- tiny helpers --------------------
-
-func getenvInt(key string, def int) int {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func getenvBool(key string) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-	return v == "1" || v == "true" || v == "yes" || v == "y"
-}
 
 func max(a, b float64) float64 {
 	if a > b {
@@ -114,10 +85,10 @@ func symbolCandidates(ui string) []string {
 	base := strings.ReplaceAll(ui, "-", "")
 	cands := []string{}
 	if strings.HasSuffix(base, "USD") {
-		cands = append(cands, base+"T") // CLOUSDT
-		cands = append(cands, base)     // CLOUSD
+		cands = append(cands, base+"T")
+		cands = append(cands, base)
 	}
-	cands = append(cands, ui) // CLO-USD
+	cands = append(cands, ui)
 	return cands
 }
 
@@ -158,23 +129,23 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 	return conf.Label
 }
 
+type hotPick struct {
+	Symbol      string
+	Rank        float64
+	Score       float64
+	VolRatio    float64
+	OIChangePct float64
+}
+
 // -------------------- scanner loop --------------------
 
 func runOnce(st *status.Store, asterClient *aster.Client) {
-	debug := getenvBool("DEBUG")
-	requireOI := getenvBool("REQUIRE_OI")
-	showTopN := getenvInt("SHOW_TOP_N", 25)
-
 	now := time.Now().UTC()
 	fmt.Printf("🔧 ASTER LONG adapter — live fetch @ %s\n", now.Format(time.RFC3339))
 
 	active := sessions.ActiveSessionLabels(now)
 	mkts := asterClient.FetchAllMarkets()
-	if debug {
-		fmt.Println("Markets fetched:", len(mkts))
-	}
 
-	// Long bias scoring
 	scored := market.ScoreAndFilter(mkts)
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
@@ -183,19 +154,21 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 	fmt.Println("-------------+--------+-------+---------+---------+------------+---------+---------")
 
 	confMap := make(map[string]string, len(scored))
-	// we keep Rows = scored (not only Eligible) so the UI isn't empty
-	rows := make([]market.Scored, 0, len(scored))
+	eligible := make([]market.Scored, 0, len(scored))
 
 	best := hotPick{Rank: -1}
 
-	limit := showTopN
-	if limit > len(scored) {
-		limit = len(scored)
-	}
+	for _, s := range scored {
+		if !s.Eligible {
+			continue
+		}
 
-	for i := 0; i < limit; i++ {
-		s := scored[i]
-		rows = append(rows, s)
+		// ✅ PERPS ONLY: skip markets without OI + Funding
+		if s.OIUSD == nil || s.FundingRate == nil {
+			continue
+		}
+
+		eligible = append(eligible, s)
 
 		lbl := confluenceLabel(asterClient, s.Symbol, "long")
 		if lbl == "" || lbl == "_" || lbl == "C" {
@@ -205,22 +178,17 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 
 		// -------------------- HOT gate (LONG) --------------------
 		sym := s.Symbol
+
 		volNow := s.VolumeUSD
 
 		oiNow := 0.0
-		oiAvail := false
 		if s.OIUSD != nil {
 			oiNow = *s.OIUSD
-			if oiNow > 0 {
-				oiAvail = true
-			}
 		}
 
 		fNow := 0.0
-		fAvail := false
 		if s.FundingRate != nil {
 			fNow = *s.FundingRate
-			fAvail = true
 		}
 
 		hv := volHist[sym]
@@ -236,36 +204,26 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		}
 
 		volMed := median(hv)
+		volPrevMed := volMed
+
 		eps := 1e-9
 		volRatio := volNow / max(volMed, eps)
-		volPrevRatio := volPrev / max(volMed, eps)
+		volPrevRatio := volPrev / max(volPrevMed, eps)
 
 		oiChg := 0.0
-		oiChgAvail := false
-		if oiAvail && oiPrev > 0 {
+		if oiPrev > 0 {
 			oiChg = (oiNow - oiPrev) / oiPrev
-			oiChgAvail = true
 		}
 
-		fp := fundPrev[sym] // default 0 if missing
-		fundFlip := fAvail && (fp <= 0 && fNow > 0) // LONG flip (needs funding data)
+		fp := fundPrev[sym]
+		fundFlip := (fp <= 0 && fNow > 0) // LONG flip
 		fundDelta := math.Abs(fNow - fp)
 
 		volPass := (volRatio >= 1.8) || (volRatio >= 1.5 && volPrevRatio >= 1.3)
+		oiPass := oiChg >= 0.01
+		fundPass := fundFlip && fundDelta >= 0.0002
 		scorePass := s.Score >= 85
 
-		// OI pass: if REQUIRE_OI=1, enforce; else missing OI doesn't block
-		oiPass := true
-		if requireOI {
-			oiPass = oiChgAvail && oiChg >= 0.01
-		} else if oiChgAvail {
-			oiPass = oiChg >= 0.01
-		}
-
-		// funding pass needs funding data
-		fundPass := fundFlip && fundDelta >= 0.0002
-
-		// Cooldown
 		onCooldown := false
 		if t, ok := lastHotAt[sym]; ok && now.Sub(t) < hotCooldown {
 			onCooldown = true
@@ -274,16 +232,9 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		if scorePass && volPass && oiPass && fundPass && !onCooldown {
 			scoreTerm := clamp(s.Score/100.0, 0, 1)
 			volTerm := clamp(volRatio/3.0, 0, 1)
-
-			oiTerm := 0.0
-			var oiPctPtr *float64
-			if oiChgAvail {
-				oiPct := oiChg * 100
-				oiPctPtr = &oiPct
-				oiTerm = clamp(oiChg/0.05, 0, 1)
-			}
-
+			oiTerm := clamp(oiChg/0.05, 0, 1)
 			flipBonus := 0.10
+
 			rank := 0.45*scoreTerm + 0.30*volTerm + 0.20*oiTerm + 0.05*flipBonus
 
 			if rank > best.Rank {
@@ -292,49 +243,33 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 					Rank:        rank,
 					Score:       s.Score,
 					VolRatio:    volRatio,
-					OIChangePct: oiPctPtr,
+					OIChangePct: oiChg * 100,
 				}
 			}
 		}
 
-		// update histories AFTER checks
 		pushCap(volHist, sym, volNow, 24)
 		pushCap(oiHist, sym, oiNow, 24)
-		if fAvail {
-			fundPrev[sym] = fNow
-		}
+		fundPrev[sym] = fNow
 		// -------------------------------------------------------
 
-		// terminal print
 		col := market.GradeColor(lbl)
 		reset := market.ResetColor()
 		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
-
-		if debug {
-			fmt.Printf("DEBUG %s score=%.2f eligible=%v volR=%.2f oiAvail=%v fAvail=%v\n",
-				sym, s.Score, s.Eligible, volRatio, oiAvail, fAvail)
-		}
 	}
 
-	// announce top pick
 	if best.Rank >= 0 {
 		lastHotAt[best.Symbol] = now
-		if best.OIChangePct != nil {
-			fmt.Printf("\n🔥 TOP HOT-LONG: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
-				best.Symbol, best.Rank, best.Score, best.VolRatio, *best.OIChangePct, hotCooldown,
-			)
-		} else {
-			fmt.Printf("\n🔥 TOP HOT-LONG: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=N/A  cooldown=%s\n\n",
-				best.Symbol, best.Rank, best.Score, best.VolRatio, hotCooldown,
-			)
-		}
+		fmt.Printf("\n🔥 TOP HOT-LONG: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
+			best.Symbol, best.Rank, best.Score, best.VolRatio, best.OIChangePct, hotCooldown,
+		)
 	}
 
 	st.SetSnap(status.Snapshot{
 		Generated: now,
 		Exchange:  "asterdex (LONGS)",
 		Active:    active,
-		Rows:      rows,
+		Rows:      eligible,
 		Conf:      confMap,
 	})
 }
