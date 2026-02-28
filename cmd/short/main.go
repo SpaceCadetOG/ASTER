@@ -1,3 +1,4 @@
+// go-machine/cmd/short/main.go
 package main
 
 import (
@@ -6,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,10 +26,37 @@ var (
 	oiHistS   = map[string][]float64{}
 	fundPrevS = map[string]float64{}
 
-	lastHotAtS = map[string]time.Time{} // cooldown tracking per symbol
+	lastHotAtS = map[string]time.Time{}
 )
 
 const hotCooldownS = 15 * time.Minute
+
+type hotPickS struct {
+	Symbol      string
+	Rank        float64
+	Score       float64
+	VolRatio    float64
+	OIChangePct *float64
+}
+
+// -------------------- tiny helpers --------------------
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func getenvBool(key string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	return v == "1" || v == "true" || v == "yes" || v == "y"
+}
 
 func maxf(a, b float64) float64 {
 	if a > b {
@@ -129,22 +158,21 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 	return conf.Label
 }
 
-type hotPickS struct {
-	Symbol      string
-	Rank        float64
-	Score       float64
-	VolRatio    float64
-	OIChangePct float64
-}
-
 // -------------------- scanner loop --------------------
 
 func runOnce(st *status.Store, asterClient *aster.Client) {
+	debug := getenvBool("DEBUG")
+	requireOI := getenvBool("REQUIRE_OI")
+	showTopN := getenvInt("SHOW_TOP_N", 25)
+
 	now := time.Now().UTC()
 	fmt.Printf("🔧 ASTER SHORT adapter — live fetch @ %s\n", now.Format(time.RFC3339))
 
 	active := sessions.ActiveSessionLabels(now)
 	mkts := asterClient.FetchAllMarkets()
+	if debug {
+		fmt.Println("Markets fetched:", len(mkts))
+	}
 
 	scored := market.ScoreAndFilterShort(mkts)
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
@@ -154,21 +182,18 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 	fmt.Println("-------------+--------+-------+---------+---------+------------+---------+---------")
 
 	confMap := make(map[string]string, len(scored))
-	eligible := make([]market.Scored, 0, len(scored))
+	rows := make([]market.Scored, 0, len(scored))
 
 	best := hotPickS{Rank: -1}
 
-	for _, s := range scored {
-		if !s.Eligible {
-			continue
-		}
+	limit := showTopN
+	if limit > len(scored) {
+		limit = len(scored)
+	}
 
-		// ✅ PERPS ONLY: skip markets without OI + Funding
-		if s.OIUSD == nil || s.FundingRate == nil {
-			continue
-		}
-
-		eligible = append(eligible, s)
+	for i := 0; i < limit; i++ {
+		s := scored[i]
+		rows = append(rows, s)
 
 		lbl := confluenceLabel(asterClient, s.Symbol, "short")
 		if lbl == "" || lbl == "_" || lbl == "C" {
@@ -178,17 +203,22 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 
 		// -------------------- HOT gate (SHORT) --------------------
 		sym := s.Symbol
-
 		volNow := s.VolumeUSD
 
 		oiNow := 0.0
+		oiAvail := false
 		if s.OIUSD != nil {
 			oiNow = *s.OIUSD
+			if oiNow > 0 {
+				oiAvail = true
+			}
 		}
 
 		fNow := 0.0
+		fAvail := false
 		if s.FundingRate != nil {
 			fNow = *s.FundingRate
+			fAvail = true
 		}
 
 		hv := volHistS[sym]
@@ -204,25 +234,32 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		}
 
 		volMed := medianf(hv)
-		volPrevMed := volMed
-
 		eps := 1e-9
 		volRatio := volNow / maxf(volMed, eps)
-		volPrevRatio := volPrev / maxf(volPrevMed, eps)
+		volPrevRatio := volPrev / maxf(volMed, eps)
 
 		oiChg := 0.0
-		if oiPrev > 0 {
+		oiChgAvail := false
+		if oiAvail && oiPrev > 0 {
 			oiChg = (oiNow - oiPrev) / oiPrev
+			oiChgAvail = true
 		}
 
 		fp := fundPrevS[sym]
-		fundFlip := (fp >= 0 && fNow < 0) // SHORT flip
+		fundFlip := fAvail && (fp >= 0 && fNow < 0) // SHORT flip
 		fundDelta := math.Abs(fNow - fp)
 
 		volPass := (volRatio >= 1.8) || (volRatio >= 1.5 && volPrevRatio >= 1.3)
-		oiPass := oiChg >= 0.01
-		fundPass := fundFlip && fundDelta >= 0.0002
 		scorePass := s.Score >= 85
+
+		oiPass := true
+		if requireOI {
+			oiPass = oiChgAvail && oiChg >= 0.01
+		} else if oiChgAvail {
+			oiPass = oiChg >= 0.01
+		}
+
+		fundPass := fundFlip && fundDelta >= 0.0002
 
 		onCooldown := false
 		if t, ok := lastHotAtS[sym]; ok && now.Sub(t) < hotCooldownS {
@@ -232,9 +269,16 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		if scorePass && volPass && oiPass && fundPass && !onCooldown {
 			scoreTerm := clampf(s.Score/100.0, 0, 1)
 			volTerm := clampf(volRatio/3.0, 0, 1)
-			oiTerm := clampf(oiChg/0.05, 0, 1)
-			flipBonus := 0.10
 
+			oiTerm := 0.0
+			var oiPctPtr *float64
+			if oiChgAvail {
+				oiPct := oiChg * 100
+				oiPctPtr = &oiPct
+				oiTerm = clampf(oiChg/0.05, 0, 1)
+			}
+
+			flipBonus := 0.10
 			rank := 0.45*scoreTerm + 0.30*volTerm + 0.20*oiTerm + 0.05*flipBonus
 
 			if rank > best.Rank {
@@ -243,33 +287,46 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 					Rank:        rank,
 					Score:       s.Score,
 					VolRatio:    volRatio,
-					OIChangePct: oiChg * 100,
+					OIChangePct: oiPctPtr,
 				}
 			}
 		}
 
 		pushCapf(volHistS, sym, volNow, 24)
 		pushCapf(oiHistS, sym, oiNow, 24)
-		fundPrevS[sym] = fNow
+		if fAvail {
+			fundPrevS[sym] = fNow
+		}
 		// ---------------------------------------------------------
 
 		col := market.GradeColor(lbl)
 		reset := market.ResetColor()
 		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
+
+		if debug {
+			fmt.Printf("DEBUG %s score=%.2f eligible=%v volR=%.2f oiAvail=%v fAvail=%v\n",
+				sym, s.Score, s.Eligible, volRatio, oiAvail, fAvail)
+		}
 	}
 
 	if best.Rank >= 0 {
 		lastHotAtS[best.Symbol] = now
-		fmt.Printf("\n🔥 TOP HOT-SHORT: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
-			best.Symbol, best.Rank, best.Score, best.VolRatio, best.OIChangePct, hotCooldownS,
-		)
+		if best.OIChangePct != nil {
+			fmt.Printf("\n🔥 TOP HOT-SHORT: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
+				best.Symbol, best.Rank, best.Score, best.VolRatio, *best.OIChangePct, hotCooldownS,
+			)
+		} else {
+			fmt.Printf("\n🔥 TOP HOT-SHORT: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=N/A  cooldown=%s\n\n",
+				best.Symbol, best.Rank, best.Score, best.VolRatio, hotCooldownS,
+			)
+		}
 	}
 
 	st.SetSnap(status.Snapshot{
 		Generated: now,
 		Exchange:  "asterdex (SHORTS)",
 		Active:    active,
-		Rows:      eligible,
+		Rows:      rows,
 		Conf:      confMap,
 	})
 }
