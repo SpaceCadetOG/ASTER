@@ -21,6 +21,7 @@ type OrderBook struct {
 }
 
 func (c *Client) FetchOrderBook(symbol string, limit int) (OrderBook, error) {
+	symbol = RawSymbol(symbol)
 	if limit <= 0 {
 		limit = 50
 	}

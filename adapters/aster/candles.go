@@ -11,6 +11,7 @@ import (
 // LoadCandles fetches TRADE candles (with volume) for any symbol.
 // Example: symbol="BTCUSDT", tf=types.TF15m, n=200.
 func (c *Client) LoadCandles(symbol string, tf types.TF, n int) ([]types.Candle, error) {
+	symbol = RawSymbol(symbol)
 	if n <= 0 {
 		n = 200
 	}

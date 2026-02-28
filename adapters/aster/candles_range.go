@@ -21,24 +21,26 @@ func tfDuration(tf types.TF) time.Duration {
 		return 5 * time.Minute
 	case types.TF15m:
 		return 15 * time.Minute
+	case types.TF30m:
+		return 30 * time.Minute
 	case types.TF1h:
 		return time.Hour
 	case types.TF4h:
 		return 4 * time.Hour
+	case types.TF1d:
+		return 24 * time.Hour
 	default:
 		return 5 * time.Minute
 	}
 }
 
-const pageLimit = 200 // safer cap; many gateways dislike big limits with time filters
+const pageLimit = 1000 // Aster API max is 1500; 1000 keeps weight ≤ 10 per request
 
 // LoadCandlesRange fetches mark-price klines over [start,end], using adaptive paging.
 // It tries (1) startTime+limit, (2) startTime+endTime (no limit), (3) endTime+limit (paging backward).
 // Falls back to /klines if /markPriceKlines is unavailable.
 func (c *Client) LoadCandlesRange(symbol string, tf types.TF, start, end time.Time) ([]types.Candle, error) {
-	if symbol == "" {
-		return nil, fmt.Errorf("symbol required")
-	}
+	symbol = RawSymbol(symbol)
 	if !end.After(start) {
 		return nil, fmt.Errorf("end must be after start")
 	}

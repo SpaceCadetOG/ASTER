@@ -1,6 +1,7 @@
 package aster
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,12 +13,14 @@ import (
 	"time"
 
 	"go-machine/internal/market"
+	"go-machine/internal/ratelimit"
 	"go-machine/internal/types"
 )
 
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	RL      *ratelimit.Limiter // 10 req/s, burst 20
 }
 
 func New(base string) *Client {
@@ -36,6 +39,7 @@ func New(base string) *Client {
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
+		RL: ratelimit.New(10, 20),
 	}
 }
 
@@ -55,6 +59,13 @@ func (c *Client) buildURL(endpoint string, params map[string]string) string {
 }
 
 func (c *Client) fetchJSON(fullURL string, target interface{}) error {
+	if c.RL != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := c.RL.Wait(ctx); err != nil {
+			return fmt.Errorf("rate limit: %w", err)
+		}
+	}
 	resp, err := c.HTTP.Get(fullURL)
 	if err != nil {
 		return fmt.Errorf("http GET failed: %w", err)
@@ -161,8 +172,13 @@ func toMarket(exchange string, ts tickerStats, funding *float64) market.Market {
 	return m
 }
 
-// FetchAllMarkets: scan full DEX (USDT/USD), enrich funding & last price for candidates
-func (c *Client) FetchAllMarkets() []market.Market {
+// FetchAllMarkets scans the full DEX, filters by quote assets, enriches top candidates.
+// If quoteAssets is nil/empty, defaults to ["USDT", "USD"].
+func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
+	if len(quoteAssets) == 0 {
+		quoteAssets = []string{"USDT", "USD"}
+	}
+
 	rows, err := c.fetchAll24h()
 	if err != nil || len(rows) == 0 {
 		return nil
@@ -170,7 +186,7 @@ func (c *Client) FetchAllMarkets() []market.Market {
 
 	mkts := make([]market.Market, 0, len(rows))
 	for _, ts := range rows {
-		if !(strings.HasSuffix(ts.Symbol, "USDT") || strings.HasSuffix(ts.Symbol, "USD")) {
+		if !MatchesQuoteAsset(ts.Symbol, quoteAssets) {
 			continue
 		}
 		mkts = append(mkts, toMarket(c.Name(), ts, nil))
@@ -292,10 +308,14 @@ func tfToInterval(tf types.TF) (string, error) {
 		return "5m", nil
 	case types.TF15m:
 		return "15m", nil
+	case types.TF30m:
+		return "30m", nil
 	case types.TF1h:
 		return "1h", nil
 	case types.TF4h:
 		return "4h", nil
+	case types.TF1d:
+		return "1d", nil
 	default:
 		return "", fmt.Errorf("unsupported TF: %s", tf)
 	}
