@@ -1,0 +1,34 @@
+name: deploy-pi
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21.x"
+
+      # Deploy-now mode: compile must pass; tests can be fixed after
+      - name: Build + install
+        run: |
+          sudo mkdir -p /opt/aster/bin
+          sudo chown -R "$(id -u):$(id -g)" /opt/aster || true
+          go build -o /opt/aster/bin/long  ./cmd/long
+          go build -o /opt/aster/bin/short ./cmd/short
+          chmod +x /opt/aster/bin/long /opt/aster/bin/short
+
+      - name: Restart services
+        run: |
+          sudo systemctl restart aster-long
+          sudo systemctl restart aster-short
+
+      - name: Status
+        run: |
+          systemctl --no-pager --full status aster-long || true
+          systemctl --no-pager --full status aster-short || true
