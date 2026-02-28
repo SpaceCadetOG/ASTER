@@ -27,7 +27,7 @@ var (
 	lastHotAt = map[string]time.Time{} // cooldown tracking per symbol
 )
 
-const hotCooldown = 15 * time.Minute
+const hotCooldown = 15 * time.Minute // change to 30m if you want fewer signals
 
 func max(a, b float64) float64 {
 	if a > b {
@@ -85,10 +85,10 @@ func symbolCandidates(ui string) []string {
 	base := strings.ReplaceAll(ui, "-", "")
 	cands := []string{}
 	if strings.HasSuffix(base, "USD") {
-		cands = append(cands, base+"T")
-		cands = append(cands, base)
+		cands = append(cands, base+"T") // CLOUSDT
+		cands = append(cands, base)     // CLOUSD
 	}
-	cands = append(cands, ui)
+	cands = append(cands, ui) // CLO-USD
 	return cands
 }
 
@@ -162,12 +162,6 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		if !s.Eligible {
 			continue
 		}
-
-		// ✅ PERPS ONLY: skip markets without OI + Funding
-		if s.OIUSD == nil || s.FundingRate == nil {
-			continue
-		}
-
 		eligible = append(eligible, s)
 
 		lbl := confluenceLabel(asterClient, s.Symbol, "long")
@@ -179,6 +173,10 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		// -------------------- HOT gate (LONG) --------------------
 		sym := s.Symbol
 
+		// field types in your struct:
+		// VolumeUSD: float64
+		// OIUSD:     *float64
+		// FundingRate:*float64
 		volNow := s.VolumeUSD
 
 		oiNow := 0.0
@@ -219,20 +217,23 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		fundFlip := (fp <= 0 && fNow > 0) // LONG flip
 		fundDelta := math.Abs(fNow - fp)
 
+		// Core rules
 		volPass := (volRatio >= 1.8) || (volRatio >= 1.5 && volPrevRatio >= 1.3)
 		oiPass := oiChg >= 0.01
 		fundPass := fundFlip && fundDelta >= 0.0002
 		scorePass := s.Score >= 85
 
+		// Cooldown
 		onCooldown := false
 		if t, ok := lastHotAt[sym]; ok && now.Sub(t) < hotCooldown {
 			onCooldown = true
 		}
 
 		if scorePass && volPass && oiPass && fundPass && !onCooldown {
+			// rank 0..~1
 			scoreTerm := clamp(s.Score/100.0, 0, 1)
 			volTerm := clamp(volRatio/3.0, 0, 1)
-			oiTerm := clamp(oiChg/0.05, 0, 1)
+			oiTerm := clamp(oiChg/0.05, 0, 1) // 5% OI change maps to 1
 			flipBonus := 0.10
 
 			rank := 0.45*scoreTerm + 0.30*volTerm + 0.20*oiTerm + 0.05*flipBonus
@@ -248,16 +249,20 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 			}
 		}
 
+		// update histories AFTER checks
 		pushCap(volHist, sym, volNow, 24)
 		pushCap(oiHist, sym, oiNow, 24)
 		fundPrev[sym] = fNow
 		// -------------------------------------------------------
 
+		// >>> colorized grade in terminal
 		col := market.GradeColor(lbl)
 		reset := market.ResetColor()
 		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
+		// <<<
 	}
 
+	// announce top pick (only one)
 	if best.Rank >= 0 {
 		lastHotAt[best.Symbol] = now
 		fmt.Printf("\n🔥 TOP HOT-LONG: %s  rank=%.3f  score=%.1f  volR=%.2f  oiΔ=%.2f%%  cooldown=%s\n\n",
@@ -329,13 +334,14 @@ func main() {
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
-			symbol, tf,
+			// 7 links => 14 args total
+			symbol, tf, // short scanner link
+			symbol, tf, // candles
+			symbol, tf, // pivots
+			symbol, tf, // structure
+			symbol, tf, // volstats
+			symbol, tf, // confluence
+			symbol, tf, // fusion
 		)
 	})
 
