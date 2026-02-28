@@ -162,6 +162,12 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		if !s.Eligible {
 			continue
 		}
+
+		// ✅ PERPS ONLY: skip markets without OI + Funding
+		if s.OIUSD == nil || s.FundingRate == nil {
+			continue
+		}
+
 		eligible = append(eligible, s)
 
 		lbl := confluenceLabel(asterClient, s.Symbol, "short")
@@ -323,14 +329,13 @@ func main() {
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			// 7 links => 14 args total
-			symbol, tf, // long scanner link
-			symbol, tf, // candles
-			symbol, tf, // pivots
-			symbol, tf, // structure
-			symbol, tf, // volstats
-			symbol, tf, // confluence
-			symbol, tf, // fusion
+			symbol, tf,
+			symbol, tf,
+			symbol, tf,
+			symbol, tf,
+			symbol, tf,
+			symbol, tf,
+			symbol, tf,
 		)
 	})
 
