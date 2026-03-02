@@ -1,5 +1,10 @@
 # go-machine/Makefile
-.PHONY: run dev devq build test clean deploy fmt backtest
+.PHONY: run dev devq build test clean deploy fmt backtest \
+	exec-balance exec-account exec-open-orders exec-position exec-place exec-cancel exec-cancel-all exec-status
+
+ASTER_CONFIG ?= $(CURDIR)/.aster.yaml
+EXEC_BASE_URL ?= https://fapi.asterdex.com
+EXEC_SYMBOL ?= BTCUSDT
 
 smoke:
 	./scripts/smoke.sh
@@ -52,3 +57,38 @@ deploy: build
 		systemctl --no-pager --full status traderbot && \
 		systemctl --no-pager --full status traderbot-short \
 	"
+
+# ---- Exec shortcuts ----
+exec-balance:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=balance go run ./cmd/exec
+
+exec-account:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=account EXEC_SYMBOL=$(EXEC_SYMBOL) go run ./cmd/exec
+
+exec-open-orders:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=open_orders EXEC_SYMBOL=$(EXEC_SYMBOL) go run ./cmd/exec
+
+exec-position:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=position EXEC_SYMBOL=$(EXEC_SYMBOL) go run ./cmd/exec
+
+# Optional vars: SIDE, KIND, USD, DRY_RUN, EXEC_AT, EXEC_OFFSET_BPS, EXEC_OFFSET_PCT, EXEC_PRICE, EXEC_QTY, EXEC_DEBUG
+SIDE ?= BUY
+KIND ?= LIMIT
+USD ?= 50
+DRY_RUN ?= 1
+EXEC_DEBUG ?= 1
+exec-place:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=place EXEC_SYMBOL=$(EXEC_SYMBOL) EXEC_SIDE=$(SIDE) EXEC_KIND=$(KIND) EXEC_USD=$(USD) DRY_RUN=$(DRY_RUN) EXEC_DEBUG=$(EXEC_DEBUG) EXEC_AT=$(EXEC_AT) EXEC_OFFSET_BPS=$(EXEC_OFFSET_BPS) EXEC_OFFSET_PCT=$(EXEC_OFFSET_PCT) EXEC_PRICE=$(EXEC_PRICE) EXEC_QTY=$(EXEC_QTY) go run ./cmd/exec
+
+# Required var: ORDER_ID
+ORDER_ID ?=
+exec-cancel:
+	@test -n "$(ORDER_ID)" || (echo "ORDER_ID is required. Example: make exec-cancel EXEC_SYMBOL=ETHUSDT ORDER_ID=123"; exit 2)
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=cancel EXEC_SYMBOL=$(EXEC_SYMBOL) EXEC_ORDER_ID=$(ORDER_ID) DRY_RUN=0 go run ./cmd/exec
+
+exec-cancel-all:
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=cancel_all EXEC_SYMBOL=$(EXEC_SYMBOL) DRY_RUN=0 go run ./cmd/exec
+
+exec-status:
+	@test -n "$(ORDER_ID)" || (echo "ORDER_ID is required. Example: make exec-status EXEC_SYMBOL=ETHUSDT ORDER_ID=123"; exit 2)
+	ASTER_CONFIG=$(ASTER_CONFIG) EXEC_BASE_URL=$(EXEC_BASE_URL) EXEC_ACTION=status EXEC_SYMBOL=$(EXEC_SYMBOL) EXEC_ORDER_ID=$(ORDER_ID) go run ./cmd/exec

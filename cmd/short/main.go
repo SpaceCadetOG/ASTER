@@ -180,7 +180,7 @@ func main() {
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			symbol, tf, symbol, tf,
+			symbol, tf,
 			symbol, tf,
 			symbol, tf,
 			symbol, tf,

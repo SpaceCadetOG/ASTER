@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -14,50 +16,68 @@ import (
 
 // cmd/exec = single control tool for Aster.
 //
-// Required:
+// Credentials:
+//   - env:  ASTER_API_KEY / ASTER_API_SECRET
+//   - YAML: ASTER_CONFIG=/path/to/file.yaml or ~/.aster.yaml
 //
-//	ASTER_API_KEY / ASTER_API_SECRET
+// Core actions:
 //
-// Core:
-//
-//	EXEC_ACTION=place|cancel|cancel_all|status|open_orders|position|close_market|close_limit   (default: place)
-//	EXEC_SYMBOL=BTCUSDT                                                                       (default: BTCUSDT)
-//	DRY_RUN=1                                                                                 (default: 1)
-//	EXEC_DEBUG=0|1                                                                            (default: 0)
-//
-// Place (EXEC_ACTION=place):
-//
-//	EXEC_SIDE=BUY|SELL                      (default: BUY)
-//	EXEC_KIND=LIMIT|MARKET                  (default: LIMIT)
-//	EXEC_USD=50                             (default: 50)  // ignored if EXEC_QTY set
-//	EXEC_QTY=0.0                            (optional)     // overrides EXEC_USD conversion
-//	EXEC_PRICE=65000                        (LIMIT only; optional if EXEC_AT used)
-//	EXEC_AT=bid|ask|mid                     (optional; used when EXEC_PRICE not provided)
-//	EXEC_OFFSET_BPS=-1                      (optional; +bps/-bps around EXEC_AT)
-//	EXEC_OFFSET_PCT=-0.05                   (optional; percent, used if BPS not set)
-//	EXEC_TIF=GTC                            (default: GTC; LIMIT only)
-//	EXEC_REDUCE_ONLY=0|1                    (default: 0)
-//	EXEC_LEV=3                              (optional)
-//	EXEC_MIN_NOTIONAL=0                     (optional; if set, auto-bump qty to satisfy)
-//
-// Cancel/Status:
-//
-//	EXEC_ORDER_ID=2275537148                (required for cancel/status)
-//
-// Close (reduce-only):
-//
-//	EXEC_CLOSE_PCT=100                      (optional; closes % of position)
+//	EXEC_ACTION=balance|account|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit
 func main() {
-	key := strings.TrimSpace(os.Getenv("ASTER_API_KEY"))
-	sec := strings.TrimSpace(os.Getenv("ASTER_API_SECRET"))
-	if key == "" || sec == "" {
-		fmt.Println("missing ASTER_API_KEY / ASTER_API_SECRET")
+	cfgPath := strings.TrimSpace(os.Getenv("ASTER_CONFIG"))
+	if cfgPath == "" {
+		// Prefer local repo config first, then fallback to ~/.aster.yaml.
+		if _, err := os.Stat(".aster.yaml"); err == nil {
+			cfgPath = ".aster.yaml"
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+			cfgPath = filepath.Join(home, ".aster.yaml")
+		}
+	}
+
+	fileKV := map[string]string{}
+	if cfgPath != "" {
+		if kv, err := loadSimpleYAMLKV(cfgPath); err == nil {
+			fileKV = kv
+		}
+	}
+	getCfg := func(envName string, keys ...string) string {
+		if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
+			return v
+		}
+		for _, k := range keys {
+			if v := strings.TrimSpace(fileKV[strings.ToLower(strings.TrimSpace(k))]); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	key := getCfg("ASTER_API_KEY", "aster_api_key", "api_key", "key")
+	sec := getCfg("ASTER_API_SECRET", "aster_api_secret", "api_secret", "secret")
+	authMode := strings.ToLower(getCfg("ASTER_AUTH_MODE", "aster_auth_mode", "auth_mode"))
+	if authMode == "" {
+		authMode = "auto"
+	}
+	user := getCfg("ASTER_USER", "aster_user", "user")
+	signer := getCfg("ASTER_SIGNER", "aster_signer", "signer")
+	priv := getCfg("ASTER_PRIVATE_KEY", "aster_private_key", "private_key")
+	baseURL := getCfg("EXEC_BASE_URL", "aster_base_url", "base_url")
+	pyBin := getCfg("ASTER_PYTHON", "aster_python", "python")
+	chainID := int64EnvWithFallback("ASTER_CHAIN_ID", fileKV, "aster_chain_id", 0)
+	if pyBin != "" && strings.TrimSpace(os.Getenv("ASTER_PYTHON")) == "" {
+		_ = os.Setenv("ASTER_PYTHON", pyBin)
+	}
+
+	hasHMAC := key != "" && sec != ""
+	hasAgent := user != "" && signer != "" && priv != ""
+	if !hasHMAC && !hasAgent {
+		fmt.Println("missing credentials: set HMAC (ASTER_API_KEY/ASTER_API_SECRET) or agent wallet fields (ASTER_USER/ASTER_SIGNER/ASTER_PRIVATE_KEY), via env or ASTER_CONFIG")
 		os.Exit(2)
 	}
 
 	action := strings.ToLower(strings.TrimSpace(os.Getenv("EXEC_ACTION")))
 	if action == "" {
-		action = "place"
+		action = "balance"
 	}
 
 	symbol := strings.ToUpper(strings.TrimSpace(os.Getenv("EXEC_SYMBOL")))
@@ -75,18 +95,65 @@ func main() {
 		debug = v != "0" && strings.ToLower(v) != "false"
 	}
 
-	rest := aster.NewRESTAuth(key, sec)
+	rest := aster.NewRESTAuthWithConfig(aster.RESTAuthConfig{
+		APIKey:     key,
+		APISecret:  sec,
+		User:       user,
+		Signer:     signer,
+		PrivateKey: priv,
+		AuthMode:   authMode,
+		ChainID:    chainID,
+		BaseURL:    baseURL,
+	})
 	_ = rest.SyncTime() // best-effort
 
-	// Non-place actions
 	switch action {
+	case "balance":
+		out, err := rest.GetBalance()
+		if err == nil {
+			out = filterBalancesByAssets(out, os.Getenv("EXEC_ASSETS"))
+		}
+		mustPrintJSON(out, err)
+		return
+
+	case "account":
+		out, err := buildAccountSummary(rest, symbol)
+		mustPrintJSON(out, err)
+		return
+
 	case "cancel":
-		oid := mustInt64Env("EXEC_ORDER_ID")
+		oidStr := strings.TrimSpace(os.Getenv("EXEC_ORDER_ID"))
+		clientOID := strings.TrimSpace(os.Getenv("EXEC_CLIENT_ORDER_ID"))
+		hasNum := oidStr != ""
+		hasClient := clientOID != ""
+		if !hasNum && !hasClient {
+			fmt.Println("missing EXEC_ORDER_ID or EXEC_CLIENT_ORDER_ID")
+			os.Exit(2)
+		}
+		var oid int64
+		if hasNum {
+			var err error
+			oid, err = strconv.ParseInt(oidStr, 10, 64)
+			if err != nil {
+				fmt.Printf("bad EXEC_ORDER_ID: %v\n", err)
+				os.Exit(2)
+			}
+		}
 		if dry {
-			fmt.Printf("DRY_RUN=1 would cancel: symbol=%s orderId=%d\n", symbol, oid)
+			if hasNum {
+				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s orderId=%d\n", symbol, oid)
+			} else {
+				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s origClientOrderId=%s\n", symbol, clientOID)
+			}
 			return
 		}
-		out, err := rest.CancelOrder(symbol, oid)
+		var out map[string]any
+		var err error
+		if hasNum {
+			out, err = rest.CancelOrder(symbol, oid)
+		} else {
+			out, err = rest.CancelOrderByClientID(symbol, clientOID)
+		}
 		mustPrintJSON(out, err)
 		return
 
@@ -100,8 +167,26 @@ func main() {
 		return
 
 	case "status":
-		oid := mustInt64Env("EXEC_ORDER_ID")
-		out, err := rest.GetOrder(symbol, oid)
+		oidStr := strings.TrimSpace(os.Getenv("EXEC_ORDER_ID"))
+		clientOID := strings.TrimSpace(os.Getenv("EXEC_CLIENT_ORDER_ID"))
+		hasNum := oidStr != ""
+		hasClient := clientOID != ""
+		if !hasNum && !hasClient {
+			fmt.Println("missing EXEC_ORDER_ID or EXEC_CLIENT_ORDER_ID")
+			os.Exit(2)
+		}
+		var out map[string]any
+		var err error
+		if hasNum {
+			oid, perr := strconv.ParseInt(oidStr, 10, 64)
+			if perr != nil {
+				fmt.Printf("bad EXEC_ORDER_ID: %v\n", perr)
+				os.Exit(2)
+			}
+			out, err = rest.GetOrder(symbol, oid)
+		} else {
+			out, err = rest.GetOrderByClientID(symbol, clientOID)
+		}
 		mustPrintJSON(out, err)
 		return
 
@@ -126,7 +211,7 @@ func main() {
 	case "place":
 		// continue below
 	default:
-		fmt.Println("unknown EXEC_ACTION (place|cancel|cancel_all|status|open_orders|position|close_market|close_limit)")
+		fmt.Println("unknown EXEC_ACTION (balance|account|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit)")
 		os.Exit(2)
 	}
 
@@ -158,14 +243,12 @@ func main() {
 	offsetBps := floatEnv("EXEC_OFFSET_BPS", 0.0)
 	offsetPct := floatEnv("EXEC_OFFSET_PCT", 0.0)
 
-	// Symbol rules
 	meta, err := rest.SymbolMeta(symbol, false)
 	if err != nil {
 		fmt.Println("symbol meta:", err)
 		os.Exit(1)
 	}
 
-	// For LIMIT: compute price if not provided
 	var bid, ask float64
 	if kind == "LIMIT" && price <= 0 {
 		if at == "" {
@@ -191,7 +274,6 @@ func main() {
 		price = base * adj
 	}
 
-	// Round price (LIMIT)
 	roundedPrice := price
 	if kind == "LIMIT" {
 		roundedPrice, _, err = rest.RoundPrice(symbol, price)
@@ -205,7 +287,6 @@ func main() {
 		}
 	}
 
-	// Reference price for qty conversion
 	refPx := 0.0
 	if qtyOverride > 0 {
 		if kind == "LIMIT" {
@@ -249,12 +330,10 @@ func main() {
 		}
 	}
 
-	// Change leverage (optional)
 	if lev > 0 && !dry {
 		_, _ = rest.ChangeLeverage(symbol, lev)
 	}
 
-	// Compute qty
 	rawQty := qtyOverride
 	if rawQty <= 0 {
 		rawQty = usd / refPx
@@ -265,15 +344,15 @@ func main() {
 		fmt.Println("round qty:", err)
 		os.Exit(1)
 	}
+	if minNotional > 0 {
+		// Apply min-notional bump before failing on roundedQty==0, so small USD
+		// test orders can still be lifted to the minimum tradable step.
+		roundedQty = bumpQtyToMinNotional(roundedQty, refPx, minNotional, meta.StepSize, meta.QtyPrecision)
+	}
 	if roundedQty <= 0 {
 		minUSD := meta.StepSize * refPx
 		fmt.Printf("qty <= 0 after rounding (stepSize=%.10f). Need at least about $%.4f notional at this price.\n", meta.StepSize, minUSD)
 		os.Exit(1)
-	}
-
-	// Min-notional bump (if user provided)
-	if minNotional > 0 {
-		roundedQty = bumpQtyToMinNotional(roundedQty, refPx, minNotional, meta.StepSize, meta.QtyPrecision)
 	}
 
 	if debug {
@@ -287,7 +366,6 @@ func main() {
 		}
 	}
 
-	// Build order params
 	vals := url.Values{}
 	vals.Set("symbol", symbol)
 	vals.Set("side", side)
@@ -319,7 +397,6 @@ func main() {
 		return
 	}
 
-	// Send order (auto-retry once on Aster -4164 minNotional error if EXEC_MIN_NOTIONAL not set)
 	out, err := rest.PlaceOrder(vals)
 	if err != nil {
 		if minNotional == 0 {
@@ -341,6 +418,83 @@ func main() {
 	mustPrintJSON(out, nil)
 }
 
+func loadSimpleYAMLKV(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := map[string]string{}
+	scan := bufio.NewScanner(f)
+	for scan.Scan() {
+		line := strings.TrimSpace(scan.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(parts[0]))
+		v := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
+		if k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	if err := scan.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func buildAccountSummary(rest *aster.RESTAuth, symbol string) (map[string]any, error) {
+	out := map[string]any{"symbol": symbol}
+
+	acct, err := rest.GetAccountSummary()
+	if err != nil {
+		out["account_error"] = err.Error()
+	} else {
+		out["account"] = acct
+	}
+
+	bals, bErr := rest.GetBalance()
+	if bErr != nil {
+		out["balance_error"] = bErr.Error()
+	} else {
+		out["balances"] = bals
+		for _, b := range bals {
+			if strings.EqualFold(b.Asset, "USDT") {
+				out["usdt"] = map[string]any{
+					"balance":          b.Balance,
+					"available":        b.AvailableBalance,
+					"unrealized_pnl":   b.CrossUnPnl,
+					"max_withdrawable": b.MaxWithdrawAmount,
+				}
+				break
+			}
+		}
+	}
+
+	pos, pErr := rest.PositionRisk(symbol)
+	if pErr != nil {
+		out["position_error"] = pErr.Error()
+	} else {
+		out["position"] = pos
+	}
+
+	if bErr != nil {
+		return out, bErr
+	}
+	return out, nil
+}
+
 func closeMarket(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 	closePct := floatEnv("EXEC_CLOSE_PCT", 100.0)
 	if closePct <= 0 || closePct > 100 {
@@ -358,7 +512,7 @@ func closeMarket(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 	}
 
 	p := pos[0]
-	amt := mapFloat(p, "positionAmt") // +long, -short
+	amt := mapFloat(p, "positionAmt")
 	if amt == 0 {
 		fmt.Println("no open position to close")
 		return
@@ -594,10 +748,20 @@ func pickBasePrice(at string, bid, ask float64) float64 {
 }
 
 func formatFloat(v float64, prec int) string {
-	return strconv.FormatFloat(v, 'f', prec, 64)
+	if prec < 0 {
+		prec = 0
+	}
+	s := strconv.FormatFloat(v, 'f', prec, 64)
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(s, "0")
+		s = strings.TrimRight(s, ".")
+	}
+	if s == "" || s == "-0" {
+		return "0"
+	}
+	return s
 }
 
-// Reads numeric values out of PositionRisk map (positionAmt is often a string).
 func mapFloat(m map[string]any, key string) float64 {
 	v, ok := m[key]
 	if !ok || v == nil {
@@ -624,7 +788,6 @@ func mapFloat(m map[string]any, key string) float64 {
 	}
 }
 
-// bumpQtyToMinNotional rounds qty UP to satisfy notional >= minNotional, in step increments.
 func bumpQtyToMinNotional(qty, price, minNotional, step float64, qtyPrec int) float64 {
 	if price <= 0 || step <= 0 || minNotional <= 0 {
 		return qty
@@ -640,7 +803,6 @@ func bumpQtyToMinNotional(qty, price, minNotional, step float64, qtyPrec int) fl
 	}
 	out := float64(steps) * step
 
-	// trim float tails to qty precision
 	pow := 1.0
 	for i := 0; i < qtyPrec; i++ {
 		pow *= 10
@@ -649,10 +811,6 @@ func bumpQtyToMinNotional(qty, price, minNotional, step float64, qtyPrec int) fl
 	return out
 }
 
-// parseMinNotionalFromErr extracts min notional from Aster's -4164 error message.
-// Example msg:
-//
-//	Order's notional must be no smaller than 5.0 (unless you choose reduce only)
 func parseMinNotionalFromErr(err error) (float64, bool) {
 	if err == nil {
 		return 0, false
@@ -680,4 +838,42 @@ func parseMinNotionalFromErr(err error) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+func int64EnvWithFallback(envName string, fileKV map[string]string, key string, def int64) int64 {
+	if s := strings.TrimSpace(os.Getenv(envName)); s != "" {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	}
+	if s := strings.TrimSpace(fileKV[strings.ToLower(strings.TrimSpace(key))]); s != "" {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func filterBalancesByAssets(in []aster.Balance, csv string) []aster.Balance {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return in
+	}
+	want := map[string]struct{}{}
+	for _, p := range strings.Split(csv, ",") {
+		s := strings.ToUpper(strings.TrimSpace(p))
+		if s != "" {
+			want[s] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return in
+	}
+	out := make([]aster.Balance, 0, len(in))
+	for _, b := range in {
+		if _, ok := want[strings.ToUpper(strings.TrimSpace(b.Asset))]; ok {
+			out = append(out, b)
+		}
+	}
+	return out
 }

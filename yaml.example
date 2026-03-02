@@ -1,0 +1,27 @@
+# Copy this file to `.aster.yaml` (already gitignored) and fill values.
+#
+# Auth modes:
+# - hmac  => uses ASTER_API_KEY/ASTER_API_SECRET style signing
+# - agent => Aster v3 wallet-sign mode (user/signer/private_key)
+# - auto  => chooses agent if user/signer/private_key exist, else hmac
+
+# Common
+aster_auth_mode: auto
+aster_base_url: https://fapi.asterdex.com
+
+# HMAC credentials (mainnet-style)
+aster_api_key: YOUR_API_KEY
+aster_api_secret: YOUR_API_SECRET
+
+# Agent-wallet credentials (v3 style)
+aster_user: 0xYOUR_USER_ADDRESS
+aster_signer: 0xYOUR_SIGNER_ADDRESS
+aster_private_key: 0xYOUR_SIGNER_PRIVATE_KEY
+
+# Optional. Defaults are inferred by base URL:
+# - mainnet: 1666
+# - testnet: 714
+aster_chain_id: 1666
+
+# Optional python interpreter for agent signing helper:
+# aster_python: /usr/bin/python3

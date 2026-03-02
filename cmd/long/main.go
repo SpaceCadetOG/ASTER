@@ -186,8 +186,8 @@ func main() {
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
-			// title + link args
-			symbol, tf, symbol, tf,
+			// title/link arg
+			symbol, tf,
 			// query links:
 			symbol, tf,
 			symbol, tf,
