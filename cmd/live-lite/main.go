@@ -41,6 +41,17 @@ type accountSnapshot struct {
 	Positions     []positionView
 }
 
+type safetyConfig struct {
+	enableLiveTrading bool
+	maxLeverage       int
+	minAvailUSDT      float64
+	maxOrdersPerDay   int
+	orderCooldown     time.Duration
+	pauseFile         string
+	allowSymbols      map[string]struct{}
+	allowShorts       bool
+}
+
 type telegramSink struct {
 	enabled  bool
 	token    string
@@ -86,15 +97,24 @@ func main() {
 		fmt.Println("live-lite: no credentials found, forcing DRY_RUN mode")
 		dryRun = true
 	}
+	safety := loadSafetyConfig(reserveUSDT, tradeMargin)
+	if !dryRun && !safety.enableLiveTrading {
+		fmt.Println("live-lite: LIVE_DRY_RUN=0 but LIVE_ENABLE_LIVE_TRADING is not enabled, forcing DRY_RUN")
+		dryRun = true
+	}
 	tg := newTelegramSink()
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=$%.2f margin=$%.2f)\n",
 		scanEvery, dryRun, strings.ToUpper(minGrade), reserveUSDT, tradeMargin)
+	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
+		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
 	tg.Sendf("live-lite started scan=%s dry_run=%v min_grade=%s", scanEvery, dryRun, strings.ToUpper(minGrade))
 
 	tk := time.NewTicker(scanEvery)
 	defer tk.Stop()
 	lastTopKey := ""
+	lastOrderAt := time.Time{}
+	orderCountByDay := map[string]int{}
 	for {
 		now := time.Now().UTC()
 		mkts := client.FetchAllMarkets()
@@ -147,6 +167,12 @@ func main() {
 			<-tk.C
 			continue
 		}
+		if reason := safetyReject(safety, best, time.Now(), lastOrderAt, orderCountByDay); reason != "" {
+			fmt.Println("live-lite: safety skip:", reason)
+			tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+			<-tk.C
+			continue
+		}
 
 		avail := acct.AvailableUSDT
 		if avail <= 0 {
@@ -157,6 +183,13 @@ func main() {
 				<-tk.C
 				continue
 			}
+		}
+		if avail < safety.minAvailUSDT {
+			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
+			tg.Sendf("safety skip %s %s: available %.4f < min %.4f",
+				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, avail, safety.minAvailUSDT)
+			<-tk.C
+			continue
 		}
 		usable := avail - reserveUSDT
 		if usable < tradeMargin {
@@ -184,10 +217,13 @@ func main() {
 			continue
 		}
 
-		if err := placeEntry(rest, best, entryBps, tradeMargin); err != nil {
+		if err := placeEntry(rest, best, entryBps, tradeMargin, safety.maxLeverage); err != nil {
 			fmt.Println("live-lite: place error:", err)
 			tg.Sendf("place error %s %s: %v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
 		} else {
+			lastOrderAt = time.Now()
+			dayKey := time.Now().UTC().Format("2006-01-02")
+			orderCountByDay[dayKey]++
 			tg.Sendf("placed %s %s margin=$%.2f grade=%s",
 				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, tradeMargin, best.Entry.CurrentGrade)
 		}
@@ -375,7 +411,7 @@ func hasAnyOpenPosition(rest *aster.RESTAuth) (bool, error) {
 	return false, nil
 }
 
-func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64) error {
+func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, maxLev int) error {
 	rawSym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	bid, ask, err := rest.BookTicker(rawSym)
 	if err != nil {
@@ -412,6 +448,9 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64) err
 	if strings.EqualFold(c.Entry.CurrentGrade, "A+") {
 		lev = 5
 	}
+	if maxLev > 0 && lev > maxLev {
+		lev = maxLev
+	}
 	_, _ = rest.ChangeLeverage(rawSym, lev)
 
 	vals := url.Values{}
@@ -431,6 +470,67 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64) err
 	fmt.Printf("live-lite: placed entry %s %s qty=%s price=%s -> %v\n",
 		rawSym, c.Side, vals.Get("quantity"), vals.Get("price"), out)
 	return nil
+}
+
+func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
+	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", reserveUSDT+tradeMargin)
+	maxLev := envInt("LIVE_MAX_LEVERAGE", 3)
+	if maxLev <= 0 {
+		maxLev = 3
+	}
+	maxOrders := envInt("LIVE_MAX_ORDERS_PER_DAY", 3)
+	if maxOrders < 0 {
+		maxOrders = 0
+	}
+	coolSec := envInt("LIVE_ORDER_COOLDOWN_SEC", 90)
+	if coolSec < 0 {
+		coolSec = 0
+	}
+	allow := envCSV("LIVE_ALLOW_SYMBOLS", "")
+	allowMap := make(map[string]struct{}, len(allow))
+	for _, s := range allow {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))
+		if raw != "" {
+			allowMap[raw] = struct{}{}
+		}
+	}
+	return safetyConfig{
+		enableLiveTrading: envBool("LIVE_ENABLE_LIVE_TRADING", false),
+		maxLeverage:       maxLev,
+		minAvailUSDT:      minAvail,
+		maxOrdersPerDay:   maxOrders,
+		orderCooldown:     time.Duration(coolSec) * time.Second,
+		pauseFile:         envStr("LIVE_PAUSE_FILE", "/tmp/live-lite.pause"),
+		allowSymbols:      allowMap,
+		allowShorts:       envBool("LIVE_ALLOW_SHORTS", true),
+	}
+}
+
+func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, byDay map[string]int) string {
+	if cfg.pauseFile != "" {
+		if _, err := os.Stat(cfg.pauseFile); err == nil {
+			return "pause file present"
+		}
+	}
+	if !cfg.allowShorts && strings.EqualFold(c.Side, "SELL") {
+		return "shorts disabled"
+	}
+	if len(cfg.allowSymbols) > 0 {
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+		if _, ok := cfg.allowSymbols[sym]; !ok {
+			return "symbol not in allowlist"
+		}
+	}
+	if cfg.orderCooldown > 0 && !lastOrderAt.IsZero() && now.Sub(lastOrderAt) < cfg.orderCooldown {
+		return "order cooldown active"
+	}
+	if cfg.maxOrdersPerDay > 0 {
+		dayKey := now.UTC().Format("2006-01-02")
+		if byDay[dayKey] >= cfg.maxOrdersPerDay {
+			return "max orders/day reached"
+		}
+	}
+	return ""
 }
 
 func buildRESTFromConfig() *aster.RESTAuth {

@@ -56,3 +56,21 @@ scripts/deploy_pi.sh
 ```bash
 scripts/tmux_aster.sh
 ```
+
+## 6) One-step bot start (recommended)
+
+```bash
+scripts/start_bot.sh
+```
+
+Options:
+- skip rebuild/redeploy and only restart + attach tmux:
+
+```bash
+SKIP_DEPLOY=1 scripts/start_bot.sh
+```
+- include extra services (`liqs/oflow/long/short`) in restart script:
+
+```bash
+START_EXTRA_SERVICES=1 scripts/start_bot.sh
+```
