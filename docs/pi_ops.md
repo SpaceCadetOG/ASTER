@@ -74,3 +74,9 @@ SKIP_DEPLOY=1 scripts/start_bot.sh
 ```bash
 START_EXTRA_SERVICES=1 scripts/start_bot.sh
 ```
+
+## 7) One-step bot stop
+
+```bash
+scripts/stop_bot.sh
+```
