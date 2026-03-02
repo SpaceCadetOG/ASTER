@@ -1,13 +1,16 @@
 package status
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 )
 
@@ -17,6 +20,7 @@ type Snapshot struct {
 	Active    []string
 	Rows      []market.Scored   // includes Change24h etc.
 	Conf      map[string]string // symbol -> "A+","A","B","C","D" (or "N/A")
+	InPlay    []inplay.Entry
 }
 
 type Store struct {
@@ -30,6 +34,12 @@ func (s *Store) SetSnap(sn Snapshot) {
 	s.mu.Lock()
 	s.cur = sn
 	s.mu.Unlock()
+}
+
+func (s *Store) Snapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cur
 }
 
 func (s *Store) Handler() http.Handler {
@@ -164,7 +174,43 @@ tr:hover{background:var(--row)}
 			)
 		}
 
-		fmt.Fprint(w, `</tbody></table></body></html>`)
+		fmt.Fprint(w, `</tbody></table>`)
+
+		if len(snap.InPlay) > 0 {
+			fmt.Fprint(w, `<h3 style="margin-top:16px;">🔥 IN-PLAY</h3>`)
+			fmt.Fprint(w, `<table><thead><tr>
+<th>Symbol</th><th>Side</th><th>State</th><th>Grade</th><th class="num">Score</th><th class="num">Slope</th><th>Momentum</th><th>LastSeen</th>
+</tr></thead><tbody>`)
+			for _, e := range snap.InPlay {
+				fmt.Fprintf(w, `<tr>
+<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="num">%.2f</td><td class="num">%.3f</td><td>%v</td><td>%s</td>
+</tr>`,
+					html.EscapeString(e.Symbol),
+					html.EscapeString(strings.ToUpper(e.SideBias)),
+					html.EscapeString(string(e.State)),
+					html.EscapeString(e.CurrentGrade),
+					e.CurrentScore,
+					e.ScoreSlope,
+					e.Momentum,
+					html.EscapeString(e.LastSeen.Format(time.RFC3339)),
+				)
+			}
+			fmt.Fprint(w, `</tbody></table>`)
+		}
+		fmt.Fprint(w, `</body></html>`)
+	})
+}
+
+func (s *Store) InPlayHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		inp := append([]inplay.Entry(nil), s.cur.InPlay...)
+		s.mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"inplay": inp,
+			"count":  len(inp),
+		})
 	})
 }
 

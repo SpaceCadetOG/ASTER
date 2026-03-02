@@ -81,6 +81,14 @@ func (w *Window) Snapshot() Stats {
 	return w.statsLocked()
 }
 
+// SnapshotAt returns stats using a caller-provided clock (useful for replay/backtest).
+func (w *Window) SnapshotAt(now time.Time) Stats {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.expireLocked(now)
+	return w.statsLocked()
+}
+
 func (w *Window) Events() []Event {
 	w.mu.Lock()
 	defer w.mu.Unlock()

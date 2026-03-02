@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"go-machine/adapters/aster"
 	"go-machine/internal/api"
+	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 	"go-machine/internal/sessions"
 	"go-machine/internal/status"
@@ -81,7 +83,7 @@ func confluenceLabel(c *aster.Client, symbol, side string) string {
 
 // --- scanner loop ---
 
-func runOnce(st *status.Store, asterClient *aster.Client) {
+func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 	now := time.Now().UTC()
 	fmt.Printf("🔧 ASTER SHORT adapter — live fetch @ %s\n", now.Format(time.RFC3339))
 
@@ -121,12 +123,24 @@ func runOnce(st *status.Store, asterClient *aster.Client) {
 		Active:    active,
 		Rows:      eligible,
 		Conf:      confMap,
+		InPlay:    trkEntries(trk, now, eligible, confMap),
 	})
+
+	printInPlayTerminal("SHORT", st)
 }
 
 func main() {
 	st := status.NewStore()
 	asterClient := aster.New("")
+	trk := inplay.NewTracker("short", inplay.Config{
+		MinGrade:       envStr("INPLAY_MIN_GRADE", "C"),
+		MinVolumeUSD:   envFloat("INPLAY_MIN_VOL_USD", 1_000_000),
+		HistoryN:       envInt("INPLAY_HISTORY_N", 5),
+		RiseN:          envInt("INPLAY_RISE_N", 3),
+		DropGradeScans: envInt("INPLAY_DROP_SCANS", 2),
+		FallScans:      envInt("INPLAY_FALL_SCANS", 2),
+		TTL:            time.Duration(envInt("INPLAY_TTL_MIN", 30)) * time.Minute,
+	})
 
 	http.HandleFunc("/api/candles", api.CandlesHandler(asterClient))
 	http.HandleFunc("/api/pivots", api.PivotsHandler(asterClient))
@@ -190,6 +204,7 @@ func main() {
 		)
 	})
 	http.Handle("/status", st.Handler())
+	http.Handle("/api/inplay", st.InPlayHandler())
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -209,7 +224,61 @@ func main() {
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
 	for {
-		runOnce(st, asterClient)
+		runOnce(st, asterClient, trk)
 		<-tick.C
 	}
+}
+
+func trkEntries(trk *inplay.Tracker, now time.Time, eligible []market.Scored, conf map[string]string) []inplay.Entry {
+	trk.Update(now, eligible, conf)
+	return trk.Entries()
+}
+
+func printInPlayTerminal(side string, st *status.Store) {
+	snap := st.Snapshot()
+	fmt.Printf("🔥 IN-PLAY (%s)\n", side)
+	n := 0
+	for _, e := range snap.InPlay {
+		if n >= 8 {
+			break
+		}
+		fmt.Printf("%-12s grade=%-2s score=%6.2f slope=%6.3f state=%-8s momentum=%v\n",
+			e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State, e.Momentum)
+		n++
+	}
+	if n == 0 {
+		fmt.Println("(none)")
+	}
+}
+
+func envStr(k, def string) string {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func envFloat(k string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
+
+func envInt(k string, def int) int {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
