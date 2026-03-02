@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+User=traderbot
+Group=traderbot
 WorkingDirectory=/opt/aster
 EnvironmentFile=-/opt/aster/env/oflow.env
 ExecStart=/opt/aster/bin/oflow

@@ -1,5 +1,5 @@
 [Unit]
-Description=Aster Liquidations Feed Monitor
+Description=Aster Tape (aggTrade stream printer)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,8 +8,8 @@ Type=simple
 User=traderbot
 Group=traderbot
 WorkingDirectory=/opt/aster
-EnvironmentFile=-/opt/aster/env/liqs.env
-ExecStart=/opt/aster/bin/liqs
+EnvironmentFile=-/opt/aster/env/tape.env
+ExecStart=/opt/aster/bin/tape
 Restart=always
 RestartSec=2
 StartLimitIntervalSec=0

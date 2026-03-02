@@ -22,7 +22,7 @@ import (
 //
 // Core actions:
 //
-//	EXEC_ACTION=balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten
+//	EXEC_ACTION=auth_check|balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten
 func main() {
 	cfgPath := strings.TrimSpace(os.Getenv("ASTER_CONFIG"))
 	if cfgPath == "" {
@@ -108,6 +108,11 @@ func main() {
 	_ = rest.SyncTime() // best-effort
 
 	switch action {
+	case "auth_check":
+		out, err := runAuthCheck(rest)
+		mustPrintJSON(out, err)
+		return
+
 	case "balance":
 		out, err := rest.GetBalance()
 		if err == nil {
@@ -214,7 +219,7 @@ func main() {
 	case "place":
 		// continue below
 	default:
-		fmt.Println("unknown EXEC_ACTION (balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten)")
+		fmt.Println("unknown EXEC_ACTION (auth_check|balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten)")
 		os.Exit(2)
 	}
 
@@ -498,6 +503,76 @@ func buildAccountSummary(rest *aster.RESTAuth, symbol string) (map[string]any, e
 	return out, nil
 }
 
+func runAuthCheck(rest *aster.RESTAuth) (map[string]any, error) {
+	out := map[string]any{
+		"base_url":  rest.BaseURL(),
+		"auth_mode": rest.AuthMode(),
+	}
+
+	if err := rest.Ping(); err != nil {
+		out["ping_ok"] = false
+		out["ping_error"] = err.Error()
+	} else {
+		out["ping_ok"] = true
+	}
+
+	srvTime, err := rest.ServerTime()
+	if err != nil {
+		out["time_ok"] = false
+		out["time_error"] = err.Error()
+	} else {
+		out["time_ok"] = true
+		out["server_time"] = srvTime
+	}
+
+	acct, aErr := rest.GetAccountSummary()
+	if aErr != nil {
+		out["account_ok"] = false
+		out["account_error"] = aErr.Error()
+		attachAuthHints(out, aErr)
+	} else {
+		out["account_ok"] = true
+		out["account_summary"] = acct
+	}
+
+	bals, bErr := rest.GetBalance()
+	if bErr != nil {
+		out["balance_ok"] = false
+		out["balance_error"] = bErr.Error()
+		attachAuthHints(out, bErr)
+	} else {
+		out["balance_ok"] = true
+		out["balances_count"] = len(bals)
+		out["balances"] = bals
+	}
+
+	if aErr != nil {
+		return out, aErr
+	}
+	return out, bErr
+}
+
+func attachAuthHints(out map[string]any, err error) {
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	hints := []string{}
+
+	if strings.Contains(msg, `code":-2015`) || strings.Contains(msg, "invalid api-key") {
+		hints = append(hints, "API key rejected. Verify mainnet vs testnet base URL, key/secret pair, and IP whitelist.")
+	}
+	if strings.Contains(msg, `code":-2014`) || strings.Contains(msg, "api-key format invalid") {
+		hints = append(hints, "API key format invalid for selected auth mode. Use HMAC key/secret for hmac mode.")
+	}
+	if strings.Contains(msg, `code":-1022`) || strings.Contains(msg, "signature for this request is not valid") {
+		hints = append(hints, "Signature mismatch. Confirm correct secret and no extra whitespace in config values.")
+	}
+	if strings.Contains(msg, `code":-1102`) || strings.Contains(msg, "mandatory parameter 'nonce'") {
+		hints = append(hints, "Signed request missing nonce/timestamp. Keep adapter on latest code and run SyncTime.")
+	}
+	if len(hints) > 0 {
+		out["auth_hints"] = hints
+	}
+}
+
 func closeMarket(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 	closePct := floatEnv("EXEC_CLOSE_PCT", 100.0)
 	if closePct <= 0 || closePct > 100 {
@@ -680,8 +755,8 @@ func closeLimit(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 
 func flatten(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 	out := map[string]any{
-		"symbol":        symbol,
-		"cancel_all":    nil,
+		"symbol":         symbol,
+		"cancel_all":     nil,
 		"position_close": nil,
 	}
 

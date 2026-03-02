@@ -24,6 +24,23 @@ aster_api_secret: YOUR_SECRET
 
 See full template in [`yaml.example`](/Users/victorogbebor/2026/go-machine/yaml.example).
 
+## Auth sanity check
+
+Runs public + signed checks in one command:
+- `/fapi/v3/ping` (or v1 fallback)
+- `/fapi/v3/time` (or v1 fallback)
+- `/fapi/v3/account`
+- `/fapi/v3/balance` (or v2 fallback)
+
+```bash
+ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=auth_check go run ./cmd/exec
+```
+
+If you see code `-2015`:
+- key/secret pair does not match selected environment (mainnet vs testnet), or
+- API key permissions are missing for futures/account reads, or
+- your current IP is not whitelisted for that key.
+
 ## Balance
 
 ```bash

@@ -21,14 +21,23 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" /opt/aster || true
           go build -o /opt/aster/bin/long  ./cmd/long
           go build -o /opt/aster/bin/short ./cmd/short
-          chmod +x /opt/aster/bin/long /opt/aster/bin/short
+          go build -o /opt/aster/bin/tape ./cmd/tape
+          go build -o /opt/aster/bin/whale ./cmd/whale
+          go build -o /opt/aster/bin/live-lite ./cmd/live-lite
+          chmod +x /opt/aster/bin/long /opt/aster/bin/short /opt/aster/bin/tape /opt/aster/bin/whale /opt/aster/bin/live-lite
 
       - name: Restart services
         run: |
-          sudo systemctl restart aster-long
-          sudo systemctl restart aster-short
+          sudo systemctl restart aster-long || true
+          sudo systemctl restart aster-short || true
+          sudo systemctl restart aster-tape || true
+          sudo systemctl restart aster-whale || true
+          sudo systemctl restart aster-live-lite || true
 
       - name: Status
         run: |
           systemctl --no-pager --full status aster-long || true
           systemctl --no-pager --full status aster-short || true
+          systemctl --no-pager --full status aster-tape || true
+          systemctl --no-pager --full status aster-whale || true
+          systemctl --no-pager --full status aster-live-lite || true

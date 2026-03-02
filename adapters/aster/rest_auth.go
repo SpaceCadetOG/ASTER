@@ -121,6 +121,14 @@ func (r *RESTAuth) SetBaseURL(base string) {
 	r.baseURL = strings.TrimRight(base, "/")
 }
 
+func (r *RESTAuth) BaseURL() string {
+	return r.baseURL
+}
+
+func (r *RESTAuth) AuthMode() string {
+	return r.authMode
+}
+
 func (r *RESTAuth) SetAgentAuth(user, signer, privateKey string, chainID int64) {
 	r.user = strings.TrimSpace(user)
 	r.signer = strings.TrimSpace(signer)
@@ -155,6 +163,28 @@ func (r *RESTAuth) SyncTime() error {
 	}
 	r.timeSkew = out.ServerTime - time.Now().UnixMilli()
 	return nil
+}
+
+func (r *RESTAuth) ServerTime() (int64, error) {
+	b, err := r.doPublicGET("/fapi/v3/time", nil)
+	if err != nil {
+		b, err = r.doPublicGET("/fapi/v1/time", nil)
+	}
+	if err != nil {
+		return 0, err
+	}
+	var out struct {
+		ServerTime int64 `json:"serverTime"`
+	}
+	if err := decodeJSONNumbers(b, &out); err != nil {
+		return 0, err
+	}
+	return out.ServerTime, nil
+}
+
+func (r *RESTAuth) Ping() error {
+	_, err := r.doPublicGETAny([]string{"/fapi/v3/ping", "/fapi/v1/ping"}, nil)
+	return err
 }
 
 // nowMS returns local ms adjusted by best-known server skew.
