@@ -38,20 +38,24 @@ func FormatHeader(exchange string, activeLabels []string) string {
 	return fmt.Sprintf("%s • [%s]", exchange, strings.Join(activeLabels, ","))
 }
 
-// Symbol | Score | Δ% | Vol($) | OI($) | Funding(%) |  Prev24h | Last
+// Symbol | Score | Δ%(24h) | DayUTC% | Vol($) | OI($) | Funding(%) | Open24h | Last
 func FormatRow(s Scored) string {
 	funding := pctFromFractionPtr(s.FundingRate)
 	oi := usdFromFloatPtr(s.OIUSD)
+	dayUTC := "-"
+	if s.DayUTC24h != nil {
+		dayUTC = fmt.Sprintf("%+.1f", *s.DayUTC24h)
+	}
 
-	prev := "-"
+	open24 := "-"
 	last := "-"
 	if s.OpenPrice > 0 {
-		prev = fmt.Sprintf("%.4f", s.OpenPrice)
+		open24 = fmt.Sprintf("%.4f", s.OpenPrice)
 	}
 	if s.LastPrice > 0 {
 		last = fmt.Sprintf("%.4f", s.LastPrice)
 	}
 
-	return fmt.Sprintf("%-12s | %6.2f | %5.1f | %7s | %7s | %10s | %8s | %8s",
-		s.Symbol, s.Score, s.Change24h, humanUSD(s.VolumeUSD), oi, funding, prev, last)
+	return fmt.Sprintf("%-12s | %6.2f | %8.1f | %7s | %7s | %7s | %10s | %8s | %8s",
+		s.Symbol, s.Score, s.Change24h, dayUTC, humanUSD(s.VolumeUSD), oi, funding, open24, last)
 }

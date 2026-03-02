@@ -4,6 +4,7 @@ type Market struct {
 	Exchange    string
 	Symbol      string
 	Change24h   float64
+	DayUTC24h   *float64
 	VolumeUSD   float64
 	OIUSD       *float64
 	FundingRate *float64

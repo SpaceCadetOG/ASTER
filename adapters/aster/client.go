@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-machine/internal/market"
@@ -21,6 +22,10 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 	RL      *ratelimit.Limiter // 10 req/s, burst 20
+
+	dayOpenMu    sync.RWMutex
+	dayOpenDate  string
+	dayOpenCache map[string]float64
 }
 
 func New(base string) *Client {
@@ -39,7 +44,8 @@ func New(base string) *Client {
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
-		RL: ratelimit.New(10, 20),
+		RL:           ratelimit.New(10, 20),
+		dayOpenCache: map[string]float64{},
 	}
 }
 
@@ -148,6 +154,55 @@ func (c *Client) priceTicker(symbol string) (float64, error) {
 	return numToFloat(pt.Price)
 }
 
+func utcDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
+
+func utcMidnightMS(t time.Time) int64 {
+	u := t.UTC()
+	mid := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	return mid.UnixMilli()
+}
+
+func (c *Client) dayOpenUTC(symbol string, now time.Time) (float64, error) {
+	day := utcDayKey(now)
+	c.dayOpenMu.RLock()
+	if c.dayOpenDate == day {
+		if px, ok := c.dayOpenCache[symbol]; ok && px > 0 {
+			c.dayOpenMu.RUnlock()
+			return px, nil
+		}
+	}
+	c.dayOpenMu.RUnlock()
+
+	start := utcMidnightMS(now)
+	params := map[string]string{
+		"symbol":    symbol,
+		"interval":  "1m",
+		"startTime": strconv.FormatInt(start, 10),
+		"limit":     "1",
+	}
+	u := c.buildURL("/klines", params)
+	var arr [][]json.Number
+	if err := c.fetchJSON(u, &arr); err != nil {
+		return 0, err
+	}
+	if len(arr) == 0 || len(arr[0]) < 2 {
+		return 0, fmt.Errorf("no klines at utc open for %s", symbol)
+	}
+	px, err := numToFloat(arr[0][1]) // open
+	if err != nil || px <= 0 {
+		return 0, fmt.Errorf("bad utc day open for %s", symbol)
+	}
+
+	c.dayOpenMu.Lock()
+	if c.dayOpenDate != day {
+		c.dayOpenDate = day
+		c.dayOpenCache = map[string]float64{}
+	}
+	c.dayOpenCache[symbol] = px
+	c.dayOpenMu.Unlock()
+	return px, nil
+}
+
 // ToMarket maps raw stats to internal market.Market
 func toMarket(exchange string, ts tickerStats, funding *float64) market.Market {
 	pct, _ := numToFloat(ts.PriceChangePercent)
@@ -216,6 +271,10 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 				mkts[i].LastPrice = p
 				if mkts[i].OpenPrice == 0 {
 					mkts[i].OpenPrice = deriveOpen(p, mkts[i].Change24h)
+				}
+				if dayOpen, err := c.dayOpenUTC(raw, time.Now().UTC()); err == nil && dayOpen > 0 {
+					v := (p/dayOpen - 1.0) * 100.0
+					mkts[i].DayUTC24h = &v
 				}
 			}
 		}
