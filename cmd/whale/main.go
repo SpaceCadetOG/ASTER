@@ -25,10 +25,11 @@ type whaleAggTrade struct {
 
 func main() {
 	syms := parseSymbols("WHALE_SYMBOLS", defaultTapeSymbols())
-	minUSD := envFloat("WHALE_MIN_USD", 5000)
+	minUSD := envFloat("WHALE_MIN_USD", 10000)
 	tier1 := envFloat("WHALE_TIER1_USD", 10000)
-	tier2 := envFloat("WHALE_TIER2_USD", 50000)
-	tier3 := envFloat("WHALE_TIER3_USD", 150000)
+	tier2 := envFloat("WHALE_TIER2_USD", 25000)
+	tier3 := envFloat("WHALE_TIER3_USD", 50000)
+	tier4 := envFloat("WHALE_TIER4_USD", 100000)
 	windowSec := envInt("WHALE_WINDOW_SEC", 30)
 	burstCount := envInt("WHALE_BURST_COUNT", 5)
 	imbalancePct := envFloat("WHALE_IMBALANCE_PCT", 65)
@@ -109,19 +110,21 @@ func main() {
 				coloredSide = colorx.Buy(side)
 			}
 
-			tier := "TIER1"
-			if usd >= tier3 {
-				tier = "TIER3"
-			} else if usd >= tier2 {
-				tier = "TIER2"
-			}
-			tierOut := tier
-			if tier == "TIER3" {
+			tier := "$10k+"
+			tierOut := colorx.Blue(tier)
+			whales := "🐋"
+			if usd >= tier4 {
+				tier = "$100k+"
 				tierOut = colorx.Sell(tier)
-			} else if tier == "TIER2" {
+				whales = "🐋🐋🐋🐋"
+			} else if usd >= tier3 {
+				tier = "$50k+"
 				tierOut = colorx.Gold(tier)
-			} else {
-				tierOut = colorx.Blue(tier)
+				whales = "🐋🐋🐋"
+			} else if usd >= tier2 {
+				tier = "$25k+"
+				tierOut = colorx.Gold(tier)
+				whales = "🐋🐋"
 			}
 
 			buyPct := s.BuyPct
@@ -140,11 +143,13 @@ func main() {
 			}
 
 			sec := time.UnixMilli(t.T).Format("15:04:05")
-			fmt.Printf("%s %-4s %-5s %s %-6s window:%d trades | buy%%:%d | burst:%s%s\n",
+			usdText := colorByWhaleTier(usd, tier1, tier2, tier3, tier4, compactUSD(usd))
+			fmt.Printf("%s %s %-4s %-5s %s %s | window:%d buy%%:%d burst:%s%s\n",
 				sec,
+				whales,
 				symbol,
 				coloredSide,
-				colorx.BySize(usd, fmt.Sprintf("$%.0f", usd)),
+				usdText,
 				tierOut,
 				s.Count,
 				int(buyPct+0.5),
@@ -248,4 +253,30 @@ func abs(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+func compactUSD(v float64) string {
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("$%.1fm", v/1_000_000)
+	case v >= 1000:
+		return fmt.Sprintf("$%.0fk", v/1000)
+	default:
+		return fmt.Sprintf("$%.0f", v)
+	}
+}
+
+func colorByWhaleTier(usd, t1, t2, t3, t4 float64, text string) string {
+	switch {
+	case usd >= t4:
+		return colorx.Sell(text)
+	case usd >= t3:
+		return colorx.Gold(text)
+	case usd >= t2:
+		return colorx.Blue(text)
+	case usd >= t1:
+		return colorx.Gray(text)
+	default:
+		return text
+	}
 }
