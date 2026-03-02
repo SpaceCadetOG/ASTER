@@ -30,6 +30,34 @@ EXEC_ASSETS=USDT \
 go run ./cmd/exec
 ```
 
+Check best bid/ask snapshot:
+
+```bash
+ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
+ASTER_AUTH_MODE=hmac \
+EXEC_BASE_URL=https://fapi.asterdex.com \
+EXEC_ACTION=orderbook \
+EXEC_SYMBOL=ETHUSDT \
+go run ./cmd/exec
+```
+
+Quote sizing preview before place:
+
+```bash
+ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
+ASTER_AUTH_MODE=hmac \
+EXEC_BASE_URL=https://fapi.asterdex.com \
+EXEC_ACTION=quote \
+EXEC_SYMBOL=ETHUSDT \
+EXEC_SIDE=BUY \
+EXEC_KIND=LIMIT \
+EXEC_AT=mid \
+EXEC_OFFSET_BPS=-200 \
+EXEC_USD=35 \
+EXEC_MIN_NOTIONAL=20 \
+go run ./cmd/exec
+```
+
 ## 3) Place a LIMIT Order (Dry Run)
 
 ```bash
@@ -139,7 +167,37 @@ make exec-cancel EXEC_SYMBOL=ETHUSDT ORDER_ID=123456789
 make exec-status EXEC_SYMBOL=ETHUSDT ORDER_ID=123456789
 ```
 
-## 8) Common Errors
+## 8) Emergency Flatten
+
+Cancels all open orders for the symbol and closes open position with reduce-only market order.
+
+Dry run:
+
+```bash
+ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
+ASTER_AUTH_MODE=hmac \
+EXEC_BASE_URL=https://fapi.asterdex.com \
+EXEC_ACTION=flatten \
+EXEC_SYMBOL=ETHUSDT \
+DRY_RUN=1 \
+EXEC_DEBUG=1 \
+go run ./cmd/exec
+```
+
+Live:
+
+```bash
+ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
+ASTER_AUTH_MODE=hmac \
+EXEC_BASE_URL=https://fapi.asterdex.com \
+EXEC_ACTION=flatten \
+EXEC_SYMBOL=ETHUSDT \
+DRY_RUN=0 \
+EXEC_DEBUG=1 \
+go run ./cmd/exec
+```
+
+## 9) Common Errors
 
 - `qty <= 0 after rounding`
   - Increase `EXEC_USD`, or set `EXEC_MIN_NOTIONAL` high enough for symbol step size.

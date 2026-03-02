@@ -1,0 +1,18 @@
+[Unit]
+Description=Aster Liquidations Feed Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/aster
+EnvironmentFile=-/opt/aster/env/liqs.env
+ExecStart=/opt/aster/bin/liqs
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

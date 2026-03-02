@@ -1,0 +1,18 @@
+[Unit]
+Description=Aster Whale Detector (aggTrade monitor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/aster
+EnvironmentFile=-/opt/aster/env/whale.env
+ExecStart=/opt/aster/bin/whale
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

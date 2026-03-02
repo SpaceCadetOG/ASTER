@@ -22,7 +22,7 @@ import (
 //
 // Core actions:
 //
-//	EXEC_ACTION=balance|account|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit
+//	EXEC_ACTION=balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten
 func main() {
 	cfgPath := strings.TrimSpace(os.Getenv("ASTER_CONFIG"))
 	if cfgPath == "" {
@@ -121,38 +121,46 @@ func main() {
 		mustPrintJSON(out, err)
 		return
 
+	case "orderbook":
+		bid, ask, err := rest.BookTicker(symbol)
+		if err != nil {
+			mustPrintJSON(nil, err)
+			return
+		}
+		out := map[string]any{
+			"symbol": symbol,
+			"bid":    bid,
+			"ask":    ask,
+			"mid":    (bid + ask) / 2.0,
+			"spread": ask - bid,
+		}
+		mustPrintJSON(out, nil)
+		return
+
+	case "quote":
+		out, err := buildQuote(rest, symbol)
+		mustPrintJSON(out, err)
+		return
+
 	case "cancel":
-		oidStr := strings.TrimSpace(os.Getenv("EXEC_ORDER_ID"))
-		clientOID := strings.TrimSpace(os.Getenv("EXEC_CLIENT_ORDER_ID"))
-		hasNum := oidStr != ""
-		hasClient := clientOID != ""
-		if !hasNum && !hasClient {
-			fmt.Println("missing EXEC_ORDER_ID or EXEC_CLIENT_ORDER_ID")
+		ref, err := resolveOrderRef(os.Getenv("EXEC_ORDER_ID"), os.Getenv("EXEC_CLIENT_ORDER_ID"))
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(2)
 		}
-		var oid int64
-		if hasNum {
-			var err error
-			oid, err = strconv.ParseInt(oidStr, 10, 64)
-			if err != nil {
-				fmt.Printf("bad EXEC_ORDER_ID: %v\n", err)
-				os.Exit(2)
-			}
-		}
 		if dry {
-			if hasNum {
-				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s orderId=%d\n", symbol, oid)
+			if ref.HasNumericID {
+				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s orderId=%d\n", symbol, ref.OrderID)
 			} else {
-				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s origClientOrderId=%s\n", symbol, clientOID)
+				fmt.Printf("DRY_RUN=1 would cancel: symbol=%s origClientOrderId=%s\n", symbol, ref.ClientOrderID)
 			}
 			return
 		}
 		var out map[string]any
-		var err error
-		if hasNum {
-			out, err = rest.CancelOrder(symbol, oid)
+		if ref.HasNumericID {
+			out, err = rest.CancelOrder(symbol, ref.OrderID)
 		} else {
-			out, err = rest.CancelOrderByClientID(symbol, clientOID)
+			out, err = rest.CancelOrderByClientID(symbol, ref.ClientOrderID)
 		}
 		mustPrintJSON(out, err)
 		return
@@ -167,25 +175,16 @@ func main() {
 		return
 
 	case "status":
-		oidStr := strings.TrimSpace(os.Getenv("EXEC_ORDER_ID"))
-		clientOID := strings.TrimSpace(os.Getenv("EXEC_CLIENT_ORDER_ID"))
-		hasNum := oidStr != ""
-		hasClient := clientOID != ""
-		if !hasNum && !hasClient {
-			fmt.Println("missing EXEC_ORDER_ID or EXEC_CLIENT_ORDER_ID")
+		ref, err := resolveOrderRef(os.Getenv("EXEC_ORDER_ID"), os.Getenv("EXEC_CLIENT_ORDER_ID"))
+		if err != nil {
+			fmt.Println(err)
 			os.Exit(2)
 		}
 		var out map[string]any
-		var err error
-		if hasNum {
-			oid, perr := strconv.ParseInt(oidStr, 10, 64)
-			if perr != nil {
-				fmt.Printf("bad EXEC_ORDER_ID: %v\n", perr)
-				os.Exit(2)
-			}
-			out, err = rest.GetOrder(symbol, oid)
+		if ref.HasNumericID {
+			out, err = rest.GetOrder(symbol, ref.OrderID)
 		} else {
-			out, err = rest.GetOrderByClientID(symbol, clientOID)
+			out, err = rest.GetOrderByClientID(symbol, ref.ClientOrderID)
 		}
 		mustPrintJSON(out, err)
 		return
@@ -208,10 +207,14 @@ func main() {
 		closeLimit(rest, symbol, dry, debug)
 		return
 
+	case "flatten":
+		flatten(rest, symbol, dry, debug)
+		return
+
 	case "place":
 		// continue below
 	default:
-		fmt.Println("unknown EXEC_ACTION (balance|account|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit)")
+		fmt.Println("unknown EXEC_ACTION (balance|account|orderbook|quote|place|cancel|cancel_all|status|open_orders|position|close_market|close_limit|flatten)")
 		os.Exit(2)
 	}
 
@@ -675,6 +678,96 @@ func closeLimit(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
 	mustPrintJSON(out, err)
 }
 
+func flatten(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {
+	out := map[string]any{
+		"symbol":        symbol,
+		"cancel_all":    nil,
+		"position_close": nil,
+	}
+
+	if dry {
+		out["cancel_all"] = "DRY_RUN=1 would cancel all open orders for symbol"
+	} else {
+		c, err := rest.CancelAllOrders(symbol)
+		if err != nil {
+			out["cancel_all_error"] = err.Error()
+		} else {
+			out["cancel_all"] = c
+		}
+	}
+
+	pos, err := rest.PositionRisk(symbol)
+	if err != nil {
+		out["position_error"] = err.Error()
+		mustPrintJSON(out, nil)
+		return
+	}
+	if len(pos) == 0 || mapFloat(pos[0], "positionAmt") == 0 {
+		out["position_close"] = "no open position to close"
+		mustPrintJSON(out, nil)
+		return
+	}
+
+	p := pos[0]
+	amt := mapFloat(p, "positionAmt")
+	side := "SELL"
+	qty := amt
+	if amt < 0 {
+		side = "BUY"
+		qty = -amt
+	}
+
+	meta, err := rest.SymbolMeta(symbol, false)
+	if err != nil {
+		out["position_close_error"] = "symbol meta: " + err.Error()
+		mustPrintJSON(out, nil)
+		return
+	}
+
+	qtyRounded, _, err := rest.RoundQty(symbol, qty)
+	if err != nil || qtyRounded <= 0 {
+		out["position_close_error"] = "round qty failed"
+		mustPrintJSON(out, nil)
+		return
+	}
+
+	if debug {
+		out["debug"] = map[string]any{
+			"positionAmt": p["positionAmt"],
+			"side":        side,
+			"rawQty":      qty,
+			"roundedQty":  qtyRounded,
+		}
+	}
+
+	if dry {
+		out["position_close"] = map[string]any{
+			"type":       "MARKET",
+			"side":       side,
+			"reduceOnly": true,
+			"quantity":   formatFloat(qtyRounded, meta.QtyPrecision),
+		}
+		mustPrintJSON(out, nil)
+		return
+	}
+
+	vals := url.Values{}
+	vals.Set("symbol", symbol)
+	vals.Set("side", side)
+	vals.Set("type", "MARKET")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatFloat(qtyRounded, meta.QtyPrecision))
+
+	placed, err := rest.PlaceOrder(vals)
+	if err != nil {
+		out["position_close_error"] = err.Error()
+	} else {
+		out["position_close"] = placed
+	}
+	mustPrintJSON(out, nil)
+}
+
 func mustPrintJSON(v any, err error) {
 	if err != nil {
 		fmt.Println(err)
@@ -838,6 +931,119 @@ func parseMinNotionalFromErr(err error) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+type orderRef struct {
+	HasNumericID  bool
+	OrderID       int64
+	ClientOrderID string
+}
+
+func resolveOrderRef(orderIDStr, clientIDStr string) (orderRef, error) {
+	orderIDStr = strings.TrimSpace(orderIDStr)
+	clientIDStr = strings.TrimSpace(clientIDStr)
+	if orderIDStr == "" && clientIDStr == "" {
+		return orderRef{}, fmt.Errorf("missing EXEC_ORDER_ID or EXEC_CLIENT_ORDER_ID")
+	}
+	if orderIDStr != "" {
+		n, err := strconv.ParseInt(orderIDStr, 10, 64)
+		if err != nil {
+			return orderRef{}, fmt.Errorf("bad EXEC_ORDER_ID: %v", err)
+		}
+		return orderRef{HasNumericID: true, OrderID: n}, nil
+	}
+	return orderRef{ClientOrderID: clientIDStr}, nil
+}
+
+func buildQuote(rest *aster.RESTAuth, symbol string) (map[string]any, error) {
+	side := strings.ToUpper(strings.TrimSpace(os.Getenv("EXEC_SIDE")))
+	if side == "" {
+		side = "BUY"
+	}
+	kind := strings.ToUpper(strings.TrimSpace(os.Getenv("EXEC_KIND")))
+	if kind == "" {
+		kind = "LIMIT"
+	}
+	usd := floatEnv("EXEC_USD", 50.0)
+	qtyOverride := floatEnv("EXEC_QTY", 0.0)
+	minNotional := floatEnv("EXEC_MIN_NOTIONAL", 0.0)
+	price := floatEnv("EXEC_PRICE", 0.0)
+	at := strings.ToLower(strings.TrimSpace(os.Getenv("EXEC_AT")))
+	offsetBps := floatEnv("EXEC_OFFSET_BPS", 0.0)
+	offsetPct := floatEnv("EXEC_OFFSET_PCT", 0.0)
+
+	meta, err := rest.SymbolMeta(symbol, false)
+	if err != nil {
+		return nil, err
+	}
+	bid, ask, err := rest.BookTicker(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	roundedPrice := price
+	refPx := 0.0
+	if kind == "LIMIT" {
+		if roundedPrice <= 0 {
+			if at == "" {
+				at = "mid"
+			}
+			base := pickBasePrice(at, bid, ask)
+			if base <= 0 {
+				return nil, fmt.Errorf("cannot derive base price from EXEC_AT")
+			}
+			adj := 1.0
+			if offsetBps != 0 {
+				adj = 1.0 + (offsetBps / 10000.0)
+			} else if offsetPct != 0 {
+				adj = 1.0 + (offsetPct / 100.0)
+			}
+			roundedPrice = base * adj
+		}
+		roundedPrice, _, err = rest.RoundPrice(symbol, roundedPrice)
+		if err != nil {
+			return nil, err
+		}
+		refPx = roundedPrice
+	} else {
+		if side == "BUY" {
+			refPx = ask
+		} else {
+			refPx = bid
+		}
+	}
+
+	rawQty := qtyOverride
+	if rawQty <= 0 && refPx > 0 {
+		rawQty = usd / refPx
+	}
+	roundedQty, _, err := rest.RoundQty(symbol, rawQty)
+	if err != nil {
+		return nil, err
+	}
+	if minNotional > 0 {
+		roundedQty = bumpQtyToMinNotional(roundedQty, refPx, minNotional, meta.StepSize, meta.QtyPrecision)
+	}
+
+	out := map[string]any{
+		"symbol":             symbol,
+		"side":               side,
+		"kind":               kind,
+		"bid":                bid,
+		"ask":                ask,
+		"refPrice":           refPx,
+		"price":              roundedPrice,
+		"rawQty":             rawQty,
+		"roundedQty":         roundedQty,
+		"notional":           roundedQty * refPx,
+		"minStepUSDApprox":   meta.StepSize * refPx,
+		"minNotionalSetting": minNotional,
+		"qtyPrecision":       meta.QtyPrecision,
+		"pricePrecision":     meta.PricePrecision,
+		"tickSize":           meta.TickSize,
+		"stepSize":           meta.StepSize,
+	}
+	return out, nil
 }
 
 func int64EnvWithFallback(envName string, fileKV map[string]string, key string, def int64) int64 {
