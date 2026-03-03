@@ -42,9 +42,14 @@ clean:
 	rm -rf bin
 
 # ---- Backtester ----
+BT_SYMBOLS ?= BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,ASTERUSDT,HYPEUSDT
+BT_STRATEGY ?= router
+BT_TF ?= 1m
 backtest:
-	mkdir -p bin
-	go build -o bin/backtest ./cmd/backtest
+	BT_SYMBOLS=$(BT_SYMBOLS) \
+	BT_STRATEGY=$(BT_STRATEGY) \
+	BT_TF=$(BT_TF) \
+	go run ./cmd/backtest
 
 # ---- Manual deploy to VM (optional; CI/CD will do this) ----
 # Requires: export SSH_USER=ubuntu ; export SSH_HOST=YOUR_VM_IP

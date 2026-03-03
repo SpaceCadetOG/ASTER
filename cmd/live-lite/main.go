@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"go-machine/adapters/aster"
+	"go-machine/internal/features"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
+	"go-machine/internal/strategies"
 	"go-machine/internal/ta"
 	"go-machine/internal/types"
 )
@@ -23,6 +25,9 @@ import (
 type candidate struct {
 	Entry inplay.Entry
 	Side  string // BUY/SELL
+	Strat string
+	Conf  float64
+	Sig   strategies.Signal
 }
 
 type positionView struct {
@@ -62,6 +67,11 @@ type telegramSink struct {
 	lastSent map[string]time.Time
 }
 
+type symbolMeta struct {
+	LastPrice float64
+	Move24h   float64
+}
+
 func main() {
 	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 30)) * time.Second
 	dryRun := envBool("LIVE_DRY_RUN", true)
@@ -77,6 +87,10 @@ func main() {
 	gradeTopN := envInt("LIVE_GRADE_TOP_N", 6)
 	if gradeTopN <= 0 {
 		gradeTopN = 6
+	}
+	strategyTopN := envInt("LIVE_STRATEGY_TOP_N", 3)
+	if strategyTopN <= 0 {
+		strategyTopN = 3
 	}
 
 	inplayCfg := inplay.Config{
@@ -103,12 +117,22 @@ func main() {
 		dryRun = true
 	}
 	tg := newTelegramSink()
+	tgVerbose := envBool("LIVE_TG_VERBOSE", false)
+	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 15)) * time.Minute
+	if digestEvery < time.Minute {
+		digestEvery = 15 * time.Minute
+	}
+	digestLimit := envInt("LIVE_TG_LIST_LIMIT", 12)
+	if digestLimit <= 0 {
+		digestLimit = 12
+	}
+	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=$%.2f margin=$%.2f)\n",
 		scanEvery, dryRun, strings.ToUpper(minGrade), reserveUSDT, tradeMargin)
 	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
 		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
-	tg.Sendf("live-lite started scan=%s dry_run=%v min_grade=%s", scanEvery, dryRun, strings.ToUpper(minGrade))
+	tg.Sendf("live-lite started scan=%s dry_run=%v min_grade=%s digest=%s", scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery)
 
 	tk := time.NewTicker(scanEvery)
 	defer tk.Stop()
@@ -120,6 +144,7 @@ func main() {
 		mkts := client.FetchAllMarkets()
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
+		metaBySymbol := buildSymbolMeta(longRows, shortRows)
 
 		longEligible, longConf := buildEligible(client, longRows, "long", gradeTopN)
 		shortEligible, shortConf := buildEligible(client, shortRows, "short", gradeTopN)
@@ -131,6 +156,10 @@ func main() {
 		shortInPlay := shortTrk.Entries()
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
+		if time.Now().UTC().After(nextDigestAt) {
+			sendInPlayDigest(tg, longInPlay, shortInPlay, metaBySymbol, dryRun, digestLimit)
+			nextDigestAt = time.Now().UTC().Add(digestEvery)
+		}
 
 		var acct accountSnapshot
 		if rest != nil && showAccount {
@@ -144,32 +173,37 @@ func main() {
 		}
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade)
+		cands = rankWithStrategy(client, cands, strategyTopN)
 		if len(cands) == 0 {
 			fmt.Println("live-lite: no trade candidate")
 			<-tk.C
 			continue
 		}
 		best := cands[0]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f\n",
-			best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank)
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f\n",
+			best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
-		if topKey != lastTopKey {
-			tg.Sendf("top candidate %s %s grade=%s score=%.2f slope=%.3f rank=%.2f",
+		if tgVerbose && topKey != lastTopKey {
+			tg.Sendf("top candidate %s %s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f",
 				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, best.Entry.CurrentGrade,
-				best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank)
+				best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 			lastTopKey = topKey
 		}
 
 		if rest == nil || dryRun {
 			printTradeIntent(best, entryBps, tradeMargin)
-			tg.Sendf("DRY_RUN intent %s %s margin=$%.2f grade=%s score=%.2f",
-				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, tradeMargin, best.Entry.CurrentGrade, best.Entry.CurrentScore)
+			if tgVerbose {
+				tg.Sendf("DRY_RUN intent %s %s margin=$%.2f grade=%s score=%.2f",
+					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, tradeMargin, best.Entry.CurrentGrade, best.Entry.CurrentScore)
+			}
 			<-tk.C
 			continue
 		}
 		if reason := safetyReject(safety, best, time.Now(), lastOrderAt, orderCountByDay); reason != "" {
 			fmt.Println("live-lite: safety skip:", reason)
-			tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+			if tgVerbose {
+				tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+			}
 			<-tk.C
 			continue
 		}
@@ -186,16 +220,20 @@ func main() {
 		}
 		if avail < safety.minAvailUSDT {
 			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
-			tg.Sendf("safety skip %s %s: available %.4f < min %.4f",
-				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, avail, safety.minAvailUSDT)
+			if tgVerbose {
+				tg.Sendf("safety skip %s %s: available %.4f < min %.4f",
+					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, avail, safety.minAvailUSDT)
+			}
 			<-tk.C
 			continue
 		}
 		usable := avail - reserveUSDT
 		if usable < tradeMargin {
 			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, tradeMargin)
-			tg.Sendf("skip %s %s: usable %.4f < margin %.4f",
-				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, usable, tradeMargin)
+			if tgVerbose {
+				tg.Sendf("skip %s %s: usable %.4f < margin %.4f",
+					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, usable, tradeMargin)
+			}
 			<-tk.C
 			continue
 		}
@@ -212,14 +250,18 @@ func main() {
 		}
 		if openPos {
 			fmt.Println("live-lite: skip (position already open, max one position)")
-			tg.Sendf("skip %s %s: existing open position", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side)
+			if tgVerbose {
+				tg.Sendf("skip %s %s: existing open position", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side)
+			}
 			<-tk.C
 			continue
 		}
 
 		if err := placeEntry(rest, best, entryBps, tradeMargin, safety.maxLeverage); err != nil {
 			fmt.Println("live-lite: place error:", err)
-			tg.Sendf("place error %s %s: %v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
+			if tgVerbose {
+				tg.Sendf("place error %s %s: %v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
+			}
 		} else {
 			lastOrderAt = time.Now()
 			dayKey := time.Now().UTC().Format("2006-01-02")
@@ -230,6 +272,69 @@ func main() {
 
 		<-tk.C
 	}
+}
+
+func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, dryRun bool, limit int) {
+	if tg == nil || !tg.enabled {
+		return
+	}
+	now := time.Now().UTC()
+	var b strings.Builder
+	mode := "LIVE"
+	if dryRun {
+		mode = "DRY_RUN"
+	}
+	fmt.Fprintf(&b, "live-lite digest (%s) %s UTC\n", mode, now.Format("15:04"))
+	appendList := func(tag string, rows []inplay.Entry) {
+		b.WriteString(tag)
+		b.WriteString(":\n")
+		if len(rows) == 0 {
+			b.WriteString("- none\n")
+			return
+		}
+		n := len(rows)
+		if n > limit {
+			n = limit
+		}
+		for i := 0; i < n; i++ {
+			e := rows[i]
+			fs := e.FirstSeen.UTC().Format("15:04")
+			raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
+			m := meta[raw]
+			price := "-"
+			move := "-"
+			if m.LastPrice > 0 {
+				price = fmt.Sprintf("%.6f", m.LastPrice)
+			}
+			if m.Move24h != 0 {
+				move = fmt.Sprintf("%+.2f%%", m.Move24h)
+			}
+			fmt.Fprintf(&b, "- %s price=%s move=%s status=%s grade=%s score=%.2f slope=%.3f in=%s\n",
+				raw, price, move, e.State, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, fs)
+		}
+	}
+	appendList("LONG", longInPlay)
+	appendList("SHORT", shortInPlay)
+	tg.Sendf("%s", strings.TrimSpace(b.String()))
+}
+
+func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta {
+	out := make(map[string]symbolMeta, len(longRows)+len(shortRows))
+	put := func(rows []market.Scored) {
+		for _, r := range rows {
+			raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(r.Symbol)))
+			if raw == "" {
+				continue
+			}
+			out[raw] = symbolMeta{
+				LastPrice: r.LastPrice,
+				Move24h:   r.Change24h,
+			}
+		}
+	}
+	put(longRows)
+	put(shortRows)
+	return out
 }
 
 func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN int) ([]market.Scored, map[string]string) {
@@ -271,6 +376,68 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string) [
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Entry.Rank > out[j].Entry.Rank })
 	return out
+}
+
+func rankWithStrategy(c *aster.Client, in []candidate, topN int) []candidate {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]candidate, len(in))
+	copy(out, in)
+	if topN > len(out) {
+		topN = len(out)
+	}
+	for i := 0; i < topN; i++ {
+		out[i] = enrichCandidate(c, out[i])
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ri := out[i].Entry.Rank * (1 + out[i].Conf)
+		rj := out[j].Entry.Rank * (1 + out[j].Conf)
+		return ri > rj
+	})
+	return out
+}
+
+func enrichCandidate(c *aster.Client, cand candidate) candidate {
+	raw := strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol))
+	bars, err := c.LoadCandles(raw, types.TF1m, 240)
+	if err != nil || len(bars) < 30 {
+		cand.Strat = "none"
+		return cand
+	}
+	fc := make([]features.Candle, 0, len(bars))
+	for _, b := range bars {
+		fc = append(fc, features.Candle{Ts: b.T, O: b.O, H: b.H, L: b.L, C: b.C, V: b.V})
+	}
+	fe := features.NewEngine(features.Config{})
+	snap := fe.Eval(fc)
+	rt := strategies.NewRouter(strategies.RouterConfig{
+		MinGrade:       "B",
+		MinScore:       0,
+		MinWhaleDelta:  -1e18,
+		AllowWarmup:    true,
+		WarmupSlopeMin: 0,
+		MaxOne:         true,
+	})
+	ctx := strategies.Context{
+		Symbol:       raw,
+		TF:           "1m",
+		ScannerScore: cand.Entry.CurrentScore,
+		ScannerGrade: cand.Entry.CurrentGrade,
+		ScoreSlope:   cand.Entry.ScoreSlope,
+		Snapshot:     snap,
+		Candles:      fc,
+	}
+	cs := rt.Eval(ctx)
+	if len(cs) == 0 {
+		cand.Strat = "none"
+		cand.Conf = 0
+		return cand
+	}
+	cand.Sig = cs[0].Signal
+	cand.Strat = cs[0].Signal.Name
+	cand.Conf = cs[0].Signal.Confidence
+	return cand
 }
 
 func printInPlay(tag string, entries []inplay.Entry) {

@@ -1,2 +1,11 @@
 .aster.yaml
 **/.aster.yaml
+.env
+.env.*
+!.env.example
+venv/
+bin/
+/long
+/short
+/tape
+/out/

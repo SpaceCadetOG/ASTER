@@ -13,7 +13,6 @@ go run ./cmd/tape
 go run ./cmd/whale
 go run ./cmd/long
 go run ./cmd/short
-go run ./cmd/backtest
 ```
 
 Exec auth + account checks:
