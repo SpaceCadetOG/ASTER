@@ -2102,11 +2102,18 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 		if p == nil || p.State == execClosed {
 			continue
 		}
+		mark, _ := m.currentMark(sym)
+		if mark <= 0 {
+			mark = p.EntryPrice
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		dayRealized := m.addDayRealized(now, pnl)
 		_ = m.cancelRemainingExits(p)
 		_, _ = m.rest.CancelAllOrders(sym)
 		_ = m.closeSymbolMarket(sym)
 		if m.tg != nil {
-			m.tg.Sendf("forced close %s\nreason=%s", sym, reason)
+			m.tg.Sendf("forced close %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
+				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
 		}
 		p.State = execClosed
 		p.CloseReason = reason
