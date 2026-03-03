@@ -638,14 +638,14 @@ func main() {
 		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev); err != nil {
 			fmt.Println("live-lite: place error:", err)
 			if tgVerbose {
-				tg.Sendf("place error %s %s: %v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
+				tg.Sendf("order error %s %s\n%v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
 			}
 		} else {
 			lastOrderAt = time.Now()
 			lastOrderBySymbol[strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))] = lastOrderAt
 			dayKey := time.Now().UTC().Format("2006-01-02")
 			orderCountByDay[dayKey]++
-			tg.Sendf("placed %s %s margin=$%.2f grade=%s",
+			tg.Sendf("order placed %s %s\nmargin=$%.2f grade=%s",
 				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveMargin, best.Entry.CurrentGrade)
 		}
 
@@ -1094,7 +1094,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	fmt.Printf("live-lite: entry submitted %s %s qty=%s px=%s orderId=%d\n",
 		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID)
 	if m.tg != nil {
-		m.tg.Sendf("ENTRY_SUBMITTED %s %s qty=%s price=%s orderId=%d",
+		m.tg.Sendf("entry submitted %s %s\nqty=%s limit=%s id=%d",
 			rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID)
 	}
 	return nil
@@ -1156,7 +1156,7 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		}
 		fmt.Printf("live-lite: entry filled %s qty=%.6f avg=%.6f\n", p.Symbol, p.FilledQty, p.EntryPrice)
 		if m.tg != nil {
-			m.tg.Sendf("ENTRY_FILLED %s %s qty=%.6f avg=%.6f", p.Symbol, p.Side, p.FilledQty, p.EntryPrice)
+			m.tg.Sendf("entry filled %s %s\nqty=%.6f avg=%s", p.Symbol, p.Side, p.FilledQty, fmtPrice(p.EntryPrice))
 		}
 		return true, nil
 	}
@@ -1168,7 +1168,7 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		p.UpdatedAt = now
 		fmt.Printf("live-lite: entry timeout/canceled %s orderId=%d\n", p.Symbol, p.EntryOrderID)
 		if m.tg != nil {
-			m.tg.Sendf("ENTRY_TIMEOUT %s orderId=%d", p.Symbol, p.EntryOrderID)
+			m.tg.Sendf("entry timeout %s\nid=%d", p.Symbol, p.EntryOrderID)
 		}
 		return true, nil
 	}
@@ -1220,7 +1220,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			p.ClosedAt = now
 			p.UpdatedAt = now
 			if m.tg != nil {
-				m.tg.Sendf("POSITION_CLOSED %s reason=%s", p.Symbol, p.CloseReason)
+				m.tg.Sendf("position closed %s\nreason=%s", p.Symbol, p.CloseReason)
 			}
 			return true, nil
 		}
@@ -1245,7 +1245,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("TP1_HIT %s qty=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp1 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
 			}
 			changed = true
 		}
@@ -1265,7 +1265,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("TP2_HIT %s qty=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp2 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
 			}
 			changed = true
 		}
@@ -1281,7 +1281,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.UpdatedAt = now
 			m.maybeEnableTrail(p, 3)
 			if m.tg != nil {
-				m.tg.Sendf("TP3_HIT %s qty=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp3 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
 			}
 			changed = true
 		}
@@ -1300,7 +1300,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.ClosedAt = now
 			p.UpdatedAt = now
 			if m.tg != nil {
-				m.tg.Sendf("STOP_HIT %s qty=%.6f", p.Symbol, execQty)
+				m.tg.Sendf("stop hit %s\nfill=%.6f", p.Symbol, execQty)
 			}
 			return true, nil
 		}
@@ -1525,7 +1525,7 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 		return false, err
 	}
 	if m.tg != nil {
-		m.tg.Sendf("TRAIL_MOVE %s stop=%.6f mark=%.6f", p.Symbol, p.StopPrice, mark)
+		m.tg.Sendf("trail move %s\nstop=%s mark=%s", p.Symbol, fmtPrice(p.StopPrice), fmtPrice(mark))
 	}
 	return true, nil
 }
@@ -1591,7 +1591,7 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 		_, _ = m.rest.CancelAllOrders(sym)
 		_ = m.closeSymbolMarket(sym)
 		if m.tg != nil {
-			m.tg.Sendf("FORCED_CLOSE %s reason=%s", sym, reason)
+			m.tg.Sendf("forced close %s\nreason=%s", sym, reason)
 		}
 		p.State = execClosed
 		p.CloseReason = reason
