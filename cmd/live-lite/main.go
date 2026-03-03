@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -80,25 +82,28 @@ type symbolMeta struct {
 }
 
 type paperPosition struct {
-	Symbol     string
-	Side       string
-	Entry      float64
-	Qty        float64 // remaining qty
-	InitialQty float64
-	Margin     float64
-	Leverage   int
-	Stop       float64
-	TP1        float64
-	TP2        float64
-	TP3        float64
-	HitTP1     bool
-	HitTP2     bool
-	HitTP3     bool
-	TrailOn    bool
-	TrailStop  float64
-	TrailRef   float64
-	Realized   float64
-	OpenedAt   time.Time
+	Symbol        string
+	Side          string
+	Entry         float64
+	Qty           float64 // remaining qty
+	InitialQty    float64
+	Margin        float64
+	Leverage      int
+	Stop          float64
+	TP1           float64
+	TP2           float64
+	TP3           float64
+	HitTP1        bool
+	HitTP2        bool
+	HitTP3        bool
+	TrailOn       bool
+	TrailStop     float64
+	TrailRef      float64
+	Realized      float64
+	OpenedAt      time.Time
+	MaxFavorableR float64
+	LastMark      float64
+	EntryReason   string
 }
 
 type paperTrader struct {
@@ -122,6 +127,14 @@ type paperTrader struct {
 	positions    map[string]*paperPosition
 	reportLoc    *time.Location
 	dayStats     map[string]*paperDayStats
+	minStopPct   float64
+	maxStopPct   float64
+	minTP1RR     float64
+	staleEnable  bool
+	staleMaxAge  time.Duration
+	staleMinProg float64
+	staleGraceR  float64
+	beLockBps    float64
 }
 
 type paperDayStats struct {
@@ -182,6 +195,12 @@ type livePosition struct {
 	CustomRiskPct float64   `json:"customRiskPct,omitempty"`
 	CustomTP1R    float64   `json:"customTp1R,omitempty"`
 	CustomTP2R    float64   `json:"customTp2R,omitempty"`
+	EntryReason   string    `json:"entryReason,omitempty"`
+	EntryConf     float64   `json:"entryConf,omitempty"`
+	EntryTags     []string  `json:"entryTags,omitempty"`
+	MaxFavorableR float64   `json:"maxFavorableR,omitempty"`
+	LastMark      float64   `json:"lastMark,omitempty"`
+	RealizedPnL   float64   `json:"realizedPnl,omitempty"`
 }
 
 type liveExecStore struct {
@@ -189,21 +208,33 @@ type liveExecStore struct {
 }
 
 type liveExecManager struct {
-	rest         *aster.RESTAuth
-	tg           *telegramSink
-	path         string
-	entryTimeout time.Duration
-	stopPct      float64
-	tp1R         float64
-	tp2R         float64
-	tp3R         float64
-	tp1Frac      float64
-	tp2Frac      float64
-	tp3Frac      float64
-	trailAfterTP int
-	trailStopPct float64
-	trailStepBps float64
-	positions    map[string]*livePosition
+	rest            *aster.RESTAuth
+	tg              *telegramSink
+	path            string
+	entryTimeout    time.Duration
+	stopPct         float64
+	tp1R            float64
+	tp2R            float64
+	tp3R            float64
+	tp1Frac         float64
+	tp2Frac         float64
+	tp3Frac         float64
+	trailAfterTP    int
+	trailStopPct    float64
+	trailStepBps    float64
+	minStopPct      float64
+	maxStopPct      float64
+	minTP1RR        float64
+	beLockBps       float64
+	staleEnable     bool
+	staleMaxAge     time.Duration
+	staleMinProg    float64
+	staleGraceR     float64
+	marginType      string
+	enforceIsolated bool
+	positions       map[string]*livePosition
+	dayRealized     map[string]float64
+	reportLoc       *time.Location
 }
 
 type liveExecSnapshot struct {
@@ -242,6 +273,22 @@ type liveLiteStatus struct {
 type liveLiteStatusStore struct {
 	mu  sync.RWMutex
 	cur liveLiteStatus
+}
+
+type maintenanceWindow struct {
+	Name      string
+	StartHour int
+	EndHour   int
+	ForceFlat bool
+	HookPath  string
+	HookTO    time.Duration
+}
+
+type maintenanceState struct {
+	LastStartDay map[string]string
+	LastEndDay   map[string]string
+	FlatDoneDay  map[string]string
+	HookDoneDay  map[string]string
 }
 
 func main() {
@@ -317,21 +364,28 @@ func main() {
 	}
 	tg := newTelegramSink()
 	execMgr := newLiveExecManager(rest, tg)
+	if execMgr != nil {
+		if nClosed, nImported, err := execMgr.ReconcileBootState(); err != nil {
+			fmt.Println("live-lite: boot reconcile warning:", err)
+		} else if nClosed > 0 || nImported > 0 {
+			tg.Sendf("boot reconcile complete\nclosed_local=%d imported_remote=%d", nClosed, nImported)
+		}
+	}
 	statusStore := newLiveLiteStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
 	startLiveLiteStatusServer(statusAddr, statusStore)
 	tgVerbose := envBool("LIVE_TG_VERBOSE", false)
-	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 15)) * time.Minute
+	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 60)) * time.Minute
 	if digestEvery < time.Minute {
-		digestEvery = 15 * time.Minute
+		digestEvery = 60 * time.Minute
 	}
 	digestLimit := envInt("LIVE_TG_LIST_LIMIT", 12)
 	if digestLimit <= 0 {
 		digestLimit = 12
 	}
-	tradeUpdateEvery := time.Duration(envInt("LIVE_TG_TRADE_UPDATE_MIN", 5)) * time.Minute
+	tradeUpdateEvery := time.Duration(envInt("LIVE_TG_TRADE_UPDATE_MIN", 60)) * time.Minute
 	if tradeUpdateEvery < time.Minute {
-		tradeUpdateEvery = 5 * time.Minute
+		tradeUpdateEvery = 60 * time.Minute
 	}
 	tradeUpdateTop := envInt("LIVE_TG_TRADE_TOP_N", 5)
 	if tradeUpdateTop <= 0 {
@@ -345,9 +399,44 @@ func main() {
 	if reportMinute < 0 || reportMinute > 59 {
 		reportMinute = 0
 	}
+	hourlyEnable := envBool("LIVE_TG_HOURLY_ENABLE", true)
+	hourlyTZName := envStr("LIVE_TG_HOURLY_TZ", "America/Chicago")
+	hourlyLoc, err := time.LoadLocation(hourlyTZName)
+	if err != nil {
+		hourlyLoc = time.Local
+	}
+	maintTZName := envStr("LIVE_MAINT_TZ", "America/Chicago")
+	maintLoc, err := time.LoadLocation(maintTZName)
+	if err != nil {
+		maintLoc = hourlyLoc
+	}
+	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
+	maintMidnight := maintenanceWindow{
+		Name:      "M1",
+		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
+		EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
+		ForceFlat: envBool("LIVE_MAINT1_FORCE_FLAT", false),
+		HookPath:  envStr("LIVE_MAINT1_HOOK", ""),
+		HookTO:    time.Duration(envInt("LIVE_MAINT1_HOOK_TIMEOUT_SEC", 900)) * time.Second,
+	}
+	maintEOD := maintenanceWindow{
+		Name:      "M2",
+		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
+		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 17),
+		ForceFlat: envBool("LIVE_MAINT2_FORCE_FLAT", true),
+		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
+		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
+	}
 	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
 	lastDailyReportDay := ""
+	lastHourlyKey := ""
+	maintState := maintenanceState{
+		LastStartDay: map[string]string{},
+		LastEndDay:   map[string]string{},
+		FlatDoneDay:  map[string]string{},
+		HookDoneDay:  map[string]string{},
+	}
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
@@ -359,7 +448,10 @@ func main() {
 	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
 	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
 		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
-	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s", scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery)
+	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s maint=%s/%s",
+		scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery,
+		fmt.Sprintf("%02d-%02d", maintMidnight.StartHour, maintMidnight.EndHour),
+		fmt.Sprintf("%02d-%02d", maintEOD.StartHour, maintEOD.EndHour))
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
 	if reconEvery <= 0 {
@@ -377,6 +469,8 @@ func main() {
 	for {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
+		localMaintNow := now.In(maintLoc)
+		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, maintEnabled, maintMidnight, maintEOD)
 		mkts := client.FetchAllMarkets()
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
@@ -385,11 +479,18 @@ func main() {
 			paper.CheckExit(now, metaBySymbol)
 		}
 		if paper.enabled && tg != nil && tg.enabled {
-			if now.After(nextTradeUpdateAt) {
+			if !hourlyEnable && now.After(nextTradeUpdateAt) {
 				if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
 					tg.Sendf("%s", msg)
 				}
 				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
+			}
+			if hourlyEnable {
+				hk := localMaintNow.Format("2006-01-02 15")
+				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
+					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, metaBySymbol, tradeUpdateTop))
+					lastHourlyKey = hk
+				}
 			}
 			localNow := now.In(paper.reportLoc)
 			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
@@ -413,7 +514,7 @@ func main() {
 		shortInPlay := shortTrk.Entries()
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
-		if time.Now().UTC().After(nextDigestAt) {
+		if !hourlyEnable && time.Now().UTC().After(nextDigestAt) {
 			sendInPlayDigest(tg, longInPlay, shortInPlay, metaBySymbol, dryRun, digestLimit)
 			nextDigestAt = time.Now().UTC().Add(digestEvery)
 		}
@@ -450,6 +551,42 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.Reconcile(now)
+		}
+		if paper.enabled {
+			paper.ApplyStale(now, metaBySymbol)
+		}
+		if inMaint {
+			dayKey := localMaintNow.Format("2006-01-02")
+			if maintState.LastStartDay[maintWindow.Name] != dayKey {
+				maintState.LastStartDay[maintWindow.Name] = dayKey
+				tg.Sendf("maintenance start %s\nwindow=%02d:00-%02d:00 %s", maintWindow.Name, maintWindow.StartHour, maintWindow.EndHour, maintLoc.String())
+			}
+			if maintWindow.ForceFlat && maintState.FlatDoneDay[maintWindow.Name] != dayKey {
+				maintState.FlatDoneDay[maintWindow.Name] = dayKey
+				if execMgr != nil {
+					_ = execMgr.ForceCloseAll("EOD_FORCE_FLAT")
+				}
+				if paper.enabled {
+					paper.ForceCloseAll(now, metaBySymbol, "EOD_FORCE_FLAT")
+				}
+				tg.Sendf("maintenance flat complete %s", maintWindow.Name)
+			}
+			if maintWindow.HookPath != "" && maintState.HookDoneDay[maintWindow.Name] != dayKey {
+				maintState.HookDoneDay[maintWindow.Name] = dayKey
+				if err := runMaintenanceHook(maintWindow.HookPath, maintWindow.HookTO); err != nil {
+					tg.Sendf("maintenance hook error %s\n%v", maintWindow.Name, err)
+				} else {
+					tg.Sendf("maintenance hook complete %s", maintWindow.Name)
+				}
+			}
+		} else {
+			for _, w := range []maintenanceWindow{maintMidnight, maintEOD} {
+				dayKey := localMaintNow.Format("2006-01-02")
+				if maintState.LastStartDay[w.Name] == dayKey && maintState.LastEndDay[w.Name] != dayKey {
+					maintState.LastEndDay[w.Name] = dayKey
+					tg.Sendf("maintenance end %s\ntrading resumed", w.Name)
+				}
+			}
 		}
 		if paper.enabled {
 			fmt.Println(paper.Summary(metaBySymbol))
@@ -521,6 +658,10 @@ func main() {
 			lastTopKey = topKey
 		}
 
+		if inMaint {
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
 		if rest == nil || dryRun {
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
 			if paper.enabled {
@@ -528,8 +669,8 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
-					tg.Sendf("PAPER ENTER %s %s\nmargin=$%.2f lev=%dx grade=%s\nentry=%s\ntp1=%s tp2=%s tp3=%s\nsl=%s",
-						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade,
+					tg.Sendf("PAPER ENTER %s %s\nmargin=$%.2f lev=%dx grade=%s reason=%s conf=%.2f\nentry=%s\ntp1=%s tp2=%s tp3=%s\nsl=%s",
+						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Strat, best.Conf,
 						fmtPrice(pp.Entry), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3), fmtPrice(pp.Stop))
 				}
 			}
@@ -709,6 +850,172 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 	tg.Sendf("%s", strings.TrimSpace(b.String()))
 }
 
+func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, topN int) string {
+	if p == nil || !p.enabled {
+		return fmt.Sprintf("Hourly Digest (%s)\npaper=disabled", now.Format("15:04 MST"))
+	}
+	dayKey := now.In(p.reportLoc).Format("2006-01-02")
+	realized := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realized = ds.Net
+	}
+	openPnL := 0.0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		m := meta[raw]
+		if strings.EqualFold(pos.Side, "BUY") {
+			openPnL += (m.LastPrice - pos.Entry) * pos.Qty
+		} else {
+			openPnL += (pos.Entry - m.LastPrice) * pos.Qty
+		}
+	}
+	eq := p.balance + openPnL
+	msg := p.TradeUpdateMessage(meta, topN)
+	return fmt.Sprintf("Hourly Digest (%s)\nrealized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n%s",
+		now.Format("15:04 MST"), realized, openPnL, realized+openPnL, p.balance, eq, msg)
+}
+
+func activeMaintenanceWindow(now time.Time, enabled bool, w1, w2 maintenanceWindow) (maintenanceWindow, bool) {
+	if !enabled {
+		return maintenanceWindow{}, false
+	}
+	if inHourWindow(now.Hour(), w1.StartHour, w1.EndHour) {
+		return w1, true
+	}
+	if inHourWindow(now.Hour(), w2.StartHour, w2.EndHour) {
+		return w2, true
+	}
+	return maintenanceWindow{}, false
+}
+
+func inHourWindow(hour, start, end int) bool {
+	if start == end {
+		return false
+	}
+	if start < end {
+		return hour >= start && hour < end
+	}
+	return hour >= start || hour < end
+}
+
+func runMaintenanceHook(path string, timeout time.Duration) error {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-lc", p)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("hook failed: %w output=%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func updateFavorableRLive(p *livePosition, mark float64) {
+	if p == nil || mark <= 0 || p.EntryPrice <= 0 {
+		return
+	}
+	risk := abs(p.EntryPrice - p.StopPrice)
+	if risk <= 0 {
+		return
+	}
+	fav := 0.0
+	if strings.EqualFold(p.Side, "BUY") {
+		fav = (mark - p.EntryPrice) / risk
+	} else {
+		fav = (p.EntryPrice - mark) / risk
+	}
+	if fav > p.MaxFavorableR {
+		p.MaxFavorableR = fav
+	}
+}
+
+func updateFavorableRPaper(p *paperPosition, mark float64) {
+	if p == nil || mark <= 0 || p.Entry <= 0 {
+		return
+	}
+	risk := abs(p.Entry - p.Stop)
+	if risk <= 0 {
+		return
+	}
+	fav := 0.0
+	if strings.EqualFold(p.Side, "BUY") {
+		fav = (mark - p.Entry) / risk
+	} else {
+		fav = (p.Entry - mark) / risk
+	}
+	if fav > p.MaxFavorableR {
+		p.MaxFavorableR = fav
+	}
+}
+
+func shouldCloseStaleLive(p *livePosition, now time.Time, maxAge time.Duration, minProgR, graceR float64) bool {
+	if p == nil || maxAge <= 0 {
+		return false
+	}
+	if p.MaxFavorableR >= graceR {
+		return false
+	}
+	return now.Sub(p.CreatedAt) >= maxAge && p.MaxFavorableR < minProgR
+}
+
+func shouldCloseStalePaper(p *paperPosition, now time.Time, maxAge time.Duration, minProgR, graceR float64) bool {
+	if p == nil || maxAge <= 0 {
+		return false
+	}
+	if p.MaxFavorableR >= graceR {
+		return false
+	}
+	return now.Sub(p.OpenedAt) >= maxAge && p.MaxFavorableR < minProgR
+}
+
+func beLockPrice(side string, entry, beLockBps float64) float64 {
+	if entry <= 0 {
+		return entry
+	}
+	d := beLockBps / 10000.0
+	if strings.EqualFold(side, "SELL") {
+		return entry * (1 - d)
+	}
+	return entry * (1 + d)
+}
+
+func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64) {
+	if entry <= 0 || fillPx <= 0 || qty <= 0 {
+		return 0, 0
+	}
+	pnl := 0.0
+	pct := 0.0
+	if strings.EqualFold(side, "BUY") {
+		pnl = (fillPx - entry) * qty
+		pct = ((fillPx - entry) / entry) * 100
+	} else {
+		pnl = (entry - fillPx) * qty
+		pct = ((entry - fillPx) / entry) * 100
+	}
+	return pnl, pct
+}
+
+func (m *liveExecManager) addDayRealized(now time.Time, pnl float64) float64 {
+	if m == nil {
+		return 0
+	}
+	loc := m.reportLoc
+	if loc == nil {
+		loc = time.Local
+	}
+	dayKey := now.In(loc).Format("2006-01-02")
+	m.dayRealized[dayKey] += pnl
+	return m.dayRealized[dayKey]
+}
+
 func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta {
 	out := make(map[string]symbolMeta, len(longRows)+len(shortRows))
 	put := func(rows []market.Scored) {
@@ -793,6 +1100,23 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if err != nil {
 		reportLoc = time.Local
 	}
+	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.25)
+	maxStopPct := envFloat("LIVE_MAX_STOP_PCT", 8.0)
+	if maxStopPct < minStopPct {
+		maxStopPct = minStopPct
+	}
+	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.8)
+	if minTP1RR <= 0 {
+		minTP1RR = 0.8
+	}
+	staleEnable := envBool("LIVE_STALE_ENABLE", true)
+	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
+	if staleMaxAge <= 0 {
+		staleMaxAge = 180 * time.Minute
+	}
+	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
+	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
+	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
 	return &paperTrader{
 		enabled:      enabled,
 		startBal:     start,
@@ -814,6 +1138,14 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		positions:    map[string]*paperPosition{},
 		reportLoc:    reportLoc,
 		dayStats:     map[string]*paperDayStats{},
+		minStopPct:   minStopPct,
+		maxStopPct:   maxStopPct,
+		minTP1RR:     minTP1RR,
+		staleEnable:  staleEnable,
+		staleMaxAge:  staleMaxAge,
+		staleMinProg: staleMinProg,
+		staleGraceR:  staleGraceR,
+		beLockBps:    beLockBps,
 	}
 }
 
@@ -872,23 +1204,59 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 	if trailStepBps < 0 {
 		trailStepBps = 0
 	}
+	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.25)
+	maxStopPct := envFloat("LIVE_MAX_STOP_PCT", 8.0)
+	if maxStopPct < minStopPct {
+		maxStopPct = minStopPct
+	}
+	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.8)
+	if minTP1RR <= 0 {
+		minTP1RR = 0.8
+	}
+	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
+	staleEnable := envBool("LIVE_STALE_ENABLE", true)
+	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
+	if staleMaxAge <= 0 {
+		staleMaxAge = 180 * time.Minute
+	}
+	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
+	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
+	marginType := strings.ToUpper(envStr("LIVE_MARGIN_TYPE", "ISOLATED"))
+	enforceIsolated := envBool("LIVE_ENFORCE_MARGIN_TYPE", true)
+	reportTZ := envStr("LIVE_REPORT_TZ", "America/Chicago")
+	reportLoc, err := time.LoadLocation(reportTZ)
+	if err != nil {
+		reportLoc = time.Local
+	}
 
 	m := &liveExecManager{
-		rest:         rest,
-		tg:           tg,
-		path:         envStr("LIVE_STATE_FILE", "out/live_exec_state.json"),
-		entryTimeout: time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
-		stopPct:      stopPct,
-		tp1R:         tp1R,
-		tp2R:         tp2R,
-		tp3R:         tp3R,
-		tp1Frac:      tp1Frac,
-		tp2Frac:      tp2Frac,
-		tp3Frac:      tp3Frac,
-		trailAfterTP: trailAfterTP,
-		trailStopPct: trailStopPct,
-		trailStepBps: trailStepBps,
-		positions:    map[string]*livePosition{},
+		rest:            rest,
+		tg:              tg,
+		path:            envStr("LIVE_STATE_FILE", "out/live_exec_state.json"),
+		entryTimeout:    time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
+		stopPct:         stopPct,
+		tp1R:            tp1R,
+		tp2R:            tp2R,
+		tp3R:            tp3R,
+		tp1Frac:         tp1Frac,
+		tp2Frac:         tp2Frac,
+		tp3Frac:         tp3Frac,
+		trailAfterTP:    trailAfterTP,
+		trailStopPct:    trailStopPct,
+		trailStepBps:    trailStepBps,
+		minStopPct:      minStopPct,
+		maxStopPct:      maxStopPct,
+		minTP1RR:        minTP1RR,
+		beLockBps:       beLockBps,
+		staleEnable:     staleEnable,
+		staleMaxAge:     staleMaxAge,
+		staleMinProg:    staleMinProg,
+		staleGraceR:     staleGraceR,
+		marginType:      marginType,
+		enforceIsolated: enforceIsolated,
+		positions:       map[string]*livePosition{},
+		dayRealized:     map[string]float64{},
+		reportLoc:       reportLoc,
 	}
 	if m.entryTimeout <= 0 {
 		m.entryTimeout = 90 * time.Second
@@ -932,6 +1300,93 @@ func (m *liveExecManager) save() error {
 		return err
 	}
 	return os.WriteFile(m.path, b, 0o644)
+}
+
+func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote int, err error) {
+	if m == nil || m.rest == nil {
+		return 0, 0, nil
+	}
+	rows, err := m.rest.PositionRisk("")
+	if err != nil {
+		return 0, 0, err
+	}
+	type remotePos struct {
+		amt   float64
+		entry float64
+		mark  float64
+		lev   int
+	}
+	remote := map[string]remotePos{}
+	for _, row := range rows {
+		sym := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
+		amt := mapFloat(row["positionAmt"])
+		if sym == "" || abs(amt) <= 1e-10 {
+			continue
+		}
+		remote[sym] = remotePos{
+			amt:   amt,
+			entry: mapFloat(row["entryPrice"]),
+			mark:  mapFloat(row["markPrice"]),
+			lev:   int(mapFloat(row["leverage"])),
+		}
+	}
+	now := time.Now().UTC()
+	for sym, p := range m.positions {
+		if !m.isActive(p) {
+			continue
+		}
+		rp, ok := remote[sym]
+		if ok && abs(rp.amt) > 1e-10 {
+			continue
+		}
+		_ = m.cancelRemainingExits(p)
+		p.State = execClosed
+		p.CloseReason = "POSITION_FLAT_RECOVERED"
+		p.ClosedAt = now
+		p.UpdatedAt = now
+		closedLocal++
+	}
+	for sym, rp := range remote {
+		if m.isActive(m.positions[sym]) {
+			continue
+		}
+		side := "BUY"
+		if rp.amt < 0 {
+			side = "SELL"
+		}
+		qty := abs(rp.amt)
+		entry := rp.entry
+		if entry <= 0 {
+			entry = rp.mark
+		}
+		if entry <= 0 || qty <= 0 {
+			continue
+		}
+		p := &livePosition{
+			Symbol:       sym,
+			Side:         side,
+			State:        execOpen,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			EntryPrice:   entry,
+			Qty:          qty,
+			FilledQty:    qty,
+			RemainingQty: qty,
+			Leverage:     maxInt(1, rp.lev),
+			CloseReason:  "RECOVERED_POSITION",
+		}
+		stopPct := clamp(m.stopPct/100.0, m.minStopPct/100.0, m.maxStopPct/100.0)
+		if strings.EqualFold(side, "BUY") {
+			p.StopPrice = entry * (1 - stopPct)
+		} else {
+			p.StopPrice = entry * (1 + stopPct)
+		}
+		m.positions[sym] = p
+		_ = m.placeOrReplaceStop(p)
+		importedRemote++
+	}
+	_ = m.save()
+	return closedLocal, importedRemote, nil
 }
 
 func (m *liveExecManager) isActive(p *livePosition) bool {
@@ -1038,6 +1493,11 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		lev = 1
 	}
 	_, _ = m.rest.ChangeLeverage(rawSym, lev)
+	if m.marginType != "" {
+		if _, err := m.rest.ChangeMarginType(rawSym, m.marginType); err != nil && m.enforceIsolated {
+			return fmt.Errorf("set margin type %s failed: %w", m.marginType, err)
+		}
+	}
 
 	vals := url.Values{}
 	vals.Set("symbol", rawSym)
@@ -1075,6 +1535,9 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		VPStopMode:    c.Sig.StopMode,
 		VPTargetMode:  c.Sig.TargetMode,
 		RejectReason:  c.RejectReason,
+		EntryReason:   c.Strat,
+		EntryConf:     c.Conf,
+		EntryTags:     append([]string{}, c.Sig.Tags...),
 	}
 	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		risk := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
@@ -1156,7 +1619,8 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		}
 		fmt.Printf("live-lite: entry filled %s qty=%.6f avg=%.6f\n", p.Symbol, p.FilledQty, p.EntryPrice)
 		if m.tg != nil {
-			m.tg.Sendf("entry filled %s %s\nqty=%.6f avg=%s", p.Symbol, p.Side, p.FilledQty, fmtPrice(p.EntryPrice))
+			m.tg.Sendf("entry filled %s %s\nqty=%.6f avg=%s reason=%s conf=%.2f",
+				p.Symbol, p.Side, p.FilledQty, fmtPrice(p.EntryPrice), p.EntryReason, p.EntryConf)
 		}
 		return true, nil
 	}
@@ -1190,12 +1654,30 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 	if p.RemainingQty > 0 {
 		mark, err := m.currentMark(p.Symbol)
 		if err == nil && mark > 0 {
+			p.LastMark = mark
+			updateFavorableRLive(p, mark)
 			updated, err := m.updateTrailingStop(p, mark)
 			if err != nil {
 				return changed, err
 			}
 			if updated {
 				changed = true
+			}
+			if m.staleEnable && shouldCloseStaleLive(p, now, m.staleMaxAge, m.staleMinProg, m.staleGraceR) {
+				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+				_ = m.cancelRemainingExits(p)
+				if err := m.closeSymbolMarket(p.Symbol); err != nil {
+					return changed, err
+				}
+				p.State = execClosed
+				p.CloseReason = "STALE_NO_PROGRESS"
+				p.ClosedAt = now
+				p.UpdatedAt = now
+				if m.tg != nil {
+					m.tg.Sendf("position closed %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s",
+						p.Symbol, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, p.CloseReason)
+				}
+				return true, nil
 			}
 		}
 	}
@@ -1231,7 +1713,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (bool, error) {
 	changed := false
 	if p.TP1OrderID > 0 {
-		filled, execQty, err := m.checkOrderFilled(p.Symbol, p.TP1OrderID)
+		filled, execQty, fillPx, err := m.checkOrderFilled(p.Symbol, p.TP1OrderID)
 		if err != nil {
 			return changed, err
 		}
@@ -1240,18 +1722,25 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.RemainingQty = maxFloat(0, p.RemainingQty-execQty)
 			p.State = execPartialTP1
 			p.UpdatedAt = now
+			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, execQty)
+			p.RealizedPnL += pnl
+			dayRealized := m.addDayRealized(now, pnl)
+			if m.beLockBps > 0 {
+				p.StopPrice = beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+			}
 			m.maybeEnableTrail(p, 1)
 			if err := m.placeOrReplaceStop(p); err != nil {
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("tp1 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp1 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP1_HIT dayRealized=%+.2f",
+					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
 			changed = true
 		}
 	}
 	if p.TP2OrderID > 0 {
-		filled, execQty, err := m.checkOrderFilled(p.Symbol, p.TP2OrderID)
+		filled, execQty, fillPx, err := m.checkOrderFilled(p.Symbol, p.TP2OrderID)
 		if err != nil {
 			return changed, err
 		}
@@ -1260,18 +1749,22 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.RemainingQty = maxFloat(0, p.RemainingQty-execQty)
 			p.State = execPartialTP2
 			p.UpdatedAt = now
+			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, execQty)
+			p.RealizedPnL += pnl
+			dayRealized := m.addDayRealized(now, pnl)
 			m.maybeEnableTrail(p, 2)
 			if err := m.placeOrReplaceStop(p); err != nil {
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("tp2 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp2 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP2_HIT dayRealized=%+.2f",
+					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
 			changed = true
 		}
 	}
 	if p.TP3OrderID > 0 {
-		filled, execQty, err := m.checkOrderFilled(p.Symbol, p.TP3OrderID)
+		filled, execQty, fillPx, err := m.checkOrderFilled(p.Symbol, p.TP3OrderID)
 		if err != nil {
 			return changed, err
 		}
@@ -1279,15 +1772,19 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.TP3OrderID = 0
 			p.RemainingQty = maxFloat(0, p.RemainingQty-execQty)
 			p.UpdatedAt = now
+			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, execQty)
+			p.RealizedPnL += pnl
+			dayRealized := m.addDayRealized(now, pnl)
 			m.maybeEnableTrail(p, 3)
 			if m.tg != nil {
-				m.tg.Sendf("tp3 hit %s\nfill=%.6f rem=%.6f", p.Symbol, execQty, p.RemainingQty)
+				m.tg.Sendf("tp3 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP3_HIT dayRealized=%+.2f",
+					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
 			changed = true
 		}
 	}
 	if p.StopOrderID > 0 {
-		filled, execQty, err := m.checkOrderFilled(p.Symbol, p.StopOrderID)
+		filled, execQty, fillPx, err := m.checkOrderFilled(p.Symbol, p.StopOrderID)
 		if err != nil {
 			return changed, err
 		}
@@ -1299,8 +1796,12 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.CloseReason = "STOP_HIT"
 			p.ClosedAt = now
 			p.UpdatedAt = now
+			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, execQty)
+			p.RealizedPnL += pnl
+			dayRealized := m.addDayRealized(now, pnl)
 			if m.tg != nil {
-				m.tg.Sendf("stop hit %s\nfill=%.6f", p.Symbol, execQty)
+				m.tg.Sendf("stop hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=STOP_HIT dayRealized=%+.2f",
+					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
 			return true, nil
 		}
@@ -1322,8 +1823,9 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	if stopPct <= 0 {
 		stopPct = 0.02
 	}
+	stopPct = clamp(stopPct, m.minStopPct/100.0, m.maxStopPct/100.0)
 	if p.CustomRiskPct > 0 {
-		stopPct = p.CustomRiskPct
+		stopPct = clamp(p.CustomRiskPct, m.minStopPct/100.0, m.maxStopPct/100.0)
 	}
 	tp1R := m.tp1R
 	tp2R := m.tp2R
@@ -1343,6 +1845,15 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		p.TP1Price = p.EntryPrice * (1 - stopPct*tp1R)
 		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
 		p.TP3Price = p.EntryPrice * (1 - stopPct*m.tp3R)
+	}
+	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
+		return fmt.Errorf("invalid bracket levels stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f",
+			p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
+	}
+	risk := abs(p.EntryPrice - p.StopPrice)
+	reward := abs(p.TP1Price - p.EntryPrice)
+	if risk <= 0 || reward/risk < m.minTP1RR {
+		return fmt.Errorf("tp1 rr below minimum: rr=%.3f min=%.3f", reward/maxFloat(risk, 1e-9), m.minTP1RR)
 	}
 	p.TrailRef = p.EntryPrice
 	p.TrailStop = p.StopPrice
@@ -1541,13 +2052,13 @@ func (m *liveExecManager) calcTrailStop(sideBuy bool, ref float64) float64 {
 	return ref * (1 + pct)
 }
 
-func (m *liveExecManager) checkOrderFilled(symbol string, orderID int64) (bool, float64, error) {
+func (m *liveExecManager) checkOrderFilled(symbol string, orderID int64) (bool, float64, float64, error) {
 	if orderID <= 0 {
-		return false, 0, nil
+		return false, 0, 0, nil
 	}
 	o, err := m.rest.GetOrder(symbol, orderID)
 	if err != nil {
-		return false, 0, err
+		return false, 0, 0, err
 	}
 	status := strings.ToUpper(strings.TrimSpace(fmt.Sprint(o["status"])))
 	if status == "FILLED" {
@@ -1555,12 +2066,16 @@ func (m *liveExecManager) checkOrderFilled(symbol string, orderID int64) (bool, 
 		if execQty <= 0 {
 			execQty = mapFloat(o["origQty"])
 		}
-		return true, execQty, nil
+		fillPx := mapFloat(o["avgPrice"])
+		if fillPx <= 0 {
+			fillPx = mapFloat(o["price"])
+		}
+		return true, execQty, fillPx, nil
 	}
 	if status == "CANCELED" || status == "EXPIRED" || status == "REJECTED" {
-		return false, 0, nil
+		return false, 0, 0, nil
 	}
-	return false, 0, nil
+	return false, 0, 0, nil
 }
 
 func (m *liveExecManager) cancelRemainingExits(p *livePosition) error {
@@ -1646,7 +2161,6 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 		return ""
 	}
 	openPnL := 0.0
-	realized := 0.0
 	openTxt := "none"
 	if len(p.positions) > 0 {
 		parts := make([]string, 0, len(p.positions))
@@ -1663,7 +2177,6 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 				}
 			}
 			openPnL += pnl
-			realized += pos.Realized
 			parts = append(parts, fmt.Sprintf("%s %s e=%.6f m=%.6f q=%.6f upnl=%+.3f", raw, pos.Side, pos.Entry, mark, pos.Qty, pnl))
 		}
 		sort.Strings(parts)
@@ -1673,9 +2186,14 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 			openTxt = strings.Join(parts, " | ")
 		}
 	}
+	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
+	realized := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realized = ds.Net
+	}
 	eq := p.balance + openPnL
-	return fmt.Sprintf("🧪 PAPER balance=%.2f equity=%.2f openPnL=%+.2f realized=%+.2f openCount=%d/%d open=%s",
-		p.balance, eq, openPnL, realized, len(p.positions), p.maxOpen, openTxt)
+	return fmt.Sprintf("🧪 PAPER bal=%.2f eq=%.2f realizedToday=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d %s",
+		p.balance, eq, realized, openPnL, realized+openPnL, len(p.positions), p.maxOpen, openTxt)
 }
 
 func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta) (*paperPosition, error) {
@@ -1712,12 +2230,13 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	qty := notional / entry
 	stopPct := p.stopPct / 100.0
+	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
 	tp1R := p.tp1R
 	tp2R := p.tp2R
 	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		riskPct := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
 		if riskPct > 0 {
-			stopPct = riskPct
+			stopPct = clamp(riskPct, p.minStopPct/100.0, p.maxStopPct/100.0)
 			baseRisk := abs(c.Sig.Entry - c.Sig.Stop)
 			if baseRisk > 0 && c.Sig.TP1 > 0 {
 				tp1R = abs(c.Sig.TP1-c.Sig.Entry) / baseRisk
@@ -1745,22 +2264,31 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		tp2 = entry * (1 - tp2Pct)
 		tp3 = entry * (1 - tp3Pct)
 	}
+	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
+		return nil, fmt.Errorf("invalid paper bracket levels")
+	}
+	risk := abs(entry - stop)
+	reward := abs(tp1 - entry)
+	if risk <= 0 || reward/risk < p.minTP1RR {
+		return nil, fmt.Errorf("paper tp1 rr below minimum")
+	}
 	fee := notional * p.feeBps / 10000.0
 	p.balance -= fee
 	pos := &paperPosition{
-		Symbol:     raw,
-		Side:       strings.ToUpper(c.Side),
-		Entry:      entry,
-		Qty:        qty,
-		InitialQty: qty,
-		Margin:     margin,
-		Leverage:   lev,
-		Stop:       stop,
-		TP1:        tp1,
-		TP2:        tp2,
-		TP3:        tp3,
-		TrailRef:   entry,
-		OpenedAt:   now,
+		Symbol:      raw,
+		Side:        strings.ToUpper(c.Side),
+		Entry:       entry,
+		Qty:         qty,
+		InitialQty:  qty,
+		Margin:      margin,
+		Leverage:    lev,
+		Stop:        stop,
+		TP1:         tp1,
+		TP2:         tp2,
+		TP3:         tp3,
+		TrailRef:    entry,
+		OpenedAt:    now,
+		EntryReason: c.Strat,
 	}
 	p.positions[raw] = pos
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f\n",
@@ -1788,6 +2316,8 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 		}
 		sideBuy := strings.EqualFold(pos.Side, "BUY")
 		mark := m.LastPrice
+		pos.LastMark = mark
+		updateFavorableRPaper(pos, mark)
 
 		// 1) Hard stop has highest priority.
 		if (sideBuy && mark <= pos.Stop) || (!sideBuy && mark >= pos.Stop) {
@@ -1804,6 +2334,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 				continue
 			}
 			pos.HitTP1 = true
+			if p.beLockBps > 0 {
+				pos.Stop = beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+			}
 		}
 		if pos == nil {
 			continue
@@ -1858,6 +2391,40 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 		if pos.Qty <= 1e-10 {
 			delete(p.positions, raw)
 		}
+	}
+}
+
+func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta) {
+	if p == nil || !p.enabled || !p.staleEnable {
+		return
+	}
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			continue
+		}
+		if shouldCloseStalePaper(pos, now, p.staleMaxAge, p.staleMinProg, p.staleGraceR) {
+			p.exitPortion(now, pos, "STALE_NO_PROGRESS", mark, pos.Qty)
+		}
+	}
+}
+
+func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, reason string) {
+	if p == nil || !p.enabled {
+		return
+	}
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			mark = pos.Entry
+		}
+		p.exitPortion(now, pos, reason, mark, pos.Qty)
 	}
 }
 
@@ -1956,16 +2523,38 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		rows = rows[:topN]
 	}
 	eq := p.balance + totalUPnL
+	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
+	realizedToday := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realizedToday = ds.Net
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Paper Update (%s)\n", time.Now().In(p.reportLoc).Format("15:04 MST"))
-	fmt.Fprintf(&b, "bal=$%.2f eq=$%.2f openPnL=%+.2f open=%d/%d\n", p.balance, eq, totalUPnL, len(p.positions), p.maxOpen)
+	fmt.Fprintf(&b, "bal=$%.2f eq=$%.2f realized=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d\n",
+		p.balance, eq, realizedToday, totalUPnL, realizedToday+totalUPnL, len(p.positions), p.maxOpen)
 	if len(rows) == 0 {
 		b.WriteString("open: none")
 		return b.String()
 	}
-	for i, r := range rows {
-		fmt.Fprintf(&b, "%d) %s %s e=%s m=%s q=%.4f uPnL=%+.2f\n",
-			i+1, r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, r.upnl)
+	b.WriteString("sym       side  entry      mark       qty      margin  lev   uPnL    uPnL%\n")
+	b.WriteString("--------------------------------------------------------------------------\n")
+	for _, r := range rows {
+		upct := 0.0
+		if r.entry > 0 {
+			if strings.EqualFold(r.side, "BUY") {
+				upct = ((r.mark - r.entry) / r.entry) * 100
+			} else {
+				upct = ((r.entry - r.mark) / r.entry) * 100
+			}
+		}
+		margin := 0.0
+		lev := 1
+		if pos, ok := p.positions[r.sym]; ok && pos != nil {
+			margin = pos.Margin
+			lev = pos.Leverage
+		}
+		fmt.Fprintf(&b, "%-8s %-5s %-10s %-10s %-8.4f %-7.2f %-4dx %+.2f  %+.2f%%\n",
+			r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, margin, lev, r.upnl, upct)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -2329,10 +2918,12 @@ func min(a, b float64) float64 {
 
 func printInPlay(tag string, entries []inplay.Entry) {
 	fmt.Printf("🔥 IN-PLAY (%s)\n", tag)
+	fmt.Println("sym          grade score   slope   state")
+	fmt.Println("---------------------------------------------")
 	for i := 0; i < len(entries) && i < 5; i++ {
 		e := entries[i]
-		fmt.Printf("%d) %-12s grade=%-2s score=%6.2f slope=%6.3f state=%-8s\n",
-			i+1, e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State)
+		fmt.Printf("%-12s %-5s %6.2f %7.3f %-8s\n",
+			e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State)
 	}
 	if len(entries) == 0 {
 		fmt.Println("(none)")
@@ -2402,13 +2993,15 @@ func printAccountSnapshot(snap accountSnapshot, assets []string) {
 		}
 	}
 	fmt.Println("active positions:")
+	fmt.Println("symbol      side   size      entry      mark       uPnL      lev")
+	fmt.Println("------------------------------------------------------------------")
 	if len(snap.Positions) == 0 {
 		fmt.Println("(none)")
 		return
 	}
 	for _, p := range snap.Positions {
-		fmt.Printf("- %-10s %-5s qty=%-10.4f entry=%-10.4f mark=%-10.4f upnl=%-10.4f lev=%g\n",
-			p.Symbol, p.Side, p.SizeAbs, p.Entry, p.Mark, p.Unreal, p.Leverage)
+		fmt.Printf("%-10s %-6s %-9.4f %-10s %-10s %+.2f    %.0fx\n",
+			p.Symbol, p.Side, p.SizeAbs, fmtPrice(p.Entry), fmtPrice(p.Mark), p.Unreal, p.Leverage)
 	}
 }
 
@@ -3159,6 +3752,19 @@ func envCSV(k, def string) []string {
 func abs(v float64) float64 {
 	if v < 0 {
 		return -v
+	}
+	return v
+}
+
+func clamp(v, lo, hi float64) float64 {
+	if hi < lo {
+		hi = lo
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
 	}
 	return v
 }

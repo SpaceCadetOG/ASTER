@@ -371,3 +371,27 @@ func (r *RESTAuth) ChangeLeverage(symbol string, lev int) (map[string]any, error
 	}
 	return out, nil
 }
+
+func (r *RESTAuth) ChangeMarginType(symbol, marginType string) (map[string]any, error) {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	mt := strings.ToUpper(strings.TrimSpace(marginType))
+	if sym == "" {
+		return nil, fmt.Errorf("symbol required")
+	}
+	if mt == "" {
+		mt = "ISOLATED"
+	}
+	q := url.Values{}
+	q.Set("symbol", sym)
+	q.Set("marginType", mt)
+	paths := []string{"/fapi/v1/marginType"}
+	b, err := r.doSignedPOSTAny(paths, q)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := decodeJSONNumbers(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

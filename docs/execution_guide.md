@@ -207,3 +207,34 @@ go run ./cmd/exec
 
 - `Invalid API-key, IP, or permissions`
   - Verify key/secret, API permissions, and IP whitelist (including VPN egress IP).
+
+## 10) Live-Lite Runtime Ops (Dual Maintenance)
+
+- Margin mode enforced per trade: `LIVE_MARGIN_TYPE=ISOLATED`
+- Maintenance windows (`America/Chicago`):
+  - `00:00-01:00`: block new entries, keep risk management active
+  - `16:00-17:00`: force flat at `16:00`, then block entries until `17:00`
+- Hourly digest defaults:
+  - `LIVE_TG_HOURLY_ENABLE=1`
+  - `LIVE_TG_DIGEST_MIN=60`
+  - `LIVE_TG_TRADE_UPDATE_MIN=60`
+
+Recommended env overrides in `/opt/aster/env/live-lite.env`:
+
+```bash
+LIVE_MARGIN_TYPE=ISOLATED
+LIVE_ENFORCE_MARGIN_TYPE=1
+LIVE_STALE_ENABLE=1
+LIVE_STALE_MAX_AGE_MIN=180
+LIVE_MIN_STOP_PCT=0.25
+LIVE_MAX_STOP_PCT=8.00
+LIVE_MIN_RR_TP1=0.80
+LIVE_BE_LOCK_BPS=5
+LIVE_MAINT_ENABLE=1
+LIVE_MAINT_TZ=America/Chicago
+LIVE_MAINT1_START_HOUR=0
+LIVE_MAINT1_END_HOUR=1
+LIVE_MAINT2_START_HOUR=16
+LIVE_MAINT2_END_HOUR=17
+LIVE_MAINT2_FORCE_FLAT=1
+```

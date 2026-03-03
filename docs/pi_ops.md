@@ -40,8 +40,21 @@ Expected behavior:
 ```bash
 sudo cp systemd/aster-*.service /etc/systemd/system/
 sudo cp systemd/env/*.env.example /opt/aster/env/ || true
+sudo mkdir -p /opt/aster/scripts
+sudo cp scripts/tmux_module_runner.sh scripts/start_tmux_modules.sh scripts/reconcile_on_boot.sh scripts/maintenance_midnight.sh scripts/maintenance_eod.sh /opt/aster/scripts/
+sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now aster-tape aster-whale aster-live-lite
+sudo systemctl disable --now aster-live-lite aster-tape aster-whale || true
+sudo systemctl enable --now aster-modules-tmux
+```
+
+## 3b) tmux sessions (one per module)
+
+```bash
+tmux ls
+tmux attach -t aster-live-lite
+tmux attach -t aster-tape
+tmux attach -t aster-whale
 ```
 
 ## 4) Deploy binaries + restart

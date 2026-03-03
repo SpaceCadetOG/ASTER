@@ -6,13 +6,14 @@ This folder contains systemd units for:
 - `aster-whale.service`
 - `aster-liqs.service`
 - `aster-oflow.service`
+- `aster-modules-tmux.service`
 
 ## Install on Raspberry Pi
 
 Build binaries into `/opt/aster/bin`:
 
 ```bash
-sudo mkdir -p /opt/aster/bin /opt/aster/env
+sudo mkdir -p /opt/aster/bin /opt/aster/env /opt/aster/scripts
 sudo chown -R "$USER:$USER" /opt/aster
 go build -o /opt/aster/bin/whale ./cmd/whale
 go build -o /opt/aster/bin/liqs  ./cmd/liqs
@@ -20,6 +21,8 @@ go build -o /opt/aster/bin/oflow ./cmd/oflow
 go build -o /opt/aster/bin/tape  ./cmd/tape
 go build -o /opt/aster/bin/live-lite ./cmd/live-lite
 chmod +x /opt/aster/bin/whale /opt/aster/bin/liqs /opt/aster/bin/oflow /opt/aster/bin/tape /opt/aster/bin/live-lite
+cp scripts/tmux_module_runner.sh scripts/start_tmux_modules.sh scripts/reconcile_on_boot.sh scripts/maintenance_midnight.sh scripts/maintenance_eod.sh /opt/aster/scripts/
+chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
 ```
 
 Copy env templates (optional), then edit:
@@ -40,17 +43,16 @@ sudo cp systemd/aster-liqs.service  /etc/systemd/system/
 sudo cp systemd/aster-oflow.service /etc/systemd/system/
 sudo cp systemd/aster-tape.service  /etc/systemd/system/
 sudo cp systemd/aster-live-lite.service  /etc/systemd/system/
+sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now aster-whale aster-liqs aster-oflow aster-tape aster-live-lite
+sudo systemctl disable --now aster-live-lite aster-tape aster-whale || true
+sudo systemctl enable --now aster-modules-tmux
 ```
 
 Check status/logs:
 
 ```bash
-systemctl --no-pager --full status aster-whale aster-liqs aster-oflow aster-tape aster-live-lite
-journalctl -u aster-whale -f
-journalctl -u aster-liqs -f
-journalctl -u aster-oflow -f
-journalctl -u aster-tape -f
-journalctl -u aster-live-lite -f
+systemctl --no-pager --full status aster-modules-tmux
+tmux ls
+tmux attach -t aster-live-lite
 ```

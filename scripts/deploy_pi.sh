@@ -4,6 +4,9 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 BIN_DIR="${BIN_DIR:-/opt/aster/bin}"
 SERVICES=(
+  aster-modules-tmux
+)
+LEGACY_SERVICES=(
   aster-tape
   aster-whale
   aster-live-lite
@@ -24,7 +27,20 @@ echo "[deploy] installing unit files"
 sudo cp systemd/aster-tape.service /etc/systemd/system/
 sudo cp systemd/aster-whale.service /etc/systemd/system/
 sudo cp systemd/aster-live-lite.service /etc/systemd/system/
+sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
+sudo mkdir -p /opt/aster/scripts
+sudo cp scripts/tmux_module_runner.sh /opt/aster/scripts/
+sudo cp scripts/start_tmux_modules.sh /opt/aster/scripts/
+sudo cp scripts/reconcile_on_boot.sh /opt/aster/scripts/
+sudo cp scripts/maintenance_midnight.sh /opt/aster/scripts/
+sudo cp scripts/maintenance_eod.sh /opt/aster/scripts/
+sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
 sudo systemctl daemon-reload
+
+echo "[deploy] stopping legacy standalone services"
+for svc in "${LEGACY_SERVICES[@]}"; do
+  sudo systemctl disable --now "${svc}" || true
+done
 
 echo "[deploy] restarting services"
 for svc in "${SERVICES[@]}"; do
@@ -33,6 +49,6 @@ for svc in "${SERVICES[@]}"; do
 done
 
 echo "[deploy] status"
-for svc in "${SERVICES[@]}"; do
+for svc in "${SERVICES[@]}" "${LEGACY_SERVICES[@]}"; do
   systemctl --no-pager --full status "${svc}" || true
 done
