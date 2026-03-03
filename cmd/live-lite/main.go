@@ -251,7 +251,7 @@ func main() {
 	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 5)
 	reserveMode := strings.ToLower(envStr("LIVE_RESERVE_MODE", "fixed")) // fixed|percent
 	reservePct := envFloat("LIVE_RESERVE_PCT", 50.0)
-	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 10)
+	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 100)
 	tradeMarginMode := strings.ToLower(envStr("LIVE_TRADE_MARGIN_MODE", "fixed")) // fixed|percent|slots
 	tradeMarginPct := envFloat("LIVE_TRADE_MARGIN_PCT", 10.0)
 	tradeSlots := envInt("LIVE_TRADE_SLOTS", 5)
@@ -269,6 +269,9 @@ func main() {
 	eventLockoutMin := envInt("LIVE_EVENT_LOCKOUT_MIN", 0)
 	maxCorrelatedExposure := envFloat("LIVE_MAX_CORRELATED_USD_EXPOSURE", 0)
 	corrGroups := parseCorrGroups(envStr("LIVE_CORR_GROUPS", ""))
+	enableMomentumReversal := envBool("LIVE_ENABLE_MOMENTUM_REVERSAL", true)
+	reversalMinGrade := envStr("LIVE_REVERSAL_MIN_GRADE", "A+")
+	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "USDT")
@@ -471,7 +474,7 @@ func main() {
 			paper,
 		)
 
-		cands := chooseCandidates(longInPlay, shortInPlay, minGrade)
+		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin)
 		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
 		st := liveLiteStatus{
 			Generated:     now,
@@ -2175,17 +2178,45 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 	return out, conf
 }
 
-func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string) []candidate {
+func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64) []candidate {
 	minVal := gradeValue(minGrade)
+	revMinVal := gradeValue(reversalMinGrade)
+	if reversalSlopeMin < 0 {
+		reversalSlopeMin = -reversalSlopeMin
+	}
 	out := make([]candidate, 0, len(longInPlay)+len(shortInPlay))
 	for _, e := range longInPlay {
 		if e.State == inplay.StateInPlay && gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
 		}
+		if enableMomentumReversal &&
+			gradeValue(e.CurrentGrade) >= revMinVal &&
+			e.ScoreSlope <= -reversalSlopeMin &&
+			(e.State == inplay.StateInPlay || e.State == inplay.StateCooling) {
+			flip := e
+			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
+			out = append(out, candidate{
+				Entry: flip,
+				Side:  "SELL",
+				Strat: "mom_reversal",
+			})
+		}
 	}
 	for _, e := range shortInPlay {
 		if e.State == inplay.StateInPlay && gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "SELL"})
+		}
+		if enableMomentumReversal &&
+			gradeValue(e.CurrentGrade) >= revMinVal &&
+			e.ScoreSlope <= -reversalSlopeMin &&
+			(e.State == inplay.StateInPlay || e.State == inplay.StateCooling) {
+			flip := e
+			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
+			out = append(out, candidate{
+				Entry: flip,
+				Side:  "BUY",
+				Strat: "mom_reversal",
+			})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Entry.Rank > out[j].Entry.Rank })
@@ -2253,16 +2284,48 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 	}
 	cs := rt.Eval(ctx)
 	if len(cs) == 0 {
+		if cand.Strat == "mom_reversal" {
+			cand.Conf = 0.35 + min(0.25, abs(cand.Entry.ScoreSlope)*0.15)
+			cand.Sig = strategies.Signal{
+				Active: true,
+				Name:   "mom_reversal",
+				Side:   toFeatureSide(cand.Side),
+			}
+			cand.RejectReason = ""
+			return cand
+		}
 		cand.Strat = "none"
 		cand.Conf = 0
 		cand.RejectReason = "no_strategy_match"
 		return cand
 	}
-	cand.Sig = cs[0].Signal
-	cand.Strat = cs[0].Signal.Name
-	cand.Conf = cs[0].Signal.Confidence
-	cand.RejectReason = cs[0].Signal.RejectReason
+	chosen := cs[0].Signal
+	targetSide := toFeatureSide(cand.Side)
+	for _, x := range cs {
+		if x.Signal.Side == targetSide {
+			chosen = x.Signal
+			break
+		}
+	}
+	cand.Sig = chosen
+	cand.Strat = chosen.Name
+	cand.Conf = chosen.Confidence
+	cand.RejectReason = chosen.RejectReason
 	return cand
+}
+
+func toFeatureSide(side string) features.Side {
+	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
+		return features.SideShort
+	}
+	return features.SideLong
+}
+
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func printInPlay(tag string, entries []inplay.Entry) {
@@ -2639,7 +2702,19 @@ func effectiveRESTBaseURL() string {
 	if baseURL == "" {
 		baseURL = "https://fapi.asterdex.com"
 	}
+	if looksLikeTestnet(baseURL) && !envBool("LIVE_ALLOW_TESTNET", false) {
+		fmt.Printf("live-lite: overriding testnet URL %q with mainnet https://fapi.asterdex.com (set LIVE_ALLOW_TESTNET=1 to bypass)\n", baseURL)
+		baseURL = "https://fapi.asterdex.com"
+	}
 	return strings.TrimRight(baseURL, "/")
+}
+
+func looksLikeTestnet(u string) bool {
+	v := strings.ToLower(strings.TrimSpace(u))
+	if v == "" {
+		return false
+	}
+	return strings.Contains(v, "testnet") || strings.Contains(v, "fapi-test") || strings.Contains(v, "demo")
 }
 
 func loadSimpleYAMLKV(path string) (map[string]string, error) {

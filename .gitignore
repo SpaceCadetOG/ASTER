@@ -9,3 +9,4 @@ bin/
 /short
 /tape
 /out/
+/.gocache/
