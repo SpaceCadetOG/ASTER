@@ -9,6 +9,7 @@ type Config struct {
 	OB        OBConfig
 	Flow      FlowConfig
 	Anchor    AnchorConfig
+	VP        VolumeProfileConfig
 }
 
 type Engine struct {
@@ -18,6 +19,7 @@ type Engine struct {
 	ob *OBEngine
 	fl *FlowEngine
 	an *AnchorEngine
+	vp *VolumeProfileEngine
 }
 
 func NewEngine(cfg Config) *Engine {
@@ -31,6 +33,7 @@ func NewEngine(cfg Config) *Engine {
 		ob: NewOBEngine(cfg.OB),
 		fl: NewFlowEngine(cfg.Flow),
 		an: NewAnchorEngine(cfg.Anchor),
+		vp: NewVolumeProfileEngine(cfg.VP),
 	}
 }
 
@@ -47,6 +50,7 @@ func (e *Engine) Eval(c []Candle) Snapshot {
 	obs := e.ob.Eval(c, st)
 	flow := e.fl.Eval(c)
 	anc := e.an.Eval(c)
+	vp := e.vp.Eval(c)
 	return Snapshot{
 		Candle:    c[len(c)-1],
 		Structure: st,
@@ -56,5 +60,6 @@ func (e *Engine) Eval(c []Candle) Snapshot {
 		OBs:       obs,
 		Flow:      flow,
 		Anchors:   anc,
+		VP:        vp,
 	}
 }

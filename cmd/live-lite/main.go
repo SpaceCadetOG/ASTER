@@ -26,11 +26,12 @@ import (
 )
 
 type candidate struct {
-	Entry inplay.Entry
-	Side  string // BUY/SELL
-	Strat string
-	Conf  float64
-	Sig   strategies.Signal
+	Entry        inplay.Entry
+	Side         string // BUY/SELL
+	Strat        string
+	Conf         float64
+	Sig          strategies.Signal
+	RejectReason string
 }
 
 type positionView struct {
@@ -144,34 +145,43 @@ const (
 )
 
 type livePosition struct {
-	Symbol       string    `json:"symbol"`
-	Side         string    `json:"side"`
-	State        execState `json:"state"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	ClosedAt     time.Time `json:"closedAt,omitempty"`
-	CloseReason  string    `json:"closeReason,omitempty"`
-	EntryOrderID int64     `json:"entryOrderId"`
-	EntryPrice   float64   `json:"entryPrice"`
-	Qty          float64   `json:"qty"`
-	FilledQty    float64   `json:"filledQty"`
-	RemainingQty float64   `json:"remainingQty"`
-	Margin       float64   `json:"margin"`
-	Leverage     int       `json:"leverage"`
-	StopPrice    float64   `json:"stopPrice"`
-	TP1Price     float64   `json:"tp1Price"`
-	TP2Price     float64   `json:"tp2Price"`
-	TP3Price     float64   `json:"tp3Price"`
-	TP1Qty       float64   `json:"tp1Qty"`
-	TP2Qty       float64   `json:"tp2Qty"`
-	TP3Qty       float64   `json:"tp3Qty"`
-	StopOrderID  int64     `json:"stopOrderId"`
-	TP1OrderID   int64     `json:"tp1OrderId"`
-	TP2OrderID   int64     `json:"tp2OrderId"`
-	TP3OrderID   int64     `json:"tp3OrderId"`
-	TrailOn      bool      `json:"trailOn"`
-	TrailRef     float64   `json:"trailRef"`
-	TrailStop    float64   `json:"trailStop"`
+	Symbol        string    `json:"symbol"`
+	Side          string    `json:"side"`
+	State         execState `json:"state"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	ClosedAt      time.Time `json:"closedAt,omitempty"`
+	CloseReason   string    `json:"closeReason,omitempty"`
+	EntryOrderID  int64     `json:"entryOrderId"`
+	EntryPrice    float64   `json:"entryPrice"`
+	Qty           float64   `json:"qty"`
+	FilledQty     float64   `json:"filledQty"`
+	RemainingQty  float64   `json:"remainingQty"`
+	Margin        float64   `json:"margin"`
+	Leverage      int       `json:"leverage"`
+	StopPrice     float64   `json:"stopPrice"`
+	TP1Price      float64   `json:"tp1Price"`
+	TP2Price      float64   `json:"tp2Price"`
+	TP3Price      float64   `json:"tp3Price"`
+	TP1Qty        float64   `json:"tp1Qty"`
+	TP2Qty        float64   `json:"tp2Qty"`
+	TP3Qty        float64   `json:"tp3Qty"`
+	StopOrderID   int64     `json:"stopOrderId"`
+	TP1OrderID    int64     `json:"tp1OrderId"`
+	TP2OrderID    int64     `json:"tp2OrderId"`
+	TP3OrderID    int64     `json:"tp3OrderId"`
+	TrailOn       bool      `json:"trailOn"`
+	TrailRef      float64   `json:"trailRef"`
+	TrailStop     float64   `json:"trailStop"`
+	VPSetup       string    `json:"vpSetup,omitempty"`
+	VPLevel       float64   `json:"vpLevel,omitempty"`
+	VPTargetLevel float64   `json:"vpTargetLevel,omitempty"`
+	VPStopMode    string    `json:"vpStopMode,omitempty"`
+	VPTargetMode  string    `json:"vpTargetMode,omitempty"`
+	RejectReason  string    `json:"rejectReason,omitempty"`
+	CustomRiskPct float64   `json:"customRiskPct,omitempty"`
+	CustomTP1R    float64   `json:"customTp1R,omitempty"`
+	CustomTP2R    float64   `json:"customTp2R,omitempty"`
 }
 
 type liveExecStore struct {
@@ -208,19 +218,25 @@ type liveExecSnapshot struct {
 }
 
 type liveLiteStatus struct {
-	Generated     time.Time        `json:"generated"`
-	DryRun        bool             `json:"dry_run"`
-	LiveEnabled   bool             `json:"live_enabled"`
-	TopSymbol     string           `json:"top_symbol,omitempty"`
-	TopSide       string           `json:"top_side,omitempty"`
-	TopGrade      string           `json:"top_grade,omitempty"`
-	TopScore      float64          `json:"top_score,omitempty"`
-	TopSlope      float64          `json:"top_slope,omitempty"`
-	LongInPlay    int              `json:"long_inplay"`
-	ShortInPlay   int              `json:"short_inplay"`
-	AvailableUSDT float64          `json:"available_usdt"`
-	PaperSummary  string           `json:"paper_summary,omitempty"`
-	Exec          liveExecSnapshot `json:"exec"`
+	Generated       time.Time        `json:"generated"`
+	DryRun          bool             `json:"dry_run"`
+	LiveEnabled     bool             `json:"live_enabled"`
+	TopSymbol       string           `json:"top_symbol,omitempty"`
+	TopSide         string           `json:"top_side,omitempty"`
+	TopGrade        string           `json:"top_grade,omitempty"`
+	TopScore        float64          `json:"top_score,omitempty"`
+	TopSlope        float64          `json:"top_slope,omitempty"`
+	TopVPSetup      string           `json:"top_vp_setup,omitempty"`
+	TopVPLevel      float64          `json:"top_vp_level,omitempty"`
+	TopVPTarget     float64          `json:"top_vp_target_level,omitempty"`
+	TopVPStopMode   string           `json:"top_vp_stop_mode,omitempty"`
+	TopVPTargetMode string           `json:"top_vp_target_mode,omitempty"`
+	TopRejectReason string           `json:"top_reject_reason,omitempty"`
+	LongInPlay      int              `json:"long_inplay"`
+	ShortInPlay     int              `json:"short_inplay"`
+	AvailableUSDT   float64          `json:"available_usdt"`
+	PaperSummary    string           `json:"paper_summary,omitempty"`
+	Exec            liveExecSnapshot `json:"exec"`
 }
 
 type liveLiteStatusStore struct {
@@ -247,6 +263,12 @@ func main() {
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
 	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 3)
 	leverageMin := envInt("LIVE_LEVERAGE_MIN", 1)
+	stopMode := strings.ToLower(envStr("LIVE_STOP_MODE", "hybrid"))
+	targetMode := strings.ToLower(envStr("LIVE_TARGET_MODE", "hybrid"))
+	vpMinTargetPct := envFloat("LIVE_VP_MIN_TARGET_PCT", 0.10)
+	eventLockoutMin := envInt("LIVE_EVENT_LOCKOUT_MIN", 0)
+	maxCorrelatedExposure := envFloat("LIVE_MAX_CORRELATED_USD_EXPOSURE", 0)
+	corrGroups := parseCorrGroups(envStr("LIVE_CORR_GROUPS", ""))
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "USDT")
@@ -450,7 +472,7 @@ func main() {
 		)
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade)
-		cands = rankWithStrategy(client, cands, strategyTopN)
+		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
 		st := liveLiteStatus{
 			Generated:     now,
 			DryRun:        dryRun,
@@ -478,6 +500,12 @@ func main() {
 		st.TopGrade = best.Entry.CurrentGrade
 		st.TopScore = best.Entry.CurrentScore
 		st.TopSlope = best.Entry.ScoreSlope
+		st.TopVPSetup = best.Sig.VPSetup
+		st.TopVPLevel = best.Sig.VPLevel
+		st.TopVPTarget = best.Sig.VPTargetLevel
+		st.TopVPStopMode = best.Sig.StopMode
+		st.TopVPTargetMode = best.Sig.TargetMode
+		st.TopRejectReason = best.RejectReason
 		statusStore.Set(st)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
 		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f\n",
@@ -513,6 +541,16 @@ func main() {
 			if tgVerbose {
 				tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
 			}
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if inEventLockout(time.Now(), eventLockoutMin) {
+			fmt.Println("live-lite: lockout skip: event window")
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
+			fmt.Println("live-lite: skip (correlated exposure gate)")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
@@ -1019,16 +1057,35 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	now := time.Now().UTC()
 	p := &livePosition{
-		Symbol:       rawSym,
-		Side:         strings.ToUpper(c.Side),
-		State:        execPendingEntry,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		EntryOrderID: orderID,
-		EntryPrice:   price,
-		Qty:          qty,
-		Margin:       margin,
-		Leverage:     lev,
+		Symbol:        rawSym,
+		Side:          strings.ToUpper(c.Side),
+		State:         execPendingEntry,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		EntryOrderID:  orderID,
+		EntryPrice:    price,
+		Qty:           qty,
+		Margin:        margin,
+		Leverage:      lev,
+		VPSetup:       c.Sig.VPSetup,
+		VPLevel:       c.Sig.VPLevel,
+		VPTargetLevel: c.Sig.VPTargetLevel,
+		VPStopMode:    c.Sig.StopMode,
+		VPTargetMode:  c.Sig.TargetMode,
+		RejectReason:  c.RejectReason,
+	}
+	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
+		risk := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
+		if risk > 0 {
+			p.CustomRiskPct = risk
+			baseRisk := abs(c.Sig.Entry - c.Sig.Stop)
+			if baseRisk > 0 && c.Sig.TP1 > 0 {
+				p.CustomTP1R = abs(c.Sig.TP1-c.Sig.Entry) / baseRisk
+			}
+			if baseRisk > 0 && c.Sig.TP2 > 0 {
+				p.CustomTP2R = abs(c.Sig.TP2-c.Sig.Entry) / baseRisk
+			}
+		}
 	}
 	m.positions[rawSym] = p
 	_ = m.save()
@@ -1263,15 +1320,26 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	if stopPct <= 0 {
 		stopPct = 0.02
 	}
+	if p.CustomRiskPct > 0 {
+		stopPct = p.CustomRiskPct
+	}
+	tp1R := m.tp1R
+	tp2R := m.tp2R
+	if p.CustomTP1R > 0 {
+		tp1R = p.CustomTP1R
+	}
+	if p.CustomTP2R > 0 {
+		tp2R = p.CustomTP2R
+	}
 	if sideBuy {
 		p.StopPrice = p.EntryPrice * (1 - stopPct)
-		p.TP1Price = p.EntryPrice * (1 + stopPct*m.tp1R)
-		p.TP2Price = p.EntryPrice * (1 + stopPct*m.tp2R)
+		p.TP1Price = p.EntryPrice * (1 + stopPct*tp1R)
+		p.TP2Price = p.EntryPrice * (1 + stopPct*tp2R)
 		p.TP3Price = p.EntryPrice * (1 + stopPct*m.tp3R)
 	} else {
 		p.StopPrice = p.EntryPrice * (1 + stopPct)
-		p.TP1Price = p.EntryPrice * (1 - stopPct*m.tp1R)
-		p.TP2Price = p.EntryPrice * (1 - stopPct*m.tp2R)
+		p.TP1Price = p.EntryPrice * (1 - stopPct*tp1R)
+		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
 		p.TP3Price = p.EntryPrice * (1 - stopPct*m.tp3R)
 	}
 	p.TrailRef = p.EntryPrice
@@ -1642,9 +1710,24 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	qty := notional / entry
 	stopPct := p.stopPct / 100.0
-	tp1Pct := (p.stopPct * p.tp1R) / 100.0
-	tp2Pct := (p.stopPct * p.tp2R) / 100.0
-	tp3Pct := (p.stopPct * p.tp3R) / 100.0
+	tp1R := p.tp1R
+	tp2R := p.tp2R
+	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
+		riskPct := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
+		if riskPct > 0 {
+			stopPct = riskPct
+			baseRisk := abs(c.Sig.Entry - c.Sig.Stop)
+			if baseRisk > 0 && c.Sig.TP1 > 0 {
+				tp1R = abs(c.Sig.TP1-c.Sig.Entry) / baseRisk
+			}
+			if baseRisk > 0 && c.Sig.TP2 > 0 {
+				tp2R = abs(c.Sig.TP2-c.Sig.Entry) / baseRisk
+			}
+		}
+	}
+	tp1Pct := stopPct * tp1R
+	tp2Pct := stopPct * tp2R
+	tp3Pct := stopPct * p.tp3R
 	stop := entry
 	tp1 := entry
 	tp2 := entry
@@ -2109,7 +2192,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string) [
 	return out
 }
 
-func rankWithStrategy(c *aster.Client, in []candidate, topN int) []candidate {
+func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64) []candidate {
 	if len(in) == 0 {
 		return in
 	}
@@ -2119,7 +2202,7 @@ func rankWithStrategy(c *aster.Client, in []candidate, topN int) []candidate {
 		topN = len(out)
 	}
 	for i := 0; i < topN; i++ {
-		out[i] = enrichCandidate(c, out[i])
+		out[i] = enrichCandidate(c, out[i], stopMode, targetMode, vpMinTargetPct)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		ri := out[i].Entry.Rank * (1 + out[i].Conf)
@@ -2129,7 +2212,7 @@ func rankWithStrategy(c *aster.Client, in []candidate, topN int) []candidate {
 	return out
 }
 
-func enrichCandidate(c *aster.Client, cand candidate) candidate {
+func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode string, vpMinTargetPct float64) candidate {
 	raw := strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol))
 	bars, err := c.LoadCandles(raw, types.TF1m, 240)
 	if err != nil || len(bars) < 30 {
@@ -2143,12 +2226,21 @@ func enrichCandidate(c *aster.Client, cand candidate) candidate {
 	fe := features.NewEngine(features.Config{})
 	snap := fe.Eval(fc)
 	rt := strategies.NewRouter(strategies.RouterConfig{
-		MinGrade:       "B",
-		MinScore:       0,
-		MinWhaleDelta:  -1e18,
-		AllowWarmup:    true,
-		WarmupSlopeMin: 0,
-		MaxOne:         true,
+		MinGrade:                  "B",
+		MinScore:                  0,
+		MinWhaleDelta:             -1e18,
+		AllowWarmup:               true,
+		WarmupSlopeMin:            0,
+		MaxOne:                    true,
+		EnableVPSetups:            true,
+		MinVPConfidence:           0.55,
+		UseVPReversal:             true,
+		RejectIfTargetTooClosePct: vpMinTargetPct,
+		RiskPolicy: strategies.RiskPolicyConfig{
+			StopMode:             strategies.StopMode(stopMode),
+			TargetMode:           strategies.TargetMode(targetMode),
+			MinTargetDistancePct: vpMinTargetPct,
+		},
 	})
 	ctx := strategies.Context{
 		Symbol:       raw,
@@ -2163,11 +2255,13 @@ func enrichCandidate(c *aster.Client, cand candidate) candidate {
 	if len(cs) == 0 {
 		cand.Strat = "none"
 		cand.Conf = 0
+		cand.RejectReason = "no_strategy_match"
 		return cand
 	}
 	cand.Sig = cs[0].Signal
 	cand.Strat = cs[0].Signal.Name
 	cand.Conf = cs[0].Signal.Confidence
+	cand.RejectReason = cs[0].Signal.RejectReason
 	return cand
 }
 
@@ -2442,6 +2536,61 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 		}
 	}
 	return ""
+}
+
+func inEventLockout(now time.Time, lockMin int) bool {
+	if lockMin <= 0 {
+		return false
+	}
+	m := now.UTC().Minute()
+	return m < lockMin || m >= (60-lockMin)
+}
+
+func parseCorrGroups(v string) map[string]string {
+	out := map[string]string{}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return out
+	}
+	groups := strings.Split(v, ";")
+	for gi, g := range groups {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		label := fmt.Sprintf("g%d", gi+1)
+		for _, sym := range strings.Split(g, ",") {
+			raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(sym)))
+			if raw != "" {
+				out[raw] = label
+			}
+		}
+	}
+	return out
+}
+
+func isCorrelatedExposureTooHigh(c candidate, acct accountSnapshot, groups map[string]string, maxExposure float64) bool {
+	if maxExposure <= 0 || len(groups) == 0 {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	g, ok := groups[raw]
+	if !ok || g == "" {
+		return false
+	}
+	exposure := 0.0
+	for _, p := range acct.Positions {
+		ps := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+		if groups[ps] != g {
+			continue
+		}
+		mark := p.Mark
+		if mark <= 0 {
+			mark = p.Entry
+		}
+		exposure += mark * p.SizeAbs
+	}
+	return exposure >= maxExposure
 }
 
 func buildRESTFromConfig() *aster.RESTAuth {

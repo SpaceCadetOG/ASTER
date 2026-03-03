@@ -31,42 +31,53 @@ type WhalePoint struct {
 }
 
 type Config struct {
-	Symbol      string
-	Strategy    string
-	TF          string
-	StartBal    float64
-	FeesBps     float64
-	SlipBps     float64
-	Leverage    float64
-	MarginUSD   float64
-	ReserveUSD  float64
-	MaxPos      int
-	ScoreMin    float64
-	GradeMin    string
-	WhaleDelta  float64
-	EntryMethod string // next_open|market_close
+	Symbol           string
+	Strategy         string
+	TF               string
+	StartBal         float64
+	FeesBps          float64
+	SlipBps          float64
+	Leverage         float64
+	MarginUSD        float64
+	ReserveUSD       float64
+	MaxPos           int
+	ScoreMin         float64
+	GradeMin         string
+	WhaleDelta       float64
+	EntryMethod      string // next_open|market_close
+	StopMode         string
+	TargetMode       string
+	VPMinTargetPct   float64
+	EventLockoutMin  int
+	MaxCorrelatedPos int
 }
 
 type Trade struct {
-	Symbol       string    `json:"symbol"`
-	Strategy     string    `json:"strategy"`
-	Side         string    `json:"side"`
-	EntryTs      time.Time `json:"entry_ts"`
-	ExitTs       time.Time `json:"exit_ts"`
-	Entry        float64   `json:"entry"`
-	Exit         float64   `json:"exit"`
-	Stop         float64   `json:"stop"`
-	TP1          float64   `json:"tp1"`
-	TP2          float64   `json:"tp2"`
-	Qty          float64   `json:"qty"`
-	PnL          float64   `json:"pnl"`
-	R            float64   `json:"r"`
-	Reason       string    `json:"reason"`
-	HoldMins     float64   `json:"hold_mins"`
-	Fees         float64   `json:"fees"`
-	Slippage     float64   `json:"slippage"`
-	Confidence   float64   `json:"confidence"`
-	CandidateRaw float64   `json:"candidate_score"`
+	Symbol        string    `json:"symbol"`
+	Strategy      string    `json:"strategy"`
+	Side          string    `json:"side"`
+	EntryTs       time.Time `json:"entry_ts"`
+	ExitTs        time.Time `json:"exit_ts"`
+	Entry         float64   `json:"entry"`
+	Exit          float64   `json:"exit"`
+	Stop          float64   `json:"stop"`
+	TP1           float64   `json:"tp1"`
+	TP2           float64   `json:"tp2"`
+	Qty           float64   `json:"qty"`
+	PnL           float64   `json:"pnl"`
+	R             float64   `json:"r"`
+	Reason        string    `json:"reason"`
+	HoldMins      float64   `json:"hold_mins"`
+	Fees          float64   `json:"fees"`
+	Slippage      float64   `json:"slippage"`
+	Confidence    float64   `json:"confidence"`
+	CandidateRaw  float64   `json:"candidate_score"`
+	VPSetup       string    `json:"vp_setup,omitempty"`
+	VPLevel       float64   `json:"vp_level,omitempty"`
+	VPTargetLevel float64   `json:"vp_target_level,omitempty"`
+	VPStopMode    string    `json:"vp_stop_mode,omitempty"`
+	VPTargetMode  string    `json:"vp_target_mode,omitempty"`
+	RejectReason  string    `json:"reject_reason,omitempty"`
 }
 
 type Report struct {
@@ -118,12 +129,21 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 
 	fe := features.NewEngine(features.Config{})
 	router := strategies.NewRouter(strategies.RouterConfig{
-		MinGrade:       cfg.GradeMin,
-		MinScore:       cfg.ScoreMin,
-		MinWhaleDelta:  cfg.WhaleDelta,
-		AllowWarmup:    true,
-		WarmupSlopeMin: 0.01,
-		MaxOne:         true,
+		MinGrade:                  cfg.GradeMin,
+		MinScore:                  cfg.ScoreMin,
+		MinWhaleDelta:             cfg.WhaleDelta,
+		AllowWarmup:               true,
+		WarmupSlopeMin:            0.01,
+		MaxOne:                    true,
+		EnableVPSetups:            true,
+		MinVPConfidence:           0.55,
+		UseVPReversal:             true,
+		RejectIfTargetTooClosePct: cfg.VPMinTargetPct,
+		RiskPolicy: strategies.RiskPolicyConfig{
+			StopMode:             strategies.StopMode(strings.ToLower(strings.TrimSpace(cfg.StopMode))),
+			TargetMode:           strategies.TargetMode(strings.ToLower(strings.TrimSpace(cfg.TargetMode))),
+			MinTargetDistancePct: cfg.VPMinTargetPct,
+		},
 	})
 
 	balance := cfg.StartBal
@@ -168,19 +188,25 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 				slip := notional * cfg.SlipBps / 10000.0
 				balance -= fee + slip
 				open = &Trade{
-					Symbol:       cfg.Symbol,
-					Strategy:     pending.Signal.Name,
-					Side:         string(pending.Signal.Side),
-					EntryTs:      c.Ts,
-					Entry:        entryPx,
-					Stop:         pending.Signal.Stop,
-					TP1:          pending.Signal.TP1,
-					TP2:          pending.Signal.TP2,
-					Qty:          qty,
-					Fees:         fee,
-					Slippage:     slip,
-					Confidence:   pending.Signal.Confidence,
-					CandidateRaw: pending.Score,
+					Symbol:        cfg.Symbol,
+					Strategy:      pending.Signal.Name,
+					Side:          string(pending.Signal.Side),
+					EntryTs:       c.Ts,
+					Entry:         entryPx,
+					Stop:          pending.Signal.Stop,
+					TP1:           pending.Signal.TP1,
+					TP2:           pending.Signal.TP2,
+					Qty:           qty,
+					Fees:          fee,
+					Slippage:      slip,
+					Confidence:    pending.Signal.Confidence,
+					CandidateRaw:  pending.Score,
+					VPSetup:       pending.Signal.VPSetup,
+					VPLevel:       pending.Signal.VPLevel,
+					VPTargetLevel: pending.Signal.VPTargetLevel,
+					VPStopMode:    pending.Signal.StopMode,
+					VPTargetMode:  pending.Signal.TargetMode,
+					RejectReason:  pending.Signal.RejectReason,
 				}
 				barsInPos = 0
 			}
@@ -245,6 +271,11 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 		}
 
 		if open == nil && !entryPending && i+1 < len(candles) {
+			if inEventLockout(c.Ts, cfg.EventLockoutMin) {
+				eq := balance
+				equity = append(equity, eq)
+				continue
+			}
 			usable := balance - cfg.ReserveUSD
 			if usable >= cfg.MarginUSD {
 				ctx := strategies.Context{
@@ -300,6 +331,14 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 		strat = strategies.FailedAuction{}
 	case "od":
 		strat = strategies.OpenDrive{}
+	case "vp_accumulation":
+		strat = strategies.VPAccumulation{}
+	case "vp_trend":
+		strat = strategies.VPTrendRetest{}
+	case "vp_rejection":
+		strat = strategies.VPRejection{}
+	case "vp_reversal":
+		strat = strategies.VPReversal{}
 	default:
 		return nil
 	}
@@ -307,6 +346,7 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 	if !sig.Active {
 		return nil
 	}
+	sig = strategies.ApplyRiskPolicy(sig, ctx.Snapshot, strategies.DefaultRiskPolicy())
 	scoreNorm := ctx.ScannerScore / 100.0
 	if scoreNorm < 0 {
 		scoreNorm = 0
@@ -447,9 +487,9 @@ func WriteOutputs(res Result, outDir string) error {
 		return err
 	}
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "confidence", "candidate_score"})
+	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason"})
 	for _, t := range res.Trades {
-		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.Confidence), f64(t.CandidateRaw)})
+		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason})
 	}
 	w.Flush()
 	_ = f.Close()
@@ -480,4 +520,12 @@ func f64(x float64) string {
 		return "0"
 	}
 	return s
+}
+
+func inEventLockout(ts time.Time, lockMin int) bool {
+	if lockMin <= 0 {
+		return false
+	}
+	m := ts.UTC().Minute()
+	return m < lockMin || m >= (60-lockMin)
 }

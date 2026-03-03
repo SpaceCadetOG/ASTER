@@ -7,13 +7,19 @@ import (
 )
 
 type RouterConfig struct {
-	MinGrade          string
-	MinScore          float64
-	MinWhaleDelta     float64
-	AllowWarmup       bool
-	WarmupSlopeMin    float64
-	MaxOne            bool
-	ScannerScoreScale float64
+	MinGrade                  string
+	MinScore                  float64
+	MinWhaleDelta             float64
+	AllowWarmup               bool
+	WarmupSlopeMin            float64
+	MaxOne                    bool
+	ScannerScoreScale         float64
+	EnableVPSetups            bool
+	MinVPConfidence           float64
+	RequireFlowConfluence     bool
+	RejectIfTargetTooClosePct float64
+	UseVPReversal             bool
+	RiskPolicy                RiskPolicyConfig
 }
 
 type Candidate struct {
@@ -33,7 +39,20 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.ScannerScoreScale <= 0 {
 		cfg.ScannerScoreScale = 100
 	}
-	return &Router{cfg: cfg, strat: []Strategy{LSR{}, BOSPB{}, OBR{}, FVGC{}, FailedAuction{}, OpenDrive{}}}
+	if cfg.MinVPConfidence <= 0 {
+		cfg.MinVPConfidence = 0.55
+	}
+	if cfg.RiskPolicy.StopMode == "" {
+		cfg.RiskPolicy = DefaultRiskPolicy()
+	}
+	base := []Strategy{LSR{}, BOSPB{}, OBR{}, FVGC{}, FailedAuction{}, OpenDrive{}}
+	if cfg.EnableVPSetups {
+		base = append(base, VPAccumulation{}, VPTrendRetest{}, VPRejection{})
+		if cfg.UseVPReversal {
+			base = append(base, VPReversal{})
+		}
+	}
+	return &Router{cfg: cfg, strat: base}
 }
 
 func (r *Router) Eval(ctx Context) []Candidate {
@@ -56,6 +75,25 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		sig := s.Eval(ctx)
 		if !sig.Active {
 			continue
+		}
+		sig = ApplyRiskPolicy(sig, ctx.Snapshot, r.cfg.RiskPolicy)
+		if sig.VPSetup != "" && sig.Confidence < r.cfg.MinVPConfidence {
+			continue
+		}
+		if r.cfg.RequireFlowConfluence && sig.VPSetup != "" {
+			if sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m < 0 {
+				continue
+			}
+			if sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m > 0 {
+				continue
+			}
+		}
+		if r.cfg.RejectIfTargetTooClosePct > 0 && sig.Entry > 0 && sig.TP1 > 0 {
+			distPct := 100.0 * abs((sig.TP1-sig.Entry)/sig.Entry)
+			if distPct < r.cfg.RejectIfTargetTooClosePct {
+				sig.RejectReason = "target_too_close"
+				continue
+			}
 		}
 		scoreNorm := ctx.ScannerScore / r.cfg.ScannerScoreScale
 		if scoreNorm < 0 {
@@ -84,6 +122,13 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		}
 	}
 	return []Candidate{best}
+}
+
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func gradeValue(g string) int {

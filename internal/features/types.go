@@ -111,4 +111,33 @@ type Snapshot struct {
 	OBs       []OBZone
 	Flow      FlowState
 	Anchors   AnchorLevels
+	VP        VolumeProfile
+}
+
+type PriceVolume struct {
+	Price  float64
+	Volume float64
+}
+
+type VolumeProfile struct {
+	POCPrice                   float64
+	POCVolume                  float64
+	VAH                        float64
+	VAL                        float64
+	TotalVolume                float64
+	POCShare                   float64
+	VAWidthPct                 float64
+	Shape                      string
+	HVNs                       []PriceVolume
+	LVNs                       []PriceVolume
+	Bins                       []PriceVolume
+	PriceMin                   float64
+	PriceMax                   float64
+	NearestHVNAbove            float64
+	NearestHVNBelow            float64
+	NearestLVNAbove            float64
+	NearestLVNBelow            float64
+	FirstOpposingVolumeDistPct float64
+	InValueArea                bool
+	DistToPOCBP                float64
 }

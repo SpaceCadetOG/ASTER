@@ -33,19 +33,24 @@ type whaleEvent struct {
 func main() {
 	symbols := symbolsList()
 	cfg := backtest.Config{
-		Strategy:    strings.ToLower(envStr("BT_STRATEGY", "router")),
-		TF:          envStr("BT_TF", "1m"),
-		StartBal:    envFloat("BT_START_BALANCE", 1000),
-		FeesBps:     envFloat("BT_FEES_BPS", 2),
-		SlipBps:     envFloat("BT_SLIPPAGE_BPS", 1),
-		Leverage:    envFloat("BT_LEVERAGE", 3),
-		MarginUSD:   envFloat("BT_MARGIN_USD", 10),
-		ReserveUSD:  envFloat("BT_RESERVE_USD", 5),
-		MaxPos:      envInt("BT_MAX_POS", 1),
-		ScoreMin:    envFloat("BT_SCORE_MIN", 70),
-		GradeMin:    envStr("BT_GRADE_MIN", "B"),
-		WhaleDelta:  envFloat("BT_WHALE_DELTA_MIN", 0),
-		EntryMethod: strings.ToLower(envStr("BT_ENTRY", "next_open")),
+		Strategy:         strings.ToLower(envStr("BT_STRATEGY", "router")),
+		TF:               envStr("BT_TF", "1m"),
+		StartBal:         envFloat("BT_START_BALANCE", 1000),
+		FeesBps:          envFloat("BT_FEES_BPS", 2),
+		SlipBps:          envFloat("BT_SLIPPAGE_BPS", 1),
+		Leverage:         envFloat("BT_LEVERAGE", 3),
+		MarginUSD:        envFloat("BT_MARGIN_USD", 10),
+		ReserveUSD:       envFloat("BT_RESERVE_USD", 5),
+		MaxPos:           envInt("BT_MAX_POS", 1),
+		ScoreMin:         envFloat("BT_SCORE_MIN", 70),
+		GradeMin:         envStr("BT_GRADE_MIN", "B"),
+		WhaleDelta:       envFloat("BT_WHALE_DELTA_MIN", 0),
+		EntryMethod:      strings.ToLower(envStr("BT_ENTRY", "next_open")),
+		StopMode:         strings.ToLower(envStr("BT_STOP_MODE", "hybrid")),
+		TargetMode:       strings.ToLower(envStr("BT_TARGET_MODE", "hybrid")),
+		VPMinTargetPct:   envFloat("BT_VP_MIN_TARGET_PCT", 0.10),
+		EventLockoutMin:  envInt("BT_EVENT_LOCKOUT_MIN", 0),
+		MaxCorrelatedPos: envInt("BT_MAX_CORRELATED_POS", 1),
 	}
 	outRoot := envStr("BT_OUT_DIR", "out/backtests")
 	from := parseDate(envStr("BT_FROM", ""))

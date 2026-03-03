@@ -58,3 +58,73 @@ func TestFVGDetectAndMitigate(t *testing.T) {
 		t.Fatal("expected mitigated zone")
 	}
 }
+
+func TestVolumeProfilePOCAndValueArea(t *testing.T) {
+	eng := NewVolumeProfileEngine(VolumeProfileConfig{
+		Bins:     20,
+		ValuePct: 0.70,
+		HVNTopN:  2,
+		LVNTopN:  2,
+	})
+	c := []Candle{
+		{Ts: time.Unix(1, 0), O: 100, H: 101, L: 99, C: 100, V: 100},
+		{Ts: time.Unix(2, 0), O: 100, H: 101, L: 99, C: 100, V: 180},
+		{Ts: time.Unix(3, 0), O: 100, H: 100.5, L: 99.5, C: 100, V: 220},
+		{Ts: time.Unix(4, 0), O: 102, H: 103, L: 101, C: 102, V: 40},
+	}
+	vp := eng.Eval(c)
+	if vp.TotalVolume <= 0 {
+		t.Fatal("expected total volume > 0")
+	}
+	if vp.POCPrice <= 0 {
+		t.Fatal("expected poc > 0")
+	}
+	if vp.VAH < vp.VAL {
+		t.Fatalf("invalid value area bounds: vah %.4f < val %.4f", vp.VAH, vp.VAL)
+	}
+	if len(vp.HVNs) == 0 || len(vp.LVNs) == 0 {
+		t.Fatal("expected hvn/lvn points")
+	}
+	if vp.POCShare <= 0 || vp.POCShare > 1 {
+		t.Fatalf("expected valid poc share, got %.4f", vp.POCShare)
+	}
+	if vp.VAWidthPct <= 0 {
+		t.Fatalf("expected positive value area width pct, got %.4f", vp.VAWidthPct)
+	}
+	if vp.Shape != "D" && vp.Shape != "P" && vp.Shape != "b" {
+		t.Fatalf("unexpected shape: %q", vp.Shape)
+	}
+	if vp.NearestHVNAbove <= 0 && vp.NearestHVNBelow <= 0 {
+		t.Fatalf("expected at least one nearest hvn level, got above=%.4f below=%.4f", vp.NearestHVNAbove, vp.NearestHVNBelow)
+	}
+	if vp.FirstOpposingVolumeDistPct <= 0 {
+		t.Fatalf("expected first opposing distance pct > 0, got %.4f", vp.FirstOpposingVolumeDistPct)
+	}
+}
+
+func TestVolumeProfileFlexibleHelpers(t *testing.T) {
+	vp := VolumeProfile{
+		TotalVolume: 1000,
+		VAH:         101.5,
+		VAL:         98.5,
+		Bins: []PriceVolume{
+			{Price: 98.0, Volume: 80},
+			{Price: 99.0, Volume: 120},
+			{Price: 100.0, Volume: 320},
+			{Price: 101.0, Volume: 220},
+			{Price: 102.0, Volume: 160},
+		},
+	}
+	lvl, ok := vp.LevelAtHeaviestInRange(99.2, 101.2)
+	if !ok || lvl != 100.0 {
+		t.Fatalf("expected heaviest in range at 100.0, got lvl=%.4f ok=%v", lvl, ok)
+	}
+	lvl, ok = vp.FirstSignificantOpposingLevel(100.0, SideLong, 0.10)
+	if !ok || lvl <= 100 {
+		t.Fatalf("expected long opposing level > entry, got lvl=%.4f ok=%v", lvl, ok)
+	}
+	lvl, ok = vp.FirstSignificantOpposingLevel(100.0, SideShort, 0.10)
+	if !ok || lvl >= 100 {
+		t.Fatalf("expected short opposing level < entry, got lvl=%.4f ok=%v", lvl, ok)
+	}
+}
