@@ -37,7 +37,7 @@ ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=a
 ```
 
 If you see code `-2015`:
-- key/secret pair does not match selected environment (mainnet vs testnet), or
+- key/secret pair is invalid for mainnet futures, or
 - API key permissions are missing for futures/account reads, or
 - your current IP is not whitelisted for that key.
 
@@ -57,16 +57,6 @@ Example with explicit base URL:
 
 ```bash
 ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=balance go run ./cmd/exec
-```
-
-Testnet candidates (depends on Aster deployment):
-
-```bash
-ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex-testnet.com EXEC_ACTION=balance go run ./cmd/exec
-```
-
-```bash
-ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://www.asterdex-testnet.com EXEC_ACTION=balance go run ./cmd/exec
 ```
 
 ## Account summary

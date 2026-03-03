@@ -6,12 +6,6 @@ aster_api_secret: "YOUR_MAINNET_API_SECRET"
 aster_base_url: "https://fapi.asterdex.com"
 aster_auth_mode: "hmac"
 
-# Testnet HMAC (uncomment when needed)
-# aster_api_key: "YOUR_TESTNET_API_KEY"
-# aster_api_secret: "YOUR_TESTNET_API_SECRET"
-# aster_base_url: "https://fapi.asterdex-testnet.com"
-# aster_auth_mode: "hmac"
-
 # Optional agent auth fields
 # aster_user: "0x..."
 # aster_signer: "0x..."

@@ -557,7 +557,7 @@ func attachAuthHints(out map[string]any, err error) {
 	hints := []string{}
 
 	if strings.Contains(msg, `code":-2015`) || strings.Contains(msg, "invalid api-key") {
-		hints = append(hints, "API key rejected. Verify mainnet vs testnet base URL, key/secret pair, and IP whitelist.")
+		hints = append(hints, "API key rejected. Verify mainnet base URL, key/secret pair, and IP whitelist.")
 	}
 	if strings.Contains(msg, `code":-2014`) || strings.Contains(msg, "api-key format invalid") {
 		hints = append(hints, "API key format invalid for selected auth mode. Use HMAC key/secret for hmac mode.")

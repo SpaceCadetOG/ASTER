@@ -90,12 +90,8 @@ func NewRESTAuthWithConfig(cfg RESTAuthConfig) *RESTAuth {
 	}
 	chainID := cfg.ChainID
 	if chainID == 0 {
-		// Defaults from Aster API v3 docs: mainnet=1666, testnet=714.
-		if strings.Contains(baseURL, "testnet") {
-			chainID = 714
-		} else {
-			chainID = 1666
-		}
+		// Mainnet default from Aster API v3 docs.
+		chainID = 1666
 	}
 	return &RESTAuth{
 		key:        strings.TrimSpace(cfg.APIKey),

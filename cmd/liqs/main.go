@@ -46,7 +46,7 @@ func main() {
 	//  - "<symbol>@forceOrder" (per symbol)
 	//  - "!forceOrder@arr"     (all symbols array)
 	// Fallback behavior requested: try docs stream first, then alternative naming.
-	// Docs: https://github.com/asterdex/api-docs/blob/master/aster-finance-futures-api-testnet.md#market-data-endpoints
+	// Docs: https://github.com/asterdex/api-docs/blob/master/README.md
 	urls := liquidationURLs(syms)
 	urlIdx := 0
 	lastSummary := time.Now()

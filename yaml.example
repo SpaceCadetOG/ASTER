@@ -20,7 +20,6 @@ aster_private_key: 0xYOUR_SIGNER_PRIVATE_KEY
 
 # Optional. Defaults are inferred by base URL:
 # - mainnet: 1666
-# - testnet: 714
 aster_chain_id: 1666
 
 # Optional python interpreter for agent signing helper:
