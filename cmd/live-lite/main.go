@@ -359,7 +359,7 @@ func main() {
 	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
 	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
 		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
-	tg.Sendf("live-lite started scan=%s dry_run=%v min_grade=%s digest=%s", scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery)
+	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s", scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery)
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
 	if reconEvery <= 0 {
@@ -515,7 +515,7 @@ func main() {
 			best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
-			tg.Sendf("top candidate %s %s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f",
+			tg.Sendf("top %s %s | g=%s s=%.2f slope=%+.3f rank=%.2f | %s conf=%.2f",
 				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, best.Entry.CurrentGrade,
 				best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 			lastTopKey = topKey
@@ -528,8 +528,9 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
-					tg.Sendf("PAPER ENTER %s %s margin=$%.2f lev=%dx entry=%.6f tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f",
-						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, pp.Entry, pp.TP1, pp.TP2, pp.TP3, pp.Stop)
+					tg.Sendf("PAPER ENTER %s %s\nmargin=$%.2f lev=%dx grade=%s\nentry=%s\ntp1=%s tp2=%s tp3=%s\nsl=%s",
+						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade,
+						fmtPrice(pp.Entry), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3), fmtPrice(pp.Stop))
 				}
 			}
 			if tgVerbose {
@@ -662,11 +663,11 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 	if dryRun {
 		mode = "DRY_RUN"
 	}
-	fmt.Fprintf(&b, "Live-Lite Digest | %s | %s UTC\n", mode, now.Format("15:04"))
+	fmt.Fprintf(&b, "Live-Lite Digest (%s) %s UTC\n", mode, now.Format("15:04"))
 	appendList := func(tag string, rows []inplay.Entry) {
-		fmt.Fprintf(&b, "\n%s (%d):\n", tag, len(rows))
+		fmt.Fprintf(&b, "\n%s (%d)\n", tag, len(rows))
 		if len(rows) == 0 {
-			b.WriteString("  • none\n")
+			b.WriteString("- none\n")
 			return
 		}
 		n := len(rows)
@@ -678,8 +679,8 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 			fs := e.FirstSeen.UTC().Format("15:04")
 			raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
 			m := meta[raw]
-			price := "-"
-			move := "-"
+			price := "n/a"
+			move := "0.00%"
 			status := string(e.State)
 			switch e.State {
 			case inplay.StateInPlay:
@@ -696,13 +697,11 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 				slopeArrow = "↓"
 			}
 			if m.LastPrice > 0 {
-				price = fmt.Sprintf("%.6f", m.LastPrice)
+				price = fmtPrice(m.LastPrice)
 			}
-			if m.Move24h != 0 {
-				move = fmt.Sprintf("%+.2f%%", m.Move24h)
-			}
-			fmt.Fprintf(&b, "  %2d) %-10s | px %-10s | %8s | %-7s | g=%-3s | s=%6.2f %s%.3f | in %s\n",
-				i+1, raw, price, move, status, e.CurrentGrade, e.CurrentScore, slopeArrow, abs(e.ScoreSlope), fs)
+			move = fmt.Sprintf("%+.2f%%", m.Move24h)
+			fmt.Fprintf(&b, "%d) %s %s g=%s s=%.2f %s%.3f\n", i+1, raw, status, e.CurrentGrade, e.CurrentScore, slopeArrow, abs(e.ScoreSlope))
+			fmt.Fprintf(&b, "   px=%s 24h=%s seen=%s\n", price, move, fs)
 		}
 	}
 	appendList("LONG", longInPlay)
@@ -1959,14 +1958,14 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 	eq := p.balance + totalUPnL
 	var b strings.Builder
 	fmt.Fprintf(&b, "Paper Update (%s)\n", time.Now().In(p.reportLoc).Format("15:04 MST"))
-	fmt.Fprintf(&b, "bal=%.2f eq=%.2f openPnL=%+.2f open=%d/%d\n", p.balance, eq, totalUPnL, len(p.positions), p.maxOpen)
+	fmt.Fprintf(&b, "bal=$%.2f eq=$%.2f openPnL=%+.2f open=%d/%d\n", p.balance, eq, totalUPnL, len(p.positions), p.maxOpen)
 	if len(rows) == 0 {
 		b.WriteString("open: none")
 		return b.String()
 	}
 	for i, r := range rows {
-		fmt.Fprintf(&b, "%d) %s %s e=%.6f m=%.6f q=%.4f upnl=%+.3f\n",
-			i+1, r.sym, r.side, r.entry, r.mark, r.qty, r.upnl)
+		fmt.Fprintf(&b, "%d) %s %s e=%s m=%s q=%.4f uPnL=%+.2f\n",
+			i+1, r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, r.upnl)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -3162,6 +3161,18 @@ func abs(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+func fmtPrice(v float64) string {
+	a := abs(v)
+	switch {
+	case a >= 1000:
+		return fmt.Sprintf("%.2f", v)
+	case a >= 1:
+		return fmt.Sprintf("%.4f", v)
+	default:
+		return fmt.Sprintf("%.6f", v)
+	}
 }
 
 func newTelegramSink() *telegramSink {
