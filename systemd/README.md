@@ -33,6 +33,8 @@ cp systemd/env/whale.env.example /opt/aster/env/whale.env
 cp systemd/env/liqs.env.example  /opt/aster/env/liqs.env
 cp systemd/env/oflow.env.example /opt/aster/env/oflow.env
 cp systemd/env/tape.env.example  /opt/aster/env/tape.env
+cp systemd/env/long.env.example  /opt/aster/env/long.env
+cp systemd/env/short.env.example /opt/aster/env/short.env
 cp systemd/env/live-lite.env.example /opt/aster/env/live-lite.env
 ```
 

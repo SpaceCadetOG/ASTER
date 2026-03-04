@@ -69,6 +69,12 @@ scripts/deploy_pi.sh
 scripts/tmux_aster.sh
 ```
 
+Layout:
+- Tab 1 `gitaction`
+- Tab 2 `live-lite`
+- Tab 3 `scanners` split: long | short
+- Tab 4 `flow` cross split: tape | whale | liqs | oflow
+
 ## 6) One-step bot start (recommended)
 
 ```bash
