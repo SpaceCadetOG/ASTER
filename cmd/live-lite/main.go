@@ -4170,7 +4170,7 @@ func newPayoutManager() *payoutManager {
 		mode:           strings.ToLower(envStr("LIVE_PAYOUT_MODE", "telegram_alert")),
 		onlyIfFlat:     envBool("LIVE_PAYOUT_ONLY_IF_FORCE_FLAT", true),
 		notifyTelegram: envBool("LIVE_PAYOUT_NOTIFY_TELEGRAM", true),
-		cycleDays:      envInt("LIVE_PAYOUT_CYCLE_DAYS", 7),
+		cycleDays:      envInt("LIVE_PAYOUT_CYCLE_DAYS", 1),
 		anchorHour:     envInt("LIVE_PAYOUT_ANCHOR_HOUR", 16),
 		anchorMin:      envInt("LIVE_PAYOUT_ANCHOR_MIN", 0),
 		deadlineMin:    envInt("LIVE_PAYOUT_DEADLINE_MIN", 15),
@@ -4180,7 +4180,7 @@ func newPayoutManager() *payoutManager {
 		loc:            loc,
 	}
 	if pm.cycleDays <= 0 {
-		pm.cycleDays = 7
+		pm.cycleDays = 1
 	}
 	if pm.deadlineMin < 0 {
 		pm.deadlineMin = 15
