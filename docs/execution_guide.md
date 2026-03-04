@@ -213,11 +213,12 @@ go run ./cmd/exec
 - Margin mode enforced per trade: `LIVE_MARGIN_TYPE=ISOLATED`
 - Maintenance windows (`America/Chicago`):
   - `00:00-01:00`: block new entries, keep risk management active
-  - `16:00-17:00`: force flat at `16:00`, then block entries until `17:00`
+  - `16:00-18:00`: force flat at `16:00`, then block entries until `18:00`
 - Hourly digest defaults:
   - `LIVE_TG_HOURLY_ENABLE=1`
   - `LIVE_TG_DIGEST_MIN=60`
   - `LIVE_TG_TRADE_UPDATE_MIN=60`
+  - `LIVE_TG_COMMANDS_ENABLE=1`
 
 Recommended env overrides in `/opt/aster/env/live-lite.env`:
 
@@ -267,6 +268,7 @@ LIVE_PAYOUT_MIN_USDT=1.0
 LIVE_PAYOUT_NOTIFY_TELEGRAM=1
 LIVE_PAYOUT_STATE_FILE=out/payout_state.json
 LIVE_PAYOUT_LEDGER_FILE=out/payouts.csv
+LIVE_TG_COMMANDS_ENABLE=1
 ```
 
 Paper continuity:
@@ -275,5 +277,13 @@ Paper continuity:
 - Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
 - Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
 - `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).
-- Payout cycle runs every 7 days and executes at `16:00 CT` with a hard deadline by `16:15 CT`.
+- Payout cycle defaults to daily and executes at `16:00 CT` with a hard deadline by `16:15 CT`.
 - In paper mode payout is auto-debited; in live mode payout is Telegram-notified for manual withdraw.
+- Telegram command handlers:
+  - `/help`
+  - `/status`
+  - `/balance`
+  - `/positions`
+  - `/pause`
+  - `/resume`
+  - `/forceflat`

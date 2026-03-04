@@ -87,6 +87,36 @@ type telegramSink struct {
 	lastSent map[string]time.Time
 }
 
+type telegramCommandCtx struct {
+	tg      *telegramSink
+	rest    *aster.RESTAuth
+	execMgr *liveExecManager
+	paper   *paperTrader
+	safety  safetyConfig
+	status  *liveLiteStatusStore
+
+	metaMu sync.RWMutex
+	meta   map[string]symbolMeta
+}
+
+type tgUpdateResp struct {
+	OK     bool       `json:"ok"`
+	Result []tgUpdate `json:"result"`
+}
+
+type tgUpdate struct {
+	UpdateID int64      `json:"update_id"`
+	Message  *tgMessage `json:"message"`
+}
+
+type tgMessage struct {
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
+	Chat      struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+}
+
 type symbolMeta struct {
 	LastPrice   float64
 	Move24h     float64
@@ -458,6 +488,7 @@ func main() {
 	statusStore := newLiveLiteStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
 	startLiveLiteStatusServer(statusAddr, statusStore)
+	var cmdCtx *telegramCommandCtx
 	tgVerbose := envBool("LIVE_TG_VERBOSE", false)
 	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 60)) * time.Minute
 	if digestEvery < time.Minute {
@@ -522,6 +553,18 @@ func main() {
 		HookDoneDay:  map[string]string{},
 	}
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
+	cmdCtx = &telegramCommandCtx{
+		tg:      tg,
+		rest:    rest,
+		execMgr: execMgr,
+		paper:   paper,
+		safety:  safety,
+		status:  statusStore,
+		meta:    map[string]symbolMeta{},
+	}
+	if envBool("LIVE_TG_COMMANDS_ENABLE", true) {
+		go cmdCtx.run()
+	}
 	payoutMgr := newPayoutManager()
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
@@ -569,6 +612,7 @@ func main() {
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
 		metaBySymbol := buildSymbolMeta(longRows, shortRows)
+		cmdCtx.setMeta(metaBySymbol)
 		paperDepth := map[string]aster.OrderBook{}
 		if paper.enabled {
 			paperDepth = fetchOrderBooks(client, paper.OpenSymbols(), envInt("LIVE_PAPER_OB_LEVELS", 20))
@@ -5009,6 +5053,193 @@ func (t *telegramSink) send(msg string) error {
 		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+func (t *telegramSink) sendToChat(chatID, msg string) error {
+	if t == nil || !t.enabled {
+		return nil
+	}
+	form := url.Values{}
+	form.Set("chat_id", chatID)
+	form.Set("text", msg)
+	form.Set("disable_web_page_preview", "true")
+	if strings.HasPrefix(msg, "<pre>") && strings.HasSuffix(msg, "</pre>") {
+		form.Set("parse_mode", "HTML")
+	}
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (t *telegramSink) getUpdates(offset int64, timeoutSec int) ([]tgUpdate, error) {
+	if t == nil || !t.enabled {
+		return nil, nil
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 20
+	}
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d", t.token, timeoutSec, offset)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("telegram getUpdates http %d: %s", resp.StatusCode, string(body))
+	}
+	var out tgUpdateResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("telegram getUpdates response not ok")
+	}
+	return out.Result, nil
+}
+
+func (c *telegramCommandCtx) setMeta(meta map[string]symbolMeta) {
+	if c == nil {
+		return
+	}
+	cp := make(map[string]symbolMeta, len(meta))
+	for k, v := range meta {
+		cp[k] = v
+	}
+	c.metaMu.Lock()
+	c.meta = cp
+	c.metaMu.Unlock()
+}
+
+func (c *telegramCommandCtx) getMeta() map[string]symbolMeta {
+	if c == nil {
+		return nil
+	}
+	c.metaMu.RLock()
+	defer c.metaMu.RUnlock()
+	cp := make(map[string]symbolMeta, len(c.meta))
+	for k, v := range c.meta {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (c *telegramCommandCtx) run() {
+	if c == nil || c.tg == nil || !c.tg.enabled {
+		return
+	}
+	var offset int64 = 0
+	for {
+		updates, err := c.tg.getUpdates(offset, 20)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		for _, u := range updates {
+			if u.UpdateID >= offset {
+				offset = u.UpdateID + 1
+			}
+			if u.Message == nil || strings.TrimSpace(u.Message.Text) == "" {
+				continue
+			}
+			chatID := strconv.FormatInt(u.Message.Chat.ID, 10)
+			if strings.TrimSpace(c.tg.chatID) != "" && chatID != strings.TrimSpace(c.tg.chatID) {
+				continue
+			}
+			reply := c.handleCommand(strings.TrimSpace(u.Message.Text))
+			if reply == "" {
+				continue
+			}
+			_ = c.tg.sendToChat(chatID, tgPre(reply))
+		}
+	}
+}
+
+func (c *telegramCommandCtx) handleCommand(msg string) string {
+	cmd := strings.ToLower(strings.TrimSpace(msg))
+	switch {
+	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
+		return "Commands:\n/help\n/status\n/balance\n/positions\n/pause\n/resume\n/forceflat"
+	case strings.HasPrefix(cmd, "/status"):
+		s := c.status.Snapshot()
+		return fmt.Sprintf("status\ndry_run=%v live_enabled=%v\nlong_inplay=%d short_inplay=%d\ntop=%s %s g=%s s=%.2f\navailable=%.2f\npaper=%s\nexec_open=%d pending=%d partial1=%d partial2=%d",
+			s.DryRun, s.LiveEnabled, s.LongInPlay, s.ShortInPlay,
+			s.TopSymbol, s.TopSide, s.TopGrade, s.TopScore,
+			s.AvailableUSDT,
+			s.PaperSummary,
+			s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2)
+	case strings.HasPrefix(cmd, "/balance"):
+		if c.rest != nil {
+			assets := envCSV("LIVE_ACCOUNT_ASSETS", "USDT")
+			snap, err := fetchAccountSnapshot(c.rest, assets)
+			if err == nil {
+				eq := accountEquity(snap)
+				return fmt.Sprintf("balance\navailableUSDT=%.4f\nequity=%.4f\nopen_positions=%d", snap.AvailableUSDT, eq, len(snap.Positions))
+			}
+		}
+		s := c.status.Snapshot()
+		return fmt.Sprintf("balance\navailableUSDT=%.4f", s.AvailableUSDT)
+	case strings.HasPrefix(cmd, "/positions"):
+		if c.paper != nil && c.paper.enabled {
+			meta := c.getMeta()
+			return c.paper.PositionsTable(meta)
+		}
+		if c.execMgr != nil {
+			ex := c.execMgr.Snapshot(10)
+			var b strings.Builder
+			fmt.Fprintf(&b, "live positions: open=%d pending=%d active=%d\n", ex.Open, ex.Pending, len(ex.Active))
+			for i, p := range ex.Active {
+				if i >= 10 {
+					break
+				}
+				fmt.Fprintf(&b, "%d) %s %s qty=%.6f entry=%s stop=%s reason=%s\n",
+					i+1, p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice), fmtPrice(p.StopPrice), p.EntryReason)
+			}
+			return strings.TrimSpace(b.String())
+		}
+		return "positions unavailable"
+	case strings.HasPrefix(cmd, "/pause"):
+		if c.safety.pauseFile == "" {
+			return "pause file is not configured"
+		}
+		_ = os.WriteFile(c.safety.pauseFile, []byte(time.Now().Format(time.RFC3339)+" manual pause\n"), 0o644)
+		return "entries paused"
+	case strings.HasPrefix(cmd, "/resume"):
+		if c.safety.pauseFile == "" {
+			return "pause file is not configured"
+		}
+		_ = os.Remove(c.safety.pauseFile)
+		return "entries resumed"
+	case strings.HasPrefix(cmd, "/forceflat"):
+		now := time.Now().UTC()
+		meta := c.getMeta()
+		if c.execMgr != nil {
+			_ = c.execMgr.ForceCloseAll("TG_FORCE_FLAT")
+		}
+		if c.paper != nil && c.paper.enabled {
+			c.paper.ForceCloseAll(now, meta, map[string]aster.OrderBook{}, "TG_FORCE_FLAT")
+		}
+		return "force flat requested"
+	default:
+		return ""
+	}
 }
 
 func gradeValue(g string) int {
