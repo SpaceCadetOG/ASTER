@@ -78,8 +78,12 @@ type telegramSink struct {
 }
 
 type symbolMeta struct {
-	LastPrice float64
-	Move24h   float64
+	LastPrice   float64
+	Move24h     float64
+	VolumeUSD   float64
+	FundingRate float64
+	Bid         float64
+	Ask         float64
 }
 
 type paperPosition struct {
@@ -113,6 +117,8 @@ type paperTrader struct {
 	balance      float64
 	reserve      float64
 	feeBps       float64
+	makerFeeBps  float64
+	takerFeeBps  float64
 	stopPct      float64
 	tp1R         float64
 	tp2R         float64
@@ -137,6 +143,8 @@ type paperTrader struct {
 	staleMinProg float64
 	staleGraceR  float64
 	beLockBps    float64
+	fundingEvery time.Duration
+	lastFundKey  map[string]string
 }
 
 type paperDayStats struct {
@@ -155,6 +163,7 @@ type paperState struct {
 	Reserve   float64                   `json:"reserve"`
 	Positions map[string]*paperPosition `json:"positions"`
 	DayStats  map[string]*paperDayStats `json:"dayStats"`
+	LastFund  map[string]string         `json:"lastFund,omitempty"`
 	UpdatedAt time.Time                 `json:"updatedAt"`
 }
 
@@ -489,8 +498,13 @@ func main() {
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
 		metaBySymbol := buildSymbolMeta(longRows, shortRows)
+		paperDepth := map[string]aster.OrderBook{}
 		if paper.enabled {
-			paper.CheckExit(now, metaBySymbol)
+			paperDepth = fetchOrderBooks(client, paper.OpenSymbols(), envInt("LIVE_PAPER_OB_LEVELS", 20))
+			paper.ApplyFunding(now, metaBySymbol)
+		}
+		if paper.enabled {
+			paper.CheckExit(now, metaBySymbol, paperDepth)
 		}
 		if paper.enabled && tg != nil && tg.enabled {
 			if !hourlyEnable && now.After(nextTradeUpdateAt) {
@@ -567,7 +581,7 @@ func main() {
 			execMgr.Reconcile(now)
 		}
 		if paper.enabled {
-			paper.ApplyStale(now, metaBySymbol)
+			paper.ApplyStale(now, metaBySymbol, paperDepth)
 		}
 		if inMaint {
 			dayKey := localMaintNow.Format("2006-01-02")
@@ -584,7 +598,7 @@ func main() {
 					_ = execMgr.ForceCloseAll("EOD_FORCE_FLAT")
 				}
 				if paper.enabled {
-					paper.ForceCloseAll(now, metaBySymbol, "EOD_FORCE_FLAT")
+					paper.ForceCloseAll(now, metaBySymbol, paperDepth, "EOD_FORCE_FLAT")
 					_ = paper.save()
 				}
 				tg.Sendf("maintenance flat complete %s", maintWindow.Name)
@@ -684,7 +698,8 @@ func main() {
 		if rest == nil || dryRun {
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
 			if paper.enabled {
-				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol)
+				entryDepth := fetchOrderBooks(client, []string{strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))}, envInt("LIVE_PAPER_OB_LEVELS", 20))
+				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth)
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
@@ -1047,14 +1062,47 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 			if raw == "" {
 				continue
 			}
+			fr := 0.0
+			if r.FundingRate != nil {
+				fr = *r.FundingRate
+			}
 			out[raw] = symbolMeta{
-				LastPrice: r.LastPrice,
-				Move24h:   r.Change24h,
+				LastPrice:   r.LastPrice,
+				Move24h:     r.Change24h,
+				VolumeUSD:   r.VolumeUSD,
+				FundingRate: fr,
 			}
 		}
 	}
 	put(longRows)
 	put(shortRows)
+	return out
+}
+
+func fetchOrderBooks(c *aster.Client, symbols []string, limit int) map[string]aster.OrderBook {
+	out := map[string]aster.OrderBook{}
+	if c == nil || len(symbols) == 0 {
+		return out
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	seen := map[string]struct{}{}
+	for _, s := range symbols {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))
+		if raw == "" {
+			continue
+		}
+		if _, ok := seen[raw]; ok {
+			continue
+		}
+		seen[raw] = struct{}{}
+		ob, err := c.FetchOrderBook(raw, limit)
+		if err != nil {
+			continue
+		}
+		out[raw] = ob
+	}
 	return out
 }
 
@@ -1111,9 +1159,21 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if trailStopPct <= 0 {
 		trailStopPct = 1.0
 	}
-	feeBps := envFloat("LIVE_PAPER_FEE_BPS", 6.0)
+	feeBps := envFloat("LIVE_PAPER_FEE_BPS", 4.0)
 	if feeBps < 0 {
 		feeBps = 0
+	}
+	makerFeeBps := envFloat("LIVE_PAPER_FEE_MAKER_BPS", 0.5)
+	takerFeeBps := envFloat("LIVE_PAPER_FEE_TAKER_BPS", feeBps)
+	if makerFeeBps < 0 {
+		makerFeeBps = 0
+	}
+	if takerFeeBps < 0 {
+		takerFeeBps = 0
+	}
+	fundingEvery := time.Duration(envInt("LIVE_PAPER_FUNDING_INTERVAL_MIN", 480)) * time.Minute
+	if fundingEvery <= 0 {
+		fundingEvery = 480 * time.Minute
 	}
 	if maxOpen <= 0 {
 		maxOpen = 1
@@ -1146,6 +1206,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		balance:      start,
 		reserve:      reserveUSDT,
 		feeBps:       feeBps,
+		makerFeeBps:  makerFeeBps,
+		takerFeeBps:  takerFeeBps,
 		stopPct:      stopPct,
 		tp1R:         tp1R,
 		tp2R:         tp2R,
@@ -1170,6 +1232,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		staleMinProg: staleMinProg,
 		staleGraceR:  staleGraceR,
 		beLockBps:    beLockBps,
+		fundingEvery: fundingEvery,
+		lastFundKey:  map[string]string{},
 	}
 	if p.enabled {
 		if err := p.load(); err != nil {
@@ -1209,6 +1273,9 @@ func (p *paperTrader) load() error {
 	if st.DayStats != nil {
 		p.dayStats = st.DayStats
 	}
+	if st.LastFund != nil {
+		p.lastFundKey = st.LastFund
+	}
 	return nil
 }
 
@@ -1225,6 +1292,7 @@ func (p *paperTrader) save() error {
 		Reserve:   p.reserve,
 		Positions: p.positions,
 		DayStats:  p.dayStats,
+		LastFund:  p.lastFundKey,
 		UpdatedAt: time.Now().UTC(),
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
@@ -2290,7 +2358,56 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 		p.balance, eq, realized, openPnL, realized+openPnL, len(p.positions), p.maxOpen, openTxt)
 }
 
-func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta) (*paperPosition, error) {
+func (p *paperTrader) OpenSymbols() []string {
+	if p == nil || len(p.positions) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p.positions))
+	for raw := range p.positions {
+		out = append(out, raw)
+	}
+	return out
+}
+
+func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
+	if p == nil || !p.enabled || len(p.positions) == 0 || p.fundingEvery <= 0 {
+		return
+	}
+	slot := now.UTC().Truncate(p.fundingEvery).Format(time.RFC3339)
+	for raw, pos := range p.positions {
+		if pos == nil || pos.Qty <= 0 {
+			continue
+		}
+		key := raw + "|" + slot
+		if p.lastFundKey[key] != "" {
+			continue
+		}
+		m := meta[raw]
+		if m.FundingRate == 0 || m.LastPrice <= 0 {
+			continue
+		}
+		notional := m.LastPrice * pos.Qty
+		if notional <= 0 {
+			continue
+		}
+		// Positive funding: longs pay, shorts receive. Negative funding: inverse.
+		cost := notional * m.FundingRate
+		net := 0.0
+		if strings.EqualFold(pos.Side, "BUY") {
+			net = -cost
+		} else {
+			net = cost
+		}
+		if net != 0 {
+			p.balance += net
+			p.recordDayStat(now, "FUNDING", net, 0, net)
+		}
+		p.lastFundKey[key] = "1"
+	}
+	_ = p.save()
+}
+
+func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook) (*paperPosition, error) {
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
@@ -2323,6 +2440,11 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, fmt.Errorf("invalid entry/notional")
 	}
 	qty := notional / entry
+	ob := depth[raw]
+	fillPx := paperSimFillPrice(strings.ToUpper(c.Side), qty, m, ob, data.CurrentRegimeCT(now), true)
+	if fillPx > 0 {
+		entry = fillPx
+	}
 	stopPct := p.stopPct / 100.0
 	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
 	tp1R := p.tp1R
@@ -2366,7 +2488,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if risk <= 0 || reward/risk < p.minTP1RR {
 		return nil, fmt.Errorf("paper tp1 rr below minimum")
 	}
-	fee := notional * p.feeBps / 10000.0
+	feeRate := p.feeRateBpsForReason("ENTRY")
+	fee := (entry * qty) * feeRate / 10000.0
 	p.balance -= fee
 	pos := &paperPosition{
 		Symbol:      raw,
@@ -2391,7 +2514,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	return pos, nil
 }
 
-func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
+func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
 	if p == nil || !p.enabled || len(p.positions) == 0 {
 		return
 	}
@@ -2417,14 +2540,14 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 
 		// 1) Hard stop has highest priority.
 		if (sideBuy && mark <= pos.Stop) || (!sideBuy && mark >= pos.Stop) {
-			p.exitPortion(now, pos, "SL", pos.Stop, pos.Qty)
+			p.exitPortion(now, pos, "SL", pos.Stop, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
 
 		// 2) Scale-out targets.
 		if !pos.HitTP1 && p.hitPrice(sideBuy, mark, pos.TP1) {
 			q := p.targetQty(pos.InitialQty, p.tp1Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP1", pos.TP1, q)
+			p.exitPortion(now, pos, "TP1", pos.TP1, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -2439,7 +2562,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 		}
 		if !pos.HitTP2 && p.hitPrice(sideBuy, mark, pos.TP2) {
 			q := p.targetQty(pos.InitialQty, p.tp2Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP2", pos.TP2, q)
+			p.exitPortion(now, pos, "TP2", pos.TP2, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -2456,7 +2579,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 		}
 		if !pos.HitTP3 && p.hitPrice(sideBuy, mark, pos.TP3) {
 			q := p.targetQty(pos.InitialQty, p.tp3Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP3", pos.TP3, q)
+			p.exitPortion(now, pos, "TP3", pos.TP3, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -2479,7 +2602,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 				pos.TrailStop = p.calcTrailStop(sideBuy, mark)
 			}
 			if (sideBuy && mark <= pos.TrailStop) || (!sideBuy && mark >= pos.TrailStop) {
-				p.exitPortion(now, pos, "TRAIL_STOP", pos.TrailStop, pos.Qty)
+				p.exitPortion(now, pos, "TRAIL_STOP", pos.TrailStop, pos.Qty, meta[raw], depth[raw])
 				continue
 			}
 		}
@@ -2490,7 +2613,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 	}
 }
 
-func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta) {
+func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
 	if p == nil || !p.enabled || !p.staleEnable {
 		return
 	}
@@ -2503,12 +2626,12 @@ func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta) {
 			continue
 		}
 		if shouldCloseStalePaper(pos, now, p.staleMaxAge, p.staleMinProg, p.staleGraceR) {
-			p.exitPortion(now, pos, "STALE_NO_PROGRESS", mark, pos.Qty)
+			p.exitPortion(now, pos, "STALE_NO_PROGRESS", mark, pos.Qty, meta[raw], depth[raw])
 		}
 	}
 }
 
-func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, reason string) {
+func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, depth map[string]aster.OrderBook, reason string) {
 	if p == nil || !p.enabled {
 		return
 	}
@@ -2520,12 +2643,12 @@ func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, r
 		if mark <= 0 {
 			mark = pos.Entry
 		}
-		p.exitPortion(now, pos, reason, mark, pos.Qty)
+		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
 	}
 	_ = p.save()
 }
 
-func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason string, exitPrice, qty float64) {
+func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason string, exitPrice, qty float64, m symbolMeta, ob aster.OrderBook) {
 	if p == nil || !p.enabled || pos == nil {
 		return
 	}
@@ -2536,6 +2659,10 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	if qty > pos.Qty {
 		qty = pos.Qty
 	}
+	fillPx := paperSimFillPrice(exitSideForPosition(pos.Side), qty, m, ob, data.CurrentRegimeCT(now), false)
+	if fillPx > 0 {
+		exitPrice = fillPx
+	}
 	gross := 0.0
 	if strings.EqualFold(pos.Side, "BUY") {
 		gross = (exitPrice - pos.Entry) * qty
@@ -2543,7 +2670,8 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		gross = (pos.Entry - exitPrice) * qty
 	}
 	notional := exitPrice * qty
-	fee := notional * p.feeBps / 10000.0
+	feeRate := p.feeRateBpsForReason(reason)
+	fee := notional * feeRate / 10000.0
 	net := gross - fee
 	pos.Realized += net
 	p.balance += net
@@ -2719,6 +2847,161 @@ func (p *paperTrader) calcTrailStop(sideBuy bool, ref float64) float64 {
 		return ref * (1 - pct)
 	}
 	return ref * (1 + pct)
+}
+
+func (p *paperTrader) feeRateBpsForReason(reason string) float64 {
+	r := strings.ToUpper(strings.TrimSpace(reason))
+	switch r {
+	case "TP1", "TP2", "TP3":
+		if p.makerFeeBps > 0 {
+			return p.makerFeeBps
+		}
+	case "SL", "TRAIL_STOP", "STALE_NO_PROGRESS", "EOD_FORCE_FLAT", "ENTRY_TIMEOUT":
+		if p.takerFeeBps > 0 {
+			return p.takerFeeBps
+		}
+	}
+	if p.feeBps > 0 {
+		return p.feeBps
+	}
+	if p.takerFeeBps > 0 {
+		return p.takerFeeBps
+	}
+	return 0
+}
+
+func exitSideForPosition(posSide string) string {
+	if strings.EqualFold(strings.TrimSpace(posSide), "BUY") {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+func paperSimFillPrice(side string, qty float64, m symbolMeta, ob aster.OrderBook, regime data.Regime, isEntry bool) float64 {
+	if qty <= 0 {
+		return m.LastPrice
+	}
+	topBid, topAsk := topOfBook(ob, m.LastPrice)
+	mid := m.LastPrice
+	if topBid > 0 && topAsk > 0 {
+		mid = (topBid + topAsk) / 2.0
+	}
+	if mid <= 0 {
+		return 0
+	}
+	vwap, ok := vwapFromDepth(side, qty, ob)
+	if ok && vwap > 0 {
+		return applyRegimeSlip(vwap, side, regime, mid, m.VolumeUSD, isEntry)
+	}
+	baseSpread := 0.0
+	if topBid > 0 && topAsk > 0 {
+		baseSpread = (topAsk - topBid) / mid
+	}
+	if baseSpread <= 0 {
+		baseSpread = 0.0004
+	}
+	fill := mid
+	if strings.EqualFold(side, "BUY") {
+		fill = mid * (1 + baseSpread/2.0)
+	} else {
+		fill = mid * (1 - baseSpread/2.0)
+	}
+	return applyRegimeSlip(fill, side, regime, mid, m.VolumeUSD, isEntry)
+}
+
+func applyRegimeSlip(px float64, side string, regime data.Regime, mid, volUSD float64, isEntry bool) float64 {
+	if px <= 0 || mid <= 0 {
+		return px
+	}
+	mult := 1.0
+	switch regime {
+	case data.OverlapAE, data.OverlapEUUS:
+		mult = 0.75
+	case data.RegimeEU, data.RegimeUS, data.RegimeAsia:
+		mult = 1.0
+	default:
+		mult = 1.35
+	}
+	impactBps := 2.0 * mult
+	if volUSD > 0 {
+		if volUSD < 5_000_000 {
+			impactBps += 4.0 * mult
+		} else if volUSD < 20_000_000 {
+			impactBps += 2.0 * mult
+		}
+	}
+	if !isEntry {
+		impactBps += 0.5 * mult
+	}
+	d := impactBps / 10000.0
+	if strings.EqualFold(side, "BUY") {
+		return px * (1 + d)
+	}
+	return px * (1 - d)
+}
+
+func topOfBook(ob aster.OrderBook, fallback float64) (bid, ask float64) {
+	if len(ob.Bids) > 0 {
+		bid = ob.Bids[0][0]
+	}
+	if len(ob.Asks) > 0 {
+		ask = ob.Asks[0][0]
+	}
+	if bid <= 0 || ask <= 0 {
+		if fallback > 0 {
+			return fallback * 0.9995, fallback * 1.0005
+		}
+	}
+	return bid, ask
+}
+
+func vwapFromDepth(side string, qty float64, ob aster.OrderBook) (float64, bool) {
+	levels := ob.Asks
+	if !strings.EqualFold(side, "BUY") {
+		levels = ob.Bids
+	}
+	if len(levels) == 0 {
+		return 0, false
+	}
+	remaining := qty
+	totalQty := 0.0
+	totalNotional := 0.0
+	for _, lv := range levels {
+		price := lv[0]
+		levelQty := lv[1]
+		if price <= 0 || levelQty <= 0 {
+			continue
+		}
+		take := levelQty
+		if take > remaining {
+			take = remaining
+		}
+		totalQty += take
+		totalNotional += price * take
+		remaining -= take
+		if remaining <= 1e-12 {
+			break
+		}
+	}
+	if totalQty <= 0 {
+		return 0, false
+	}
+	avg := totalNotional / totalQty
+	if remaining > 1e-12 {
+		last := levels[len(levels)-1][0]
+		if last <= 0 {
+			last = avg
+		}
+		// Penalize remainder beyond visible depth.
+		worse := last
+		if strings.EqualFold(side, "BUY") {
+			worse = last * 1.0015
+		} else {
+			worse = last * 0.9985
+		}
+		avg = ((avg * totalQty) + (worse * remaining)) / (totalQty + remaining)
+	}
+	return avg, true
 }
 
 func (p *paperTrader) logTrade(now time.Time, symbol, side string, entry, exit, qty float64, lev int, margin, stop, tp float64, reason string, gross, fee, net, holdMin float64) error {

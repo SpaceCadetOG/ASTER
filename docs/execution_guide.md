@@ -238,9 +238,15 @@ LIVE_MAINT2_START_HOUR=16
 LIVE_MAINT2_END_HOUR=17
 LIVE_MAINT2_FORCE_FLAT=1
 LIVE_PAPER_STATE_FILE=out/paper_state.json
+LIVE_PAPER_OB_LEVELS=20
+LIVE_PAPER_FEE_BPS=4.0
+LIVE_PAPER_FEE_MAKER_BPS=0.5
+LIVE_PAPER_FEE_TAKER_BPS=4.0
+LIVE_PAPER_FUNDING_INTERVAL_MIN=480
 ```
 
 Paper continuity:
 
 - Paper trader state is persisted to `LIVE_PAPER_STATE_FILE`.
 - Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
+- Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
