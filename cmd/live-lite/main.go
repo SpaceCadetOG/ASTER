@@ -188,6 +188,7 @@ type paperTrader struct {
 	fundingBySym map[string]time.Duration
 	lastFundKey  map[string]string
 	openCostMode string
+	onExit       func(string)
 }
 
 type paperDayStats struct {
@@ -569,6 +570,11 @@ func main() {
 		HookDoneDay:  map[string]string{},
 	}
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
+	if paper != nil && tg != nil && tg.enabled {
+		paper.onExit = func(msg string) {
+			tg.Sendf("%s", tgPre(msg))
+		}
+	}
 	cmdCtx = &telegramCommandCtx{
 		tg:      tg,
 		rest:    rest,
@@ -3319,6 +3325,14 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	feeRate := p.feeRateBpsForReason(reason)
 	fee := notional * feeRate / 10000.0
 	net := gross - fee
+	pct := 0.0
+	if pos.Entry > 0 {
+		if strings.EqualFold(pos.Side, "BUY") {
+			pct = ((exitPrice - pos.Entry) / pos.Entry) * 100.0
+		} else {
+			pct = ((pos.Entry - exitPrice) / pos.Entry) * 100.0
+		}
+	}
 	pos.Realized += net
 	p.balance += net
 	p.recordDayStat(now, reason, gross, fee, net)
@@ -3329,6 +3343,22 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
 	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm\n",
 		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin)
+	if p.onExit != nil {
+		loc := p.reportLoc
+		if loc == nil {
+			loc = time.Local
+		}
+		dayKey := now.In(loc).Format("2006-01-02")
+		realizedToday := 0.0
+		if ds := p.dayStats[dayKey]; ds != nil {
+			realizedToday = ds.Net
+		}
+		p.onExit(fmt.Sprintf(
+			"PAPER EXIT | %s %s\nqty=%.6f exit=%s pnl=%+.2f (%+.2f%%)\nreason=%s hold=%.1fm rem=%.6f\nrealizedToday=%+.2f balance=$%.2f session=%s",
+			symbol, pos.Side, qty, fmtPrice(exitPrice), net, pct, strings.ToUpper(strings.TrimSpace(reason)), holdMin, pos.Qty,
+			realizedToday, p.balance, sessionTag(now.In(loc)),
+		))
+	}
 	_ = p.logTrade(now, symbol, pos.Side, pos.Entry, exitPrice, qty, pos.Leverage, pos.Margin, pos.Stop, exitPrice, reason, gross, fee, net, holdMin)
 	if pos.Qty <= 1e-10 {
 		delete(p.positions, symbol)
