@@ -275,6 +275,8 @@ type liveExecManager struct {
 	rest            *aster.RESTAuth
 	tg              *telegramSink
 	path            string
+	tradesCSV       string
+	fillReceipt     bool
 	entryTimeout    time.Duration
 	stopPct         float64
 	tp1R            float64
@@ -515,6 +517,11 @@ func main() {
 	if receiptLimit <= 0 {
 		receiptLimit = 25
 	}
+	liveReceiptEnable := envBool("LIVE_TG_DAILY_LIVE_RECEIPT_ENABLE", true)
+	liveReceiptLimit := envInt("LIVE_TG_DAILY_LIVE_RECEIPT_LIMIT", 25)
+	if liveReceiptLimit <= 0 {
+		liveReceiptLimit = 25
+	}
 	if reportHour < 0 || reportHour > 23 {
 		reportHour = 0
 	}
@@ -552,6 +559,7 @@ func main() {
 	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
 	lastDailyReportDay := ""
+	lastDailyLiveReceiptDay := ""
 	lastHourlyKey := ""
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
@@ -649,6 +657,18 @@ func main() {
 						}
 					}
 					lastDailyReportDay = dayKey
+				}
+			}
+		}
+		if tg != nil && tg.enabled && execMgr != nil && liveReceiptEnable {
+			localNow := now.In(execMgr.reportLoc)
+			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
+				dayKey := localNow.AddDate(0, 0, -1).Format("2006-01-02")
+				if dayKey != lastDailyLiveReceiptDay {
+					if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
+						tg.Sendf("%s", tgPre(msg))
+					}
+					lastDailyLiveReceiptDay = dayKey
 				}
 			}
 		}
@@ -1647,6 +1667,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		rest:            rest,
 		tg:              tg,
 		path:            envStr("LIVE_STATE_FILE", "out/live_exec_state.json"),
+		tradesCSV:       envStr("LIVE_TRADES_FILE", "out/live_trades.csv"),
+		fillReceipt:     envBool("LIVE_TG_FILL_RECEIPT_ENABLE", true),
 		entryTimeout:    time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
 		stopPct:         stopPct,
 		tp1R:            tp1R,
@@ -1715,6 +1737,158 @@ func (m *liveExecManager) save() error {
 		return err
 	}
 	return os.WriteFile(m.path, b, 0o644)
+}
+
+func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason string, qty, fillPx, pnl, pct float64) error {
+	if m == nil || strings.TrimSpace(m.tradesCSV) == "" || p == nil {
+		return nil
+	}
+	if err := ensureCSVWithHeader(m.tradesCSV, []string{
+		"ts", "symbol", "side", "action", "reason", "qty", "fill_px", "entry_px", "pnl", "pnl_pct", "state", "hold_min",
+	}); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(m.tradesCSV, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	holdMin := now.Sub(p.CreatedAt).Minutes()
+	w := csv.NewWriter(f)
+	_ = w.Write([]string{
+		now.Format(time.RFC3339),
+		p.Symbol,
+		p.Side,
+		strings.ToUpper(strings.TrimSpace(action)),
+		strings.ToUpper(strings.TrimSpace(reason)),
+		fmt.Sprintf("%.8f", qty),
+		fmt.Sprintf("%.8f", fillPx),
+		fmt.Sprintf("%.8f", p.EntryPrice),
+		fmt.Sprintf("%.8f", pnl),
+		fmt.Sprintf("%.8f", pct),
+		string(p.State),
+		fmt.Sprintf("%.2f", holdMin),
+	})
+	w.Flush()
+	return w.Error()
+}
+
+func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action, reason string, qty, fillPx, pnl, pct float64) {
+	if m == nil || p == nil || m.tg == nil || !m.fillReceipt {
+		return
+	}
+	loc := m.reportLoc
+	if loc == nil {
+		loc = time.Local
+	}
+	dayKey := now.In(loc).Format("2006-01-02")
+	dayRealized := 0.0
+	if m.dayRealized != nil {
+		dayRealized = m.dayRealized[dayKey]
+	}
+	holdMin := now.Sub(p.CreatedAt).Minutes()
+	m.tg.Sendf("fill receipt %s %s\naction=%s reason=%s qty=%.6f fill=%s pnl=%+.2f (%+.2f%%)\nhold=%.1fm dayRealized=%+.2f session=%s",
+		p.Symbol,
+		p.Side,
+		strings.ToUpper(strings.TrimSpace(action)),
+		strings.ToUpper(strings.TrimSpace(reason)),
+		qty,
+		fmtPrice(fillPx),
+		pnl,
+		pct,
+		holdMin,
+		dayRealized,
+		sessionTag(now))
+}
+
+func (m *liveExecManager) DailyReceiptMessage(dayKey string, limit int) (string, bool) {
+	if m == nil || strings.TrimSpace(m.tradesCSV) == "" || m.reportLoc == nil {
+		return "", false
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	f, err := os.Open(m.tradesCSV)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	header, err := r.Read()
+	if err != nil || len(header) == 0 {
+		return "", false
+	}
+	idx := map[string]int{}
+	for i, h := range header {
+		idx[strings.TrimSpace(h)] = i
+	}
+	req := []string{"ts", "symbol", "side", "action", "reason", "qty", "fill_px", "pnl", "pnl_pct", "hold_min"}
+	for _, k := range req {
+		if _, ok := idx[k]; !ok {
+			return "", false
+		}
+	}
+	type row struct {
+		ts     time.Time
+		symbol string
+		side   string
+		action string
+		reason string
+		qty    string
+		fill   string
+		pnl    string
+		pct    string
+		hold   string
+	}
+	rows := make([]row, 0, limit)
+	for {
+		rec, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, rec[idx["ts"]])
+		if err != nil {
+			continue
+		}
+		if ts.In(m.reportLoc).Format("2006-01-02") != dayKey {
+			continue
+		}
+		rows = append(rows, row{
+			ts:     ts,
+			symbol: rec[idx["symbol"]],
+			side:   rec[idx["side"]],
+			action: rec[idx["action"]],
+			reason: rec[idx["reason"]],
+			qty:    rec[idx["qty"]],
+			fill:   rec[idx["fill_px"]],
+			pnl:    rec[idx["pnl"]],
+			pct:    rec[idx["pnl_pct"]],
+			hold:   rec[idx["hold_min"]],
+		})
+	}
+	if len(rows) == 0 {
+		return fmt.Sprintf("Live Trade Receipt %s (%s)\nno fills", dayKey, m.reportLoc.String()), true
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ts.Before(rows[j].ts) })
+	if len(rows) > limit {
+		rows = rows[len(rows)-limit:]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Live Trade Receipt %s (%s)\n", dayKey, m.reportLoc.String())
+	b.WriteString("| Time | Sym | Side | Action | Qty | Fill | PnL | PnL% | Hold(m) | Reason |\n")
+	b.WriteString("|---|---|---|---|---:|---:|---:|---:|---:|---|\n")
+	for _, x := range rows {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+			x.ts.In(m.reportLoc).Format("15:04"),
+			strings.ToUpper(strings.TrimSpace(x.symbol)),
+			strings.ToUpper(strings.TrimSpace(x.side)),
+			strings.ToUpper(strings.TrimSpace(x.action)),
+			x.qty, x.fill, x.pnl, x.pct, x.hold, strings.ToUpper(strings.TrimSpace(x.reason)))
+	}
+	return strings.TrimSpace(b.String()), true
 }
 
 func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote int, err error) {
@@ -2039,6 +2213,8 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 			m.tg.Sendf("entry filled %s %s\nqty=%.6f avg=%s reason=%s conf=%.2f",
 				p.Symbol, p.Side, p.FilledQty, fmtPrice(p.EntryPrice), p.EntryReason, p.EntryConf)
 		}
+		_ = m.logFill(now, p, "ENTRY", "ENTRY_FILLED", p.FilledQty, p.EntryPrice, 0, 0)
+		m.sendFillReceipt(now, p, "ENTRY", "ENTRY_FILLED", p.FilledQty, p.EntryPrice, 0, 0)
 		return true, nil
 	}
 	if now.Sub(p.CreatedAt) >= m.entryTimeout {
@@ -2051,6 +2227,8 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		if m.tg != nil {
 			m.tg.Sendf("entry timeout %s\nid=%d", p.Symbol, p.EntryOrderID)
 		}
+		_ = m.logFill(now, p, "ENTRY", "ENTRY_TIMEOUT", 0, 0, 0, 0)
+		m.sendFillReceipt(now, p, "ENTRY", "ENTRY_TIMEOUT", 0, 0, 0, 0)
 		return true, nil
 	}
 	return false, nil
@@ -2094,6 +2272,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 					m.tg.Sendf("position closed %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s",
 						p.Symbol, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, p.CloseReason)
 				}
+				_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, mark, pnl, pct)
+				m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, mark, pnl, pct)
 				return true, nil
 			}
 		}
@@ -2121,6 +2301,13 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			if m.tg != nil {
 				m.tg.Sendf("position closed %s\nreason=%s", p.Symbol, p.CloseReason)
 			}
+			px := p.LastMark
+			if px <= 0 {
+				px = p.EntryPrice
+			}
+			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, px, p.RemainingQty)
+			_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, px, pnl, pct)
+			m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, px, pnl, pct)
 			return true, nil
 		}
 	}
@@ -2153,6 +2340,8 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				m.tg.Sendf("tp1 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP1_HIT dayRealized=%+.2f",
 					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
+			_ = m.logFill(now, p, "TP", "TP1_HIT", execQty, fillPx, pnl, pct)
+			m.sendFillReceipt(now, p, "TP", "TP1_HIT", execQty, fillPx, pnl, pct)
 			changed = true
 		}
 	}
@@ -2177,6 +2366,8 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				m.tg.Sendf("tp2 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP2_HIT dayRealized=%+.2f",
 					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
+			_ = m.logFill(now, p, "TP", "TP2_HIT", execQty, fillPx, pnl, pct)
+			m.sendFillReceipt(now, p, "TP", "TP2_HIT", execQty, fillPx, pnl, pct)
 			changed = true
 		}
 	}
@@ -2197,6 +2388,8 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				m.tg.Sendf("tp3 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP3_HIT dayRealized=%+.2f",
 					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
+			_ = m.logFill(now, p, "TP", "TP3_HIT", execQty, fillPx, pnl, pct)
+			m.sendFillReceipt(now, p, "TP", "TP3_HIT", execQty, fillPx, pnl, pct)
 			changed = true
 		}
 	}
@@ -2220,6 +2413,8 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				m.tg.Sendf("stop hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=STOP_HIT dayRealized=%+.2f",
 					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
 			}
+			_ = m.logFill(now, p, "STOP", "STOP_HIT", execQty, fillPx, pnl, pct)
+			m.sendFillReceipt(now, p, "STOP", "STOP_HIT", execQty, fillPx, pnl, pct)
 			return true, nil
 		}
 	}
@@ -2545,6 +2740,8 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 			m.tg.Sendf("forced close %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
 				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
 		}
+		_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 		p.State = execClosed
 		p.CloseReason = reason
 		p.ClosedAt = now
