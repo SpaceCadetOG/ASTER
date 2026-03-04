@@ -265,10 +265,13 @@ LIVE_PAYOUT_ANCHOR_MIN=0
 LIVE_PAYOUT_DEADLINE_MIN=15
 LIVE_PAYOUT_ONLY_IF_FORCE_FLAT=1
 LIVE_PAYOUT_MIN_USDT=1.0
+LIVE_PAYOUT_KEEP_USDT=0
 LIVE_PAYOUT_NOTIFY_TELEGRAM=1
 LIVE_PAYOUT_STATE_FILE=out/payout_state.json
 LIVE_PAYOUT_LEDGER_FILE=out/payouts.csv
 LIVE_TG_COMMANDS_ENABLE=1
+LIVE_TG_DAILY_RECEIPT_ENABLE=1
+LIVE_TG_DAILY_RECEIPT_LIMIT=25
 ```
 
 Paper continuity:
@@ -279,6 +282,8 @@ Paper continuity:
 - `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).
 - Payout cycle defaults to daily and executes at `16:00 CT` with a hard deadline by `16:15 CT`.
 - In paper mode payout is auto-debited; in live mode payout is Telegram-notified for manual withdraw.
+- Payout withdraws only profit above trading base; set `LIVE_PAYOUT_KEEP_USDT` to keep a fixed top-up base.
+- End-of-day receipt can include all trades and results via `LIVE_TG_DAILY_RECEIPT_ENABLE`.
 - Telegram command handlers:
   - `/help`
   - `/status`
