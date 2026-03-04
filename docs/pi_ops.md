@@ -75,22 +75,18 @@ Layout:
 - Tab 3 `scanners` split: long | short
 - Tab 4 `flow` cross split: tape | whale | liqs | oflow
 
-## 6) One-step bot start (recommended)
+## 6) Start / restart bot stack
+
+Deploy latest binaries + units:
 
 ```bash
-scripts/start_bot.sh
+scripts/deploy_pi.sh
 ```
 
-Options:
-- skip rebuild/redeploy and only restart + attach tmux:
+Then restart/attach tmux stack:
 
 ```bash
-SKIP_DEPLOY=1 scripts/start_bot.sh
-```
-- include extra services (`liqs/oflow/long/short`) in restart script:
-
-```bash
-START_EXTRA_SERVICES=1 scripts/start_bot.sh
+scripts/restart_aster_stack.sh
 ```
 
 ## 7) One-step bot stop
