@@ -105,6 +105,7 @@ scripts/stop_bot.sh
 - EOD maintenance: `16:00-18:00` (`LIVE_MAINT2_*`), with force-flat at `16:00`.
 - EOD daily report/receipt dispatch default: `18:00 CT` (`LIVE_TG_DAILY_REPORT_*`).
 - 7-day payout anchor: `16:00` (`LIVE_PAYOUT_ANCHOR_*`).
+- Set `LIVE_STATE_DIR=/opt/aster/state` so restarts always load/save the same state files regardless of cwd.
 - Payout SLA: action/notification completed by `16:15` (`LIVE_PAYOUT_DEADLINE_MIN=15`).
 - Payout files:
   - state: `out/payout_state.json`

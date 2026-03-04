@@ -597,6 +597,22 @@ func main() {
 		go cmdCtx.run()
 	}
 	payoutMgr := newPayoutManager()
+	if paper != nil || execMgr != nil || payoutMgr != nil {
+		paperPath := ""
+		livePath := ""
+		payoutPath := ""
+		if paper != nil {
+			paperPath = paper.stateFile
+		}
+		if execMgr != nil {
+			livePath = execMgr.path
+		}
+		if payoutMgr != nil {
+			payoutPath = payoutMgr.stateFile
+		}
+		fmt.Printf("state paths: paper=%s (exists=%v) live=%s (exists=%v) payout=%s (exists=%v)\n",
+			paperPath, fileExists(paperPath), livePath, fileExists(livePath), payoutPath, fileExists(payoutPath))
+	}
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
 		scanEvery, dryRun, strings.ToUpper(minGrade),
@@ -1559,8 +1575,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		trailAfterTP: trailAfterTP,
 		trailStopPct: trailStopPct,
 		stateFile:    envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
-		tradesCSV:    envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv"),
-		equityCSV:    envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv"),
+		tradesCSV:    resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
+		equityCSV:    resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
 		maxOpen:      maxOpen,
 		positions:    map[string]*paperPosition{},
 		reportLoc:    reportLoc,
@@ -1578,6 +1594,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		lastFundKey:  map[string]string{},
 		openCostMode: openCostMode,
 	}
+	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
 		if err := p.load(); err != nil {
 			fmt.Printf("live-lite: paper state load warning: %v\n", err)
@@ -1733,8 +1750,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 	m := &liveExecManager{
 		rest:            rest,
 		tg:              tg,
-		path:            envStr("LIVE_STATE_FILE", "out/live_exec_state.json"),
-		tradesCSV:       envStr("LIVE_TRADES_FILE", "out/live_trades.csv"),
+		path:            resolveStatePath(envStr("LIVE_STATE_FILE", "out/live_exec_state.json")),
+		tradesCSV:       resolveStatePath(envStr("LIVE_TRADES_FILE", "out/live_trades.csv")),
 		fillReceipt:     envBool("LIVE_TG_FILL_RECEIPT_ENABLE", true),
 		entryTimeout:    time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
 		stopPct:         stopPct,
@@ -4640,8 +4657,8 @@ func newPayoutManager() *payoutManager {
 		deadlineMin:    envInt("LIVE_PAYOUT_DEADLINE_MIN", 15),
 		minPayoutUSDT:  envFloat("LIVE_PAYOUT_MIN_USDT", 1.0),
 		keepTradingUSD: envFloat("LIVE_PAYOUT_KEEP_USDT", 0),
-		stateFile:      envStr("LIVE_PAYOUT_STATE_FILE", "out/payout_state.json"),
-		ledgerFile:     envStr("LIVE_PAYOUT_LEDGER_FILE", "out/payouts.csv"),
+		stateFile:      resolveStatePath(envStr("LIVE_PAYOUT_STATE_FILE", "out/payout_state.json")),
+		ledgerFile:     resolveStatePath(envStr("LIVE_PAYOUT_LEDGER_FILE", "out/payouts.csv")),
 		loc:            loc,
 	}
 	if pm.cycleDays <= 0 {
@@ -5289,6 +5306,46 @@ func envStr(k, def string) string {
 		return def
 	}
 	return v
+}
+
+func resolveStatePath(p string) string {
+	s := strings.TrimSpace(p)
+	if s == "" {
+		return ""
+	}
+	if filepath.IsAbs(s) {
+		return filepath.Clean(s)
+	}
+	base := strings.TrimSpace(os.Getenv("LIVE_STATE_DIR"))
+	if base == "" {
+		if exe, err := os.Executable(); err == nil {
+			exeDir := filepath.Dir(exe)
+			if filepath.Base(exeDir) == "bin" {
+				exeDir = filepath.Dir(exeDir)
+			}
+			if !strings.HasPrefix(exeDir, os.TempDir()) {
+				base = exeDir
+			}
+		}
+	}
+	if base == "" {
+		if wd, err := os.Getwd(); err == nil {
+			base = wd
+		}
+	}
+	if base == "" {
+		return filepath.Clean(s)
+	}
+	return filepath.Clean(filepath.Join(base, s))
+}
+
+func fileExists(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return false
+	}
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func envFloat(k string, def float64) float64 {

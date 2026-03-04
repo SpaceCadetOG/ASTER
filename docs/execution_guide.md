@@ -230,6 +230,7 @@ Recommended env overrides in `/opt/aster/env/live-lite.env`:
 LIVE_MARGIN_TYPE=ISOLATED
 LIVE_ENFORCE_MARGIN_TYPE=1
 LIVE_MULTI_ASSET_MODE=0
+LIVE_STATE_DIR=/opt/aster/state
 LIVE_FEE_PROFILE=pro
 LIVE_FEE_DISCOUNT_PCT=0
 LIVE_RESERVE_MODE=fixed
@@ -301,6 +302,7 @@ Paper continuity:
 - End-of-day receipt can include all trades and results via `LIVE_TG_DAILY_RECEIPT_ENABLE`.
 - Daily report/receipts are dispatched after EOD by default at `18:00 CT` (configure with `LIVE_TG_DAILY_REPORT_*`).
 - Live fills are journaled to `LIVE_TRADES_FILE`; enable second per-fill Telegram receipt with `LIVE_TG_FILL_RECEIPT_ENABLE=1`.
+- To avoid state resets across different working directories, set `LIVE_STATE_DIR` to a stable absolute path (example: `/opt/aster/state`).
 - Telegram command handlers:
   - `/help`
   - `/status`
