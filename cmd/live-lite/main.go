@@ -42,6 +42,7 @@ type candidate struct {
 type positionView struct {
 	Symbol   string
 	Side     string
+	Margin   float64
 	SizeAbs  float64
 	Entry    float64
 	Mark     float64
@@ -702,7 +703,11 @@ func main() {
 				fmt.Println("live-lite: account snapshot error:", err)
 			} else {
 				acct = snap
-				printAccountSnapshot(snap, accountAssets)
+				realizedToday := 0.0
+				if execMgr != nil {
+					realizedToday = execMgr.dayRealizedAt(now)
+				}
+				printAccountSnapshot(snap, accountAssets, realizedToday)
 				dayKey := now.Format("2006-01-02")
 				eq := accountEquity(snap)
 				if eq > 0 && dayStartEq[dayKey] == 0 {
@@ -1295,6 +1300,18 @@ func (m *liveExecManager) addDayRealized(now time.Time, pnl float64) float64 {
 	}
 	dayKey := now.In(loc).Format("2006-01-02")
 	m.dayRealized[dayKey] += pnl
+	return m.dayRealized[dayKey]
+}
+
+func (m *liveExecManager) dayRealizedAt(now time.Time) float64 {
+	if m == nil {
+		return 0
+	}
+	loc := m.reportLoc
+	if loc == nil {
+		loc = time.Local
+	}
+	dayKey := now.In(loc).Format("2006-01-02")
 	return m.dayRealized[dayKey]
 }
 
@@ -2835,15 +2852,18 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 		return ""
 	}
 	type row struct {
-		sym   string
-		side  string
-		size  float64
-		entry float64
-		mark  float64
-		upnl  float64
-		lev   int
+		sym    string
+		side   string
+		margin float64
+		size   float64
+		entry  float64
+		mark   float64
+		upnl   float64
+		lev    int
 	}
 	rows := make([]row, 0, len(p.positions))
+	totalUPnL := 0.0
+	totalMargin := 0.0
 	for raw, pos := range p.positions {
 		if pos == nil {
 			continue
@@ -2858,29 +2878,41 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 				upnl = (pos.Entry - mark) * pos.Qty
 			}
 		}
+		totalUPnL += upnl
+		totalMargin += pos.Margin
 		rows = append(rows, row{
-			sym:   raw,
-			side:  pos.Side,
-			size:  pos.Qty,
-			entry: pos.Entry,
-			mark:  mark,
-			upnl:  upnl,
-			lev:   maxInt(pos.Leverage, 1),
+			sym:    raw,
+			side:   pos.Side,
+			margin: pos.Margin,
+			size:   pos.Qty,
+			entry:  pos.Entry,
+			mark:   mark,
+			upnl:   upnl,
+			lev:    maxInt(pos.Leverage, 1),
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].upnl > rows[j].upnl })
 	var b strings.Builder
 	b.WriteString("paper active positions:\n")
-	b.WriteString("symbol      side   size      entry      mark       uPnL      lev\n")
-	b.WriteString("------------------------------------------------------------------\n")
+	b.WriteString("symbol      side   margin    size      entry      mark       uPnL      lev\n")
+	b.WriteString("----------------------------------------------------------------------------\n")
+	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
+	realizedToday := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realizedToday = ds.Net
+	}
 	if len(rows) == 0 {
 		b.WriteString("(none)")
+		fmt.Fprintf(&b, "\ntotals: margin=$%.2f openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f",
+			0.0, 0.0, realizedToday, realizedToday)
 		return b.String()
 	}
 	for _, r := range rows {
-		fmt.Fprintf(&b, "%-10s %-6s %-9.4f %-10s %-10s %+.2f    %dx\n",
-			r.sym, r.side, r.size, fmtPrice(r.entry), fmtPrice(r.mark), r.upnl, r.lev)
+		fmt.Fprintf(&b, "%-10s %-6s $%-8.2f %-9.4f %-10s %-10s %+.2f    %dx\n",
+			r.sym, r.side, r.margin, r.size, fmtPrice(r.entry), fmtPrice(r.mark), r.upnl, r.lev)
 	}
+	fmt.Fprintf(&b, "totals: margin=$%.2f openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f",
+		totalMargin, totalUPnL, realizedToday, realizedToday+totalUPnL)
 	return strings.TrimSpace(b.String())
 }
 
@@ -3405,12 +3437,13 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		b.WriteString("open: none")
 		return b.String()
 	}
-	b.WriteString("| Sym | Side | Entry | Mark | Qty | Margin | Lev | uPnL | uPnL% | Age(m) | Reason |\n")
+	b.WriteString("| Sym | Side | Margin | Qty | Entry | Mark | Lev | uPnL | uPnL% | Age(m) | Reason |\n")
 	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %.4f | %.2f | %dx | %+.2f | %+.2f%% | %d | %s |\n",
-			r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, r.margin, r.lev, r.upnl, r.upct, r.ageMin, r.reason)
+		fmt.Fprintf(&b, "| %s | %s | $%.2f | %.4f | %s | %s | %dx | %+.2f | %+.2f%% | %d | %s |\n",
+			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.upct, r.ageMin, r.reason)
 	}
+	fmt.Fprintf(&b, "\nTotals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f", totalUPnL, realizedToday, realizedToday+totalUPnL)
 	return strings.TrimSpace(b.String())
 }
 
@@ -4068,14 +4101,24 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapsho
 		if amt < 0 {
 			side = "SHORT"
 		}
+		entry := mapFloat(r["entryPrice"])
+		lev := mapFloat(r["leverage"])
+		margin := mapFloat(r["isolatedWallet"])
+		if margin <= 0 {
+			margin = mapFloat(r["positionInitialMargin"])
+		}
+		if margin <= 0 && entry > 0 && lev > 0 {
+			margin = (entry * abs(amt)) / lev
+		}
 		snap.Positions = append(snap.Positions, positionView{
 			Symbol:   strings.ToUpper(strings.TrimSpace(fmt.Sprint(r["symbol"]))),
 			Side:     side,
+			Margin:   margin,
 			SizeAbs:  abs(amt),
-			Entry:    mapFloat(r["entryPrice"]),
+			Entry:    entry,
 			Mark:     mapFloat(r["markPrice"]),
 			Unreal:   mapFloat(r["unRealizedProfit"]),
-			Leverage: mapFloat(r["leverage"]),
+			Leverage: lev,
 		})
 	}
 	sort.Slice(snap.Positions, func(i, j int) bool {
@@ -4084,7 +4127,7 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapsho
 	return snap, nil
 }
 
-func printAccountSnapshot(snap accountSnapshot, assets []string) {
+func printAccountSnapshot(snap accountSnapshot, assets []string, realizedToday float64) {
 	fmt.Printf("💼 ACCOUNT availableUSDT=%.4f\n", snap.AvailableUSDT)
 	if len(snap.Balances) == 0 {
 		fmt.Println("balances: (none matching filter)")
@@ -4096,16 +4139,23 @@ func printAccountSnapshot(snap accountSnapshot, assets []string) {
 		}
 	}
 	fmt.Println("active positions:")
-	fmt.Println("symbol      side   size      entry      mark       uPnL      lev")
-	fmt.Println("------------------------------------------------------------------")
+	fmt.Println("symbol      side   margin    size      entry      mark       uPnL      lev")
+	fmt.Println("----------------------------------------------------------------------------")
 	if len(snap.Positions) == 0 {
 		fmt.Println("(none)")
+		fmt.Printf("totals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f\n", 0.0, realizedToday, realizedToday)
 		return
 	}
+	openPnL := 0.0
+	totalMargin := 0.0
 	for _, p := range snap.Positions {
-		fmt.Printf("%-10s %-6s %-9.4f %-10s %-10s %+.2f    %.0fx\n",
-			p.Symbol, p.Side, p.SizeAbs, fmtPrice(p.Entry), fmtPrice(p.Mark), p.Unreal, p.Leverage)
+		openPnL += p.Unreal
+		totalMargin += p.Margin
+		fmt.Printf("%-10s %-6s $%-8.2f %-9.4f %-10s %-10s %+.2f    %.0fx\n",
+			p.Symbol, p.Side, p.Margin, p.SizeAbs, fmtPrice(p.Entry), fmtPrice(p.Mark), p.Unreal, p.Leverage)
 	}
+	fmt.Printf("totals: margin=$%.2f openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f\n",
+		totalMargin, openPnL, realizedToday, realizedToday+openPnL)
 }
 
 func filterBalances(rows []aster.Balance, assets []string) []aster.Balance {
