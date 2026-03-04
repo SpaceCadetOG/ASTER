@@ -69,6 +69,14 @@ type safetyConfig struct {
 	killClose         bool
 }
 
+type reserveLockGate struct {
+	enabled       bool
+	lossPct       float64
+	recoveryPct   float64
+	targetReserve float64
+	locked        bool
+}
+
 type telegramSink struct {
 	enabled  bool
 	token    string
@@ -551,6 +559,7 @@ func main() {
 	orderCountByDay := map[string]int{}
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
+	reserveGate := newReserveLockGate()
 	for {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
@@ -849,11 +858,23 @@ func main() {
 		effectiveReserve = computeReserveUSDT(reserveMode, reserveUSDT, reservePct, avail, paper)
 		effectiveMargin = computeTradeMargin(tradeMarginMode, tradeMargin, tradeMarginPct, tradeSlots, tradeMarginMin, tradeMarginMax, effectiveReserve, avail, paper)
 		usable := avail - effectiveReserve
+		baseBal := sizingBaseBalance(avail, paper)
+		if reserveGate != nil {
+			reserveGate.ensureTarget(baseBal, effectiveReserve)
+		}
 		if usable < effectiveMargin {
 			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
 				tg.Sendf("skip %s %s: usable %.4f < margin %.4f",
 					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, usable, effectiveMargin)
+			}
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if reserveGate != nil && reserveGate.block(baseBal) {
+			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
+			if tgVerbose {
+				tg.Sendf("reserve lock: base %.2f below threshold, entries paused until reserve recovers", baseBal)
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -4648,6 +4669,64 @@ func computeReserveUSDT(mode string, fixed, pct, avail float64, p *paperTrader) 
 		r = base
 	}
 	return r
+}
+
+func newReserveLockGate() *reserveLockGate {
+	enabled := envBool("LIVE_RESERVE_LOCK_ENABLE", false)
+	lossPct := envFloat("LIVE_RESERVE_LOCK_LOSS_PCT", 40.0)
+	recoveryPct := envFloat("LIVE_RESERVE_LOCK_RECOVERY_PCT", 100.0)
+	if lossPct < 0 {
+		lossPct = 0
+	}
+	if lossPct > 100 {
+		lossPct = 100
+	}
+	if recoveryPct < 0 {
+		recoveryPct = 0
+	}
+	if recoveryPct > 200 {
+		recoveryPct = 200
+	}
+	return &reserveLockGate{
+		enabled:     enabled,
+		lossPct:     lossPct,
+		recoveryPct: recoveryPct,
+	}
+}
+
+func (g *reserveLockGate) ensureTarget(base, reserve float64) {
+	if g == nil || !g.enabled {
+		return
+	}
+	if g.targetReserve > 0 {
+		return
+	}
+	if reserve > 0 {
+		g.targetReserve = reserve
+		return
+	}
+	// Fallback: 50% reserve target if reserve resolver returns 0.
+	if base > 0 {
+		g.targetReserve = base * 0.5
+	}
+}
+
+func (g *reserveLockGate) block(base float64) bool {
+	if g == nil || !g.enabled || g.targetReserve <= 0 {
+		return false
+	}
+	lockAt := g.targetReserve * (1.0 - g.lossPct/100.0)
+	unlockAt := g.targetReserve * (g.recoveryPct / 100.0)
+	if unlockAt < lockAt {
+		unlockAt = lockAt
+	}
+	if !g.locked && base <= lockAt {
+		g.locked = true
+	}
+	if g.locked && base >= unlockAt {
+		g.locked = false
+	}
+	return g.locked
 }
 
 func sizingBaseBalance(avail float64, p *paperTrader) float64 {
