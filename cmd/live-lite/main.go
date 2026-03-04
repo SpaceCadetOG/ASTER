@@ -295,6 +295,11 @@ type liveLiteStatus struct {
 	ShortInPlay     int              `json:"short_inplay"`
 	AvailableUSDT   float64          `json:"available_usdt"`
 	PaperSummary    string           `json:"paper_summary,omitempty"`
+	PayoutCycleID   string           `json:"payout_cycle_id,omitempty"`
+	PayoutNextAt    string           `json:"payout_next_at,omitempty"`
+	PayoutLastAmt   float64          `json:"payout_last_amount,omitempty"`
+	PayoutLastPnL   float64          `json:"payout_last_profit,omitempty"`
+	PayoutLastType  string           `json:"payout_last_action,omitempty"`
 	Exec            liveExecSnapshot `json:"exec"`
 }
 
@@ -317,6 +322,49 @@ type maintenanceState struct {
 	LastEndDay   map[string]string
 	FlatDoneDay  map[string]string
 	HookDoneDay  map[string]string
+}
+
+type payoutRunState string
+
+const (
+	payoutIdle         payoutRunState = "IDLE"
+	payoutPendingClose payoutRunState = "PENDING_CLOSE"
+	payoutDone         payoutRunState = "DONE"
+	payoutDoneFallback payoutRunState = "DONE_FALLBACK"
+)
+
+type payoutState struct {
+	CycleID         string         `json:"cycleId"`
+	CycleStart      time.Time      `json:"cycleStart"`
+	CycleEnd        time.Time      `json:"cycleEnd"`
+	StartEquity     float64        `json:"startEquity"`
+	CycleCloseDate  string         `json:"cycleCloseDate"`
+	PendingSince    time.Time      `json:"pendingSince"`
+	DeadlineAt      time.Time      `json:"deadlineAt"`
+	ActionAt        time.Time      `json:"actionAt"`
+	ActionType      string         `json:"actionType"`
+	ActionReason    string         `json:"actionReason"`
+	LastPayoutAt    time.Time      `json:"lastPayoutAt"`
+	LastPayoutAmt   float64        `json:"lastPayoutAmount"`
+	LastCycleProfit float64        `json:"lastCycleProfit"`
+	LastAction      string         `json:"lastAction"`
+	RunState        payoutRunState `json:"runState"`
+}
+
+type payoutManager struct {
+	enabled        bool
+	mode           string
+	onlyIfFlat     bool
+	notifyTelegram bool
+	cycleDays      int
+	anchorHour     int
+	anchorMin      int
+	deadlineMin    int
+	minPayoutUSDT  float64
+	stateFile      string
+	ledgerFile     string
+	loc            *time.Location
+	state          payoutState
 }
 
 func main() {
@@ -450,7 +498,7 @@ func main() {
 	maintEOD := maintenanceWindow{
 		Name:      "M2",
 		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
-		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 17),
+		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
 		ForceFlat: envBool("LIVE_MAINT2_FORCE_FLAT", true),
 		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
@@ -466,6 +514,7 @@ func main() {
 		HookDoneDay:  map[string]string{},
 	}
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
+	payoutMgr := newPayoutManager()
 
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
 		scanEvery, dryRun, strings.ToUpper(minGrade),
@@ -479,6 +528,10 @@ func main() {
 	if execMgr != nil {
 		fmt.Printf("execution: margin_type=%s enforce_isolated=%v multi_asset_mode=%v\n",
 			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
+	}
+	if payoutMgr != nil && payoutMgr.enabled {
+		fmt.Printf("payout: mode=%s cycle=%dd anchor=%02d:%02d deadline=%dm tz=%s\n",
+			payoutMgr.mode, payoutMgr.cycleDays, payoutMgr.anchorHour, payoutMgr.anchorMin, payoutMgr.deadlineMin, payoutMgr.loc.String())
 	}
 	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s maint=%s/%s",
 		scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery,
@@ -630,6 +683,9 @@ func main() {
 				}
 			}
 		}
+		if payoutMgr != nil && payoutMgr.enabled {
+			payoutMgr.maybeRun(now, localMaintNow, maintEOD, &maintState, paper, metaBySymbol, acct, execMgr, tg)
+		}
 		if paper.enabled {
 			fmt.Println(paper.Summary(metaBySymbol))
 			fmt.Println(paper.PositionsTable(metaBySymbol))
@@ -670,6 +726,16 @@ func main() {
 		}
 		if paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
+		}
+		if payoutMgr != nil && payoutMgr.enabled {
+			ps := payoutMgr.state
+			st.PayoutCycleID = ps.CycleID
+			if !ps.CycleEnd.IsZero() {
+				st.PayoutNextAt = ps.CycleEnd.In(payoutMgr.loc).Format(time.RFC3339)
+			}
+			st.PayoutLastAmt = ps.LastPayoutAmt
+			st.PayoutLastPnL = ps.LastCycleProfit
+			st.PayoutLastType = ps.LastAction
 		}
 		if len(cands) == 0 {
 			statusStore.Set(st)
@@ -2495,6 +2561,43 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 	return strings.TrimSpace(b.String())
 }
 
+func (p *paperTrader) Equity(meta map[string]symbolMeta) float64 {
+	if p == nil || !p.enabled {
+		return 0
+	}
+	openPnL := 0.0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			continue
+		}
+		if strings.EqualFold(pos.Side, "BUY") {
+			openPnL += (mark - pos.Entry) * pos.Qty
+		} else {
+			openPnL += (pos.Entry - mark) * pos.Qty
+		}
+	}
+	return p.balance + openPnL
+}
+
+func (p *paperTrader) ApplyPayout(amount float64) float64 {
+	if p == nil || !p.enabled || amount <= 0 {
+		return 0
+	}
+	if amount > p.balance {
+		amount = p.balance
+	}
+	if amount <= 0 {
+		return 0
+	}
+	p.balance -= amount
+	_ = p.save()
+	return amount
+}
+
 func (p *paperTrader) OpenSymbols() []string {
 	if p == nil || len(p.positions) == 0 {
 		return nil
@@ -3978,6 +4081,286 @@ func accountEquity(s accountSnapshot) float64 {
 		eq += p.Unreal
 	}
 	return eq
+}
+
+func newPayoutManager() *payoutManager {
+	enabled := envBool("LIVE_PAYOUT_ENABLE", true)
+	locName := envStr("LIVE_PAYOUT_TZ", "America/Chicago")
+	loc, err := time.LoadLocation(locName)
+	if err != nil {
+		loc = time.Local
+	}
+	pm := &payoutManager{
+		enabled:        enabled,
+		mode:           strings.ToLower(envStr("LIVE_PAYOUT_MODE", "telegram_alert")),
+		onlyIfFlat:     envBool("LIVE_PAYOUT_ONLY_IF_FORCE_FLAT", true),
+		notifyTelegram: envBool("LIVE_PAYOUT_NOTIFY_TELEGRAM", true),
+		cycleDays:      envInt("LIVE_PAYOUT_CYCLE_DAYS", 7),
+		anchorHour:     envInt("LIVE_PAYOUT_ANCHOR_HOUR", 16),
+		anchorMin:      envInt("LIVE_PAYOUT_ANCHOR_MIN", 0),
+		deadlineMin:    envInt("LIVE_PAYOUT_DEADLINE_MIN", 15),
+		minPayoutUSDT:  envFloat("LIVE_PAYOUT_MIN_USDT", 1.0),
+		stateFile:      envStr("LIVE_PAYOUT_STATE_FILE", "out/payout_state.json"),
+		ledgerFile:     envStr("LIVE_PAYOUT_LEDGER_FILE", "out/payouts.csv"),
+		loc:            loc,
+	}
+	if pm.cycleDays <= 0 {
+		pm.cycleDays = 7
+	}
+	if pm.deadlineMin < 0 {
+		pm.deadlineMin = 15
+	}
+	if pm.anchorHour < 0 || pm.anchorHour > 23 {
+		pm.anchorHour = 16
+	}
+	if pm.anchorMin < 0 || pm.anchorMin > 59 {
+		pm.anchorMin = 0
+	}
+	if pm.minPayoutUSDT < 0 {
+		pm.minPayoutUSDT = 0
+	}
+	if pm.enabled {
+		_ = pm.load()
+	}
+	return pm
+}
+
+func (pm *payoutManager) load() error {
+	if pm == nil || !pm.enabled || strings.TrimSpace(pm.stateFile) == "" {
+		return nil
+	}
+	b, err := os.ReadFile(pm.stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var st payoutState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return err
+	}
+	pm.state = st
+	return nil
+}
+
+func (pm *payoutManager) save() error {
+	if pm == nil || !pm.enabled || strings.TrimSpace(pm.stateFile) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(pm.stateFile), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(pm.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(pm.stateFile, b, 0o644)
+}
+
+func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWindow, ms *maintenanceState, paper *paperTrader, meta map[string]symbolMeta, acct accountSnapshot, execMgr *liveExecManager, tg *telegramSink) {
+	if pm == nil || !pm.enabled {
+		return
+	}
+	pm.ensureCycle(nowUTC, localNow, paper, meta, acct)
+	if pm.state.CycleEnd.IsZero() {
+		return
+	}
+	cycleEndLocal := pm.state.CycleEnd.In(pm.loc)
+	if localNow.Before(cycleEndLocal) {
+		return
+	}
+	closeDay := cycleEndLocal.Format("2006-01-02")
+	if pm.state.RunState == payoutIdle {
+		pm.state.RunState = payoutPendingClose
+		pm.state.CycleCloseDate = closeDay
+		pm.state.PendingSince = nowUTC
+		pm.state.DeadlineAt = time.Date(cycleEndLocal.Year(), cycleEndLocal.Month(), cycleEndLocal.Day(), pm.anchorHour, pm.anchorMin, 0, 0, pm.loc).Add(time.Duration(pm.deadlineMin) * time.Minute).UTC()
+		pm.state.ActionType = ""
+		pm.state.ActionReason = ""
+		_ = pm.save()
+	}
+	if pm.state.CycleCloseDate != closeDay {
+		return
+	}
+	if pm.state.RunState == payoutDone || pm.state.RunState == payoutDoneFallback {
+		return
+	}
+
+	flatConfirmed := pm.flatConfirmed(localNow, eod, ms, paper, acct, execMgr)
+	deadlinePassed := !pm.state.DeadlineAt.IsZero() && !nowUTC.Before(pm.state.DeadlineAt)
+	if pm.onlyIfFlat && !flatConfirmed && !deadlinePassed {
+		return
+	}
+
+	closeEq := pm.currentEquity(paper, meta, acct)
+	profit := maxFloat(0, closeEq-pm.state.StartEquity)
+	payoutAmt := profit
+	if payoutAmt < pm.minPayoutUSDT {
+		payoutAmt = 0
+	}
+
+	actionType := "NO_PAYOUT"
+	actionReason := "NO_PROFIT"
+	runState := payoutDone
+	if deadlinePassed && pm.onlyIfFlat && !flatConfirmed {
+		runState = payoutDoneFallback
+		actionReason = "FLAT_TIMEOUT_FALLBACK"
+	} else if !flatConfirmed && pm.onlyIfFlat {
+		actionReason = "WAITING_FORCE_FLAT"
+	}
+
+	if payoutAmt > 0 {
+		if paper != nil && paper.enabled {
+			debited := paper.ApplyPayout(payoutAmt)
+			payoutAmt = debited
+			actionType = "PAPER_DEBIT"
+			actionReason = "CYCLE_CLOSE_PAYOUT"
+			if payoutAmt <= 0 {
+				actionType = "NO_PAYOUT"
+				actionReason = "PAPER_DEBIT_ZERO"
+			}
+		} else {
+			actionType = "LIVE_ALERT"
+			actionReason = "MANUAL_WITHDRAW_REQUIRED"
+		}
+	}
+	if runState == payoutDoneFallback && !strings.HasPrefix(actionType, "FALLBACK_") {
+		actionType = "FALLBACK_" + actionType
+	}
+
+	pm.state.ActionAt = nowUTC
+	pm.state.ActionType = actionType
+	pm.state.ActionReason = actionReason
+	pm.state.LastPayoutAt = nowUTC
+	pm.state.LastPayoutAmt = payoutAmt
+	pm.state.LastCycleProfit = profit
+	pm.state.LastAction = actionType
+	pm.state.RunState = runState
+	execCycleID := pm.state.CycleID
+	execStartEq := pm.state.StartEquity
+	execDeadline := time.Date(cycleEndLocal.Year(), cycleEndLocal.Month(), cycleEndLocal.Day(), pm.anchorHour, pm.anchorMin, 0, 0, pm.loc).Add(time.Duration(pm.deadlineMin) * time.Minute)
+	_ = pm.appendLedger(nowUTC, closeEq, profit, payoutAmt, actionType, actionReason)
+	_ = pm.save()
+
+	nextCloseLocal := cycleEndLocal.AddDate(0, 0, pm.cycleDays)
+	pm.state.CycleStart = cycleEndLocal.UTC()
+	pm.state.CycleEnd = nextCloseLocal.UTC()
+	pm.state.CycleID = pm.cycleID(nextCloseLocal)
+	pm.state.StartEquity = closeEq - payoutAmt
+	if pm.state.StartEquity < 0 {
+		pm.state.StartEquity = 0
+	}
+	pm.state.CycleCloseDate = ""
+	pm.state.PendingSince = time.Time{}
+	pm.state.DeadlineAt = time.Time{}
+	pm.state.RunState = payoutIdle
+	_ = pm.save()
+
+	if tg != nil && tg.enabled && pm.notifyTelegram {
+		prefix := "PAYOUT CYCLE CLOSE"
+		if strings.HasPrefix(actionType, "FALLBACK_") {
+			prefix = "PAYOUT DEADLINE FALLBACK"
+		}
+		msg := fmt.Sprintf("%s\ncycle_id=%s\nstart_equity=%.2f close_equity=%.2f locked_profit=%.2f payout_amount=%.2f\naction_type=%s reason=%s\nexecuted_at=%s deadline=%s\nnext_cycle_close=%s",
+			prefix,
+			execCycleID,
+			execStartEq,
+			closeEq,
+			profit,
+			payoutAmt,
+			actionType,
+			actionReason,
+			nowUTC.In(pm.loc).Format("2006-01-02 15:04:05 MST"),
+			execDeadline.Format("2006-01-02 15:04 MST"),
+			nextCloseLocal.Format("2006-01-02 15:04 MST"),
+		)
+		tg.Sendf("%s", tgPre(msg))
+	}
+}
+
+func (pm *payoutManager) ensureCycle(nowUTC, localNow time.Time, paper *paperTrader, meta map[string]symbolMeta, acct accountSnapshot) {
+	if pm == nil {
+		return
+	}
+	if pm.state.CycleID != "" && !pm.state.CycleEnd.IsZero() {
+		return
+	}
+	nextClose := pm.nextCloseAfter(localNow)
+	pm.state.CycleStart = nowUTC
+	pm.state.CycleEnd = nextClose.UTC()
+	pm.state.CycleID = pm.cycleID(nextClose)
+	pm.state.StartEquity = pm.currentEquity(paper, meta, acct)
+	pm.state.RunState = payoutIdle
+	_ = pm.save()
+}
+
+func (pm *payoutManager) nextCloseAfter(localNow time.Time) time.Time {
+	target := localNow.Add(time.Duration(pm.cycleDays) * 24 * time.Hour)
+	closeAt := time.Date(target.Year(), target.Month(), target.Day(), pm.anchorHour, pm.anchorMin, 0, 0, pm.loc)
+	if closeAt.Before(target) {
+		closeAt = closeAt.Add(24 * time.Hour)
+	}
+	return closeAt
+}
+
+func (pm *payoutManager) cycleID(closeLocal time.Time) string {
+	return fmt.Sprintf("%s@%02d%02d", closeLocal.Format("2006-01-02"), pm.anchorHour, pm.anchorMin)
+}
+
+func (pm *payoutManager) currentEquity(paper *paperTrader, meta map[string]symbolMeta, acct accountSnapshot) float64 {
+	if paper != nil && paper.enabled {
+		return paper.Equity(meta)
+	}
+	return accountEquity(acct)
+}
+
+func (pm *payoutManager) flatConfirmed(localNow time.Time, eod maintenanceWindow, ms *maintenanceState, paper *paperTrader, acct accountSnapshot, execMgr *liveExecManager) bool {
+	dayKey := localNow.Format("2006-01-02")
+	if ms != nil && ms.FlatDoneDay[eod.Name] != dayKey {
+		return false
+	}
+	if paper != nil && paper.enabled && len(paper.positions) > 0 {
+		return false
+	}
+	if execMgr != nil && execMgr.ActiveCount() > 0 {
+		return false
+	}
+	if len(acct.Positions) > 0 {
+		return false
+	}
+	return true
+}
+
+func (pm *payoutManager) appendLedger(nowUTC time.Time, closeEq, profit, payout float64, actionType, reason string) error {
+	if pm == nil || !pm.enabled || strings.TrimSpace(pm.ledgerFile) == "" {
+		return nil
+	}
+	if err := ensureCSVWithHeader(pm.ledgerFile, []string{
+		"ts", "cycle_id", "cycle_start", "cycle_end", "start_equity", "close_equity", "locked_profit", "payout_amount", "action_type", "action_reason",
+	}); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(pm.ledgerFile, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	_ = w.Write([]string{
+		nowUTC.Format(time.RFC3339),
+		pm.state.CycleID,
+		pm.state.CycleStart.Format(time.RFC3339),
+		pm.state.CycleEnd.Format(time.RFC3339),
+		fmt.Sprintf("%.8f", pm.state.StartEquity),
+		fmt.Sprintf("%.8f", closeEq),
+		fmt.Sprintf("%.8f", profit),
+		fmt.Sprintf("%.8f", payout),
+		actionType,
+		reason,
+	})
+	w.Flush()
+	return w.Error()
 }
 
 func shadowReady(days int, equityFile string, now time.Time) bool {

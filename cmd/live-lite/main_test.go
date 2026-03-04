@@ -26,7 +26,7 @@ func TestActiveMaintenanceWindow(t *testing.T) {
 	loc, _ := time.LoadLocation("America/Chicago")
 	now := time.Date(2026, 3, 3, 16, 10, 0, 0, loc)
 	w1 := maintenanceWindow{Name: "M1", StartHour: 0, EndHour: 1}
-	w2 := maintenanceWindow{Name: "M2", StartHour: 16, EndHour: 17, ForceFlat: true}
+	w2 := maintenanceWindow{Name: "M2", StartHour: 16, EndHour: 18, ForceFlat: true}
 	w, ok := activeMaintenanceWindow(now, true, w1, w2)
 	if !ok || w.Name != "M2" || !w.ForceFlat {
 		t.Fatalf("expected M2 active at 16:10")
@@ -126,5 +126,77 @@ func TestResolvePaperFeeProfile(t *testing.T) {
 	mk, tk = resolvePaperFeeProfile("unknown")
 	if mk != 0.5 || tk != 4.0 {
 		t.Fatalf("default profile mismatch: maker=%.2f taker=%.2f", mk, tk)
+	}
+}
+
+func TestPayoutNextCloseAfterAtAnchor(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	pm := &payoutManager{
+		enabled:    true,
+		cycleDays:  7,
+		anchorHour: 16,
+		anchorMin:  0,
+		loc:        loc,
+	}
+	nowLocal := time.Date(2026, 3, 3, 10, 30, 0, 0, loc)
+	closeAt := pm.nextCloseAfter(nowLocal)
+	if closeAt.Location().String() != loc.String() {
+		t.Fatalf("expected local close location")
+	}
+	if closeAt.Hour() != 16 || closeAt.Minute() != 0 {
+		t.Fatalf("expected 16:00 close got %s", closeAt.Format("15:04"))
+	}
+	if !closeAt.After(nowLocal.Add(7*24*time.Hour)) && !closeAt.Equal(nowLocal.Add(7*24*time.Hour)) {
+		t.Fatalf("expected close >= now+7d")
+	}
+}
+
+func TestPayoutFallbackRunsOnceAndRollsCycle(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	closeLocal := time.Date(2026, 3, 10, 16, 0, 0, 0, loc)
+	nowLocal := time.Date(2026, 3, 10, 16, 16, 0, 0, loc)
+	pm := &payoutManager{
+		enabled:       true,
+		mode:          "telegram_alert",
+		onlyIfFlat:    true,
+		cycleDays:     7,
+		anchorHour:    16,
+		anchorMin:     0,
+		deadlineMin:   15,
+		minPayoutUSDT: 1.0,
+		loc:           loc,
+		state: payoutState{
+			CycleID:        "2026-03-10@1600",
+			CycleStart:     closeLocal.AddDate(0, 0, -7).UTC(),
+			CycleEnd:       closeLocal.UTC(),
+			StartEquity:    100,
+			CycleCloseDate: closeLocal.Format("2006-01-02"),
+			RunState:       payoutPendingClose,
+			DeadlineAt:     closeLocal.Add(15 * time.Minute).UTC(),
+		},
+	}
+	paper := &paperTrader{
+		enabled:   true,
+		balance:   110,
+		positions: map[string]*paperPosition{},
+	}
+	ms := &maintenanceState{
+		LastStartDay: map[string]string{},
+		LastEndDay:   map[string]string{},
+		FlatDoneDay:  map[string]string{},
+		HookDoneDay:  map[string]string{},
+	}
+	eod := maintenanceWindow{Name: "M2", StartHour: 16, EndHour: 18, ForceFlat: true}
+	pm.maybeRun(nowLocal.UTC(), nowLocal, eod, ms, paper, map[string]symbolMeta{}, accountSnapshot{}, nil, nil)
+	if pm.state.LastAction != "FALLBACK_PAPER_DEBIT" {
+		t.Fatalf("expected fallback action got %s", pm.state.LastAction)
+	}
+	if pm.state.LastPayoutAmt <= 0 {
+		t.Fatalf("expected payout amount > 0")
+	}
+	balAfter := paper.balance
+	pm.maybeRun(nowLocal.UTC(), nowLocal, eod, ms, paper, map[string]symbolMeta{}, accountSnapshot{}, nil, nil)
+	if paper.balance != balAfter {
+		t.Fatalf("expected idempotent second run")
 	}
 }

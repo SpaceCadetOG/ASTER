@@ -238,7 +238,7 @@ LIVE_MAINT_TZ=America/Chicago
 LIVE_MAINT1_START_HOUR=0
 LIVE_MAINT1_END_HOUR=1
 LIVE_MAINT2_START_HOUR=16
-LIVE_MAINT2_END_HOUR=17
+LIVE_MAINT2_END_HOUR=18
 LIVE_MAINT2_FORCE_FLAT=1
 LIVE_PAPER_STATE_FILE=out/paper_state.json
 LIVE_PAPER_OB_LEVELS=20
@@ -248,6 +248,18 @@ LIVE_PAPER_FEE_TAKER_BPS=4.0
 LIVE_PAPER_FUNDING_INTERVAL_MIN=480
 LIVE_PAPER_FUNDING_INTERVALS=BTCUSDT:480,ETHUSDT:480
 LIVE_PAPER_OPEN_COST_MODE=aster
+LIVE_PAYOUT_ENABLE=1
+LIVE_PAYOUT_MODE=telegram_alert
+LIVE_PAYOUT_CYCLE_DAYS=7
+LIVE_PAYOUT_TZ=America/Chicago
+LIVE_PAYOUT_ANCHOR_HOUR=16
+LIVE_PAYOUT_ANCHOR_MIN=0
+LIVE_PAYOUT_DEADLINE_MIN=15
+LIVE_PAYOUT_ONLY_IF_FORCE_FLAT=1
+LIVE_PAYOUT_MIN_USDT=1.0
+LIVE_PAYOUT_NOTIFY_TELEGRAM=1
+LIVE_PAYOUT_STATE_FILE=out/payout_state.json
+LIVE_PAYOUT_LEDGER_FILE=out/payouts.csv
 ```
 
 Paper continuity:
@@ -256,3 +268,5 @@ Paper continuity:
 - Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
 - Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
 - `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).
+- Payout cycle runs every 7 days and executes at `16:00 CT` with a hard deadline by `16:15 CT`.
+- In paper mode payout is auto-debited; in live mode payout is Telegram-notified for manual withdraw.
