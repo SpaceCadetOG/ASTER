@@ -4698,16 +4698,17 @@ func (g *reserveLockGate) ensureTarget(base, reserve float64) {
 	if g == nil || !g.enabled {
 		return
 	}
-	if g.targetReserve > 0 {
-		return
-	}
-	if reserve > 0 {
-		g.targetReserve = reserve
-		return
-	}
+	next := reserve
 	// Fallback: 50% reserve target if reserve resolver returns 0.
-	if base > 0 {
-		g.targetReserve = base * 0.5
+	if next <= 0 && base > 0 {
+		next = base * 0.5
+	}
+	if next <= 0 {
+		return
+	}
+	// Ratchet-up behavior: scale with growth, don't loosen lock target on drawdown.
+	if next > g.targetReserve {
+		g.targetReserve = next
 	}
 }
 
