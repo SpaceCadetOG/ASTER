@@ -13,9 +13,11 @@ import (
 type State string
 
 const (
-	StateWarming State = "warming"
+	StateHeating State = "heating"
 	StateInPlay  State = "in-play"
 	StateCooling State = "cooling"
+	StatePumping State = "pumping"
+	StateDumping State = "dumping"
 )
 
 type Entry struct {
@@ -42,10 +44,12 @@ type Config struct {
 }
 
 type scorePoint struct {
-	ts    time.Time
-	score float64
-	grade string
-	vol   float64
+	ts     time.Time
+	score  float64
+	grade  string
+	vol    float64
+	price  float64
+	change float64
 }
 
 type symbolState struct {
@@ -110,15 +114,17 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 
 		ss := t.data[sym]
 		if ss == nil {
-			ss = &symbolState{firstSeen: now, state: StateWarming}
+			ss = &symbolState{firstSeen: now, state: StateHeating}
 			t.data[sym] = ss
 		}
 		ss.lastSeen = now
 		ss.history = append(ss.history, scorePoint{
-			ts:    now,
-			score: r.Score,
-			grade: g,
-			vol:   r.VolumeUSD,
+			ts:     now,
+			score:  r.Score,
+			grade:  g,
+			vol:    r.VolumeUSD,
+			price:  r.LastPrice,
+			change: r.Change24h,
 		})
 		if len(ss.history) > t.cfg.HistoryN {
 			ss.history = append([]scorePoint(nil), ss.history[len(ss.history)-t.cfg.HistoryN:]...)
@@ -138,14 +144,26 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 		}
 
 		rising := isRising(ss.history, t.cfg.RiseN)
+		falling := isFalling(ss.history, t.cfg.RiseN)
 		gradeOK := gradeValue(g) >= minGradeVal
 		volOK := r.VolumeUSD >= t.cfg.MinVolumeUSD
+		priceFav := favorablePriceMove(t.side, ss.history)
+		volRise := volumeRising(ss.history)
+		volFall := volumeFalling(ss.history)
+		signFlipAgainst := change24hFlipAgainst(t.side, ss.history)
+		dropPct := peakDropPct(ss.history)
+		aPlusLosing := gradeValue(g) >= gradeValue("A+") && (dropPct >= 0.08 || slope <= -0.8) && (!priceFav || volFall)
+		momentumLoss := (falling && !priceFav && volFall) || signFlipAgainst || aPlusLosing
 
 		switch {
-		case rising && gradeOK && volOK:
+		case gradeOK && volOK && rising && priceFav && volRise:
+			ss.state = StatePumping
+		case gradeOK && volOK && rising:
 			ss.state = StateInPlay
-		case rising && volOK:
-			ss.state = StateWarming
+		case momentumLoss:
+			ss.state = StateDumping
+		case rising || (slope > 0 && (priceFav || !volFall)):
+			ss.state = StateHeating
 		default:
 			ss.state = StateCooling
 		}
@@ -183,7 +201,7 @@ func (t *Tracker) Entries() []Entry {
 			FirstSeen:    ss.firstSeen,
 			LastSeen:     ss.lastSeen,
 			State:        ss.state,
-			Momentum:     slope > 0 && isRising(ss.history, t.cfg.RiseN),
+			Momentum:     (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping,
 		}
 		e.Rank = rankFor(e)
 		out = append(out, e)
@@ -195,10 +213,16 @@ func (t *Tracker) Entries() []Entry {
 func rankFor(e Entry) float64 {
 	stateBoost := 0.0
 	switch e.State {
+	case StatePumping:
+		stateBoost = 35
 	case StateInPlay:
 		stateBoost = 25
-	case StateWarming:
+	case StateHeating:
 		stateBoost = 10
+	case StateCooling:
+		stateBoost = -5
+	case StateDumping:
+		stateBoost = -12
 	}
 	momentum := 0.0
 	if e.Momentum {
@@ -235,6 +259,89 @@ func isRising(points []scorePoint, riseN int) bool {
 		}
 	}
 	return rises >= riseN-1
+}
+
+func isFalling(points []scorePoint, n int) bool {
+	if len(points) < 2 {
+		return false
+	}
+	if n <= 1 {
+		n = 2
+	}
+	if len(points) < n {
+		n = len(points)
+	}
+	start := len(points) - n
+	falls := 0
+	for i := start + 1; i < len(points); i++ {
+		if points[i].score < points[i-1].score {
+			falls++
+		}
+	}
+	return falls >= n-1
+}
+
+func favorablePriceMove(side string, points []scorePoint) bool {
+	if len(points) < 2 {
+		return false
+	}
+	last := points[len(points)-1]
+	prev := points[len(points)-2]
+	if side == "short" {
+		return last.price < prev.price
+	}
+	return last.price > prev.price
+}
+
+func volumeRising(points []scorePoint) bool {
+	if len(points) < 2 {
+		return false
+	}
+	last := points[len(points)-1].vol
+	prev := points[len(points)-2].vol
+	return last >= prev*1.03
+}
+
+func volumeFalling(points []scorePoint) bool {
+	if len(points) < 2 {
+		return false
+	}
+	last := points[len(points)-1].vol
+	prev := points[len(points)-2].vol
+	return last <= prev*0.97
+}
+
+func change24hFlipAgainst(side string, points []scorePoint) bool {
+	if len(points) < 2 {
+		return false
+	}
+	last := points[len(points)-1].change
+	prev := points[len(points)-2].change
+	if side == "short" {
+		return prev < 0 && last >= 0
+	}
+	return prev > 0 && last <= 0
+}
+
+func peakDropPct(points []scorePoint) float64 {
+	if len(points) == 0 {
+		return 0
+	}
+	peak := points[0].score
+	for i := 1; i < len(points); i++ {
+		if points[i].score > peak {
+			peak = points[i].score
+		}
+	}
+	last := points[len(points)-1].score
+	if peak <= 0 {
+		return 0
+	}
+	d := (peak - last) / peak
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 func gradeValue(g string) int {

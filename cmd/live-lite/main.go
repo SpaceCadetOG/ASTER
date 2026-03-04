@@ -845,10 +845,14 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 			switch e.State {
 			case inplay.StateInPlay:
 				status = "IN_PLAY"
-			case inplay.StateWarming:
-				status = "WARMING"
+			case inplay.StateHeating:
+				status = "HEATING"
 			case inplay.StateCooling:
 				status = "COOLING"
+			case inplay.StatePumping:
+				status = "PUMPING"
+			case inplay.StateDumping:
+				status = "DUMPING"
 			}
 			slopeArrow := "→"
 			if e.ScoreSlope > 0 {
@@ -2868,13 +2872,14 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	}
 	out := make([]candidate, 0, len(longInPlay)+len(shortInPlay))
 	for _, e := range longInPlay {
-		if e.State == inplay.StateInPlay && gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
+		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
+			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
 		}
 		if enableMomentumReversal &&
 			gradeValue(e.CurrentGrade) >= revMinVal &&
 			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateInPlay || e.State == inplay.StateCooling) {
+			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay) {
 			flip := e
 			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
 			out = append(out, candidate{
@@ -2885,13 +2890,14 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		}
 	}
 	for _, e := range shortInPlay {
-		if e.State == inplay.StateInPlay && gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
+		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
+			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "SELL"})
 		}
 		if enableMomentumReversal &&
 			gradeValue(e.CurrentGrade) >= revMinVal &&
 			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateInPlay || e.State == inplay.StateCooling) {
+			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay) {
 			flip := e
 			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
 			out = append(out, candidate{

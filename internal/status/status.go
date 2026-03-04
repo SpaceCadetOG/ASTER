@@ -6,6 +6,7 @@ import (
 	"html"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,18 @@ func (s *Store) Handler() http.Handler {
 		s.mu.RLock()
 		snap := s.cur
 		s.mu.RUnlock()
+		refreshMS := 5000
+		if v := strings.TrimSpace(r.URL.Query().Get("refresh_ms")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				if n < 1000 {
+					n = 1000
+				}
+				if n > 60000 {
+					n = 60000
+				}
+				refreshMS = n
+			}
+		}
 
 		// infer direction from exchange name
 		direction := "long"
@@ -78,9 +91,10 @@ tr:hover{background:var(--row)}
 .sep{opacity:.25}
 </style></head><body>`)
 
-		fmt.Fprintf(w, `<h3>%s <small>&nbsp;generated %s</small></h3>`,
+		fmt.Fprintf(w, `<h3>%s <small>&nbsp;generated %s &nbsp;•&nbsp; auto-refresh %dms</small></h3>`,
 			html.EscapeString(snap.Exchange),
 			html.EscapeString(snap.Generated.Format(time.RFC3339)),
+			refreshMS,
 		)
 
 		if len(snap.Active) > 0 {
@@ -197,6 +211,19 @@ tr:hover{background:var(--row)}
 			}
 			fmt.Fprint(w, `</tbody></table>`)
 		}
+		fmt.Fprintf(w, `<script>
+(function(){
+  const ms=%d;
+  let timer=null;
+  function tick(){ window.location.reload(); }
+  function arm(){ if(timer) clearTimeout(timer); timer=setTimeout(tick, ms); }
+  document.addEventListener('visibilitychange', function(){
+    if(document.hidden){ if(timer) clearTimeout(timer); timer=null; return; }
+    arm();
+  });
+  arm();
+})();
+</script>`, refreshMS)
 		fmt.Fprint(w, `</body></html>`)
 	})
 }
