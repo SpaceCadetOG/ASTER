@@ -1,0 +1,9 @@
+[Unit]
+Description=Aster auto update from git and restart modules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/aster
+ExecStart=/opt/aster/scripts/auto_update_aster.sh

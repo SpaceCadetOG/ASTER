@@ -28,13 +28,16 @@ sudo cp systemd/aster-tape.service /etc/systemd/system/
 sudo cp systemd/aster-whale.service /etc/systemd/system/
 sudo cp systemd/aster-live-lite.service /etc/systemd/system/
 sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
+sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
+sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/
 sudo mkdir -p /opt/aster/scripts
 sudo cp scripts/tmux_module_runner.sh /opt/aster/scripts/
 sudo cp scripts/start_tmux_modules.sh /opt/aster/scripts/
 sudo cp scripts/reconcile_on_boot.sh /opt/aster/scripts/
 sudo cp scripts/maintenance_midnight.sh /opt/aster/scripts/
 sudo cp scripts/maintenance_eod.sh /opt/aster/scripts/
-sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
+sudo cp scripts/auto_update_aster.sh /opt/aster/scripts/
+sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh /opt/aster/scripts/auto_update_aster.sh
 sudo systemctl daemon-reload
 
 echo "[deploy] stopping legacy standalone services"
@@ -47,6 +50,8 @@ for svc in "${SERVICES[@]}"; do
   sudo systemctl enable --now "${svc}" || true
   sudo systemctl restart "${svc}" || true
 done
+
+sudo systemctl enable --now aster-autoupdate.timer || true
 
 echo "[deploy] status"
 for svc in "${SERVICES[@]}" "${LEGACY_SERVICES[@]}"; do

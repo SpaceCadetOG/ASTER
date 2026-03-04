@@ -102,3 +102,36 @@ scripts/stop_bot.sh
 - Payout files:
   - state: `out/payout_state.json`
   - ledger: `out/payouts.csv`
+
+## 9) Auto update on every commit (minimum downtime)
+
+Install/enable once:
+
+```bash
+cd /opt/aster
+sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
+sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/
+sudo cp scripts/auto_update_aster.sh /opt/aster/scripts/
+sudo chmod +x /opt/aster/scripts/auto_update_aster.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now aster-autoupdate.timer
+```
+
+Check it:
+
+```bash
+systemctl status aster-autoupdate.timer --no-pager
+systemctl list-timers --all | rg aster-autoupdate
+tail -f /opt/aster/out/autoupdate.log
+```
+
+Manual trigger:
+
+```bash
+sudo systemctl start aster-autoupdate.service
+```
+
+How it works:
+- Polls `origin/main` every minute.
+- If no new commit: does nothing.
+- If new commit: fast-forward pull, rebuild binaries, restart `aster-modules-tmux`.

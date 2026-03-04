@@ -7,6 +7,7 @@ This folder contains systemd units for:
 - `aster-liqs.service`
 - `aster-oflow.service`
 - `aster-modules-tmux.service`
+- `aster-autoupdate.service` + `aster-autoupdate.timer`
 
 ## Install on Raspberry Pi
 
@@ -44,15 +45,19 @@ sudo cp systemd/aster-oflow.service /etc/systemd/system/
 sudo cp systemd/aster-tape.service  /etc/systemd/system/
 sudo cp systemd/aster-live-lite.service  /etc/systemd/system/
 sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
+sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
+sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl disable --now aster-live-lite aster-tape aster-whale || true
 sudo systemctl enable --now aster-modules-tmux
+sudo systemctl enable --now aster-autoupdate.timer
 ```
 
 Check status/logs:
 
 ```bash
 systemctl --no-pager --full status aster-modules-tmux
+systemctl --no-pager --full status aster-autoupdate.timer
 tmux ls
 tmux attach -t aster-live-lite
 ```
