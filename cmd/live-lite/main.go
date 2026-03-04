@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"math"
 	"net/http"
@@ -518,14 +519,14 @@ func main() {
 		if paper.enabled && tg != nil && tg.enabled {
 			if !hourlyEnable && now.After(nextTradeUpdateAt) {
 				if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
-					tg.Sendf("%s", msg)
+					tg.Sendf("%s", tgPre(msg))
 				}
 				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
 			if hourlyEnable {
 				hk := localMaintNow.Format("2006-01-02 15")
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
-					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, metaBySymbol, tradeUpdateTop))
+					tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, tradeUpdateTop)))
 					lastHourlyKey = hk
 				}
 			}
@@ -713,9 +714,9 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
-					tg.Sendf("PAPER ENTER %s %s\nmargin=$%.2f lev=%dx grade=%s reason=%s conf=%.2f\nentry=%s\ntp1=%s tp2=%s tp3=%s\nsl=%s",
-						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Strat, best.Conf,
-						fmtPrice(pp.Entry), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3), fmtPrice(pp.Stop))
+					tg.Sendf("%s", tgPre(fmt.Sprintf("PAPER ENTER | %s %s\nmargin=$%.2f lev=%dx grade=%s conf=%.2f\nreason=%s\nentry=%s sl=%s\ntp1=%s tp2=%s tp3=%s",
+						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
+						fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))))
 				}
 			}
 			if tgVerbose {
@@ -1033,6 +1034,26 @@ func beLockPrice(side string, entry, beLockBps float64) float64 {
 		return entry * (1 - d)
 	}
 	return entry * (1 + d)
+}
+
+func enforceTPProgression(side string, tp1, tp2, tp3 float64) (float64, float64, float64) {
+	step := 0.0015 // 15 bps minimum separation
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		if tp2 <= tp1 {
+			tp2 = tp1 * (1 + step)
+		}
+		if tp3 <= tp2 {
+			tp3 = tp2 * (1 + step)
+		}
+		return tp1, tp2, tp3
+	}
+	if tp2 >= tp1 {
+		tp2 = tp1 * (1 - step)
+	}
+	if tp3 >= tp2 {
+		tp3 = tp2 * (1 - step)
+	}
+	return tp1, tp2, tp3
 }
 
 func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64) {
@@ -2049,6 +2070,7 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
 		p.TP3Price = p.EntryPrice * (1 - stopPct*m.tp3R)
 	}
+	p.TP1Price, p.TP2Price, p.TP3Price = enforceTPProgression(p.Side, p.TP1Price, p.TP2Price, p.TP3Price)
 	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
 		return fmt.Errorf("invalid bracket levels stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f",
 			p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
@@ -2076,6 +2098,18 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	p.TP3Qty, err = m.roundQty(p.Symbol, remForTP3)
 	if err != nil {
 		return err
+	}
+	// Prevent duplicated TP levels after exchange tick rounding.
+	if p.TP3Qty > 0 {
+		tp2Rounded, _, err2 := m.rest.RoundPrice(p.Symbol, p.TP2Price)
+		if err2 == nil {
+			tp3Rounded, _, err3 := m.rest.RoundPrice(p.Symbol, p.TP3Price)
+			if err3 == nil && tp2Rounded > 0 && tp3Rounded > 0 && tp2Rounded == tp3Rounded {
+				p.TP2Qty += p.TP3Qty
+				p.TP3Qty = 0
+				p.TP3OrderID = 0
+			}
+		}
 	}
 
 	if p.TP1Qty > 0 {
@@ -2580,6 +2614,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		tp2 = entry * (1 - tp2Pct)
 		tp3 = entry * (1 - tp3Pct)
 	}
+	tp1, tp2, tp3 = enforceTPProgression(c.Side, tp1, tp2, tp3)
 	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
 		return nil, fmt.Errorf("invalid paper bracket levels")
 	}
@@ -2822,25 +2857,53 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		topN = 5
 	}
 	type row struct {
-		sym   string
-		side  string
-		entry float64
-		mark  float64
-		qty   float64
-		upnl  float64
+		sym    string
+		side   string
+		entry  float64
+		mark   float64
+		qty    float64
+		upnl   float64
+		margin float64
+		lev    int
+		upct   float64
+		ageMin int
+		reason string
 	}
 	rows := make([]row, 0, len(p.positions))
 	totalUPnL := 0.0
 	for sym, pos := range p.positions {
 		mark := meta[sym].LastPrice
 		upnl := 0.0
+		upct := 0.0
 		if strings.EqualFold(pos.Side, "BUY") {
 			upnl = (mark - pos.Entry) * pos.Qty
+			if pos.Entry > 0 {
+				upct = ((mark - pos.Entry) / pos.Entry) * 100
+			}
 		} else {
 			upnl = (pos.Entry - mark) * pos.Qty
+			if pos.Entry > 0 {
+				upct = ((pos.Entry - mark) / pos.Entry) * 100
+			}
 		}
 		totalUPnL += upnl
-		rows = append(rows, row{sym: sym, side: pos.Side, entry: pos.Entry, mark: mark, qty: pos.Qty, upnl: upnl})
+		reason := strings.TrimSpace(pos.EntryReason)
+		if reason == "" {
+			reason = "-"
+		}
+		rows = append(rows, row{
+			sym:    sym,
+			side:   pos.Side,
+			entry:  pos.Entry,
+			mark:   mark,
+			qty:    pos.Qty,
+			upnl:   upnl,
+			margin: pos.Margin,
+			lev:    maxInt(pos.Leverage, 1),
+			upct:   upct,
+			ageMin: int(time.Since(pos.OpenedAt).Minutes()),
+			reason: reason,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return abs(rows[i].upnl) > abs(rows[j].upnl) })
 	if len(rows) > topN {
@@ -2860,25 +2923,11 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		b.WriteString("open: none")
 		return b.String()
 	}
-	b.WriteString("sym       side  entry      mark       qty      margin  lev   uPnL    uPnL%\n")
-	b.WriteString("--------------------------------------------------------------------------\n")
+	b.WriteString("| Sym | Side | Entry | Mark | Qty | Margin | Lev | uPnL | uPnL% | Age(m) | Reason |\n")
+	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
 	for _, r := range rows {
-		upct := 0.0
-		if r.entry > 0 {
-			if strings.EqualFold(r.side, "BUY") {
-				upct = ((r.mark - r.entry) / r.entry) * 100
-			} else {
-				upct = ((r.entry - r.mark) / r.entry) * 100
-			}
-		}
-		margin := 0.0
-		lev := 1
-		if pos, ok := p.positions[r.sym]; ok && pos != nil {
-			margin = pos.Margin
-			lev = pos.Leverage
-		}
-		fmt.Fprintf(&b, "%-8s %-5s %-10s %-10s %-8.4f %-7.2f %-4dx %+.2f  %+.2f%%\n",
-			r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, margin, lev, r.upnl, upct)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %.4f | %.2f | %dx | %+.2f | %+.2f%% | %d | %s |\n",
+			r.sym, r.side, fmtPrice(r.entry), fmtPrice(r.mark), r.qty, r.margin, r.lev, r.upnl, r.upct, r.ageMin, r.reason)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -4355,11 +4404,22 @@ func (t *telegramSink) Sendf(format string, args ...any) {
 	_ = t.send(msg)
 }
 
+func tgPre(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	return "<pre>" + html.EscapeString(msg) + "</pre>"
+}
+
 func (t *telegramSink) send(msg string) error {
 	form := url.Values{}
 	form.Set("chat_id", t.chatID)
 	form.Set("text", msg)
 	form.Set("disable_web_page_preview", "true")
+	if strings.HasPrefix(msg, "<pre>") && strings.HasSuffix(msg, "</pre>") {
+		form.Set("parse_mode", "HTML")
+	}
 	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
