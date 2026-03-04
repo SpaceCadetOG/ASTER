@@ -224,6 +224,9 @@ Recommended env overrides in `/opt/aster/env/live-lite.env`:
 ```bash
 LIVE_MARGIN_TYPE=ISOLATED
 LIVE_ENFORCE_MARGIN_TYPE=1
+LIVE_MULTI_ASSET_MODE=0
+LIVE_FEE_PROFILE=pro
+LIVE_FEE_DISCOUNT_PCT=0
 LIVE_STALE_ENABLE=1
 LIVE_STALE_MAX_AGE_MIN=180
 LIVE_MIN_STOP_PCT=0.25
@@ -243,6 +246,8 @@ LIVE_PAPER_FEE_BPS=4.0
 LIVE_PAPER_FEE_MAKER_BPS=0.5
 LIVE_PAPER_FEE_TAKER_BPS=4.0
 LIVE_PAPER_FUNDING_INTERVAL_MIN=480
+LIVE_PAPER_FUNDING_INTERVALS=BTCUSDT:480,ETHUSDT:480
+LIVE_PAPER_OPEN_COST_MODE=aster
 ```
 
 Paper continuity:
@@ -250,3 +255,4 @@ Paper continuity:
 - Paper trader state is persisted to `LIVE_PAPER_STATE_FILE`.
 - Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
 - Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
+- `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).

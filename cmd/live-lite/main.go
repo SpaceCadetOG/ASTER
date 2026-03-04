@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -144,7 +145,9 @@ type paperTrader struct {
 	staleGraceR  float64
 	beLockBps    float64
 	fundingEvery time.Duration
+	fundingBySym map[string]time.Duration
 	lastFundKey  map[string]string
+	openCostMode string
 }
 
 type paperDayStats struct {
@@ -254,6 +257,7 @@ type liveExecManager struct {
 	staleGraceR     float64
 	marginType      string
 	enforceIsolated bool
+	multiAssetMode  bool
 	positions       map[string]*livePosition
 	dayRealized     map[string]float64
 	reportLoc       *time.Location
@@ -471,6 +475,10 @@ func main() {
 	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
 	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
 		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
+	if execMgr != nil {
+		fmt.Printf("execution: margin_type=%s enforce_isolated=%v multi_asset_mode=%v\n",
+			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
+	}
 	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s maint=%s/%s",
 		scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery,
 		fmt.Sprintf("%02d-%02d", maintMidnight.StartHour, maintMidnight.EndHour),
@@ -501,6 +509,7 @@ func main() {
 		paperDepth := map[string]aster.OrderBook{}
 		if paper.enabled {
 			paperDepth = fetchOrderBooks(client, paper.OpenSymbols(), envInt("LIVE_PAPER_OB_LEVELS", 20))
+			mergeTopOfBookIntoMeta(metaBySymbol, paperDepth)
 			paper.ApplyFunding(now, metaBySymbol)
 		}
 		if paper.enabled {
@@ -699,6 +708,7 @@ func main() {
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
 			if paper.enabled {
 				entryDepth := fetchOrderBooks(client, []string{strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))}, envInt("LIVE_PAPER_OB_LEVELS", 20))
+				mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
 				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth)
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
@@ -1106,6 +1116,25 @@ func fetchOrderBooks(c *aster.Client, symbols []string, limit int) map[string]as
 	return out
 }
 
+func mergeTopOfBookIntoMeta(meta map[string]symbolMeta, books map[string]aster.OrderBook) {
+	if len(meta) == 0 || len(books) == 0 {
+		return
+	}
+	for raw, ob := range books {
+		m, ok := meta[raw]
+		if !ok {
+			continue
+		}
+		if len(ob.Bids) > 0 && ob.Bids[0][0] > 0 {
+			m.Bid = ob.Bids[0][0]
+		}
+		if len(ob.Asks) > 0 && ob.Asks[0][0] > 0 {
+			m.Ask = ob.Asks[0][0]
+		}
+		meta[raw] = m
+	}
+}
+
 func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader {
 	enabled := dryRun && envBool("LIVE_PAPER_ENABLE", true)
 	start := envFloat("LIVE_PAPER_START_BALANCE", 1000)
@@ -1159,12 +1188,21 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if trailStopPct <= 0 {
 		trailStopPct = 1.0
 	}
-	feeBps := envFloat("LIVE_PAPER_FEE_BPS", 4.0)
+	feeProfile := envStr("LIVE_FEE_PROFILE", "pro")
+	discPct := envFloat("LIVE_FEE_DISCOUNT_PCT", 0)
+	profileMaker, profileTaker := resolvePaperFeeProfile(feeProfile)
+	feeBps := envFloat("LIVE_PAPER_FEE_BPS", profileTaker)
 	if feeBps < 0 {
 		feeBps = 0
 	}
-	makerFeeBps := envFloat("LIVE_PAPER_FEE_MAKER_BPS", 0.5)
+	makerFeeBps := envFloat("LIVE_PAPER_FEE_MAKER_BPS", profileMaker)
 	takerFeeBps := envFloat("LIVE_PAPER_FEE_TAKER_BPS", feeBps)
+	if discPct > 0 {
+		f := 1.0 - clamp(discPct, 0, 100)/100.0
+		makerFeeBps *= f
+		takerFeeBps *= f
+		feeBps *= f
+	}
 	if makerFeeBps < 0 {
 		makerFeeBps = 0
 	}
@@ -1175,6 +1213,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if fundingEvery <= 0 {
 		fundingEvery = 480 * time.Minute
 	}
+	fundingBySym := parseSymbolMinutesMap(envStr("LIVE_PAPER_FUNDING_INTERVALS", ""))
 	if maxOpen <= 0 {
 		maxOpen = 1
 	}
@@ -1200,6 +1239,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
 	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
+	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	p := &paperTrader{
 		enabled:      enabled,
 		startBal:     start,
@@ -1233,7 +1273,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		staleGraceR:  staleGraceR,
 		beLockBps:    beLockBps,
 		fundingEvery: fundingEvery,
+		fundingBySym: fundingBySym,
 		lastFundKey:  map[string]string{},
+		openCostMode: openCostMode,
 	}
 	if p.enabled {
 		if err := p.load(); err != nil {
@@ -1376,6 +1418,11 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	marginType := strings.ToUpper(envStr("LIVE_MARGIN_TYPE", "ISOLATED"))
 	enforceIsolated := envBool("LIVE_ENFORCE_MARGIN_TYPE", true)
+	multiAssetMode := envBool("LIVE_MULTI_ASSET_MODE", false)
+	if multiAssetMode {
+		marginType = "CROSSED"
+		enforceIsolated = false
+	}
 	reportTZ := envStr("LIVE_REPORT_TZ", "America/Chicago")
 	reportLoc, err := time.LoadLocation(reportTZ)
 	if err != nil {
@@ -1407,6 +1454,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		staleGraceR:     staleGraceR,
 		marginType:      marginType,
 		enforceIsolated: enforceIsolated,
+		multiAssetMode:  multiAssetMode,
 		positions:       map[string]*livePosition{},
 		dayRealized:     map[string]float64{},
 		reportLoc:       reportLoc,
@@ -2369,24 +2417,52 @@ func (p *paperTrader) OpenSymbols() []string {
 	return out
 }
 
+func (p *paperTrader) freeForEntries() float64 {
+	if p == nil {
+		return 0
+	}
+	used := 0.0
+	for _, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		used += pos.Margin
+	}
+	free := p.balance - p.reserve - used
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
 func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 	if p == nil || !p.enabled || len(p.positions) == 0 || p.fundingEvery <= 0 {
 		return
 	}
-	slot := now.UTC().Truncate(p.fundingEvery).Format(time.RFC3339)
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
 			continue
 		}
+		interval := p.fundingEvery
+		if p.fundingBySym != nil {
+			if d, ok := p.fundingBySym[raw]; ok && d > 0 {
+				interval = d
+			}
+		}
+		slot := now.UTC().Truncate(interval).Format(time.RFC3339)
 		key := raw + "|" + slot
 		if p.lastFundKey[key] != "" {
 			continue
 		}
 		m := meta[raw]
-		if m.FundingRate == 0 || m.LastPrice <= 0 {
+		mark := m.LastPrice
+		if m.Bid > 0 && m.Ask > 0 {
+			mark = (m.Bid + m.Ask) / 2.0
+		}
+		if m.FundingRate == 0 || mark <= 0 {
 			continue
 		}
-		notional := m.LastPrice * pos.Qty
+		notional := mark * pos.Qty
 		if notional <= 0 {
 			continue
 		}
@@ -2414,7 +2490,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if len(p.positions) >= p.maxOpen {
 		return nil, fmt.Errorf("max paper positions reached (%d)", p.maxOpen)
 	}
-	if p.balance-p.reserve < margin {
+	free := p.freeForEntries()
+	if free < margin {
 		return nil, fmt.Errorf("insufficient usable paper balance")
 	}
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
@@ -2444,6 +2521,29 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	fillPx := paperSimFillPrice(strings.ToUpper(c.Side), qty, m, ob, data.CurrentRegimeCT(now), true)
 	if fillPx > 0 {
 		entry = fillPx
+	}
+	feeRate := p.feeRateBpsForReason("ENTRY")
+	entryFee := (entry * qty) * feeRate / 10000.0
+	if strings.EqualFold(p.openCostMode, "aster") {
+		refMark := m.LastPrice
+		if m.Bid > 0 && m.Ask > 0 {
+			refMark = (m.Bid + m.Ask) / 2.0
+		}
+		if refMark <= 0 {
+			refMark = entry
+		}
+		openLoss := 0.0
+		if strings.EqualFold(c.Side, "BUY") {
+			openLoss = math.Max(0, (entry-refMark)*qty)
+		} else {
+			openLoss = math.Max(0, (refMark-entry)*qty)
+		}
+		required := margin + entryFee + openLoss
+		if free < required {
+			return nil, fmt.Errorf("paper open cost %.4f exceeds free %.4f", required, free)
+		}
+	} else if free < margin+entryFee {
+		return nil, fmt.Errorf("paper margin+fee exceeds free balance")
 	}
 	stopPct := p.stopPct / 100.0
 	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
@@ -2488,9 +2588,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if risk <= 0 || reward/risk < p.minTP1RR {
 		return nil, fmt.Errorf("paper tp1 rr below minimum")
 	}
-	feeRate := p.feeRateBpsForReason("ENTRY")
-	fee := (entry * qty) * feeRate / 10000.0
-	p.balance -= fee
+	p.balance -= entryFee
 	pos := &paperPosition{
 		Symbol:      raw,
 		Side:        strings.ToUpper(c.Side),
@@ -2510,7 +2608,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	p.positions[raw] = pos
 	_ = p.save()
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f\n",
-		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, fee)
+		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee)
 	return pos, nil
 }
 
@@ -4132,6 +4230,48 @@ func envCSV(k, def string) []string {
 		if s != "" {
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+func resolvePaperFeeProfile(profile string) (makerBps, takerBps float64) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "vip":
+		return 0.3, 3.0
+	case "standard":
+		return 1.0, 6.0
+	case "pro":
+		fallthrough
+	default:
+		return 0.5, 4.0
+	}
+}
+
+func parseSymbolMinutesMap(raw string) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	parts := strings.Split(raw, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		kv := strings.SplitN(p, ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(kv[0])))
+		if sym == "" {
+			continue
+		}
+		mins, err := strconv.Atoi(strings.TrimSpace(kv[1]))
+		if err != nil || mins <= 0 {
+			continue
+		}
+		out[sym] = time.Duration(mins) * time.Minute
 	}
 	return out
 }

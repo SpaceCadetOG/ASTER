@@ -100,3 +100,31 @@ func TestPaperStateSaveLoad(t *testing.T) {
 		t.Fatalf("day stats not restored")
 	}
 }
+
+func TestParseSymbolMinutesMap(t *testing.T) {
+	m := parseSymbolMinutesMap("BTCUSDT:480, ETHUSDT:240, bad, SOLUSDT:abc")
+	if len(m) != 2 {
+		t.Fatalf("expected 2 valid entries, got %d", len(m))
+	}
+	if m["BTCUSDT"] != 480*time.Minute {
+		t.Fatalf("btc interval mismatch: %v", m["BTCUSDT"])
+	}
+	if m["ETHUSDT"] != 240*time.Minute {
+		t.Fatalf("eth interval mismatch: %v", m["ETHUSDT"])
+	}
+}
+
+func TestResolvePaperFeeProfile(t *testing.T) {
+	mk, tk := resolvePaperFeeProfile("pro")
+	if mk != 0.5 || tk != 4.0 {
+		t.Fatalf("pro profile mismatch: maker=%.2f taker=%.2f", mk, tk)
+	}
+	mk, tk = resolvePaperFeeProfile("vip")
+	if mk != 0.3 || tk != 3.0 {
+		t.Fatalf("vip profile mismatch: maker=%.2f taker=%.2f", mk, tk)
+	}
+	mk, tk = resolvePaperFeeProfile("unknown")
+	if mk != 0.5 || tk != 4.0 {
+		t.Fatalf("default profile mismatch: maker=%.2f taker=%.2f", mk, tk)
+	}
+}
