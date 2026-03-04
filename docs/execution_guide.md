@@ -212,7 +212,7 @@ go run ./cmd/exec
 
 - Margin mode enforced per trade: `LIVE_MARGIN_TYPE=ISOLATED`
 - Maintenance windows (`America/Chicago`):
-  - `00:00-01:00`: block new entries, keep risk management active
+  - `22:00-23:30`: block new entries, keep risk management active
   - `16:00-18:00`: force flat at `16:00`, then block entries until `18:00`
 - Hourly digest defaults:
   - `LIVE_TG_HOURLY_ENABLE=1`
@@ -243,10 +243,14 @@ LIVE_MIN_RR_TP1=0.80
 LIVE_BE_LOCK_BPS=5
 LIVE_MAINT_ENABLE=1
 LIVE_MAINT_TZ=America/Chicago
-LIVE_MAINT1_START_HOUR=0
-LIVE_MAINT1_END_HOUR=1
+LIVE_MAINT1_START_HOUR=22
+LIVE_MAINT1_START_MIN=0
+LIVE_MAINT1_END_HOUR=23
+LIVE_MAINT1_END_MIN=30
 LIVE_MAINT2_START_HOUR=16
+LIVE_MAINT2_START_MIN=0
 LIVE_MAINT2_END_HOUR=18
+LIVE_MAINT2_END_MIN=0
 LIVE_MAINT2_FORCE_FLAT=1
 LIVE_PAPER_STATE_FILE=out/paper_state.json
 LIVE_PAPER_OB_LEVELS=20

@@ -353,7 +353,9 @@ type liveLiteStatusStore struct {
 type maintenanceWindow struct {
 	Name      string
 	StartHour int
+	StartMin  int
 	EndHour   int
+	EndMin    int
 	ForceFlat bool
 	HookPath  string
 	HookTO    time.Duration
@@ -545,7 +547,9 @@ func main() {
 	maintMidnight := maintenanceWindow{
 		Name:      "M1",
 		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
+		StartMin:  envInt("LIVE_MAINT1_START_MIN", 0),
 		EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
+		EndMin:    envInt("LIVE_MAINT1_END_MIN", 0),
 		ForceFlat: envBool("LIVE_MAINT1_FORCE_FLAT", false),
 		HookPath:  envStr("LIVE_MAINT1_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT1_HOOK_TIMEOUT_SEC", 900)) * time.Second,
@@ -553,11 +557,15 @@ func main() {
 	maintEOD := maintenanceWindow{
 		Name:      "M2",
 		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
+		StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
 		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
+		EndMin:    envInt("LIVE_MAINT2_END_MIN", 0),
 		ForceFlat: envBool("LIVE_MAINT2_FORCE_FLAT", true),
 		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
 	}
+	maintMidnight = normalizeMaintenanceWindow(maintMidnight)
+	maintEOD = normalizeMaintenanceWindow(maintEOD)
 	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
 	lastDailyReportDay := ""
@@ -608,8 +616,8 @@ func main() {
 	}
 	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s maint=%s/%s",
 		scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery,
-		fmt.Sprintf("%02d-%02d", maintMidnight.StartHour, maintMidnight.EndHour),
-		fmt.Sprintf("%02d-%02d", maintEOD.StartHour, maintEOD.EndHour))
+		fmt.Sprintf("%02d:%02d-%02d:%02d", maintMidnight.StartHour, maintMidnight.StartMin, maintMidnight.EndHour, maintMidnight.EndMin),
+		fmt.Sprintf("%02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin))
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
 	if reconEvery <= 0 {
@@ -746,7 +754,12 @@ func main() {
 			dayKey := localMaintNow.Format("2006-01-02")
 			if maintState.LastStartDay[maintWindow.Name] != dayKey {
 				maintState.LastStartDay[maintWindow.Name] = dayKey
-				tg.Sendf("maintenance start %s\nwindow=%02d:00-%02d:00 %s\nsession=%s", maintWindow.Name, maintWindow.StartHour, maintWindow.EndHour, maintLoc.String(), sessionTag(localMaintNow))
+				tg.Sendf("maintenance start %s\nwindow=%02d:%02d-%02d:%02d %s\nsession=%s",
+					maintWindow.Name,
+					maintWindow.StartHour, maintWindow.StartMin,
+					maintWindow.EndHour, maintWindow.EndMin,
+					maintLoc.String(),
+					sessionTag(localMaintNow))
 				if paper.enabled {
 					_ = paper.save()
 				}
@@ -1154,13 +1167,29 @@ func activeMaintenanceWindow(now time.Time, enabled bool, w1, w2 maintenanceWind
 	if !enabled {
 		return maintenanceWindow{}, false
 	}
-	if inHourWindow(now.Hour(), w1.StartHour, w1.EndHour) {
+	if inMinuteWindow(now.Hour(), now.Minute(), w1.StartHour, w1.StartMin, w1.EndHour, w1.EndMin) {
 		return w1, true
 	}
-	if inHourWindow(now.Hour(), w2.StartHour, w2.EndHour) {
+	if inMinuteWindow(now.Hour(), now.Minute(), w2.StartHour, w2.StartMin, w2.EndHour, w2.EndMin) {
 		return w2, true
 	}
 	return maintenanceWindow{}, false
+}
+
+func normalizeMaintenanceWindow(w maintenanceWindow) maintenanceWindow {
+	if w.StartHour < 0 || w.StartHour > 23 {
+		w.StartHour = 0
+	}
+	if w.EndHour < 0 || w.EndHour > 23 {
+		w.EndHour = 0
+	}
+	if w.StartMin < 0 || w.StartMin > 59 {
+		w.StartMin = 0
+	}
+	if w.EndMin < 0 || w.EndMin > 59 {
+		w.EndMin = 0
+	}
+	return w
 }
 
 func inHourWindow(hour, start, end int) bool {
@@ -1171,6 +1200,19 @@ func inHourWindow(hour, start, end int) bool {
 		return hour >= start && hour < end
 	}
 	return hour >= start || hour < end
+}
+
+func inMinuteWindow(hour, min, startHour, startMin, endHour, endMin int) bool {
+	nowM := hour*60 + min
+	startM := startHour*60 + startMin
+	endM := endHour*60 + endMin
+	if startM == endM {
+		return false
+	}
+	if startM < endM {
+		return nowM >= startM && nowM < endM
+	}
+	return nowM >= startM || nowM < endM
 }
 
 func runMaintenanceHook(path string, timeout time.Duration) error {

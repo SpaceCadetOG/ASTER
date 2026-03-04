@@ -33,6 +33,37 @@ func TestActiveMaintenanceWindow(t *testing.T) {
 	}
 }
 
+func TestInMinuteWindow(t *testing.T) {
+	if !inMinuteWindow(22, 15, 22, 0, 23, 30) {
+		t.Fatalf("expected 22:15 in 22:00-23:30")
+	}
+	if !inMinuteWindow(23, 29, 22, 0, 23, 30) {
+		t.Fatalf("expected 23:29 in 22:00-23:30")
+	}
+	if inMinuteWindow(23, 30, 22, 0, 23, 30) {
+		t.Fatalf("expected 23:30 out of 22:00-23:30")
+	}
+	if !inMinuteWindow(0, 30, 22, 0, 1, 0) {
+		t.Fatalf("expected 00:30 in 22:00-01:00")
+	}
+}
+
+func TestActiveMaintenanceWindowMinutePrecision(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 3, 3, 23, 20, 0, 0, loc)
+	w1 := maintenanceWindow{Name: "M1", StartHour: 22, StartMin: 0, EndHour: 23, EndMin: 30}
+	w2 := maintenanceWindow{Name: "M2", StartHour: 16, StartMin: 0, EndHour: 18, EndMin: 0, ForceFlat: true}
+	w, ok := activeMaintenanceWindow(now, true, w1, w2)
+	if !ok || w.Name != "M1" {
+		t.Fatalf("expected M1 active at 23:20")
+	}
+	after := time.Date(2026, 3, 3, 23, 35, 0, 0, loc)
+	_, ok = activeMaintenanceWindow(after, true, w1, w2)
+	if ok {
+		t.Fatalf("expected no maintenance at 23:35")
+	}
+}
+
 func TestRealizedFromFill(t *testing.T) {
 	pnl, pct := realizedFromFill("BUY", 100, 105, 2)
 	if pnl <= 0 || pct <= 0 {

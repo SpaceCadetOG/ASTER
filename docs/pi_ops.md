@@ -101,7 +101,7 @@ scripts/stop_bot.sh
 
 ## 8) Maintenance + payout timing (CT)
 
-- Midnight maintenance: `00:00-01:00` (`LIVE_MAINT1_*`).
+- Night maintenance: `22:00-23:30` (`LIVE_MAINT1_*`, minute-precision with `*_MIN` envs).
 - EOD maintenance: `16:00-18:00` (`LIVE_MAINT2_*`), with force-flat at `16:00`.
 - 7-day payout anchor: `16:00` (`LIVE_PAYOUT_ANCHOR_*`).
 - Payout SLA: action/notification completed by `16:15` (`LIVE_PAYOUT_DEADLINE_MIN=15`).
