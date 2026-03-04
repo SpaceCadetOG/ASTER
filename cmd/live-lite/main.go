@@ -576,13 +576,6 @@ func main() {
 				}
 				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
-			if hourlyEnable {
-				hk := localMaintNow.Format("2006-01-02 15")
-				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
-					tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, tradeUpdateTop)))
-					lastHourlyKey = hk
-				}
-			}
 			localNow := now.In(paper.reportLoc)
 			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
 				dayKey := localNow.AddDate(0, 0, -1).Format("2006-01-02")
@@ -605,6 +598,13 @@ func main() {
 		shortInPlay := shortTrk.Entries()
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
+		if paper.enabled && tg != nil && tg.enabled && hourlyEnable {
+			hk := localMaintNow.Format("2006-01-02 15")
+			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
+				tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+				lastHourlyKey = hk
+			}
+		}
 		if !hourlyEnable && time.Now().UTC().After(nextDigestAt) {
 			sendInPlayDigest(tg, longInPlay, shortInPlay, metaBySymbol, dryRun, digestLimit)
 			nextDigestAt = time.Now().UTC().Add(digestEvery)
@@ -966,7 +966,7 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 	tg.Sendf("%s", strings.TrimSpace(b.String()))
 }
 
-func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, topN int) string {
+func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
 	if p == nil || !p.enabled {
 		return fmt.Sprintf("Hourly Digest (%s) session=%s\npaper=disabled", now.Format("15:04 MST"), sessionTag(now))
 	}
@@ -988,9 +988,58 @@ func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta
 		}
 	}
 	eq := p.balance + openPnL
-	msg := p.TradeUpdateMessage(meta, topN)
-	return fmt.Sprintf("Hourly Digest (%s) session=%s\nrealized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n%s",
-		now.Format("15:04 MST"), sessionTag(now), realized, openPnL, realized+openPnL, p.balance, eq, msg)
+	paperMsg := p.TradeUpdateMessage(meta, topN)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Hourly Digest (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
+	fmt.Fprintf(&b, "realized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n\n",
+		realized, openPnL, realized+openPnL, p.balance, eq)
+	b.WriteString(strings.TrimSpace(paperMsg))
+	b.WriteString("\n\nIn-Play Scanner\n")
+	appendInPlayRows(&b, "LONG", longInPlay, meta, 3)
+	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 3)
+	return strings.TrimSpace(b.String())
+}
+
+func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta map[string]symbolMeta, limit int) {
+	fmt.Fprintf(b, "%s (%d)\n", tag, len(rows))
+	if len(rows) == 0 {
+		b.WriteString("- none\n")
+		return
+	}
+	n := len(rows)
+	if n > limit {
+		n = limit
+	}
+	for i := 0; i < n; i++ {
+		e := rows[i]
+		raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
+		m := meta[raw]
+		status := string(e.State)
+		switch e.State {
+		case inplay.StateInPlay:
+			status = "IN_PLAY"
+		case inplay.StateHeating:
+			status = "HEATING"
+		case inplay.StateCooling:
+			status = "COOLING"
+		case inplay.StatePumping:
+			status = "PUMPING"
+		case inplay.StateDumping:
+			status = "DUMPING"
+		}
+		slopeArrow := "→"
+		if e.ScoreSlope > 0 {
+			slopeArrow = "↑"
+		} else if e.ScoreSlope < 0 {
+			slopeArrow = "↓"
+		}
+		price := "n/a"
+		if m.LastPrice > 0 {
+			price = fmtPrice(m.LastPrice)
+		}
+		fmt.Fprintf(b, "%d) %s %s g=%s s=%.2f %s%.3f px=%s 24h=%+.2f%%\n",
+			i+1, raw, status, e.CurrentGrade, e.CurrentScore, slopeArrow, abs(e.ScoreSlope), price, m.Move24h)
+	}
 }
 
 func activeMaintenanceWindow(now time.Time, enabled bool, w1, w2 maintenanceWindow) (maintenanceWindow, bool) {
