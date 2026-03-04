@@ -650,7 +650,7 @@ func main() {
 			dayKey := localMaintNow.Format("2006-01-02")
 			if maintState.LastStartDay[maintWindow.Name] != dayKey {
 				maintState.LastStartDay[maintWindow.Name] = dayKey
-				tg.Sendf("maintenance start %s\nwindow=%02d:00-%02d:00 %s", maintWindow.Name, maintWindow.StartHour, maintWindow.EndHour, maintLoc.String())
+				tg.Sendf("maintenance start %s\nwindow=%02d:00-%02d:00 %s\nsession=%s", maintWindow.Name, maintWindow.StartHour, maintWindow.EndHour, maintLoc.String(), sessionTag(localMaintNow))
 				if paper.enabled {
 					_ = paper.save()
 				}
@@ -679,7 +679,7 @@ func main() {
 				dayKey := localMaintNow.Format("2006-01-02")
 				if maintState.LastStartDay[w.Name] == dayKey && maintState.LastEndDay[w.Name] != dayKey {
 					maintState.LastEndDay[w.Name] = dayKey
-					tg.Sendf("maintenance end %s\ntrading resumed", w.Name)
+					tg.Sendf("maintenance end %s\ntrading resumed\nsession=%s", w.Name, sessionTag(localMaintNow))
 				}
 			}
 		}
@@ -968,7 +968,7 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 
 func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, topN int) string {
 	if p == nil || !p.enabled {
-		return fmt.Sprintf("Hourly Digest (%s)\npaper=disabled", now.Format("15:04 MST"))
+		return fmt.Sprintf("Hourly Digest (%s) session=%s\npaper=disabled", now.Format("15:04 MST"), sessionTag(now))
 	}
 	dayKey := now.In(p.reportLoc).Format("2006-01-02")
 	realized := 0.0
@@ -989,8 +989,8 @@ func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta
 	}
 	eq := p.balance + openPnL
 	msg := p.TradeUpdateMessage(meta, topN)
-	return fmt.Sprintf("Hourly Digest (%s)\nrealized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n%s",
-		now.Format("15:04 MST"), realized, openPnL, realized+openPnL, p.balance, eq, msg)
+	return fmt.Sprintf("Hourly Digest (%s) session=%s\nrealized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n%s",
+		now.Format("15:04 MST"), sessionTag(now), realized, openPnL, realized+openPnL, p.balance, eq, msg)
 }
 
 func activeMaintenanceWindow(now time.Time, enabled bool, w1, w2 maintenanceWindow) (maintenanceWindow, bool) {
@@ -3074,7 +3074,8 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		realizedToday = ds.Net
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Paper Update (%s)\n", time.Now().In(p.reportLoc).Format("15:04 MST"))
+	nowLocal := time.Now().In(p.reportLoc)
+	fmt.Fprintf(&b, "Paper Update (%s) session=%s\n", nowLocal.Format("15:04 MST"), sessionTag(nowLocal))
 	fmt.Fprintf(&b, "bal=$%.2f eq=$%.2f realized=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d\n",
 		p.balance, eq, realizedToday, totalUPnL, realizedToday+totalUPnL, len(p.positions), p.maxOpen)
 	if len(rows) == 0 {
@@ -4083,6 +4084,10 @@ func accountEquity(s accountSnapshot) float64 {
 	return eq
 }
 
+func sessionTag(ts time.Time) string {
+	return string(data.CurrentRegimeCT(ts))
+}
+
 func newPayoutManager() *payoutManager {
 	enabled := envBool("LIVE_PAYOUT_ENABLE", true)
 	locName := envStr("LIVE_PAYOUT_TZ", "America/Chicago")
@@ -4275,6 +4280,7 @@ func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWin
 			execDeadline.Format("2006-01-02 15:04 MST"),
 			nextCloseLocal.Format("2006-01-02 15:04 MST"),
 		)
+		msg += fmt.Sprintf("\nsession=%s", sessionTag(nowUTC.In(pm.loc)))
 		tg.Sendf("%s", tgPre(msg))
 	}
 }
