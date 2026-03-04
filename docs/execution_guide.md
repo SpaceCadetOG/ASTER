@@ -237,4 +237,10 @@ LIVE_MAINT1_END_HOUR=1
 LIVE_MAINT2_START_HOUR=16
 LIVE_MAINT2_END_HOUR=17
 LIVE_MAINT2_FORCE_FLAT=1
+LIVE_PAPER_STATE_FILE=out/paper_state.json
 ```
+
+Paper continuity:
+
+- Paper trader state is persisted to `LIVE_PAPER_STATE_FILE`.
+- Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.

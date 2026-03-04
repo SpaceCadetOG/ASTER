@@ -3,6 +3,7 @@ package strategies
 import (
 	"strings"
 
+	"go-machine/internal/data"
 	"go-machine/internal/features"
 )
 
@@ -19,6 +20,10 @@ type RouterConfig struct {
 	RequireFlowConfluence     bool
 	RejectIfTargetTooClosePct float64
 	UseVPReversal             bool
+	EnableInstitutionalPA     bool
+	MinConfluenceScore        float64
+	UseSessionRegimeRisk      bool
+	AllowDeadZoneOnlyAPlus    bool
 	RiskPolicy                RiskPolicyConfig
 }
 
@@ -42,6 +47,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.MinVPConfidence <= 0 {
 		cfg.MinVPConfidence = 0.55
 	}
+	if cfg.MinConfluenceScore <= 0 {
+		cfg.MinConfluenceScore = 0.58
+	}
 	if cfg.RiskPolicy.StopMode == "" {
 		cfg.RiskPolicy = DefaultRiskPolicy()
 	}
@@ -51,6 +59,14 @@ func NewRouter(cfg RouterConfig) *Router {
 		if cfg.UseVPReversal {
 			base = append(base, VPReversal{})
 		}
+	}
+	if cfg.EnableInstitutionalPA {
+		base = append(base,
+			DailyOpenSR{},
+			PDLevelsRetest{},
+			FailedAuctionMagnetStrategy{},
+			VWAPConfluenceStrategy{},
+		)
 	}
 	return &Router{cfg: cfg, strat: base}
 }
@@ -95,6 +111,14 @@ func (r *Router) Eval(ctx Context) []Candidate {
 				continue
 			}
 		}
+		if sig.Confidence < r.cfg.MinConfluenceScore {
+			sig.RejectReason = "below_min_confluence"
+			continue
+		}
+		if r.cfg.AllowDeadZoneOnlyAPlus && data.CurrentRegimeCT(sig.Ts) == data.RegimeDead && gradeValue(ctx.ScannerGrade) < gradeValue("A") {
+			sig.RejectReason = "dead_zone_non_a_grade"
+			continue
+		}
 		scoreNorm := ctx.ScannerScore / r.cfg.ScannerScoreScale
 		if scoreNorm < 0 {
 			scoreNorm = 0
@@ -109,7 +133,12 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		if ctx.Snapshot.Flow.WhaleDelta1m < 0 && sig.Side == features.SideShort {
 			whaleBoost = 1.15
 		}
-		candScore := sig.Confidence * scoreNorm * whaleBoost
+		sessionMult := 1.0
+		if r.cfg.UseSessionRegimeRisk {
+			sessionMult = data.SessionRiskMultiplier(sig.Ts, sig.Confidence)
+			sig.RegimeTag = string(data.CurrentRegimeCT(sig.Ts))
+		}
+		candScore := sig.Confidence * scoreNorm * whaleBoost * sessionMult
 		out = append(out, Candidate{Signal: sig, Score: candScore})
 	}
 	if len(out) <= 1 || !r.cfg.MaxOne {

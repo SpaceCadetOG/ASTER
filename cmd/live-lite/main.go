@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go-machine/adapters/aster"
+	"go-machine/internal/data"
 	"go-machine/internal/features"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
@@ -121,6 +122,7 @@ type paperTrader struct {
 	tp3Frac      float64
 	trailAfterTP int
 	trailStopPct float64
+	stateFile    string
 	tradesCSV    string
 	equityCSV    string
 	maxOpen      int
@@ -145,6 +147,15 @@ type paperDayStats struct {
 	Fees    float64
 	Net     float64
 	Reasons map[string]int
+}
+
+type paperState struct {
+	StartBal  float64                   `json:"startBal"`
+	Balance   float64                   `json:"balance"`
+	Reserve   float64                   `json:"reserve"`
+	Positions map[string]*paperPosition `json:"positions"`
+	DayStats  map[string]*paperDayStats `json:"dayStats"`
+	UpdatedAt time.Time                 `json:"updatedAt"`
 }
 
 type execState string
@@ -198,6 +209,8 @@ type livePosition struct {
 	EntryReason   string    `json:"entryReason,omitempty"`
 	EntryConf     float64   `json:"entryConf,omitempty"`
 	EntryTags     []string  `json:"entryTags,omitempty"`
+	EntryReasons  []string  `json:"entryReasons,omitempty"`
+	RegimeTag     string    `json:"regimeTag,omitempty"`
 	MaxFavorableR float64   `json:"maxFavorableR,omitempty"`
 	LastMark      float64   `json:"lastMark,omitempty"`
 	RealizedPnL   float64   `json:"realizedPnl,omitempty"`
@@ -263,6 +276,7 @@ type liveLiteStatus struct {
 	TopVPStopMode   string           `json:"top_vp_stop_mode,omitempty"`
 	TopVPTargetMode string           `json:"top_vp_target_mode,omitempty"`
 	TopRejectReason string           `json:"top_reject_reason,omitempty"`
+	TopRegimeTag    string           `json:"top_regime_tag,omitempty"`
 	LongInPlay      int              `json:"long_inplay"`
 	ShortInPlay     int              `json:"short_inplay"`
 	AvailableUSDT   float64          `json:"available_usdt"`
@@ -560,6 +574,9 @@ func main() {
 			if maintState.LastStartDay[maintWindow.Name] != dayKey {
 				maintState.LastStartDay[maintWindow.Name] = dayKey
 				tg.Sendf("maintenance start %s\nwindow=%02d:00-%02d:00 %s", maintWindow.Name, maintWindow.StartHour, maintWindow.EndHour, maintLoc.String())
+				if paper.enabled {
+					_ = paper.save()
+				}
 			}
 			if maintWindow.ForceFlat && maintState.FlatDoneDay[maintWindow.Name] != dayKey {
 				maintState.FlatDoneDay[maintWindow.Name] = dayKey
@@ -568,6 +585,7 @@ func main() {
 				}
 				if paper.enabled {
 					paper.ForceCloseAll(now, metaBySymbol, "EOD_FORCE_FLAT")
+					_ = paper.save()
 				}
 				tg.Sendf("maintenance flat complete %s", maintWindow.Name)
 			}
@@ -646,6 +664,7 @@ func main() {
 		st.TopVPStopMode = best.Sig.StopMode
 		st.TopVPTargetMode = best.Sig.TargetMode
 		st.TopRejectReason = best.RejectReason
+		st.TopRegimeTag = best.Sig.RegimeTag
 		statusStore.Set(st)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
 		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f\n",
@@ -804,7 +823,7 @@ func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, 
 	if dryRun {
 		mode = "DRY_RUN"
 	}
-	fmt.Fprintf(&b, "Live-Lite Digest (%s) %s UTC\n", mode, now.Format("15:04"))
+	fmt.Fprintf(&b, "Live-Lite Digest (%s) %s UTC regime=%s\n", mode, now.Format("15:04"), data.CurrentRegimeCT(now))
 	appendList := func(tag string, rows []inplay.Entry) {
 		fmt.Fprintf(&b, "\n%s (%d)\n", tag, len(rows))
 		if len(rows) == 0 {
@@ -1117,7 +1136,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
 	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
-	return &paperTrader{
+	p := &paperTrader{
 		enabled:      enabled,
 		startBal:     start,
 		balance:      start,
@@ -1132,6 +1151,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		tp3Frac:      tp3Frac,
 		trailAfterTP: trailAfterTP,
 		trailStopPct: trailStopPct,
+		stateFile:    envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
 		tradesCSV:    envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv"),
 		equityCSV:    envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv"),
 		maxOpen:      maxOpen,
@@ -1147,6 +1167,67 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		staleGraceR:  staleGraceR,
 		beLockBps:    beLockBps,
 	}
+	if p.enabled {
+		if err := p.load(); err != nil {
+			fmt.Printf("live-lite: paper state load warning: %v\n", err)
+		}
+	}
+	return p
+}
+
+func (p *paperTrader) load() error {
+	if p == nil || !p.enabled || strings.TrimSpace(p.stateFile) == "" {
+		return nil
+	}
+	b, err := os.ReadFile(p.stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var st paperState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return err
+	}
+	if st.Balance > 0 {
+		p.balance = st.Balance
+	}
+	if st.StartBal > 0 {
+		p.startBal = st.StartBal
+	}
+	if st.Reserve > 0 {
+		p.reserve = st.Reserve
+	}
+	if st.Positions != nil {
+		p.positions = st.Positions
+	}
+	if st.DayStats != nil {
+		p.dayStats = st.DayStats
+	}
+	return nil
+}
+
+func (p *paperTrader) save() error {
+	if p == nil || !p.enabled || strings.TrimSpace(p.stateFile) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.stateFile), 0o755); err != nil {
+		return err
+	}
+	st := paperState{
+		StartBal:  p.startBal,
+		Balance:   p.balance,
+		Reserve:   p.reserve,
+		Positions: p.positions,
+		DayStats:  p.dayStats,
+		UpdatedAt: time.Now().UTC(),
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.stateFile, b, 0o644)
 }
 
 func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager {
@@ -1538,6 +1619,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		EntryReason:   c.Strat,
 		EntryConf:     c.Conf,
 		EntryTags:     append([]string{}, c.Sig.Tags...),
+		EntryReasons:  append([]string{}, c.Sig.Reasons...),
+		RegimeTag:     c.Sig.RegimeTag,
 	}
 	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		risk := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
@@ -2298,6 +2381,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		EntryReason: c.Strat,
 	}
 	p.positions[raw] = pos
+	_ = p.save()
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f\n",
 		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, fee)
 	return pos, nil
@@ -2307,6 +2391,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta) {
 	if p == nil || !p.enabled || len(p.positions) == 0 {
 		return
 	}
+	defer func() { _ = p.save() }()
 	// Iterate over a snapshot of keys because positions can be closed during processing.
 	keys := make([]string, 0, len(p.positions))
 	for k := range p.positions {
@@ -2433,6 +2518,7 @@ func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, r
 		}
 		p.exitPortion(now, pos, reason, mark, pos.Qty)
 	}
+	_ = p.save()
 }
 
 func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason string, exitPrice, qty float64) {
@@ -2469,6 +2555,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	if pos.Qty <= 1e-10 {
 		delete(p.positions, symbol)
 	}
+	_ = p.save()
 }
 
 func (p *paperTrader) recordDayStat(now time.Time, reason string, gross, fee, net float64) {
@@ -2861,6 +2948,10 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		EnableVPSetups:            true,
 		MinVPConfidence:           0.55,
 		UseVPReversal:             true,
+		EnableInstitutionalPA:     true,
+		UseSessionRegimeRisk:      true,
+		AllowDeadZoneOnlyAPlus:    true,
+		MinConfluenceScore:        0.58,
 		RejectIfTargetTooClosePct: vpMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(stopMode),

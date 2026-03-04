@@ -23,6 +23,10 @@ type Signal struct {
 	StopMode      string
 	TargetMode    string
 	RejectReason  string
+	Reasons       []string
+	Confluence    map[string]float64
+	RegimeTag     string
+	SignalSource  []string
 	Ts            time.Time
 }
 

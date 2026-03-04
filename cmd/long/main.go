@@ -92,10 +92,14 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 	fmt.Printf("🔧 ASTER LONG adapter — live fetch @ %s\n", now.Format(time.RFC3339))
 
 	active := sessions.ActiveSessionLabels(now)
+	scanMult := sessions.ScannerScoreMultiplier(now)
 	mkts := asterClient.FetchAllMarkets()
 
 	// Long bias scoring
 	scored := market.ScoreAndFilter(mkts)
+	for i := range scored {
+		scored[i].Score = round2(scored[i].Score * scanMult)
+	}
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	fmt.Println(market.FormatHeader("asterdex (LONGS)", active))
@@ -290,4 +294,11 @@ func envInt(k string, def int) int {
 		return def
 	}
 	return n
+}
+
+func round2(x float64) float64 {
+	if x >= 0 {
+		return float64(int(x*100+0.5)) / 100
+	}
+	return float64(int(x*100-0.5)) / 100
 }

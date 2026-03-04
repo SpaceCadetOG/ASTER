@@ -78,6 +78,9 @@ type Trade struct {
 	VPStopMode    string    `json:"vp_stop_mode,omitempty"`
 	VPTargetMode  string    `json:"vp_target_mode,omitempty"`
 	RejectReason  string    `json:"reject_reason,omitempty"`
+	RegimeTag     string    `json:"regime_tag,omitempty"`
+	Reasons       string    `json:"reasons,omitempty"`
+	SignalSource  string    `json:"signal_source,omitempty"`
 }
 
 type Report struct {
@@ -138,6 +141,10 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 		EnableVPSetups:            true,
 		MinVPConfidence:           0.55,
 		UseVPReversal:             true,
+		EnableInstitutionalPA:     true,
+		UseSessionRegimeRisk:      true,
+		AllowDeadZoneOnlyAPlus:    true,
+		MinConfluenceScore:        0.58,
 		RejectIfTargetTooClosePct: cfg.VPMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(strings.ToLower(strings.TrimSpace(cfg.StopMode))),
@@ -207,6 +214,9 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 					VPStopMode:    pending.Signal.StopMode,
 					VPTargetMode:  pending.Signal.TargetMode,
 					RejectReason:  pending.Signal.RejectReason,
+					RegimeTag:     pending.Signal.RegimeTag,
+					Reasons:       strings.Join(pending.Signal.Reasons, "|"),
+					SignalSource:  strings.Join(pending.Signal.SignalSource, "|"),
 				}
 				barsInPos = 0
 			}
@@ -339,6 +349,14 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 		strat = strategies.VPRejection{}
 	case "vp_reversal":
 		strat = strategies.VPReversal{}
+	case "daily_open_sr":
+		strat = strategies.DailyOpenSR{}
+	case "pd_levels_retest":
+		strat = strategies.PDLevelsRetest{}
+	case "failed_auction_magnet":
+		strat = strategies.FailedAuctionMagnetStrategy{}
+	case "vwap_confluence":
+		strat = strategies.VWAPConfluenceStrategy{}
 	default:
 		return nil
 	}
@@ -487,9 +505,9 @@ func WriteOutputs(res Result, outDir string) error {
 		return err
 	}
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason"})
+	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason", "regime_tag", "signal_reasons", "signal_source"})
 	for _, t := range res.Trades {
-		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason})
+		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason, t.RegimeTag, t.Reasons, t.SignalSource})
 	}
 	w.Flush()
 	_ = f.Close()

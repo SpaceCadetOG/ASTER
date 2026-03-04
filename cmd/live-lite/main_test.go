@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -51,5 +53,50 @@ func TestShouldCloseStaleLive(t *testing.T) {
 	p.MaxFavorableR = 0.9
 	if shouldCloseStaleLive(p, now, 3*time.Hour, 0.25, 0.75) {
 		t.Fatalf("expected grace to skip stale close")
+	}
+}
+
+func TestPaperStateSaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paper_state.json")
+	p := &paperTrader{
+		enabled:   true,
+		startBal:  1000,
+		balance:   1123.45,
+		reserve:   50,
+		stateFile: path,
+		positions: map[string]*paperPosition{
+			"BTCUSDT": {Symbol: "BTCUSDT", Side: "BUY", Entry: 100, Qty: 1.25, OpenedAt: time.Now().UTC()},
+		},
+		dayStats: map[string]*paperDayStats{
+			"2026-03-03": {Trades: 2, Wins: 1, Losses: 1, Net: 12.3, Reasons: map[string]int{"TP1": 1, "SL": 1}},
+		},
+	}
+	if err := p.save(); err != nil {
+		t.Fatalf("save error: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected state file: %v", err)
+	}
+	q := &paperTrader{
+		enabled:   true,
+		stateFile: path,
+		positions: map[string]*paperPosition{},
+		dayStats:  map[string]*paperDayStats{},
+	}
+	if err := q.load(); err != nil {
+		t.Fatalf("load error: %v", err)
+	}
+	if q.balance != p.balance {
+		t.Fatalf("balance mismatch got=%.2f want=%.2f", q.balance, p.balance)
+	}
+	if len(q.positions) != 1 {
+		t.Fatalf("positions mismatch got=%d", len(q.positions))
+	}
+	if q.positions["BTCUSDT"] == nil || q.positions["BTCUSDT"].Qty <= 0 {
+		t.Fatalf("missing restored position")
+	}
+	if q.dayStats["2026-03-03"] == nil || q.dayStats["2026-03-03"].Trades != 2 {
+		t.Fatalf("day stats not restored")
 	}
 }
