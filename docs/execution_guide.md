@@ -219,6 +219,10 @@ go run ./cmd/exec
   - `LIVE_TG_DIGEST_MIN=60`
   - `LIVE_TG_TRADE_UPDATE_MIN=60`
   - `LIVE_TG_COMMANDS_ENABLE=1`
+  - EOD daily dispatch default at `18:00 CT`:
+    - `LIVE_TG_DAILY_REPORT_HOUR=18`
+    - `LIVE_TG_DAILY_REPORT_MIN=0`
+    - `LIVE_TG_DAILY_REPORT_DAY_OFFSET=0`
 
 Recommended env overrides in `/opt/aster/env/live-lite.env`:
 
@@ -275,6 +279,9 @@ LIVE_PAYOUT_STATE_FILE=out/payout_state.json
 LIVE_PAYOUT_LEDGER_FILE=out/payouts.csv
 LIVE_TRADES_FILE=out/live_trades.csv
 LIVE_TG_COMMANDS_ENABLE=1
+LIVE_TG_DAILY_REPORT_HOUR=18
+LIVE_TG_DAILY_REPORT_MIN=0
+LIVE_TG_DAILY_REPORT_DAY_OFFSET=0
 LIVE_TG_DAILY_RECEIPT_ENABLE=1
 LIVE_TG_DAILY_RECEIPT_LIMIT=25
 LIVE_TG_DAILY_LIVE_RECEIPT_ENABLE=1
@@ -292,6 +299,7 @@ Paper continuity:
 - In paper mode payout is auto-debited; in live mode payout is Telegram-notified for manual withdraw.
 - Payout withdraws only profit above trading base; set `LIVE_PAYOUT_KEEP_USDT` to keep a fixed top-up base.
 - End-of-day receipt can include all trades and results via `LIVE_TG_DAILY_RECEIPT_ENABLE`.
+- Daily report/receipts are dispatched after EOD by default at `18:00 CT` (configure with `LIVE_TG_DAILY_REPORT_*`).
 - Live fills are journaled to `LIVE_TRADES_FILE`; enable second per-fill Telegram receipt with `LIVE_TG_FILL_RECEIPT_ENABLE=1`.
 - Telegram command handlers:
   - `/help`

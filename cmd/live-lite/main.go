@@ -514,8 +514,9 @@ func main() {
 	if tradeUpdateTop <= 0 {
 		tradeUpdateTop = 5
 	}
-	reportHour := envInt("LIVE_TG_DAILY_REPORT_HOUR", 0)
+	reportHour := envInt("LIVE_TG_DAILY_REPORT_HOUR", 18)
 	reportMinute := envInt("LIVE_TG_DAILY_REPORT_MIN", 0)
+	reportDayOffset := envInt("LIVE_TG_DAILY_REPORT_DAY_OFFSET", 0)
 	receiptEnable := envBool("LIVE_TG_DAILY_RECEIPT_ENABLE", true)
 	receiptLimit := envInt("LIVE_TG_DAILY_RECEIPT_LIMIT", 25)
 	if receiptLimit <= 0 {
@@ -661,8 +662,9 @@ func main() {
 			}
 			localNow := now.In(paper.reportLoc)
 			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
-				dayKey := localNow.AddDate(0, 0, -1).Format("2006-01-02")
+				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyReportDay {
+					tg.Sendf("EOD Daily Dispatch (%s) at %s", dayKey, localNow.Format("15:04 MST"))
 					if msg, ok := paper.DailyReportMessage(dayKey); ok {
 						tg.Sendf("%s", msg)
 					}
@@ -678,7 +680,7 @@ func main() {
 		if tg != nil && tg.enabled && execMgr != nil && liveReceiptEnable {
 			localNow := now.In(execMgr.reportLoc)
 			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
-				dayKey := localNow.AddDate(0, 0, -1).Format("2006-01-02")
+				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyLiveReceiptDay {
 					if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
 						tg.Sendf("%s", tgPre(msg))
