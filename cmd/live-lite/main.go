@@ -443,7 +443,7 @@ func main() {
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
-	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "USDT")
+	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 	if entryBps < 0 {
 		entryBps = -entryBps
 	}
@@ -5687,11 +5687,22 @@ func (c *telegramCommandCtx) handleCommand(msg string) string {
 			s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2)
 	case strings.HasPrefix(cmd, "/balance"):
 		if c.rest != nil {
-			assets := envCSV("LIVE_ACCOUNT_ASSETS", "USDT")
+			assets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 			snap, err := fetchAccountSnapshot(c.rest, assets)
 			if err == nil {
 				eq := accountEquity(snap)
-				return fmt.Sprintf("balance\navailableUSDT=%.4f\nequity=%.4f\nopen_positions=%d", snap.AvailableUSDT, eq, len(snap.Positions))
+				var b strings.Builder
+				fmt.Fprintf(&b, "balance (live)\navailableUSDT=%.4f\nequityUSDTView=%.4f\nopen_positions=%d\nbalances:\n",
+					snap.AvailableUSDT, eq, len(snap.Positions))
+				if len(snap.Balances) == 0 {
+					b.WriteString("(none)\n")
+				} else {
+					for _, x := range snap.Balances {
+						fmt.Fprintf(&b, "- %-6s bal=%-12.6f avail=%-12.6f upnl=%-10.6f\n",
+							strings.ToUpper(x.Asset), x.Balance, x.AvailableBalance, x.CrossUnPnl)
+					}
+				}
+				return strings.TrimSpace(b.String())
 			}
 		}
 		s := c.status.Snapshot()
