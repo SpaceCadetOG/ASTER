@@ -36,6 +36,7 @@ type candidate struct {
 	Side         string // BUY/SELL
 	Strat        string
 	Conf         float64
+	VolumeUSD    float64
 	Sig          strategies.Signal
 	RejectReason string
 }
@@ -236,51 +237,52 @@ const (
 )
 
 type livePosition struct {
-	Symbol        string    `json:"symbol"`
-	Side          string    `json:"side"`
-	State         execState `json:"state"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
-	ClosedAt      time.Time `json:"closedAt,omitempty"`
-	CloseReason   string    `json:"closeReason,omitempty"`
-	EntryOrderID  int64     `json:"entryOrderId"`
-	EntryPrice    float64   `json:"entryPrice"`
-	Qty           float64   `json:"qty"`
-	FilledQty     float64   `json:"filledQty"`
-	RemainingQty  float64   `json:"remainingQty"`
-	Margin        float64   `json:"margin"`
-	Leverage      int       `json:"leverage"`
-	StopPrice     float64   `json:"stopPrice"`
-	TP1Price      float64   `json:"tp1Price"`
-	TP2Price      float64   `json:"tp2Price"`
-	TP3Price      float64   `json:"tp3Price"`
-	TP1Qty        float64   `json:"tp1Qty"`
-	TP2Qty        float64   `json:"tp2Qty"`
-	TP3Qty        float64   `json:"tp3Qty"`
-	StopOrderID   int64     `json:"stopOrderId"`
-	TP1OrderID    int64     `json:"tp1OrderId"`
-	TP2OrderID    int64     `json:"tp2OrderId"`
-	TP3OrderID    int64     `json:"tp3OrderId"`
-	TrailOn       bool      `json:"trailOn"`
-	TrailRef      float64   `json:"trailRef"`
-	TrailStop     float64   `json:"trailStop"`
-	VPSetup       string    `json:"vpSetup,omitempty"`
-	VPLevel       float64   `json:"vpLevel,omitempty"`
-	VPTargetLevel float64   `json:"vpTargetLevel,omitempty"`
-	VPStopMode    string    `json:"vpStopMode,omitempty"`
-	VPTargetMode  string    `json:"vpTargetMode,omitempty"`
-	RejectReason  string    `json:"rejectReason,omitempty"`
-	CustomRiskPct float64   `json:"customRiskPct,omitempty"`
-	CustomTP1R    float64   `json:"customTp1R,omitempty"`
-	CustomTP2R    float64   `json:"customTp2R,omitempty"`
-	EntryReason   string    `json:"entryReason,omitempty"`
-	EntryConf     float64   `json:"entryConf,omitempty"`
-	EntryTags     []string  `json:"entryTags,omitempty"`
-	EntryReasons  []string  `json:"entryReasons,omitempty"`
-	RegimeTag     string    `json:"regimeTag,omitempty"`
-	MaxFavorableR float64   `json:"maxFavorableR,omitempty"`
-	LastMark      float64   `json:"lastMark,omitempty"`
-	RealizedPnL   float64   `json:"realizedPnl,omitempty"`
+	Symbol         string    `json:"symbol"`
+	Side           string    `json:"side"`
+	State          execState `json:"state"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	ClosedAt       time.Time `json:"closedAt,omitempty"`
+	CloseReason    string    `json:"closeReason,omitempty"`
+	EntryOrderID   int64     `json:"entryOrderId"`
+	EntryPrice     float64   `json:"entryPrice"`
+	Qty            float64   `json:"qty"`
+	FilledQty      float64   `json:"filledQty"`
+	RemainingQty   float64   `json:"remainingQty"`
+	Margin         float64   `json:"margin"`
+	Leverage       int       `json:"leverage"`
+	StopPrice      float64   `json:"stopPrice"`
+	TP1Price       float64   `json:"tp1Price"`
+	TP2Price       float64   `json:"tp2Price"`
+	TP3Price       float64   `json:"tp3Price"`
+	TP1Qty         float64   `json:"tp1Qty"`
+	TP2Qty         float64   `json:"tp2Qty"`
+	TP3Qty         float64   `json:"tp3Qty"`
+	StopOrderID    int64     `json:"stopOrderId"`
+	TP1OrderID     int64     `json:"tp1OrderId"`
+	TP2OrderID     int64     `json:"tp2OrderId"`
+	TP3OrderID     int64     `json:"tp3OrderId"`
+	TrailOn        bool      `json:"trailOn"`
+	TrailRef       float64   `json:"trailRef"`
+	TrailStop      float64   `json:"trailStop"`
+	VPSetup        string    `json:"vpSetup,omitempty"`
+	VPLevel        float64   `json:"vpLevel,omitempty"`
+	VPTargetLevel  float64   `json:"vpTargetLevel,omitempty"`
+	VPStopMode     string    `json:"vpStopMode,omitempty"`
+	VPTargetMode   string    `json:"vpTargetMode,omitempty"`
+	RejectReason   string    `json:"rejectReason,omitempty"`
+	CustomRiskPct  float64   `json:"customRiskPct,omitempty"`
+	CustomTP1R     float64   `json:"customTp1R,omitempty"`
+	CustomTP2R     float64   `json:"customTp2R,omitempty"`
+	EntryReason    string    `json:"entryReason,omitempty"`
+	EntryConf      float64   `json:"entryConf,omitempty"`
+	EntryTags      []string  `json:"entryTags,omitempty"`
+	EntryReasons   []string  `json:"entryReasons,omitempty"`
+	EntryVolumeUSD float64   `json:"entryVolumeUsd,omitempty"`
+	RegimeTag      string    `json:"regimeTag,omitempty"`
+	MaxFavorableR  float64   `json:"maxFavorableR,omitempty"`
+	LastMark       float64   `json:"lastMark,omitempty"`
+	RealizedPnL    float64   `json:"realizedPnl,omitempty"`
 }
 
 type liveExecStore struct {
@@ -982,6 +984,7 @@ func main() {
 			lastTopKey = topKey
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
 		entryDepth := map[string]aster.OrderBook{}
 		if obFilterEnable {
 			entryDepth = fetchOrderBooks(client, []string{rawBest}, obLevels)
@@ -1554,11 +1557,11 @@ func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64
 	return pnl, pct
 }
 
-func adjustBracketParams(reason string, conf, stopPct, tp1R, tp2R, tp3R, minStopPct, maxStopPct float64) (float64, float64, float64, float64) {
+func adjustBracketParams(reason string, conf, volumeUSD, stopPct, tp1R, tp2R, tp3R, minStopPct, maxStopPct float64) (float64, float64, float64, float64) {
 	tp1Max := envFloat("LIVE_TP1_MAX_R", 2.5)
 	tp2Max := envFloat("LIVE_TP2_MAX_R", 4.0)
 	tp3Max := envFloat("LIVE_TP3_MAX_R", 6.0)
-	stopWiden := envFloat("LIVE_STOP_WIDEN_MULT", 1.25)
+	stopWiden := envFloat("LIVE_STOP_WIDEN_MULT", 1.35)
 	softenConf := envFloat("LIVE_SOFTEN_CONF_MAX", 0.65)
 
 	r := strings.ToLower(strings.TrimSpace(reason))
@@ -1566,6 +1569,7 @@ func adjustBracketParams(reason string, conf, stopPct, tp1R, tp2R, tp3R, minStop
 	if soften && stopWiden > 0 {
 		stopPct *= stopWiden
 	}
+	stopPct *= volumeStopWiden(volumeUSD)
 	stopPct = clamp(stopPct, minStopPct, maxStopPct)
 
 	if tp1Max > 0 && tp1R > tp1Max {
@@ -1587,6 +1591,47 @@ func adjustBracketParams(reason string, conf, stopPct, tp1R, tp2R, tp3R, minStop
 		tp3R = tp2R
 	}
 	return stopPct, tp1R, tp2R, tp3R
+}
+
+func volumeStopWiden(volumeUSD float64) float64 {
+	if volumeUSD <= 0 {
+		return 1.0
+	}
+	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER3", 250_000_000) {
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER3", 1.35)
+	}
+	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER2", 100_000_000) {
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER2", 1.22)
+	}
+	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER1", 25_000_000) {
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER1", 1.12)
+	}
+	return 1.0
+}
+
+func beArmThreshold(configured, tp1R float64) float64 {
+	if configured <= 0 {
+		configured = 0.5
+	}
+	nearTP1 := tp1R - 0.5
+	if nearTP1 < 0.5 {
+		nearTP1 = 0.5
+	}
+	if tp1R > 0 && nearTP1 > tp1R {
+		nearTP1 = tp1R
+	}
+	if nearTP1 > configured {
+		return nearTP1
+	}
+	return configured
+}
+
+func tp1RFromBracket(entry, stop, tp1 float64) float64 {
+	risk := abs(entry - stop)
+	if risk <= 0 || entry <= 0 || tp1 <= 0 {
+		return 1.0
+	}
+	return abs(tp1-entry) / risk
 }
 
 func (m *liveExecManager) addDayRealized(now time.Time, pnl float64) float64 {
@@ -1782,12 +1827,12 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
-	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 30)) * time.Minute
-	maxLossStreak := envInt("LIVE_PAPER_SYMBOL_MAX_LOSS_STREAK", 2)
+	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 0)) * time.Minute
+	maxLossStreak := envInt("LIVE_PAPER_SYMBOL_MAX_LOSS_STREAK", 3)
 	if maxLossStreak < 0 {
 		maxLossStreak = 0
 	}
-	lossLock := time.Duration(envInt("LIVE_PAPER_SYMBOL_LOSS_LOCK_MIN", 120)) * time.Minute
+	lossLock := time.Duration(envInt("LIVE_PAPER_SYMBOL_LOSS_LOCK_MIN", 5)) * time.Minute
 	if lossLock < 0 {
 		lossLock = 0
 	}
@@ -2464,27 +2509,28 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	now := time.Now().UTC()
 	p := &livePosition{
-		Symbol:        rawSym,
-		Side:          strings.ToUpper(c.Side),
-		State:         execPendingEntry,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		EntryOrderID:  orderID,
-		EntryPrice:    price,
-		Qty:           qty,
-		Margin:        margin,
-		Leverage:      lev,
-		VPSetup:       c.Sig.VPSetup,
-		VPLevel:       c.Sig.VPLevel,
-		VPTargetLevel: c.Sig.VPTargetLevel,
-		VPStopMode:    c.Sig.StopMode,
-		VPTargetMode:  c.Sig.TargetMode,
-		RejectReason:  c.RejectReason,
-		EntryReason:   c.Strat,
-		EntryConf:     c.Conf,
-		EntryTags:     append([]string{}, c.Sig.Tags...),
-		EntryReasons:  append([]string{}, c.Sig.Reasons...),
-		RegimeTag:     c.Sig.RegimeTag,
+		Symbol:         rawSym,
+		Side:           strings.ToUpper(c.Side),
+		State:          execPendingEntry,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		EntryOrderID:   orderID,
+		EntryPrice:     price,
+		Qty:            qty,
+		Margin:         margin,
+		Leverage:       lev,
+		VPSetup:        c.Sig.VPSetup,
+		VPLevel:        c.Sig.VPLevel,
+		VPTargetLevel:  c.Sig.VPTargetLevel,
+		VPStopMode:     c.Sig.StopMode,
+		VPTargetMode:   c.Sig.TargetMode,
+		RejectReason:   c.RejectReason,
+		EntryReason:    c.Strat,
+		EntryConf:      c.Conf,
+		EntryTags:      append([]string{}, c.Sig.Tags...),
+		EntryReasons:   append([]string{}, c.Sig.Reasons...),
+		EntryVolumeUSD: c.VolumeUSD,
+		RegimeTag:      c.Sig.RegimeTag,
 	}
 	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		risk := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
@@ -2607,7 +2653,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 		if err == nil && mark > 0 {
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
-			beArmR := envFloat("LIVE_BE_ARM_R", 0.35)
+			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
+			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 0.5), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
 				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -2799,6 +2846,7 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
 		p.EntryReason,
 		p.EntryConf,
+		p.EntryVolumeUSD,
 		stopPct,
 		tp1R,
 		tp2R,
@@ -3566,6 +3614,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
 		c.Strat,
 		c.Conf,
+		m.VolumeUSD,
 		stopPct,
 		tp1R,
 		tp2R,
@@ -3647,7 +3696,8 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		mark := m.LastPrice
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
-		beArmR := envFloat("LIVE_PAPER_BE_ARM_R", 0.35)
+		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
+		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 0.5), tp1R)
 		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR {
 			be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
 			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
@@ -5017,15 +5067,15 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	if maxDailyLossPct < 0 {
 		maxDailyLossPct = 0
 	}
-	stopoutWindowMin := envInt("LIVE_SYMBOL_STOPOUT_WINDOW_MIN", 90)
+	stopoutWindowMin := envInt("LIVE_SYMBOL_STOPOUT_WINDOW_MIN", 60)
 	if stopoutWindowMin < 0 {
 		stopoutWindowMin = 0
 	}
-	stopoutLockMin := envInt("LIVE_SYMBOL_STOPOUT_LOCK_MIN", 45)
+	stopoutLockMin := envInt("LIVE_SYMBOL_STOPOUT_LOCK_MIN", 5)
 	if stopoutLockMin < 0 {
 		stopoutLockMin = 0
 	}
-	stopoutCount := envInt("LIVE_SYMBOL_STOPOUT_COUNT", 2)
+	stopoutCount := envInt("LIVE_SYMBOL_STOPOUT_COUNT", 3)
 	if stopoutCount < 0 {
 		stopoutCount = 0
 	}
