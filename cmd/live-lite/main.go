@@ -445,6 +445,8 @@ func main() {
 	enableMomentumReversal := envBool("LIVE_ENABLE_MOMENTUM_REVERSAL", true)
 	reversalMinGrade := envStr("LIVE_REVERSAL_MIN_GRADE", "A+")
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
+	bNearAOnly := envBool("LIVE_B_NEAR_A_ONLY", true)
+	bNearAScoreMin := envFloat("LIVE_B_NEAR_A_SCORE_MIN", 90.0)
 	obFilterEnable := envBool("LIVE_OB_FILTER_ENABLE", true)
 	obLevels := envInt("LIVE_OB_LEVELS", 5)
 	obImbMin := envFloat("LIVE_OB_IMBALANCE_MIN", 1.10)
@@ -845,7 +847,7 @@ func main() {
 			paper,
 		)
 
-		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin)
+		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin)
 		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
 		st := liveLiteStatus{
 			Generated:     now,
@@ -4100,14 +4102,26 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 	return out, conf
 }
 
-func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64) []candidate {
+func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64) []candidate {
 	minVal := gradeValue(minGrade)
 	revMinVal := gradeValue(reversalMinGrade)
 	if reversalSlopeMin < 0 {
 		reversalSlopeMin = -reversalSlopeMin
 	}
+	allow := func(e inplay.Entry) bool {
+		if !bNearAOnly {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(e.CurrentGrade), "B") && e.CurrentScore < bNearAScoreMin {
+			return false
+		}
+		return true
+	}
 	out := make([]candidate, 0, len(longInPlay)+len(shortInPlay))
 	for _, e := range longInPlay {
+		if !allow(e) {
+			continue
+		}
 		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
 			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
@@ -4126,6 +4140,9 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		}
 	}
 	for _, e := range shortInPlay {
+		if !allow(e) {
+			continue
+		}
 		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
 			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "SELL"})
