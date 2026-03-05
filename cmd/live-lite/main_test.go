@@ -167,6 +167,31 @@ func TestReserveLockGateHalfReserveMath(t *testing.T) {
 	}
 }
 
+func TestAdjustBracketParamsCapsAndSoften(t *testing.T) {
+	t.Setenv("LIVE_TP1_MAX_R", "2.5")
+	t.Setenv("LIVE_TP2_MAX_R", "4.0")
+	t.Setenv("LIVE_TP3_MAX_R", "6.0")
+	t.Setenv("LIVE_STOP_WIDEN_MULT", "1.25")
+	t.Setenv("LIVE_SOFTEN_CONF_MAX", "0.65")
+
+	stop, tp1, tp2, tp3 := adjustBracketParams(
+		"failed_auction_magnet",
+		0.62,
+		0.01, // 1%
+		15.0, // unrealistic
+		30.0, // unrealistic
+		50.0, // unrealistic
+		0.0025,
+		0.08,
+	)
+	if stop <= 0.01 {
+		t.Fatalf("expected widened stop, got %.4f", stop)
+	}
+	if tp1 > 2.5 || tp2 > 4.0 || tp3 > 6.0 {
+		t.Fatalf("tp caps not enforced tp1=%.2f tp2=%.2f tp3=%.2f", tp1, tp2, tp3)
+	}
+}
+
 func TestResolvePaperFeeProfile(t *testing.T) {
 	mk, tk := resolvePaperFeeProfile("pro")
 	if mk != 0.5 || tk != 4.0 {

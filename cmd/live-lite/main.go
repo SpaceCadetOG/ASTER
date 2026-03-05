@@ -1357,6 +1357,41 @@ func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64
 	return pnl, pct
 }
 
+func adjustBracketParams(reason string, conf, stopPct, tp1R, tp2R, tp3R, minStopPct, maxStopPct float64) (float64, float64, float64, float64) {
+	tp1Max := envFloat("LIVE_TP1_MAX_R", 2.5)
+	tp2Max := envFloat("LIVE_TP2_MAX_R", 4.0)
+	tp3Max := envFloat("LIVE_TP3_MAX_R", 6.0)
+	stopWiden := envFloat("LIVE_STOP_WIDEN_MULT", 1.25)
+	softenConf := envFloat("LIVE_SOFTEN_CONF_MAX", 0.65)
+
+	r := strings.ToLower(strings.TrimSpace(reason))
+	soften := strings.Contains(r, "failed_auction") || strings.Contains(r, "rejection") || conf <= softenConf
+	if soften && stopWiden > 0 {
+		stopPct *= stopWiden
+	}
+	stopPct = clamp(stopPct, minStopPct, maxStopPct)
+
+	if tp1Max > 0 && tp1R > tp1Max {
+		tp1R = tp1Max
+	}
+	if tp2Max > 0 && tp2R > tp2Max {
+		tp2R = tp2Max
+	}
+	if tp3Max > 0 && tp3R > tp3Max {
+		tp3R = tp3Max
+	}
+	if tp1R < 0.8 {
+		tp1R = 0.8
+	}
+	if tp2R < tp1R {
+		tp2R = tp1R
+	}
+	if tp3R < tp2R {
+		tp3R = tp2R
+	}
+	return stopPct, tp1R, tp2R, tp3R
+}
+
 func (m *liveExecManager) addDayRealized(now time.Time, pnl float64) float64 {
 	if m == nil {
 		return 0
@@ -2526,22 +2561,33 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	}
 	tp1R := m.tp1R
 	tp2R := m.tp2R
+	tp3R := m.tp3R
 	if p.CustomTP1R > 0 {
 		tp1R = p.CustomTP1R
 	}
 	if p.CustomTP2R > 0 {
 		tp2R = p.CustomTP2R
 	}
+	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
+		p.EntryReason,
+		p.EntryConf,
+		stopPct,
+		tp1R,
+		tp2R,
+		tp3R,
+		m.minStopPct/100.0,
+		m.maxStopPct/100.0,
+	)
 	if sideBuy {
 		p.StopPrice = p.EntryPrice * (1 - stopPct)
 		p.TP1Price = p.EntryPrice * (1 + stopPct*tp1R)
 		p.TP2Price = p.EntryPrice * (1 + stopPct*tp2R)
-		p.TP3Price = p.EntryPrice * (1 + stopPct*m.tp3R)
+		p.TP3Price = p.EntryPrice * (1 + stopPct*tp3R)
 	} else {
 		p.StopPrice = p.EntryPrice * (1 + stopPct)
 		p.TP1Price = p.EntryPrice * (1 - stopPct*tp1R)
 		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
-		p.TP3Price = p.EntryPrice * (1 - stopPct*m.tp3R)
+		p.TP3Price = p.EntryPrice * (1 - stopPct*tp3R)
 	}
 	p.TP1Price, p.TP2Price, p.TP3Price = enforceTPProgression(p.Side, p.TP1Price, p.TP2Price, p.TP3Price)
 	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
@@ -3164,6 +3210,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
 	tp1R := p.tp1R
 	tp2R := p.tp2R
+	tp3R := p.tp3R
 	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		riskPct := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
 		if riskPct > 0 {
@@ -3177,9 +3224,19 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			}
 		}
 	}
+	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
+		c.Strat,
+		c.Conf,
+		stopPct,
+		tp1R,
+		tp2R,
+		tp3R,
+		p.minStopPct/100.0,
+		p.maxStopPct/100.0,
+	)
 	tp1Pct := stopPct * tp1R
 	tp2Pct := stopPct * tp2R
-	tp3Pct := stopPct * p.tp3R
+	tp3Pct := stopPct * tp3R
 	stop := entry
 	tp1 := entry
 	tp2 := entry
