@@ -74,6 +74,7 @@ type reserveLockGate struct {
 	enabled       bool
 	lossPct       float64
 	recoveryPct   float64
+	targetBase    float64
 	targetReserve float64
 	locked        bool
 }
@@ -5202,6 +5203,9 @@ func (g *reserveLockGate) ensureTarget(base, reserve float64) {
 	if g == nil || !g.enabled {
 		return
 	}
+	if base > g.targetBase {
+		g.targetBase = base
+	}
 	next := reserve
 	// Fallback: 50% reserve target if reserve resolver returns 0.
 	if next <= 0 && base > 0 {
@@ -5220,8 +5224,13 @@ func (g *reserveLockGate) block(base float64) bool {
 	if g == nil || !g.enabled || g.targetReserve <= 0 {
 		return false
 	}
-	lockAt := g.targetReserve * (1.0 - g.lossPct/100.0)
-	unlockAt := g.targetReserve * (g.recoveryPct / 100.0)
+	targetBase := g.targetBase
+	if targetBase <= 0 {
+		targetBase = g.targetReserve * 2
+	}
+	usableTarget := targetBase - g.targetReserve
+	lockAt := usableTarget + g.targetReserve*(1.0-g.lossPct/100.0)
+	unlockAt := usableTarget + g.targetReserve*(g.recoveryPct/100.0)
 	if unlockAt < lockAt {
 		unlockAt = lockAt
 	}

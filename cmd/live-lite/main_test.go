@@ -145,6 +145,28 @@ func TestParseSymbolMinutesMap(t *testing.T) {
 	}
 }
 
+func TestReserveLockGateHalfReserveMath(t *testing.T) {
+	g := &reserveLockGate{
+		enabled:     true,
+		lossPct:     40,  // lock when 40% of reserve is gone
+		recoveryPct: 100, // unlock only at full reserve recovery
+	}
+	// Account baseline 100, reserve target 50, usable target 50.
+	g.ensureTarget(100, 50)
+
+	// At base=79, reserve-equivalent is 29 (< 30), should lock.
+	if !g.block(79) {
+		t.Fatalf("expected lock at base 79")
+	}
+	// Stays locked until base recovers to 100 (full reserve recovery).
+	if !g.block(95) {
+		t.Fatalf("expected still locked below full recovery")
+	}
+	if g.block(100) {
+		t.Fatalf("expected unlock at full recovery")
+	}
+}
+
 func TestResolvePaperFeeProfile(t *testing.T) {
 	mk, tk := resolvePaperFeeProfile("pro")
 	if mk != 0.5 || tk != 4.0 {
