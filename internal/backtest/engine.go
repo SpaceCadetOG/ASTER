@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"go-machine/internal/features"
+	"go-machine/internal/risk"
 	"go-machine/internal/strategies"
 )
 
@@ -50,6 +52,12 @@ type Config struct {
 	VPMinTargetPct   float64
 	EventLockoutMin  int
 	MaxCorrelatedPos int
+	FundingRate      float64
+	ExpectedHoldHrs  float64
+	MinLiqBufferMult float64
+	MaxFundingCostR  float64
+	MaxSpreadBps     float64
+	SpreadProxyFrac  float64
 }
 
 type Trade struct {
@@ -81,6 +89,8 @@ type Trade struct {
 	RegimeTag     string    `json:"regime_tag,omitempty"`
 	Reasons       string    `json:"reasons,omitempty"`
 	SignalSource  string    `json:"signal_source,omitempty"`
+	FundingImpact float64   `json:"funding_impact,omitempty"`
+	LiqBufferOK   bool      `json:"liq_buffer_ok,omitempty"`
 }
 
 type Report struct {
@@ -129,6 +139,21 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 	if cfg.Strategy == "" {
 		cfg.Strategy = "router"
 	}
+	if cfg.ExpectedHoldHrs <= 0 {
+		cfg.ExpectedHoldHrs = 8
+	}
+	if cfg.MinLiqBufferMult <= 0 {
+		cfg.MinLiqBufferMult = 2.5
+	}
+	if cfg.MaxFundingCostR <= 0 {
+		cfg.MaxFundingCostR = 0.25
+	}
+	if cfg.MaxSpreadBps <= 0 {
+		cfg.MaxSpreadBps = 20
+	}
+	if cfg.SpreadProxyFrac <= 0 {
+		cfg.SpreadProxyFrac = 0.05
+	}
 
 	fe := features.NewEngine(features.Config{})
 	router := strategies.NewRouter(strategies.RouterConfig{
@@ -158,6 +183,7 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 	trades := []Trade{}
 	var open *Trade
 	var pending strategies.Candidate
+	var pendingRisk risk.Decision
 	entryPending := false
 	barsInPos := 0
 	holdBars := 0
@@ -217,6 +243,7 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 					RegimeTag:     pending.Signal.RegimeTag,
 					Reasons:       strings.Join(pending.Signal.Reasons, "|"),
 					SignalSource:  strings.Join(pending.Signal.SignalSource, "|"),
+					LiqBufferOK:   pendingRisk.LiqBufferOK,
 				}
 				barsInPos = 0
 			}
@@ -262,6 +289,8 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 				} else {
 					pnl = (open.Entry-exitPx)*open.Qty - fee - slip
 				}
+				funding := fundingImpact(open.Side, cfg.FundingRate, open.Entry*open.Qty, c.Ts.Sub(open.EntryTs).Hours())
+				pnl += funding
 				balance += pnl
 				r := 0.0
 				if risk > 1e-9 {
@@ -275,6 +304,7 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 				open.HoldMins = c.Ts.Sub(open.EntryTs).Minutes()
 				open.Fees += fee
 				open.Slippage += slip
+				open.FundingImpact += funding
 				trades = append(trades, *open)
 				open = nil
 			}
@@ -300,8 +330,31 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 				}
 				cands := evalCandidates(cfg.Strategy, router, ctx)
 				if len(cands) > 0 {
-					pending = cands[0]
-					entryPending = true
+					dec := risk.Approve(risk.Config{
+						Enabled:              true,
+						MinLiqBufferMult:     cfg.MinLiqBufferMult,
+						MaxFundingCostR:      cfg.MaxFundingCostR,
+						MaxSpreadBps:         cfg.MaxSpreadBps,
+						MinBookImbalance:     1.0,
+						MaxRecentSlippageBps: math.Max(cfg.SlipBps*3, 20),
+					}, risk.Input{
+						Side:              signalSideToOrder(cands[0].Signal.Side),
+						Entry:             nonZero(cands[0].Signal.Entry, c.C),
+						Stop:              deriveBacktestStop(cands[0].Signal, c.C),
+						Leverage:          cfg.Leverage,
+						NotionalUSD:       cfg.MarginUSD * cfg.Leverage,
+						FundingRate:       cfg.FundingRate,
+						HoldHours:         cfg.ExpectedHoldHrs,
+						SpreadBps:         spreadProxyBps(c, cfg.SpreadProxyFrac),
+						BookImbalance:     1.1,
+						RecentSlippageBps: cfg.SlipBps,
+						VenueHealthy:      true,
+					})
+					if dec.Approved {
+						pending = cands[0]
+						pendingRisk = dec
+						entryPending = true
+					}
 				}
 			}
 		}
@@ -505,9 +558,9 @@ func WriteOutputs(res Result, outDir string) error {
 		return err
 	}
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason", "regime_tag", "signal_reasons", "signal_source"})
+	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "tp1", "tp2", "qty", "pnl", "r", "reason", "hold_mins", "fees", "slippage", "funding_impact", "liq_buffer_ok", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason", "regime_tag", "signal_reasons", "signal_source"})
 	for _, t := range res.Trades {
-		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason, t.RegimeTag, t.Reasons, t.SignalSource})
+		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), f64(t.TP1), f64(t.TP2), f64(t.Qty), f64(t.PnL), f64(t.R), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.FundingImpact), fmt.Sprintf("%t", t.LiqBufferOK), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason, t.RegimeTag, t.Reasons, t.SignalSource})
 	}
 	w.Flush()
 	_ = f.Close()
@@ -546,4 +599,58 @@ func inEventLockout(ts time.Time, lockMin int) bool {
 	}
 	m := ts.UTC().Minute()
 	return m < lockMin || m >= (60-lockMin)
+}
+
+func deriveBacktestStop(sig strategies.Signal, mark float64) float64 {
+	if sig.Stop > 0 {
+		return sig.Stop
+	}
+	if sig.Side == features.SideShort {
+		return mark * 1.006
+	}
+	return mark * 0.994
+}
+
+func nonZero(v, fallback float64) float64 {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
+
+func spreadProxyBps(c Candle, frac float64) float64 {
+	if c.C <= 0 || c.H <= 0 || c.L <= 0 {
+		return 0
+	}
+	if frac <= 0 {
+		frac = 0.05
+	}
+	return math.Abs(c.H-c.L) / c.C * 10000.0 * frac
+}
+
+func fundingImpact(side string, fr, notional, holdH float64) float64 {
+	if fr == 0 || notional <= 0 {
+		return 0
+	}
+	if holdH <= 0 {
+		holdH = 8
+	}
+	f := math.Abs(fr) * notional * (holdH / 8.0)
+	if strings.EqualFold(side, string(features.SideLong)) || strings.EqualFold(side, "BUY") {
+		if fr > 0 {
+			return -f
+		}
+		return f
+	}
+	if fr < 0 {
+		return -f
+	}
+	return f
+}
+
+func signalSideToOrder(s features.Side) string {
+	if s == features.SideShort {
+		return "SELL"
+	}
+	return "BUY"
 }

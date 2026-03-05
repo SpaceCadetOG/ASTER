@@ -133,12 +133,10 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		if ctx.Snapshot.Flow.WhaleDelta1m < 0 && sig.Side == features.SideShort {
 			whaleBoost = 1.15
 		}
-		sessionMult := 1.0
 		if r.cfg.UseSessionRegimeRisk {
-			sessionMult = data.SessionRiskMultiplier(sig.Ts, sig.Confidence)
 			sig.RegimeTag = string(data.CurrentRegimeCT(sig.Ts))
 		}
-		candScore := sig.Confidence * scoreNorm * whaleBoost * sessionMult
+		candScore := sig.Confidence * scoreNorm * whaleBoost
 		out = append(out, Candidate{Signal: sig, Score: candScore})
 	}
 	if len(out) <= 1 || !r.cfg.MaxOne {

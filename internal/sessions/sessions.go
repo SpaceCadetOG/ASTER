@@ -1,7 +1,6 @@
 package sessions
 
 import (
-	"fmt"
 	"time"
 
 	"go-machine/internal/data"
@@ -9,8 +8,7 @@ import (
 
 func ActiveSessionLabels(nowUTC time.Time) []string {
 	regime := data.CurrentRegimeCT(nowUTC)
-	mult := ScannerScoreMultiplier(nowUTC)
-	labels := []string{string(regime), fmt.Sprintf("SCAN_MULT=%.2fx", mult)}
+	labels := []string{string(regime)}
 	if data.IsMajorOverlapCT(nowUTC) {
 		labels = append(labels, "MAJOR_OVERLAP")
 	}
@@ -29,6 +27,6 @@ func ActiveSessionLabels(nowUTC time.Time) []string {
 }
 
 func ScannerScoreMultiplier(nowUTC time.Time) float64 {
-	// Scanner path uses neutral confidence input and reuses session risk policy semantics.
-	return data.SessionRiskMultiplier(nowUTC, 0.65)
+	_ = nowUTC
+	return 1.0
 }

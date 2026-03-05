@@ -51,6 +51,12 @@ func main() {
 		VPMinTargetPct:   envFloat("BT_VP_MIN_TARGET_PCT", 0.10),
 		EventLockoutMin:  envInt("BT_EVENT_LOCKOUT_MIN", 0),
 		MaxCorrelatedPos: envInt("BT_MAX_CORRELATED_POS", 1),
+		FundingRate:      envFloat("BT_FUNDING_RATE", 0.0),
+		ExpectedHoldHrs:  envFloat("BT_EXPECTED_HOLD_HOURS", 8.0),
+		MinLiqBufferMult: envFloat("BT_MIN_LIQ_BUFFER_MULT", 2.5),
+		MaxFundingCostR:  envFloat("BT_MAX_FUNDING_COST_R", 0.25),
+		MaxSpreadBps:     envFloat("BT_MAX_SPREAD_BPS", 20.0),
+		SpreadProxyFrac:  envFloat("BT_SPREAD_PROXY_FRAC", 0.05),
 	}
 	outRoot := envStr("BT_OUT_DIR", "out/backtests")
 	from := parseDate(envStr("BT_FROM", ""))

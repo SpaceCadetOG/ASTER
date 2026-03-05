@@ -25,6 +25,7 @@ import (
 	"go-machine/internal/features"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
+	"go-machine/internal/risk"
 	"go-machine/internal/strategies"
 	"go-machine/internal/ta"
 	"go-machine/internal/types"
@@ -61,8 +62,12 @@ type safetyConfig struct {
 	maxLeverage       int
 	minAvailUSDT      float64
 	maxOrdersPerDay   int
+	maxOrdersPerHour  int
 	orderCooldown     time.Duration
 	symbolCooldown    time.Duration
+	stopoutWindow     time.Duration
+	stopoutLock       time.Duration
+	stopoutCount      int
 	pauseFile         string
 	allowSymbols      map[string]struct{}
 	blockSymbols      map[string]struct{}
@@ -458,6 +463,15 @@ func main() {
 	obLevels := envInt("LIVE_OB_LEVELS", 5)
 	obImbMin := envFloat("LIVE_OB_IMBALANCE_MIN", 1.10)
 	obMaxSpreadBps := envFloat("LIVE_OB_MAX_SPREAD_BPS", 12)
+	riskShell := risk.DefaultConfig()
+	riskShell.Enabled = envBool("LIVE_RISK_SHELL_ENABLE", true)
+	riskShell.MinLiqBufferMult = envFloat("LIVE_MIN_LIQ_BUFFER_MULT", 2.5)
+	riskShell.MaxFundingCostR = envFloat("LIVE_MAX_FUNDING_COST_R", 0.25)
+	riskShell.MaxSpreadBps = envFloat("LIVE_MAX_SPREAD_BPS", obMaxSpreadBps)
+	riskShell.MinBookImbalance = envFloat("LIVE_MIN_BOOK_IMBALANCE", obImbMin)
+	riskShell.MaxRecentSlippageBps = envFloat("LIVE_MAX_RECENT_SLIPPAGE_BPS", 20)
+	riskHoldHours := envFloat("LIVE_EXPECTED_HOLD_HOURS", 8.0)
+	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 2.0)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
@@ -649,8 +663,8 @@ func main() {
 		cfgPath = "(none)"
 	}
 	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
-	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d cooldown=%s allow_shorts=%v pause_file=%s\n",
-		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.orderCooldown, safety.allowShorts, safety.pauseFile)
+	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d max_orders_hour=%d cooldown=%s allow_shorts=%v pause_file=%s stopout=%d/%s lock=%s\n",
+		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.maxOrdersPerHour, safety.orderCooldown, safety.allowShorts, safety.pauseFile, safety.stopoutCount, safety.stopoutWindow, safety.stopoutLock)
 	if execMgr != nil {
 		fmt.Printf("execution: margin_type=%s enforce_isolated=%v multi_asset_mode=%v\n",
 			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
@@ -675,6 +689,8 @@ func main() {
 	lastOrderAt := time.Time{}
 	lastOrderBySymbol := map[string]time.Time{}
 	orderCountByDay := map[string]int{}
+	orderCountByHour := map[string]int{}
+	symbolStopoutLockUntil := map[string]time.Time{}
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
 	reserveGate := newReserveLockGate()
@@ -955,19 +971,59 @@ func main() {
 			entryDepth = fetchOrderBooks(client, []string{rawBest}, obLevels)
 			ob := entryDepth[rawBest]
 			if !orderbookSupportsEntry(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps) {
-				fmt.Printf("live-lite: skip (%s orderbook filter)\n", rawBest)
+				st.TopRejectReason = "orderbook_filter"
+				statusStore.Set(st)
+				fmt.Printf("live-lite: skip (%s reason=orderbook_filter)\n", rawBest)
 				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 				continue
 			}
 		}
+		spreadBps, bookImb := orderbookRiskMetrics(rawBest, best.Side, entryDepth, metaBySymbol, obLevels)
+		entryPx := best.Sig.Entry
+		if entryPx <= 0 {
+			entryPx = metaBySymbol[rawBest].LastPrice
+		}
+		stopPx := best.Sig.Stop
+		if stopPx <= 0 && entryPx > 0 {
+			d := riskFallbackStopPct / 100.0
+			if strings.EqualFold(best.Side, "BUY") {
+				stopPx = entryPx * (1 - d)
+			} else {
+				stopPx = entryPx * (1 + d)
+			}
+		}
+		riskDec := risk.Approve(riskShell, risk.Input{
+			Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
+			Entry:             entryPx,
+			Stop:              stopPx,
+			Leverage:          float64(maxInt(1, effectiveLev)),
+			NotionalUSD:       effectiveMargin * float64(maxInt(1, effectiveLev)),
+			FundingRate:       metaBySymbol[rawBest].FundingRate,
+			HoldHours:         riskHoldHours,
+			SpreadBps:         spreadBps,
+			BookImbalance:     bookImb,
+			RecentSlippageBps: 0,
+			VenueHealthy:      metaBySymbol[rawBest].LastPrice > 0,
+		})
+		if !riskDec.Approved {
+			st.TopRejectReason = riskDec.RejectReason
+			statusStore.Set(st)
+			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
 
 		if inMaint {
+			st.TopRejectReason = "maintenance_window"
+			statusStore.Set(st)
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
 		if maintWarmup > 0 {
 			if until, ok := maintenanceWarmupUntil(localMaintNow, maintWarmup, &maintState); ok {
-				fmt.Printf("live-lite: skip (post-maint warmup until %s)\n", until.Format("15:04 MST"))
+				st.TopRejectReason = "post_maint_warmup"
+				statusStore.Set(st)
+				fmt.Printf("live-lite: skip (reason=post_maint_warmup until %s)\n", until.Format("15:04 MST"))
 				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 				continue
 			}
@@ -995,7 +1051,19 @@ func main() {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
-		if reason := safetyReject(safety, best, time.Now(), lastOrderAt, lastOrderBySymbol, orderCountByDay); reason != "" {
+		nowLocal := time.Now()
+		if safety.stopoutCount > 0 && safety.stopoutWindow > 0 && safety.stopoutLock > 0 && execMgr != nil {
+			raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+			cnt := execMgr.StopoutCountSince(raw, nowLocal.Add(-safety.stopoutWindow))
+			if cnt >= safety.stopoutCount {
+				if until, ok := symbolStopoutLockUntil[raw]; !ok || nowLocal.After(until) {
+					symbolStopoutLockUntil[raw] = nowLocal.Add(safety.stopoutLock)
+				}
+			}
+		}
+		if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
+			st.TopRejectReason = reason
+			statusStore.Set(st)
 			fmt.Println("live-lite: safety skip:", reason)
 			if tgVerbose {
 				tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
@@ -1004,12 +1072,16 @@ func main() {
 			continue
 		}
 		if inEventLockout(time.Now(), eventLockoutMin) {
-			fmt.Println("live-lite: lockout skip: event window")
+			st.TopRejectReason = "event_lockout"
+			statusStore.Set(st)
+			fmt.Println("live-lite: skip reason=event_lockout")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
 		if isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
-			fmt.Println("live-lite: skip (correlated exposure gate)")
+			st.TopRejectReason = "correlated_exposure_gate"
+			statusStore.Set(st)
+			fmt.Println("live-lite: skip reason=correlated_exposure_gate")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
@@ -1111,7 +1183,9 @@ func main() {
 			lastOrderAt = time.Now()
 			lastOrderBySymbol[strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))] = lastOrderAt
 			dayKey := time.Now().UTC().Format("2006-01-02")
+			hourKey := time.Now().UTC().Format("2006-01-02T15")
 			orderCountByDay[dayKey]++
+			orderCountByHour[hourKey]++
 			tg.Sendf("order placed %s %s\nmargin=$%.2f grade=%s",
 				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveMargin, best.Entry.CurrentGrade)
 		}
@@ -2248,6 +2322,32 @@ func (m *liveExecManager) Snapshot(limit int) liveExecSnapshot {
 		return out.Active[i].UpdatedAt.After(out.Active[j].UpdatedAt)
 	})
 	return out
+}
+
+func (m *liveExecManager) StopoutCountSince(symbol string, since time.Time) int {
+	if m == nil {
+		return 0
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return 0
+	}
+	n := 0
+	for _, p := range m.positions {
+		if p == nil {
+			continue
+		}
+		if strings.ToUpper(strings.TrimSpace(p.Symbol)) != raw {
+			continue
+		}
+		if p.State != execClosed || p.ClosedAt.IsZero() || p.ClosedAt.Before(since) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(p.CloseReason), "SL") {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int) error {
@@ -4616,6 +4716,42 @@ func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb,
 	return imb >= minImb
 }
 
+func orderbookRiskMetrics(rawSymbol, side string, depth map[string]aster.OrderBook, meta map[string]symbolMeta, levels int) (float64, float64) {
+	ob, ok := depth[rawSymbol]
+	if ok && len(ob.Bids) > 0 && len(ob.Asks) > 0 && ob.Bids[0][0] > 0 && ob.Asks[0][0] > 0 {
+		mid := (ob.Bids[0][0] + ob.Asks[0][0]) / 2.0
+		if mid <= 0 {
+			return 0, 0
+		}
+		spreadBps := ((ob.Asks[0][0] - ob.Bids[0][0]) / mid) * 10000.0
+		nBid := minInt(levels, len(ob.Bids))
+		nAsk := minInt(levels, len(ob.Asks))
+		bidUSD := 0.0
+		askUSD := 0.0
+		for i := 0; i < nBid; i++ {
+			bidUSD += ob.Bids[i][0] * ob.Bids[i][1]
+		}
+		for i := 0; i < nAsk; i++ {
+			askUSD += ob.Asks[i][0] * ob.Asks[i][1]
+		}
+		if bidUSD <= 0 || askUSD <= 0 {
+			return spreadBps, 0
+		}
+		if strings.EqualFold(side, "SELL") {
+			return spreadBps, askUSD / bidUSD
+		}
+		return spreadBps, bidUSD / askUSD
+	}
+	m := meta[rawSymbol]
+	if m.Bid > 0 && m.Ask > 0 {
+		mid := (m.Bid + m.Ask) / 2.0
+		if mid > 0 {
+			return ((m.Ask - m.Bid) / mid) * 10000.0, 0
+		}
+	}
+	return 0, 0
+}
+
 func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapshot, error) {
 	snap := accountSnapshot{}
 	bals, err := rest.GetBalance()
@@ -4819,6 +4955,10 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	if maxOrders < 0 {
 		maxOrders = 0
 	}
+	maxOrdersHour := envInt("LIVE_MAX_ORDERS_PER_HOUR", 0)
+	if maxOrdersHour < 0 {
+		maxOrdersHour = 0
+	}
 	coolSec := envInt("LIVE_ORDER_COOLDOWN_SEC", 90)
 	if coolSec < 0 {
 		coolSec = 0
@@ -4830,6 +4970,18 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	maxDailyLossPct := envFloat("LIVE_MAX_DAILY_LOSS_PCT", 0)
 	if maxDailyLossPct < 0 {
 		maxDailyLossPct = 0
+	}
+	stopoutWindowMin := envInt("LIVE_SYMBOL_STOPOUT_WINDOW_MIN", 90)
+	if stopoutWindowMin < 0 {
+		stopoutWindowMin = 0
+	}
+	stopoutLockMin := envInt("LIVE_SYMBOL_STOPOUT_LOCK_MIN", 45)
+	if stopoutLockMin < 0 {
+		stopoutLockMin = 0
+	}
+	stopoutCount := envInt("LIVE_SYMBOL_STOPOUT_COUNT", 2)
+	if stopoutCount < 0 {
+		stopoutCount = 0
 	}
 	allow := envCSV("LIVE_ALLOW_SYMBOLS", "")
 	allowMap := make(map[string]struct{}, len(allow))
@@ -4852,8 +5004,12 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 		maxLeverage:       maxLev,
 		minAvailUSDT:      minAvail,
 		maxOrdersPerDay:   maxOrders,
+		maxOrdersPerHour:  maxOrdersHour,
 		orderCooldown:     time.Duration(coolSec) * time.Second,
 		symbolCooldown:    time.Duration(symCoolSec) * time.Second,
+		stopoutWindow:     time.Duration(stopoutWindowMin) * time.Minute,
+		stopoutLock:       time.Duration(stopoutLockMin) * time.Minute,
+		stopoutCount:      stopoutCount,
 		pauseFile:         envStr("LIVE_PAUSE_FILE", "/tmp/live-lite.pause"),
 		allowSymbols:      allowMap,
 		blockSymbols:      blockMap,
@@ -4863,7 +5019,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	}
 }
 
-func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, lastBySymbol map[string]time.Time, byDay map[string]int) string {
+func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, lastBySymbol map[string]time.Time, byDay, byHour map[string]int, stopoutLockUntil map[string]time.Time) string {
 	if cfg.pauseFile != "" {
 		if _, err := os.Stat(cfg.pauseFile); err == nil {
 			return "pause file present"
@@ -4888,6 +5044,18 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 		if t := lastBySymbol[raw]; !t.IsZero() && now.Sub(t) < cfg.symbolCooldown {
 			return "symbol cooldown active"
+		}
+	}
+	if cfg.stopoutCount > 0 && cfg.stopoutLock > 0 {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+		if t := stopoutLockUntil[raw]; !t.IsZero() && now.Before(t) {
+			return fmt.Sprintf("symbol stopout lock active until %s", t.UTC().Format(time.RFC3339))
+		}
+	}
+	if cfg.maxOrdersPerHour > 0 {
+		hourKey := now.UTC().Format("2006-01-02T15")
+		if byHour[hourKey] >= cfg.maxOrdersPerHour {
+			return "max orders/hour reached"
 		}
 	}
 	if cfg.maxOrdersPerDay > 0 {
