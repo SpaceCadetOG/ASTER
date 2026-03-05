@@ -1,0 +1,15 @@
+# Summary
+
+- [ASTER Trading Bot API Documentation](README.md)
+- [Architecture Overview](architecture/overview.md)
+- [Data Models](reference/data-models.md)
+- [Strategy and Signal API](reference/strategy-signal-api.md)
+- [Risk Shell API](reference/risk-shell-api.md)
+- [Execution Adapter API (Aster)](reference/execution-adapter-api.md)
+- [Backtest API](reference/backtest-api.md)
+- [CLI API](reference/cli-api.md)
+- [HTTP API](reference/http-api.md)
+- [Telegram Command API](reference/telegram-api.md)
+- [Environment Variables](reference/environment.md)
+- [Runbook and Operations](ops/runbook.md)
+- [Quickstart Guides](guides/quickstart.md)

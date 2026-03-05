@@ -458,18 +458,18 @@ func main() {
 	reversalMinGrade := envStr("LIVE_REVERSAL_MIN_GRADE", "A+")
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
 	bNearAOnly := envBool("LIVE_B_NEAR_A_ONLY", true)
-	bNearAScoreMin := envFloat("LIVE_B_NEAR_A_SCORE_MIN", 90.0)
+	bNearAScoreMin := envFloat("LIVE_B_NEAR_A_SCORE_MIN", 92.0)
 	obFilterEnable := envBool("LIVE_OB_FILTER_ENABLE", true)
 	obLevels := envInt("LIVE_OB_LEVELS", 5)
 	obImbMin := envFloat("LIVE_OB_IMBALANCE_MIN", 1.10)
-	obMaxSpreadBps := envFloat("LIVE_OB_MAX_SPREAD_BPS", 12)
+	obMaxSpreadBps := envFloat("LIVE_OB_MAX_SPREAD_BPS", 10)
 	riskShell := risk.DefaultConfig()
 	riskShell.Enabled = envBool("LIVE_RISK_SHELL_ENABLE", true)
 	riskShell.MinLiqBufferMult = envFloat("LIVE_MIN_LIQ_BUFFER_MULT", 2.5)
-	riskShell.MaxFundingCostR = envFloat("LIVE_MAX_FUNDING_COST_R", 0.25)
+	riskShell.MaxFundingCostR = envFloat("LIVE_MAX_FUNDING_COST_R", 0.20)
 	riskShell.MaxSpreadBps = envFloat("LIVE_MAX_SPREAD_BPS", obMaxSpreadBps)
 	riskShell.MinBookImbalance = envFloat("LIVE_MIN_BOOK_IMBALANCE", obImbMin)
-	riskShell.MaxRecentSlippageBps = envFloat("LIVE_MAX_RECENT_SLIPPAGE_BPS", 20)
+	riskShell.MaxRecentSlippageBps = envFloat("LIVE_MAX_RECENT_SLIPPAGE_BPS", 15)
 	riskHoldHours := envFloat("LIVE_EXPECTED_HOLD_HOURS", 8.0)
 	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 2.0)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
@@ -4951,19 +4951,19 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	if maxLev <= 0 {
 		maxLev = 3
 	}
-	maxOrders := envInt("LIVE_MAX_ORDERS_PER_DAY", 3)
+	maxOrders := envInt("LIVE_MAX_ORDERS_PER_DAY", 6)
 	if maxOrders < 0 {
 		maxOrders = 0
 	}
-	maxOrdersHour := envInt("LIVE_MAX_ORDERS_PER_HOUR", 0)
+	maxOrdersHour := envInt("LIVE_MAX_ORDERS_PER_HOUR", 2)
 	if maxOrdersHour < 0 {
 		maxOrdersHour = 0
 	}
-	coolSec := envInt("LIVE_ORDER_COOLDOWN_SEC", 90)
+	coolSec := envInt("LIVE_ORDER_COOLDOWN_SEC", 180)
 	if coolSec < 0 {
 		coolSec = 0
 	}
-	symCoolSec := envInt("LIVE_SYMBOL_COOLDOWN_SEC", coolSec)
+	symCoolSec := envInt("LIVE_SYMBOL_COOLDOWN_SEC", 900)
 	if symCoolSec < 0 {
 		symCoolSec = 0
 	}
