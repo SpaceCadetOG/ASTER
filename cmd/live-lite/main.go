@@ -155,45 +155,45 @@ type paperPosition struct {
 }
 
 type paperTrader struct {
-	enabled      bool
-	startBal     float64
-	balance      float64
-	reserve      float64
-	feeBps       float64
-	makerFeeBps  float64
-	takerFeeBps  float64
-	stopPct      float64
-	tp1R         float64
-	tp2R         float64
-	tp3R         float64
-	tp1Frac      float64
-	tp2Frac      float64
-	tp3Frac      float64
-	trailAfterTP int
-	trailStopPct float64
-	stateFile    string
-	tradesCSV    string
-	equityCSV    string
-	maxOpen      int
-	positions    map[string]*paperPosition
-	reportLoc    *time.Location
-	dayStats     map[string]*paperDayStats
-	minStopPct   float64
-	maxStopPct   float64
-	minTP1RR     float64
-	staleEnable  bool
-	staleMaxAge  time.Duration
-	staleMinProg float64
-	staleGraceR  float64
-	beLockBps    float64
-	fundingEvery time.Duration
-	fundingBySym map[string]time.Duration
-	lastFundKey  map[string]string
-	openCostMode string
-	onExit       func(string)
-	lossCooldown time.Duration
-	lastExitAt   map[string]time.Time
-	lastExitLoss map[string]bool
+	enabled       bool
+	startBal      float64
+	balance       float64
+	reserve       float64
+	feeBps        float64
+	makerFeeBps   float64
+	takerFeeBps   float64
+	stopPct       float64
+	tp1R          float64
+	tp2R          float64
+	tp3R          float64
+	tp1Frac       float64
+	tp2Frac       float64
+	tp3Frac       float64
+	trailAfterTP  int
+	trailStopPct  float64
+	stateFile     string
+	tradesCSV     string
+	equityCSV     string
+	maxOpen       int
+	positions     map[string]*paperPosition
+	reportLoc     *time.Location
+	dayStats      map[string]*paperDayStats
+	minStopPct    float64
+	maxStopPct    float64
+	minTP1RR      float64
+	beLockBps     float64
+	fundingEvery  time.Duration
+	fundingBySym  map[string]time.Duration
+	lastFundKey   map[string]string
+	openCostMode  string
+	onExit        func(string)
+	lossCooldown  time.Duration
+	lastExitAt    map[string]time.Time
+	lastExitLoss  map[string]bool
+	lossStreak    map[string]int
+	lockUntil     map[string]time.Time
+	maxLossStreak int
+	lossLock      time.Duration
 }
 
 type paperDayStats struct {
@@ -207,13 +207,17 @@ type paperDayStats struct {
 }
 
 type paperState struct {
-	StartBal  float64                   `json:"startBal"`
-	Balance   float64                   `json:"balance"`
-	Reserve   float64                   `json:"reserve"`
-	Positions map[string]*paperPosition `json:"positions"`
-	DayStats  map[string]*paperDayStats `json:"dayStats"`
-	LastFund  map[string]string         `json:"lastFund,omitempty"`
-	UpdatedAt time.Time                 `json:"updatedAt"`
+	StartBal     float64                   `json:"startBal"`
+	Balance      float64                   `json:"balance"`
+	Reserve      float64                   `json:"reserve"`
+	Positions    map[string]*paperPosition `json:"positions"`
+	DayStats     map[string]*paperDayStats `json:"dayStats"`
+	LastFund     map[string]string         `json:"lastFund,omitempty"`
+	LastExitAt   map[string]time.Time      `json:"lastExitAt,omitempty"`
+	LastExitLoss map[string]bool           `json:"lastExitLoss,omitempty"`
+	LossStreak   map[string]int            `json:"lossStreak,omitempty"`
+	LockUntil    map[string]time.Time      `json:"lockUntil,omitempty"`
+	UpdatedAt    time.Time                 `json:"updatedAt"`
 }
 
 type execState string
@@ -299,10 +303,6 @@ type liveExecManager struct {
 	maxStopPct      float64
 	minTP1RR        float64
 	beLockBps       float64
-	staleEnable     bool
-	staleMaxAge     time.Duration
-	staleMinProg    float64
-	staleGraceR     float64
 	marginType      string
 	enforceIsolated bool
 	multiAssetMode  bool
@@ -809,9 +809,6 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.Reconcile(now)
-		}
-		if paper.enabled {
-			paper.ApplyStale(now, metaBySymbol, paperDepth)
 		}
 		if inMaint {
 			dayKey := localMaintNow.Format("2006-01-02")
@@ -1390,26 +1387,6 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	}
 }
 
-func shouldCloseStaleLive(p *livePosition, now time.Time, maxAge time.Duration, minProgR, graceR float64) bool {
-	if p == nil || maxAge <= 0 {
-		return false
-	}
-	if p.MaxFavorableR >= graceR {
-		return false
-	}
-	return now.Sub(p.CreatedAt) >= maxAge && p.MaxFavorableR < minProgR
-}
-
-func shouldCloseStalePaper(p *paperPosition, now time.Time, maxAge time.Duration, minProgR, graceR float64) bool {
-	if p == nil || maxAge <= 0 {
-		return false
-	}
-	if p.MaxFavorableR >= graceR {
-		return false
-	}
-	return now.Sub(p.OpenedAt) >= maxAge && p.MaxFavorableR < minProgR
-}
-
 func beLockPrice(side string, entry, beLockBps float64) float64 {
 	if entry <= 0 {
 		return entry
@@ -1684,58 +1661,59 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if minTP1RR <= 0 {
 		minTP1RR = 0.8
 	}
-	staleEnable := envBool("LIVE_STALE_ENABLE", false)
-	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
-	if staleMaxAge <= 0 {
-		staleMaxAge = 180 * time.Minute
-	}
-	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
-	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
 	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 30)) * time.Minute
+	maxLossStreak := envInt("LIVE_PAPER_SYMBOL_MAX_LOSS_STREAK", 2)
+	if maxLossStreak < 0 {
+		maxLossStreak = 0
+	}
+	lossLock := time.Duration(envInt("LIVE_PAPER_SYMBOL_LOSS_LOCK_MIN", 120)) * time.Minute
+	if lossLock < 0 {
+		lossLock = 0
+	}
 	if lossCooldown < 0 {
 		lossCooldown = 0
 	}
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	p := &paperTrader{
-		enabled:      enabled,
-		startBal:     start,
-		balance:      start,
-		reserve:      reserveUSDT,
-		feeBps:       feeBps,
-		makerFeeBps:  makerFeeBps,
-		takerFeeBps:  takerFeeBps,
-		stopPct:      stopPct,
-		tp1R:         tp1R,
-		tp2R:         tp2R,
-		tp3R:         tp3R,
-		tp1Frac:      tp1Frac,
-		tp2Frac:      tp2Frac,
-		tp3Frac:      tp3Frac,
-		trailAfterTP: trailAfterTP,
-		trailStopPct: trailStopPct,
-		stateFile:    envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
-		tradesCSV:    resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
-		equityCSV:    resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
-		maxOpen:      maxOpen,
-		positions:    map[string]*paperPosition{},
-		reportLoc:    reportLoc,
-		dayStats:     map[string]*paperDayStats{},
-		minStopPct:   minStopPct,
-		maxStopPct:   maxStopPct,
-		minTP1RR:     minTP1RR,
-		staleEnable:  staleEnable,
-		staleMaxAge:  staleMaxAge,
-		staleMinProg: staleMinProg,
-		staleGraceR:  staleGraceR,
-		beLockBps:    beLockBps,
-		fundingEvery: fundingEvery,
-		fundingBySym: fundingBySym,
-		lastFundKey:  map[string]string{},
-		openCostMode: openCostMode,
-		lossCooldown: lossCooldown,
-		lastExitAt:   map[string]time.Time{},
-		lastExitLoss: map[string]bool{},
+		enabled:       enabled,
+		startBal:      start,
+		balance:       start,
+		reserve:       reserveUSDT,
+		feeBps:        feeBps,
+		makerFeeBps:   makerFeeBps,
+		takerFeeBps:   takerFeeBps,
+		stopPct:       stopPct,
+		tp1R:          tp1R,
+		tp2R:          tp2R,
+		tp3R:          tp3R,
+		tp1Frac:       tp1Frac,
+		tp2Frac:       tp2Frac,
+		tp3Frac:       tp3Frac,
+		trailAfterTP:  trailAfterTP,
+		trailStopPct:  trailStopPct,
+		stateFile:     envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
+		tradesCSV:     resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
+		equityCSV:     resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
+		maxOpen:       maxOpen,
+		positions:     map[string]*paperPosition{},
+		reportLoc:     reportLoc,
+		dayStats:      map[string]*paperDayStats{},
+		minStopPct:    minStopPct,
+		maxStopPct:    maxStopPct,
+		minTP1RR:      minTP1RR,
+		beLockBps:     beLockBps,
+		fundingEvery:  fundingEvery,
+		fundingBySym:  fundingBySym,
+		lastFundKey:   map[string]string{},
+		openCostMode:  openCostMode,
+		lossCooldown:  lossCooldown,
+		lastExitAt:    map[string]time.Time{},
+		lastExitLoss:  map[string]bool{},
+		lossStreak:    map[string]int{},
+		lockUntil:     map[string]time.Time{},
+		maxLossStreak: maxLossStreak,
+		lossLock:      lossLock,
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -1779,6 +1757,18 @@ func (p *paperTrader) load() error {
 	if st.LastFund != nil {
 		p.lastFundKey = st.LastFund
 	}
+	if st.LastExitAt != nil {
+		p.lastExitAt = st.LastExitAt
+	}
+	if st.LastExitLoss != nil {
+		p.lastExitLoss = st.LastExitLoss
+	}
+	if st.LossStreak != nil {
+		p.lossStreak = st.LossStreak
+	}
+	if st.LockUntil != nil {
+		p.lockUntil = st.LockUntil
+	}
 	return nil
 }
 
@@ -1790,13 +1780,17 @@ func (p *paperTrader) save() error {
 		return err
 	}
 	st := paperState{
-		StartBal:  p.startBal,
-		Balance:   p.balance,
-		Reserve:   p.reserve,
-		Positions: p.positions,
-		DayStats:  p.dayStats,
-		LastFund:  p.lastFundKey,
-		UpdatedAt: time.Now().UTC(),
+		StartBal:     p.startBal,
+		Balance:      p.balance,
+		Reserve:      p.reserve,
+		Positions:    p.positions,
+		DayStats:     p.dayStats,
+		LastFund:     p.lastFundKey,
+		LastExitAt:   p.lastExitAt,
+		LastExitLoss: p.lastExitLoss,
+		LossStreak:   p.lossStreak,
+		LockUntil:    p.lockUntil,
+		UpdatedAt:    time.Now().UTC(),
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -1870,13 +1864,6 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
-	staleEnable := envBool("LIVE_STALE_ENABLE", false)
-	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
-	if staleMaxAge <= 0 {
-		staleMaxAge = 180 * time.Minute
-	}
-	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
-	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	marginType := strings.ToUpper(envStr("LIVE_MARGIN_TYPE", "ISOLATED"))
 	enforceIsolated := envBool("LIVE_ENFORCE_MARGIN_TYPE", true)
 	multiAssetMode := envBool("LIVE_MULTI_ASSET_MODE", false)
@@ -1911,10 +1898,6 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		maxStopPct:      maxStopPct,
 		minTP1RR:        minTP1RR,
 		beLockBps:       beLockBps,
-		staleEnable:     staleEnable,
-		staleMaxAge:     staleMaxAge,
-		staleMinProg:    staleMinProg,
-		staleGraceR:     staleGraceR,
 		marginType:      marginType,
 		enforceIsolated: enforceIsolated,
 		multiAssetMode:  multiAssetMode,
@@ -2494,24 +2477,6 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			}
 			if updated {
 				changed = true
-			}
-			if m.staleEnable && shouldCloseStaleLive(p, now, m.staleMaxAge, m.staleMinProg, m.staleGraceR) {
-				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-				_ = m.cancelRemainingExits(p)
-				if err := m.closeSymbolMarket(p.Symbol); err != nil {
-					return changed, err
-				}
-				p.State = execClosed
-				p.CloseReason = "STALE_NO_PROGRESS"
-				p.ClosedAt = now
-				p.UpdatedAt = now
-				if m.tg != nil {
-					m.tg.Sendf("position closed %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s",
-						p.Symbol, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, p.CloseReason)
-				}
-				_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, mark, pnl, pct)
-				m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, mark, pnl, pct)
-				return true, nil
 			}
 		}
 	}
@@ -3379,6 +3344,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if _, exists := p.positions[raw]; exists {
 		return nil, fmt.Errorf("symbol already open")
 	}
+	if t := p.lockUntil[raw]; !t.IsZero() && now.Before(t) {
+		return nil, fmt.Errorf("symbol loss lock active")
+	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
 			return nil, fmt.Errorf("symbol loss cooldown active")
@@ -3616,24 +3584,6 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 	}
 }
 
-func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
-	if p == nil || !p.enabled || !p.staleEnable {
-		return
-	}
-	for raw, pos := range p.positions {
-		if pos == nil {
-			continue
-		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			continue
-		}
-		if shouldCloseStalePaper(pos, now, p.staleMaxAge, p.staleMinProg, p.staleGraceR) {
-			p.exitPortion(now, pos, "STALE_NO_PROGRESS", mark, pos.Qty, meta[raw], depth[raw])
-		}
-	}
-}
-
 func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
 	if p == nil || !p.enabled || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(p.positions) == 0 {
 		return
@@ -3765,6 +3715,21 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	}
 	if p.lastExitLoss != nil {
 		p.lastExitLoss[symbol] = net < 0
+	}
+	if net < 0 {
+		if p.lossStreak != nil {
+			p.lossStreak[symbol] = p.lossStreak[symbol] + 1
+			if p.maxLossStreak > 0 && p.lossLock > 0 && p.lossStreak[symbol] >= p.maxLossStreak && p.lockUntil != nil {
+				p.lockUntil[symbol] = now.Add(p.lossLock)
+			}
+		}
+	} else {
+		if p.lossStreak != nil {
+			p.lossStreak[symbol] = 0
+		}
+		if p.lockUntil != nil {
+			delete(p.lockUntil, symbol)
+		}
 	}
 	pos.Qty -= qty
 	if pos.Qty < 0 {
@@ -4065,7 +4030,7 @@ func (p *paperTrader) feeRateBpsForReason(reason string) float64 {
 		if p.makerFeeBps > 0 {
 			return p.makerFeeBps
 		}
-	case "SL", "TRAIL_STOP", "STALE_NO_PROGRESS", "EOD_FORCE_FLAT", "ENTRY_TIMEOUT":
+	case "SL", "TRAIL_STOP", "EOD_FORCE_FLAT", "ENTRY_TIMEOUT":
 		if p.takerFeeBps > 0 {
 			return p.takerFeeBps
 		}
@@ -4874,7 +4839,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 			allowMap[raw] = struct{}{}
 		}
 	}
-	block := envCSV("LIVE_BLOCK_SYMBOLS", "REMUSDT")
+	block := envCSV("LIVE_BLOCK_SYMBOLS", "")
 	blockMap := make(map[string]struct{}, len(block))
 	for _, s := range block {
 		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))

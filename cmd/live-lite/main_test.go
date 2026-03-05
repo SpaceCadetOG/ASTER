@@ -79,18 +79,6 @@ func TestRealizedFromFill(t *testing.T) {
 	}
 }
 
-func TestShouldCloseStaleLive(t *testing.T) {
-	now := time.Now()
-	p := &livePosition{CreatedAt: now.Add(-4 * time.Hour), MaxFavorableR: 0.1}
-	if !shouldCloseStaleLive(p, now, 3*time.Hour, 0.25, 0.75) {
-		t.Fatalf("expected stale close")
-	}
-	p.MaxFavorableR = 0.9
-	if shouldCloseStaleLive(p, now, 3*time.Hour, 0.25, 0.75) {
-		t.Fatalf("expected grace to skip stale close")
-	}
-}
-
 func TestPaperStateSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paper_state.json")
@@ -269,6 +257,34 @@ func TestFilterBlockedScored(t *testing.T) {
 	out := filterBlockedScored(rows, blocked)
 	if len(out) != 1 || out[0].Symbol != "BTCUSDT" {
 		t.Fatalf("unexpected filtered rows: %+v", out)
+	}
+}
+
+func TestPaperLossStreakLock(t *testing.T) {
+	now := time.Now().UTC()
+	p := &paperTrader{
+		enabled:       true,
+		balance:       1000,
+		positions:     map[string]*paperPosition{},
+		dayStats:      map[string]*paperDayStats{},
+		lastExitAt:    map[string]time.Time{},
+		lastExitLoss:  map[string]bool{},
+		lossStreak:    map[string]int{},
+		lockUntil:     map[string]time.Time{},
+		maxLossStreak: 1,
+		lossLock:      60 * time.Minute,
+	}
+	pos := &paperPosition{
+		Symbol:   "BARDUSDT",
+		Side:     "BUY",
+		Entry:    1.50,
+		Qty:      100,
+		OpenedAt: now.Add(-10 * time.Minute),
+	}
+	p.positions["BARDUSDT"] = pos
+	p.exitPortion(now, pos, "SL", 1.45, pos.Qty, symbolMeta{LastPrice: 1.45}, aster.OrderBook{})
+	if !p.lockUntil["BARDUSDT"].After(now) {
+		t.Fatalf("expected BARDUSDT lock after loss streak")
 	}
 }
 
