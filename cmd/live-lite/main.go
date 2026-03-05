@@ -368,8 +368,14 @@ type maintenanceWindow struct {
 type maintenanceState struct {
 	LastStartDay map[string]string
 	LastEndDay   map[string]string
+	LastEndAt    map[string]time.Time
 	FlatDoneDay  map[string]string
 	HookDoneDay  map[string]string
+}
+
+type momentumView struct {
+	Long  *inplay.Entry
+	Short *inplay.Entry
 }
 
 type payoutRunState string
@@ -555,6 +561,7 @@ func main() {
 		maintLoc = hourlyLoc
 	}
 	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
+	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 20)) * time.Minute
 	maintMidnight := maintenanceWindow{
 		Name:      "M1",
 		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
@@ -585,9 +592,12 @@ func main() {
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
 		LastEndDay:   map[string]string{},
+		LastEndAt:    map[string]time.Time{},
 		FlatDoneDay:  map[string]string{},
 		HookDoneDay:  map[string]string{},
 	}
+	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "A")
+	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.72)
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
 	if paper != nil && tg != nil && tg.enabled {
 		paper.onExit = func(msg string) {
@@ -724,6 +734,13 @@ func main() {
 
 		longInPlay := longTrk.Entries()
 		shortInPlay := shortTrk.Entries()
+		momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
+		if paper.enabled {
+			paper.ApplyMomentumExit(now, momBySymbol, metaBySymbol, paperDepth)
+		}
+		if execMgr != nil {
+			execMgr.ApplyMomentumExit(now, momBySymbol)
+		}
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
 		if paper.enabled && tg != nil && tg.enabled && hourlyEnable {
@@ -816,6 +833,7 @@ func main() {
 				dayKey := localMaintNow.Format("2006-01-02")
 				if maintState.LastStartDay[w.Name] == dayKey && maintState.LastEndDay[w.Name] != dayKey {
 					maintState.LastEndDay[w.Name] = dayKey
+					maintState.LastEndAt[w.Name] = localMaintNow
 					tg.Sendf("maintenance end %s\ntrading resumed\nsession=%s", w.Name, sessionTag(localMaintNow))
 				}
 			}
@@ -849,6 +867,14 @@ func main() {
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin)
 		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
+		filtered := make([]candidate, 0, len(cands))
+		for _, c := range cands {
+			if !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
+				continue
+			}
+			filtered = append(filtered, c)
+		}
+		cands = filtered
 		st := liveLiteStatus{
 			Generated:     now,
 			DryRun:        dryRun,
@@ -876,7 +902,11 @@ func main() {
 		}
 		if len(cands) == 0 {
 			statusStore.Set(st)
-			fmt.Println("live-lite: no trade candidate")
+			if data.CurrentRegimeCT(now) == data.RegimeAsia {
+				fmt.Println("live-lite: no trade candidate (asia quality gate)")
+			} else {
+				fmt.Println("live-lite: no trade candidate")
+			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
@@ -919,6 +949,13 @@ func main() {
 		if inMaint {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
+		}
+		if maintWarmup > 0 {
+			if until, ok := maintenanceWarmupUntil(localMaintNow, maintWarmup, &maintState); ok {
+				fmt.Printf("live-lite: skip (post-maint warmup until %s)\n", until.Format("15:04 MST"))
+				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+				continue
+			}
 		}
 		if rest == nil || dryRun {
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
@@ -1231,6 +1268,29 @@ func normalizeMaintenanceWindow(w maintenanceWindow) maintenanceWindow {
 		w.EndMin = 0
 	}
 	return w
+}
+
+func maintenanceWarmupUntil(now time.Time, warmup time.Duration, st *maintenanceState) (time.Time, bool) {
+	if warmup <= 0 || st == nil || len(st.LastEndAt) == 0 {
+		return time.Time{}, false
+	}
+	latest := time.Time{}
+	for _, t := range st.LastEndAt {
+		if t.IsZero() {
+			continue
+		}
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	if latest.IsZero() {
+		return time.Time{}, false
+	}
+	until := latest.Add(warmup)
+	if now.Before(until) {
+		return until, true
+	}
+	return time.Time{}, false
 }
 
 func inHourWindow(hour, start, end int) bool {
@@ -1614,7 +1674,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
 	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
-	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 15)) * time.Minute
+	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 30)) * time.Minute
 	if lossCooldown < 0 {
 		lossCooldown = 0
 	}
@@ -2921,6 +2981,60 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 	return nil
 }
 
+func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView) {
+	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(m.positions) == 0 {
+		return
+	}
+	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 5)) * time.Minute
+	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.0)
+	changed := false
+	for sym, p := range m.positions {
+		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
+			continue
+		}
+		mv := mom[sym]
+		if !shouldExitOnMomentumFade(p.Side, mv, slopeMax) {
+			continue
+		}
+		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
+			continue
+		}
+		mark := p.LastMark
+		if mark <= 0 {
+			px, err := m.currentMark(sym)
+			if err != nil || px <= 0 {
+				continue
+			}
+			mark = px
+		}
+		_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		if upct < minUpnlPct {
+			continue
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		dayRealized := m.addDayRealized(now, pnl)
+		_ = m.cancelRemainingExits(p)
+		if err := m.closeSymbolMarket(sym); err != nil {
+			continue
+		}
+		p.State = execClosed
+		p.CloseReason = "MOMENTUM_FADE"
+		p.ClosedAt = now
+		p.UpdatedAt = now
+		if m.tg != nil {
+			m.tg.Sendf("momentum exit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=MOMENTUM_FADE dayRealized=%+.2f",
+				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, dayRealized)
+		}
+		_ = m.logFill(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
+		m.sendFillReceipt(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
+		changed = true
+	}
+	if changed {
+		_ = m.save()
+	}
+}
+
 func (m *liveExecManager) closeSymbolMarket(symbol string) error {
 	rows, err := m.rest.PositionRisk(symbol)
 	if err != nil {
@@ -3450,6 +3564,45 @@ func (p *paperTrader) ApplyStale(now time.Time, meta map[string]symbolMeta, dept
 		if shouldCloseStalePaper(pos, now, p.staleMaxAge, p.staleMinProg, p.staleGraceR) {
 			p.exitPortion(now, pos, "STALE_NO_PROGRESS", mark, pos.Qty, meta[raw], depth[raw])
 		}
+	}
+}
+
+func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
+	if p == nil || !p.enabled || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(p.positions) == 0 {
+		return
+	}
+	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 5)) * time.Minute
+	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.0)
+	changed := false
+	for raw, pos := range p.positions {
+		if pos == nil || pos.Qty <= 0 {
+			continue
+		}
+		mv := mom[raw]
+		if !shouldExitOnMomentumFade(pos.Side, mv, slopeMax) {
+			continue
+		}
+		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
+			continue
+		}
+		m := meta[raw]
+		mark := m.LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			continue
+		}
+		_, upnlPct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
+		if upnlPct < minUpnlPct {
+			continue
+		}
+		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
+		changed = true
+	}
+	if changed {
+		_ = p.save()
 	}
 }
 
@@ -4164,6 +4317,16 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	return out
 }
 
+func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64) bool {
+	if data.CurrentRegimeCT(now) != data.RegimeAsia {
+		return true
+	}
+	if gradeValue(c.Entry.CurrentGrade) >= gradeValue(asiaMinGrade) {
+		return true
+	}
+	return c.Conf >= asiaStrongConfMin
+}
+
 func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64) []candidate {
 	if len(in) == 0 {
 		return in
@@ -4294,6 +4457,46 @@ func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
 	}
 	fmt.Printf("DRY_RUN intent: symbol=%s side=%s margin=$%.2f leverage=%dx entry=LIMIT(mid %+0.2fbps in direction)\n",
 		sym, c.Side, margin, lev, entryBps)
+}
+
+func buildMomentumIndex(longInPlay, shortInPlay []inplay.Entry) map[string]momentumView {
+	out := make(map[string]momentumView, len(longInPlay)+len(shortInPlay))
+	for i := range longInPlay {
+		e := longInPlay[i]
+		raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
+		if raw == "" {
+			continue
+		}
+		mv := out[raw]
+		mv.Long = &e
+		out[raw] = mv
+	}
+	for i := range shortInPlay {
+		e := shortInPlay[i]
+		raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
+		if raw == "" {
+			continue
+		}
+		mv := out[raw]
+		mv.Short = &e
+		out[raw] = mv
+	}
+	return out
+}
+
+func shouldExitOnMomentumFade(side string, mv momentumView, slopeMax float64) bool {
+	if strings.EqualFold(side, "BUY") {
+		if mv.Long == nil {
+			return false
+		}
+		st := mv.Long.State
+		return mv.Long.ScoreSlope <= slopeMax || st == inplay.StateCooling || st == inplay.StateDumping
+	}
+	if mv.Short == nil {
+		return false
+	}
+	st := mv.Short.State
+	return mv.Short.ScoreSlope <= slopeMax || st == inplay.StateCooling || st == inplay.StateDumping
 }
 
 func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) bool {

@@ -115,7 +115,7 @@ func (r *Router) Eval(ctx Context) []Candidate {
 			sig.RejectReason = "below_min_confluence"
 			continue
 		}
-		if r.cfg.AllowDeadZoneOnlyAPlus && data.CurrentRegimeCT(sig.Ts) == data.RegimeDead && gradeValue(ctx.ScannerGrade) < gradeValue("A") {
+		if r.cfg.AllowDeadZoneOnlyAPlus && data.IsMaintenanceRegime(data.CurrentRegimeCT(sig.Ts)) && gradeValue(ctx.ScannerGrade) < gradeValue("A") {
 			sig.RejectReason = "dead_zone_non_a_grade"
 			continue
 		}

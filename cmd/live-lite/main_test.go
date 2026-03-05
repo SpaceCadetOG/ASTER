@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go-machine/adapters/aster"
+	"go-machine/internal/inplay"
 )
 
 func TestInHourWindow(t *testing.T) {
@@ -204,6 +205,35 @@ func TestOrderbookSupportsEntry(t *testing.T) {
 	}
 	if orderbookSupportsEntry(ob, "SELL", 3, 1.20, 20) {
 		t.Fatalf("expected sell to fail with weak ask imbalance")
+	}
+}
+
+func TestShouldExitOnMomentumFade(t *testing.T) {
+	mv := momentumView{
+		Long:  &inplay.Entry{State: inplay.StateCooling, ScoreSlope: -0.02},
+		Short: &inplay.Entry{State: inplay.StateInPlay, ScoreSlope: 0.10},
+	}
+	if !shouldExitOnMomentumFade("BUY", mv, 0.0) {
+		t.Fatalf("expected BUY momentum fade exit")
+	}
+	mv2 := momentumView{
+		Short: &inplay.Entry{State: inplay.StateCooling, ScoreSlope: 0.04},
+		Long:  &inplay.Entry{State: inplay.StateInPlay, ScoreSlope: 0.03},
+	}
+	if !shouldExitOnMomentumFade("SELL", mv2, 0.0) {
+		t.Fatalf("expected SELL momentum fade exit")
+	}
+}
+
+func TestBuildMomentumIndexUsesRawSymbol(t *testing.T) {
+	longs := []inplay.Entry{{Symbol: "POWER-USD", State: inplay.StateInPlay, ScoreSlope: 0.1}}
+	shorts := []inplay.Entry{{Symbol: "PIPPINUSDT", State: inplay.StateCooling, ScoreSlope: -0.1}}
+	idx := buildMomentumIndex(longs, shorts)
+	if idx["POWERUSDT"].Long == nil {
+		t.Fatalf("expected POWERUSDT long index")
+	}
+	if idx["PIPPINUSDT"].Short == nil {
+		t.Fatalf("expected PIPPINUSDT short index")
 	}
 }
 
