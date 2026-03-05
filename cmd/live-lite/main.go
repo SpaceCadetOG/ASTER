@@ -545,8 +545,10 @@ func main() {
 	if tradeUpdateTop <= 0 {
 		tradeUpdateTop = 5
 	}
-	reportHour := envInt("LIVE_TG_DAILY_REPORT_HOUR", 18)
-	reportMinute := envInt("LIVE_TG_DAILY_REPORT_MIN", 0)
+	eodReportHour := envInt("LIVE_TG_EOD_REPORT_HOUR", 16)
+	eodReportMinute := envInt("LIVE_TG_EOD_REPORT_MIN", 0)
+	sodReportHour := envInt("LIVE_TG_SOD_REPORT_HOUR", 18)
+	sodReportMinute := envInt("LIVE_TG_SOD_REPORT_MIN", 0)
 	reportDayOffset := envInt("LIVE_TG_DAILY_REPORT_DAY_OFFSET", 0)
 	receiptEnable := envBool("LIVE_TG_DAILY_RECEIPT_ENABLE", true)
 	receiptLimit := envInt("LIVE_TG_DAILY_RECEIPT_LIMIT", 25)
@@ -558,11 +560,17 @@ func main() {
 	if liveReceiptLimit <= 0 {
 		liveReceiptLimit = 25
 	}
-	if reportHour < 0 || reportHour > 23 {
-		reportHour = 0
+	if eodReportHour < 0 || eodReportHour > 23 {
+		eodReportHour = 16
 	}
-	if reportMinute < 0 || reportMinute > 59 {
-		reportMinute = 0
+	if eodReportMinute < 0 || eodReportMinute > 59 {
+		eodReportMinute = 0
+	}
+	if sodReportHour < 0 || sodReportHour > 23 {
+		sodReportHour = 18
+	}
+	if sodReportMinute < 0 || sodReportMinute > 59 {
+		sodReportMinute = 0
 	}
 	hourlyEnable := envBool("LIVE_TG_HOURLY_ENABLE", true)
 	hourlyTZName := envStr("LIVE_TG_HOURLY_TZ", "America/Chicago")
@@ -610,6 +618,7 @@ func main() {
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
 	lastDailyReportDay := ""
 	lastDailyLiveReceiptDay := ""
+	lastSODReportDay := ""
 	lastHourlyKey := ""
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
@@ -723,7 +732,7 @@ func main() {
 				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
 			localNow := now.In(paper.reportLoc)
-			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
+			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
 				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyReportDay {
 					tg.Sendf("EOD Daily Dispatch (%s) at %s", dayKey, localNow.Format("15:04 MST"))
@@ -738,10 +747,17 @@ func main() {
 					lastDailyReportDay = dayKey
 				}
 			}
+			if localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute) {
+				dayKey := localNow.Format("2006-01-02")
+				if dayKey != lastSODReportDay {
+					tg.Sendf("%s", tgPre(buildSODReport(localNow, paper, metaBySymbol)))
+					lastSODReportDay = dayKey
+				}
+			}
 		}
 		if tg != nil && tg.enabled && execMgr != nil && liveReceiptEnable {
 			localNow := now.In(execMgr.reportLoc)
-			if localNow.Hour() > reportHour || (localNow.Hour() == reportHour && localNow.Minute() >= reportMinute) {
+			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
 				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyLiveReceiptDay {
 					if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
@@ -1285,6 +1301,36 @@ func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta
 	b.WriteString("\n\nIn-Play Scanner\n")
 	appendInPlayRows(&b, "LONG", longInPlay, meta, 3)
 	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 3)
+	return strings.TrimSpace(b.String())
+}
+
+func buildSODReport(now time.Time, p *paperTrader, meta map[string]symbolMeta) string {
+	if p == nil || !p.enabled {
+		return fmt.Sprintf("SOD Report (%s) session=%s\npaper=disabled", now.Format("15:04 MST"), sessionTag(now))
+	}
+	dayKey := now.In(p.reportLoc).Format("2006-01-02")
+	realized := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realized = ds.Net
+	}
+	openPnL := 0.0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		m := meta[raw]
+		if strings.EqualFold(pos.Side, "BUY") {
+			openPnL += (m.LastPrice - pos.Entry) * pos.Qty
+		} else {
+			openPnL += (pos.Entry - m.LastPrice) * pos.Qty
+		}
+	}
+	eq := p.balance + openPnL
+	var b strings.Builder
+	fmt.Fprintf(&b, "SOD Report (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
+	fmt.Fprintf(&b, "bal=%.2f eq=%.2f realizedToday=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d\n\n",
+		p.balance, eq, realized, openPnL, realized+openPnL, len(p.positions), p.maxOpen)
+	b.WriteString(strings.TrimSpace(p.PositionsTable(meta)))
 	return strings.TrimSpace(b.String())
 }
 
