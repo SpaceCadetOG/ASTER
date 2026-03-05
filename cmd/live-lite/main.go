@@ -5685,7 +5685,16 @@ func (c *telegramCommandCtx) handleCommand(msg string) string {
 	cmd := strings.ToLower(strings.TrimSpace(msg))
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
-		return "Commands:\n/help\n/status\n/balance\n/positions\n/pause\n/resume\n/forceflat"
+		return strings.Join([]string{
+			"Commands:",
+			"/help - show this command guide",
+			"/status - runtime snapshot (mode, top candidate, in-play counts, exec state)",
+			"/balance - live account balances (all assets), available USDT, equityUSDTView, open positions",
+			"/positions - open positions summary (paper table in dry-run, live tracked positions otherwise)",
+			"/pause - pause new entries (risk management still runs)",
+			"/resume - resume new entries",
+			"/forceflat - close open positions now (live + paper paths)",
+		}, "\n")
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
 		return fmt.Sprintf("status\ndry_run=%v live_enabled=%v\nlong_inplay=%d short_inplay=%d\ntop=%s %s g=%s s=%.2f\navailable=%.2f\npaper=%s\nexec_open=%d pending=%d partial1=%d partial2=%d",
