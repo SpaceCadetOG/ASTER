@@ -65,6 +65,7 @@ type safetyConfig struct {
 	symbolCooldown    time.Duration
 	pauseFile         string
 	allowSymbols      map[string]struct{}
+	blockSymbols      map[string]struct{}
 	allowShorts       bool
 	maxDailyLossPct   float64
 	killClose         bool
@@ -567,14 +568,14 @@ func main() {
 	preEODStartMin := envInt("LIVE_PRE_EOD_EXIT_START_MIN", 0)
 	preEODEndHour := envInt("LIVE_PRE_EOD_EXIT_END_HOUR", 16)
 	preEODEndMin := envInt("LIVE_PRE_EOD_EXIT_END_MIN", 0)
-	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 0)) * time.Minute
 	preEODUpnlPctMax := envFloat("LIVE_PRE_EOD_EXIT_UPNL_PCT_MAX", 0.30)
 	maintMidnight := maintenanceWindow{
 		Name:      "M1",
 		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
 		StartMin:  envInt("LIVE_MAINT1_START_MIN", 0),
 		EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
-		EndMin:    envInt("LIVE_MAINT1_END_MIN", 0),
+		EndMin:    envInt("LIVE_MAINT1_END_MIN", 30),
 		ForceFlat: envBool("LIVE_MAINT1_FORCE_FLAT", false),
 		HookPath:  envStr("LIVE_MAINT1_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT1_HOOK_TIMEOUT_SEC", 900)) * time.Second,
@@ -685,6 +686,8 @@ func main() {
 		mkts := client.FetchAllMarkets()
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
+		longRows = filterBlockedScored(longRows, safety.blockSymbols)
+		shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
 		metaBySymbol := buildSymbolMeta(longRows, shortRows)
 		cmdCtx.setMeta(metaBySymbol)
 		paperDepth := map[string]aster.OrderBook{}
@@ -1681,7 +1684,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if minTP1RR <= 0 {
 		minTP1RR = 0.8
 	}
-	staleEnable := envBool("LIVE_STALE_ENABLE", true)
+	staleEnable := envBool("LIVE_STALE_ENABLE", false)
 	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
 	if staleMaxAge <= 0 {
 		staleMaxAge = 180 * time.Minute
@@ -1867,7 +1870,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
-	staleEnable := envBool("LIVE_STALE_ENABLE", true)
+	staleEnable := envBool("LIVE_STALE_ENABLE", false)
 	staleMaxAge := time.Duration(envInt("LIVE_STALE_MAX_AGE_MIN", 180)) * time.Minute
 	if staleMaxAge <= 0 {
 		staleMaxAge = 180 * time.Minute
@@ -4871,6 +4874,14 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 			allowMap[raw] = struct{}{}
 		}
 	}
+	block := envCSV("LIVE_BLOCK_SYMBOLS", "REMUSDT")
+	blockMap := make(map[string]struct{}, len(block))
+	for _, s := range block {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))
+		if raw != "" {
+			blockMap[raw] = struct{}{}
+		}
+	}
 	return safetyConfig{
 		enableLiveTrading: envBool("LIVE_ENABLE_LIVE_TRADING", false),
 		maxLeverage:       maxLev,
@@ -4880,6 +4891,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 		symbolCooldown:    time.Duration(symCoolSec) * time.Second,
 		pauseFile:         envStr("LIVE_PAUSE_FILE", "/tmp/live-lite.pause"),
 		allowSymbols:      allowMap,
+		blockSymbols:      blockMap,
 		allowShorts:       envBool("LIVE_ALLOW_SHORTS", true),
 		maxDailyLossPct:   maxDailyLossPct,
 		killClose:         envBool("LIVE_KILL_CLOSE_POSITIONS", false),
@@ -4895,8 +4907,11 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 	if !cfg.allowShorts && strings.EqualFold(c.Side, "SELL") {
 		return "shorts disabled"
 	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if _, blocked := cfg.blockSymbols[sym]; blocked {
+		return "symbol blocked"
+	}
 	if len(cfg.allowSymbols) > 0 {
-		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 		if _, ok := cfg.allowSymbols[sym]; !ok {
 			return "symbol not in allowlist"
 		}
@@ -4917,6 +4932,21 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 		}
 	}
 	return ""
+}
+
+func filterBlockedScored(rows []market.Scored, blocked map[string]struct{}) []market.Scored {
+	if len(rows) == 0 || len(blocked) == 0 {
+		return rows
+	}
+	out := make([]market.Scored, 0, len(rows))
+	for _, r := range rows {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(r.Symbol)))
+		if _, skip := blocked[raw]; skip {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func inEventLockout(now time.Time, lockMin int) bool {

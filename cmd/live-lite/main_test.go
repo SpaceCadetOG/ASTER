@@ -8,6 +8,7 @@ import (
 
 	"go-machine/adapters/aster"
 	"go-machine/internal/inplay"
+	"go-machine/internal/market"
 )
 
 func TestInHourWindow(t *testing.T) {
@@ -252,6 +253,22 @@ func TestPreEODExitReason(t *testing.T) {
 	}
 	if got := preEODExitReason("BUY", mvStable, 0.90, 0.30); got != "" {
 		t.Fatalf("expected no exit reason, got %s", got)
+	}
+}
+
+func TestFilterBlockedScored(t *testing.T) {
+	rows := []market.Scored{
+		{Market: market.Market{Symbol: "XAUUSDT"}},
+		{Market: market.Market{Symbol: "BTCUSDT"}},
+		{Market: market.Market{Symbol: "REM-USD"}},
+	}
+	blocked := map[string]struct{}{
+		"XAUUSDT": {},
+		"REMUSDT": {},
+	}
+	out := filterBlockedScored(rows, blocked)
+	if len(out) != 1 || out[0].Symbol != "BTCUSDT" {
+		t.Fatalf("unexpected filtered rows: %+v", out)
 	}
 }
 

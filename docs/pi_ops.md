@@ -101,7 +101,7 @@ scripts/stop_bot.sh
 
 ## 8) Maintenance + payout timing (CT)
 
-- Night maintenance: `22:00-23:30` (`LIVE_MAINT1_*`, minute-precision with `*_MIN` envs).
+- Night maintenance: `00:00-01:30` (`LIVE_MAINT1_*`, minute-precision with `*_MIN` envs; global low-liquidity window).
 - EOD maintenance: `16:00-18:00` (`LIVE_MAINT2_*`), with force-flat at `16:00`.
 - EOD daily report/receipt dispatch default: `18:00 CT` (`LIVE_TG_DAILY_REPORT_*`).
 - 7-day payout anchor: `16:00` (`LIVE_PAYOUT_ANCHOR_*`).
