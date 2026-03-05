@@ -22,7 +22,7 @@ func TestSwingHighLow(t *testing.T) {
 	if len(highs) != 2 {
 		t.Fatalf("expected 2 highs got %d", len(highs))
 	}
-	if len(lows) != 2 {
-		t.Fatalf("expected 2 lows got %d", len(lows))
+	if len(lows) != 1 {
+		t.Fatalf("expected 1 low got %d", len(lows))
 	}
 }

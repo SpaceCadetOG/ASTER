@@ -11,13 +11,12 @@ const chicagoTZ = "America/Chicago"
 type Regime string
 
 const (
-	RegimeAsia                Regime = "ASIA"
-	RegimeEU                  Regime = "EU"
-	RegimeUS                  Regime = "US"
-	RegimeMaintenance         Regime = "MAINT"
-	RegimeSaturdayMaintenance Regime = "SAT_MAINT"
-	OverlapAE                 Regime = "ASIA_EU_OVERLAP"
-	OverlapEUUS               Regime = "EU_US_OVERLAP"
+	RegimeAsia  Regime = "ASIA"
+	RegimeEU    Regime = "EU"
+	RegimeUS    Regime = "US"
+	RegimeDead  Regime = "DEAD"
+	OverlapAE   Regime = "ASIA_EU_OVERLAP"
+	OverlapEUUS Regime = "EU_US_OVERLAP"
 )
 
 func mustChicago() *time.Location {
@@ -71,19 +70,12 @@ func CurrentRegimeCT(ts time.Time) Regime {
 	if inMinuteRange(cur, 7*60, 16*60) {
 		return RegimeUS
 	}
-	if t.Weekday() == time.Saturday {
-		return RegimeSaturdayMaintenance
-	}
-	return RegimeMaintenance
+	return RegimeDead
 }
 
 func IsMajorOverlapCT(ts time.Time) bool {
 	r := CurrentRegimeCT(ts)
 	return r == OverlapAE || r == OverlapEUUS
-}
-
-func IsMaintenanceRegime(r Regime) bool {
-	return r == RegimeMaintenance || r == RegimeSaturdayMaintenance
 }
 
 func SessionRiskMultiplier(ts time.Time, confidence float64) float64 {

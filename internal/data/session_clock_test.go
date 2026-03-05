@@ -52,31 +52,18 @@ func TestCurrentRegimeCT(t *testing.T) {
 		ts   string
 		want Regime
 	}{
-		{"2026-03-04T08:30:00Z", OverlapAE},                 // 02:30 CST
-		{"2026-03-04T08:15:00Z", OverlapAE},                 // 02:15 CST
-		{"2026-03-04T14:30:00Z", OverlapEUUS},               // 08:30 CST
-		{"2026-03-04T17:30:00Z", RegimeUS},                  // 11:30 CST
-		{"2026-03-04T23:30:00Z", RegimeMaintenance},         // 17:30 CST
-		{"2026-03-05T02:30:00Z", RegimeAsia},                // 20:30 CST
-		{"2026-03-07T23:30:00Z", RegimeSaturdayMaintenance}, // Sat 17:30 CST
+		{"2026-03-04T08:30:00Z", OverlapAE},   // 02:30 CST
+		{"2026-03-04T08:15:00Z", OverlapAE},   // 02:15 CST
+		{"2026-03-04T14:30:00Z", OverlapEUUS}, // 08:30 CST
+		{"2026-03-04T17:30:00Z", RegimeUS},    // 11:30 CST
+		{"2026-03-04T23:30:00Z", RegimeDead},  // 17:30 CST
+		{"2026-03-05T02:30:00Z", RegimeAsia},  // 20:30 CST
 	}
 	for _, tc := range cases {
 		got := CurrentRegimeCT(mustParseRFC3339(t, tc.ts))
 		if got != tc.want {
 			t.Fatalf("ts=%s want=%s got=%s", tc.ts, tc.want, got)
 		}
-	}
-}
-
-func TestIsMaintenanceRegime(t *testing.T) {
-	if !IsMaintenanceRegime(RegimeMaintenance) {
-		t.Fatal("expected MAINT to be maintenance regime")
-	}
-	if !IsMaintenanceRegime(RegimeSaturdayMaintenance) {
-		t.Fatal("expected SAT_MAINT to be maintenance regime")
-	}
-	if IsMaintenanceRegime(RegimeUS) {
-		t.Fatal("US should not be maintenance regime")
 	}
 }
 
