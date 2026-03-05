@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go-machine/adapters/aster"
 )
 
 func TestInHourWindow(t *testing.T) {
@@ -189,6 +191,19 @@ func TestAdjustBracketParamsCapsAndSoften(t *testing.T) {
 	}
 	if tp1 > 2.5 || tp2 > 4.0 || tp3 > 6.0 {
 		t.Fatalf("tp caps not enforced tp1=%.2f tp2=%.2f tp3=%.2f", tp1, tp2, tp3)
+	}
+}
+
+func TestOrderbookSupportsEntry(t *testing.T) {
+	ob := aster.OrderBook{
+		Bids: [][2]float64{{100, 10}, {99.9, 8}, {99.8, 6}},
+		Asks: [][2]float64{{100.1, 5}, {100.2, 4}, {100.3, 3}},
+	}
+	if !orderbookSupportsEntry(ob, "BUY", 3, 1.05, 20) {
+		t.Fatalf("expected buy to pass orderbook filter")
+	}
+	if orderbookSupportsEntry(ob, "SELL", 3, 1.20, 20) {
+		t.Fatalf("expected sell to fail with weak ask imbalance")
 	}
 }
 

@@ -190,6 +190,9 @@ type paperTrader struct {
 	lastFundKey  map[string]string
 	openCostMode string
 	onExit       func(string)
+	lossCooldown time.Duration
+	lastExitAt   map[string]time.Time
+	lastExitLoss map[string]bool
 }
 
 type paperDayStats struct {
@@ -442,6 +445,10 @@ func main() {
 	enableMomentumReversal := envBool("LIVE_ENABLE_MOMENTUM_REVERSAL", true)
 	reversalMinGrade := envStr("LIVE_REVERSAL_MIN_GRADE", "A+")
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
+	obFilterEnable := envBool("LIVE_OB_FILTER_ENABLE", true)
+	obLevels := envInt("LIVE_OB_LEVELS", 5)
+	obImbMin := envFloat("LIVE_OB_IMBALANCE_MIN", 1.10)
+	obMaxSpreadBps := envFloat("LIVE_OB_MAX_SPREAD_BPS", 12)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
@@ -895,6 +902,17 @@ func main() {
 				best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 			lastTopKey = topKey
 		}
+		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+		entryDepth := map[string]aster.OrderBook{}
+		if obFilterEnable {
+			entryDepth = fetchOrderBooks(client, []string{rawBest}, obLevels)
+			ob := entryDepth[rawBest]
+			if !orderbookSupportsEntry(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps) {
+				fmt.Printf("live-lite: skip (%s orderbook filter)\n", rawBest)
+				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+				continue
+			}
+		}
 
 		if inMaint {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
@@ -903,7 +921,9 @@ func main() {
 		if rest == nil || dryRun {
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
 			if paper.enabled {
-				entryDepth := fetchOrderBooks(client, []string{strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))}, envInt("LIVE_PAPER_OB_LEVELS", 20))
+				if len(entryDepth) == 0 {
+					entryDepth = fetchOrderBooks(client, []string{rawBest}, envInt("LIVE_PAPER_OB_LEVELS", 20))
+				}
 				mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
 				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth)
 				if err != nil {
@@ -1592,6 +1612,10 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	staleMinProg := envFloat("LIVE_STALE_MIN_PROGRESS_R", 0.25)
 	staleGraceR := envFloat("LIVE_STALE_PROFIT_GRACE_R", 0.75)
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
+	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 15)) * time.Minute
+	if lossCooldown < 0 {
+		lossCooldown = 0
+	}
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	p := &paperTrader{
 		enabled:      enabled,
@@ -1629,6 +1653,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		fundingBySym: fundingBySym,
 		lastFundKey:  map[string]string{},
 		openCostMode: openCostMode,
+		lossCooldown: lossCooldown,
+		lastExitAt:   map[string]time.Time{},
+		lastExitLoss: map[string]bool{},
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -2371,6 +2398,16 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 		if err == nil && mark > 0 {
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
+			beArmR := envFloat("LIVE_BE_ARM_R", 0.35)
+			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
+				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
+					p.StopPrice = be
+					if err := m.placeOrReplaceStop(p); err == nil {
+						changed = true
+					}
+				}
+			}
 			updated, err := m.updateTrailingStop(p, mark)
 			if err != nil {
 				return changed, err
@@ -3148,6 +3185,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
+	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	if len(p.positions) >= p.maxOpen {
 		return nil, fmt.Errorf("max paper positions reached (%d)", p.maxOpen)
 	}
@@ -3155,9 +3193,13 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if free < margin {
 		return nil, fmt.Errorf("insufficient usable paper balance")
 	}
-	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	if _, exists := p.positions[raw]; exists {
 		return nil, fmt.Errorf("symbol already open")
+	}
+	if p.lossCooldown > 0 {
+		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
+			return nil, fmt.Errorf("symbol loss cooldown active")
+		}
 	}
 	m := meta[raw]
 	if m.LastPrice <= 0 {
@@ -3308,6 +3350,13 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		mark := m.LastPrice
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
+		beArmR := envFloat("LIVE_PAPER_BE_ARM_R", 0.35)
+		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR {
+			be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
+				pos.Stop = be
+			}
+		}
 
 		// 1) Hard stop has highest priority.
 		if (sideBuy && mark <= pos.Stop) || (!sideBuy && mark >= pos.Stop) {
@@ -3455,6 +3504,12 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	pos.Realized += net
 	p.balance += net
 	p.recordDayStat(now, reason, gross, fee, net)
+	if p.lastExitAt != nil {
+		p.lastExitAt[symbol] = now
+	}
+	if p.lastExitLoss != nil {
+		p.lastExitLoss[symbol] = net < 0
+	}
 	pos.Qty -= qty
 	if pos.Qty < 0 {
 		pos.Qty = 0
@@ -4222,6 +4277,47 @@ func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
 	}
 	fmt.Printf("DRY_RUN intent: symbol=%s side=%s margin=$%.2f leverage=%dx entry=LIMIT(mid %+0.2fbps in direction)\n",
 		sym, c.Side, margin, lev, entryBps)
+}
+
+func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) bool {
+	if levels <= 0 {
+		levels = 5
+	}
+	if minImb <= 0 {
+		minImb = 1.05
+	}
+	if maxSpreadBps <= 0 {
+		maxSpreadBps = 15
+	}
+	if len(ob.Bids) == 0 || len(ob.Asks) == 0 || ob.Bids[0][0] <= 0 || ob.Asks[0][0] <= 0 {
+		return false
+	}
+	mid := (ob.Bids[0][0] + ob.Asks[0][0]) / 2.0
+	if mid <= 0 {
+		return false
+	}
+	spreadBps := ((ob.Asks[0][0] - ob.Bids[0][0]) / mid) * 10000.0
+	if spreadBps > maxSpreadBps {
+		return false
+	}
+	nBid := minInt(levels, len(ob.Bids))
+	nAsk := minInt(levels, len(ob.Asks))
+	bidUSD := 0.0
+	askUSD := 0.0
+	for i := 0; i < nBid; i++ {
+		bidUSD += ob.Bids[i][0] * ob.Bids[i][1]
+	}
+	for i := 0; i < nAsk; i++ {
+		askUSD += ob.Asks[i][0] * ob.Asks[i][1]
+	}
+	if bidUSD <= 0 || askUSD <= 0 {
+		return false
+	}
+	imb := bidUSD / askUSD
+	if strings.EqualFold(side, "SELL") {
+		imb = askUSD / bidUSD
+	}
+	return imb >= minImb
 }
 
 func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapshot, error) {
@@ -5135,6 +5231,13 @@ func maxFloat(a, b float64) float64 {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
