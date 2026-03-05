@@ -562,6 +562,13 @@ func main() {
 	}
 	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
 	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 20)) * time.Minute
+	preEODExitEnable := envBool("LIVE_PRE_EOD_EXIT_ENABLE", true)
+	preEODStartHour := envInt("LIVE_PRE_EOD_EXIT_START_HOUR", 15)
+	preEODStartMin := envInt("LIVE_PRE_EOD_EXIT_START_MIN", 0)
+	preEODEndHour := envInt("LIVE_PRE_EOD_EXIT_END_HOUR", 16)
+	preEODEndMin := envInt("LIVE_PRE_EOD_EXIT_END_MIN", 0)
+	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	preEODUpnlPctMax := envFloat("LIVE_PRE_EOD_EXIT_UPNL_PCT_MAX", 0.30)
 	maintMidnight := maintenanceWindow{
 		Name:      "M1",
 		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
@@ -740,6 +747,14 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.ApplyMomentumExit(now, momBySymbol)
+		}
+		if preEODExitEnable && inMinuteWindow(localMaintNow.Hour(), localMaintNow.Minute(), preEODStartHour, preEODStartMin, preEODEndHour, preEODEndMin) {
+			if paper.enabled {
+				paper.ApplyPreEODExit(now, momBySymbol, metaBySymbol, paperDepth, preEODMinHold, preEODUpnlPctMax)
+			}
+			if execMgr != nil {
+				execMgr.ApplyPreEODExit(now, momBySymbol, preEODMinHold, preEODUpnlPctMax)
+			}
 		}
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
@@ -3035,6 +3050,55 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 	}
 }
 
+func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentumView, minHold time.Duration, upnlPctMax float64) {
+	if m == nil || m.rest == nil || len(m.positions) == 0 {
+		return
+	}
+	changed := false
+	for sym, p := range m.positions {
+		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
+			continue
+		}
+		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
+			continue
+		}
+		mark := p.LastMark
+		if mark <= 0 {
+			px, err := m.currentMark(sym)
+			if err != nil || px <= 0 {
+				continue
+			}
+			mark = px
+		}
+		_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		mv := mom[sym]
+		reason := preEODExitReason(p.Side, mv, upct, upnlPctMax)
+		if reason == "" {
+			continue
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		dayRealized := m.addDayRealized(now, pnl)
+		_ = m.cancelRemainingExits(p)
+		if err := m.closeSymbolMarket(sym); err != nil {
+			continue
+		}
+		p.State = execClosed
+		p.CloseReason = reason
+		p.ClosedAt = now
+		p.UpdatedAt = now
+		if m.tg != nil {
+			m.tg.Sendf("pre-eod exit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
+				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
+		}
+		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		changed = true
+	}
+	if changed {
+		_ = m.save()
+	}
+}
+
 func (m *liveExecManager) closeSymbolMarket(symbol string) error {
 	rows, err := m.rest.PositionRisk(symbol)
 	if err != nil {
@@ -3599,6 +3663,40 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			continue
 		}
 		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
+		changed = true
+	}
+	if changed {
+		_ = p.save()
+	}
+}
+
+func (p *paperTrader) ApplyPreEODExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook, minHold time.Duration, upnlPctMax float64) {
+	if p == nil || !p.enabled || len(p.positions) == 0 {
+		return
+	}
+	changed := false
+	for raw, pos := range p.positions {
+		if pos == nil || pos.Qty <= 0 {
+			continue
+		}
+		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
+			continue
+		}
+		m := meta[raw]
+		mark := m.LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			continue
+		}
+		_, upnlPct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
+		mv := mom[raw]
+		reason := preEODExitReason(pos.Side, mv, upnlPct, upnlPctMax)
+		if reason == "" {
+			continue
+		}
+		p.exitPortion(now, pos, reason, mark, pos.Qty, m, depth[raw])
 		changed = true
 	}
 	if changed {
@@ -4497,6 +4595,16 @@ func shouldExitOnMomentumFade(side string, mv momentumView, slopeMax float64) bo
 	}
 	st := mv.Short.State
 	return mv.Short.ScoreSlope <= slopeMax || st == inplay.StateCooling || st == inplay.StateDumping
+}
+
+func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64) string {
+	if shouldExitOnMomentumFade(side, mv, 0.0) {
+		return "PRE_EOD_MOMENTUM_FADE"
+	}
+	if upnlPct <= upnlPctMax {
+		return "PRE_EOD_WEAK_PNL"
+	}
+	return ""
 }
 
 func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) bool {

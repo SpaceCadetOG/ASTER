@@ -237,6 +237,24 @@ func TestBuildMomentumIndexUsesRawSymbol(t *testing.T) {
 	}
 }
 
+func TestPreEODExitReason(t *testing.T) {
+	mvFade := momentumView{
+		Long: &inplay.Entry{State: inplay.StateCooling, ScoreSlope: -0.01},
+	}
+	if got := preEODExitReason("BUY", mvFade, 1.25, 0.30); got != "PRE_EOD_MOMENTUM_FADE" {
+		t.Fatalf("expected momentum fade reason, got %s", got)
+	}
+	mvStable := momentumView{
+		Long: &inplay.Entry{State: inplay.StateInPlay, ScoreSlope: 0.03},
+	}
+	if got := preEODExitReason("BUY", mvStable, 0.20, 0.30); got != "PRE_EOD_WEAK_PNL" {
+		t.Fatalf("expected weak pnl reason, got %s", got)
+	}
+	if got := preEODExitReason("BUY", mvStable, 0.90, 0.30); got != "" {
+		t.Fatalf("expected no exit reason, got %s", got)
+	}
+}
+
 func TestResolvePaperFeeProfile(t *testing.T) {
 	mk, tk := resolvePaperFeeProfile("pro")
 	if mk != 0.5 || tk != 4.0 {
