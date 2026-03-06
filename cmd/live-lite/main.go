@@ -1833,7 +1833,7 @@ func adjustBracketParams(reason string, conf, volumeUSD, stopPct, tp1R, tp2R, tp
 	tp1Max := envFloat("LIVE_TP1_MAX_R", 2.5)
 	tp2Max := envFloat("LIVE_TP2_MAX_R", 4.0)
 	tp3Max := envFloat("LIVE_TP3_MAX_R", 6.0)
-	stopWiden := envFloat("LIVE_STOP_WIDEN_MULT", 1.35)
+	stopWiden := envFloat("LIVE_STOP_WIDEN_MULT", 1.32)
 	softenConf := envFloat("LIVE_SOFTEN_CONF_MAX", 0.65)
 
 	r := strings.ToLower(strings.TrimSpace(reason))
@@ -1870,13 +1870,13 @@ func volumeStopWiden(volumeUSD float64) float64 {
 		return 1.0
 	}
 	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER3", 250_000_000) {
-		return envFloat("LIVE_STOP_VOL_WIDEN_TIER3", 1.35)
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER3", 1.32)
 	}
 	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER2", 100_000_000) {
-		return envFloat("LIVE_STOP_VOL_WIDEN_TIER2", 1.22)
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER2", 1.20)
 	}
 	if volumeUSD >= envFloat("LIVE_STOP_VOL_USD_TIER1", 25_000_000) {
-		return envFloat("LIVE_STOP_VOL_WIDEN_TIER1", 1.12)
+		return envFloat("LIVE_STOP_VOL_WIDEN_TIER1", 1.11)
 	}
 	return 1.0
 }
