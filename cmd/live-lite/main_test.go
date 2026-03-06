@@ -198,6 +198,32 @@ func TestOrderbookSupportsEntry(t *testing.T) {
 	}
 }
 
+func TestOrderbookEntryDecisionReasons(t *testing.T) {
+	empty := aster.OrderBook{}
+	ok, reason, _, _ := orderbookEntryDecision(empty, "BUY", 5, 1.1, 10)
+	if ok || reason != "orderbook_empty" {
+		t.Fatalf("expected empty reason, got ok=%v reason=%s", ok, reason)
+	}
+
+	wide := aster.OrderBook{
+		Bids: [][2]float64{{100, 10}},
+		Asks: [][2]float64{{102, 10}},
+	}
+	ok, reason, spread, _ := orderbookEntryDecision(wide, "BUY", 5, 1.1, 10)
+	if ok || reason != "orderbook_spread" || spread <= 10 {
+		t.Fatalf("expected spread reject, got ok=%v reason=%s spread=%.2f", ok, reason, spread)
+	}
+
+	imb := aster.OrderBook{
+		Bids: [][2]float64{{100, 1}},
+		Asks: [][2]float64{{100.05, 100}},
+	}
+	ok, reason, _, ratio := orderbookEntryDecision(imb, "BUY", 1, 1.1, 20)
+	if ok || reason != "orderbook_imbalance" || ratio >= 1.1 {
+		t.Fatalf("expected imbalance reject, got ok=%v reason=%s ratio=%.3f", ok, reason, ratio)
+	}
+}
+
 func TestShouldExitOnMomentumFade(t *testing.T) {
 	mv := momentumView{
 		Long:  &inplay.Entry{State: inplay.StateCooling, ScoreSlope: -0.02},

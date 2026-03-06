@@ -9,6 +9,7 @@
 - `cmd/exec`: execution utility (balance/place/cancel/status/flatten).
 - `cmd/oflow`, `cmd/tape`, `cmd/whale`, `cmd/liqs`: market microstructure sidecars.
 - `cmd/vp`: VP inspection command.
+- `cmd/stats`: JSONL event-log performance aggregation.
 
 ## `cmd/live-lite` behavior
 
@@ -17,6 +18,12 @@
 - Applies risk shell hard gate.
 - Executes via paper trader (`LIVE_DRY_RUN=1`) or REST execution manager.
 - Sends Telegram digests/receipts and hosts status API.
+- Emits structured event logs (`SIGNAL`, `GATE_DECISION`, `INTENT`, `ORDER_*`, `POSITION_*`, `METRICS_SNAPSHOT`).
+
+## `cmd/stats` usage
+
+- `go run ./cmd/stats -log logs/events.jsonl -from 2026-03-01 -to 2026-03-05`
+- Optional: `-csv out/stats_report.csv`
 
 ## `cmd/exec` actions
 

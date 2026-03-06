@@ -1,0 +1,36 @@
+# Optional strategy quality profile for live-lite (mapped to LIVE_* envs).
+# Source of truth for runtime remains env vars; keep this file for versioned defaults.
+
+discovery:
+  enabled: true
+  top_n: 10
+  min_volume_ratio: 1.5
+  min_volatility: 0.0
+  lookback_minutes: 60
+  refresh_seconds: 60
+
+gates:
+  min_grade: "B"
+  min_score: 75.0
+  min_slope: 0.15
+  require_volume_spike: true
+  min_volume_ratio: 1.5
+  require_mtf: true
+  mtf:
+    tfs: ["1m", "5m"]
+    ema_fast: 8
+    ema_slow: 20
+    use_15m: false
+  require_regime: false
+  regime:
+    proxy_symbol: "BTCUSDT"
+    min_atr_pct: 0.8
+
+throttle:
+  symbol_cooldown_seconds: 300
+  dedupe_window_seconds: 120
+
+events:
+  enabled: true
+  path: "logs/events.jsonl"
+  stdout: false

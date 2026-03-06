@@ -22,12 +22,17 @@ import (
 
 	"go-machine/adapters/aster"
 	"go-machine/internal/data"
+	"go-machine/internal/discovery"
 	"go-machine/internal/features"
+	"go-machine/internal/gate"
+	"go-machine/internal/indicators"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 	"go-machine/internal/risk"
+	"go-machine/internal/stats"
 	"go-machine/internal/strategies"
 	"go-machine/internal/ta"
+	"go-machine/internal/throttle"
 	"go-machine/internal/types"
 )
 
@@ -200,6 +205,7 @@ type paperTrader struct {
 	lockUntil     map[string]time.Time
 	maxLossStreak int
 	lossLock      time.Duration
+	eventLog      *stats.EventLogger
 }
 
 type paperDayStats struct {
@@ -316,6 +322,7 @@ type liveExecManager struct {
 	positions       map[string]*livePosition
 	dayRealized     map[string]float64
 	reportLoc       *time.Location
+	eventLog        *stats.EventLogger
 }
 
 type liveExecSnapshot struct {
@@ -551,6 +558,8 @@ func main() {
 	eodReportMinute := envInt("LIVE_TG_EOD_REPORT_MIN", 0)
 	sodReportHour := envInt("LIVE_TG_SOD_REPORT_HOUR", 18)
 	sodReportMinute := envInt("LIVE_TG_SOD_REPORT_MIN", 0)
+	preUSReportHour := envInt("LIVE_TG_PRE_US_REPORT_HOUR", 8)
+	preUSReportMinute := envInt("LIVE_TG_PRE_US_REPORT_MIN", 0)
 	reportDayOffset := envInt("LIVE_TG_DAILY_REPORT_DAY_OFFSET", 0)
 	receiptEnable := envBool("LIVE_TG_DAILY_RECEIPT_ENABLE", true)
 	receiptLimit := envInt("LIVE_TG_DAILY_RECEIPT_LIMIT", 25)
@@ -574,6 +583,12 @@ func main() {
 	if sodReportMinute < 0 || sodReportMinute > 59 {
 		sodReportMinute = 0
 	}
+	if preUSReportHour < 0 || preUSReportHour > 23 {
+		preUSReportHour = 8
+	}
+	if preUSReportMinute < 0 || preUSReportMinute > 59 {
+		preUSReportMinute = 0
+	}
 	hourlyEnable := envBool("LIVE_TG_HOURLY_ENABLE", true)
 	hourlyTZName := envStr("LIVE_TG_HOURLY_TZ", "America/Chicago")
 	hourlyLoc, err := time.LoadLocation(hourlyTZName)
@@ -586,7 +601,7 @@ func main() {
 		maintLoc = hourlyLoc
 	}
 	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
-	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 20)) * time.Minute
+	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 0)) * time.Minute
 	preEODExitEnable := envBool("LIVE_PRE_EOD_EXIT_ENABLE", true)
 	preEODStartHour := envInt("LIVE_PRE_EOD_EXIT_START_HOUR", 15)
 	preEODStartMin := envInt("LIVE_PRE_EOD_EXIT_START_MIN", 0)
@@ -621,6 +636,9 @@ func main() {
 	lastDailyReportDay := ""
 	lastDailyLiveReceiptDay := ""
 	lastSODReportDay := ""
+	lastPreUSReportDay := ""
+	lastM1ReportDay := ""
+	lastM2ReportDay := ""
 	lastHourlyKey := ""
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
@@ -705,6 +723,22 @@ func main() {
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
 	reserveGate := newReserveLockGate()
+	discoveryCfg := loadDiscoveryConfig()
+	gateCfg := loadEntryGateConfig()
+	symbolCooldown := throttle.NewCooldown(time.Duration(envInt("LIVE_THROTTLE_SYMBOL_COOLDOWN_SECONDS", 300)) * time.Second)
+	intentDedupe := throttle.NewDedupe(time.Duration(envInt("LIVE_THROTTLE_DEDUPE_WINDOW_SECONDS", 120)) * time.Second)
+	eventLog := stats.NewEventLogger(
+		envStr("LIVE_EVENTS_LOG", "logs/events.jsonl"),
+		envBool("LIVE_EVENTS_ENABLE", true),
+		envBool("LIVE_EVENTS_STDOUT", false),
+		dryRun,
+	)
+	if paper != nil {
+		paper.eventLog = eventLog
+	}
+	if execMgr != nil {
+		execMgr.eventLog = eventLog
+	}
 	for {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
@@ -715,6 +749,15 @@ func main() {
 		shortRows := market.ScoreAndFilterShort(mkts)
 		longRows = filterBlockedScored(longRows, safety.blockSymbols)
 		shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
+		if discoveryCfg.Enabled {
+			candleBySymbol := buildDiscoveryCandles(client, longRows, shortRows, discoveryCfg)
+			snaps := discovery.BuildSnapshots(longRows, candleBySymbol)
+			universe := discovery.SelectUniverse(snaps, discoveryCfg)
+			if len(universe) > 0 {
+				longRows = filterUniverseRows(longRows, universe)
+				shortRows = filterUniverseRows(shortRows, universe)
+			}
+		}
 		metaBySymbol := buildSymbolMeta(longRows, shortRows)
 		cmdCtx.setMeta(metaBySymbol)
 		paperDepth := map[string]aster.OrderBook{}
@@ -795,11 +838,24 @@ func main() {
 		}
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
+		eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      "METRICS_SNAPSHOT",
+			TF:        "1m",
+			Reason:    fmt.Sprintf("long_inplay=%d short_inplay=%d", len(longInPlay), len(shortInPlay)),
+		})
 		if paper.enabled && tg != nil && tg.enabled && hourlyEnable {
 			hk := localMaintNow.Format("2006-01-02 15")
 			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 				tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
 				lastHourlyKey = hk
+			}
+			if localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute) {
+				dayKey := localMaintNow.Format("2006-01-02")
+				if dayKey != lastPreUSReportDay {
+					tg.Sendf("%s", tgPre(buildWindowReport("Pre-US Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+					lastPreUSReportDay = dayKey
+				}
 			}
 		}
 		if !hourlyEnable && time.Now().UTC().After(nextDigestAt) {
@@ -854,6 +910,20 @@ func main() {
 					maintWindow.EndHour, maintWindow.EndMin,
 					maintLoc.String(),
 					sessionTag(localMaintNow))
+				if paper.enabled && tg != nil && tg.enabled {
+					switch maintWindow.Name {
+					case "M1":
+						if lastM1ReportDay != dayKey {
+							tg.Sendf("%s", tgPre(buildWindowReport("M1 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+							lastM1ReportDay = dayKey
+						}
+					case "M2":
+						if lastM2ReportDay != dayKey {
+							tg.Sendf("%s", tgPre(buildWindowReport("EOD/M2 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+							lastM2ReportDay = dayKey
+						}
+					}
+				}
 				if paper.enabled {
 					_ = paper.save()
 				}
@@ -918,7 +988,47 @@ func main() {
 		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "SIGNAL",
+				Symbol:    strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+				Side:      c.Side,
+				TF:        "1m",
+				Strategy:  c.Strat,
+				Score:     c.Entry.CurrentScore,
+				Slope:     c.Entry.ScoreSlope,
+			})
 			if !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
+				deny := []string{"asia_quality_gate"}
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					GateAllow:   &f,
+					GateReasons: deny,
+				})
+				continue
+			}
+			gateInput := buildGateInput(client, c, gateCfg)
+			dec := gate.Evaluate(gateInput, gateCfg)
+			eventLog.Emit(stats.Event{
+				Timestamp:   now,
+				Type:        "GATE_DECISION",
+				Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+				Side:        c.Side,
+				Strategy:    c.Strat,
+				Score:       c.Entry.CurrentScore,
+				Slope:       c.Entry.ScoreSlope,
+				VolumeRatio: gateInput.VolumeRatio,
+				GateAllow:   &dec.Allow,
+				GateReasons: dec.Reasons,
+			})
+			if !dec.Allow {
 				continue
 			}
 			filtered = append(filtered, c)
@@ -985,14 +1095,68 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
+		if !symbolCooldown.Allow(rawBest, now) {
+			st.TopRejectReason = "symbol_cooldown"
+			statusStore.Set(st)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "GATE_DECISION",
+				Symbol:    rawBest,
+				Side:      best.Side,
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				GateAllow: boolPtr(false),
+				GateReasons: []string{
+					"throttle_symbol_cooldown",
+				},
+			})
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if !intentDedupe.Allow(rawBest, best.Side, now) {
+			st.TopRejectReason = "intent_dedupe"
+			statusStore.Set(st)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "GATE_DECISION",
+				Symbol:    rawBest,
+				Side:      best.Side,
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				GateAllow: boolPtr(false),
+				GateReasons: []string{
+					"throttle_dedupe",
+				},
+			})
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
 		entryDepth := map[string]aster.OrderBook{}
 		if obFilterEnable {
 			entryDepth = fetchOrderBooks(client, []string{rawBest}, obLevels)
 			ob := entryDepth[rawBest]
-			if !orderbookSupportsEntry(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps) {
-				st.TopRejectReason = "orderbook_filter"
+			okOB, obReason, obSpreadBps, obImb := orderbookEntryDecision(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps)
+			if !okOB {
+				st.TopRejectReason = obReason
 				statusStore.Set(st)
-				fmt.Printf("live-lite: skip (%s reason=orderbook_filter)\n", rawBest)
+				eventLog.Emit(stats.Event{
+					Timestamp: now,
+					Type:      "GATE_DECISION",
+					Symbol:    rawBest,
+					Side:      best.Side,
+					Strategy:  best.Strat,
+					Score:     best.Entry.CurrentScore,
+					Slope:     best.Entry.ScoreSlope,
+					GateAllow: boolPtr(false),
+					GateReasons: []string{
+						obReason,
+						fmt.Sprintf("spread_bps=%.2f", obSpreadBps),
+						fmt.Sprintf("imb=%.3f", obImb),
+					},
+				})
+				fmt.Printf("live-lite: skip (%s reason=%s spread_bps=%.2f imb=%.3f)\n", rawBest, obReason, obSpreadBps, obImb)
 				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 				continue
 			}
@@ -1048,6 +1212,20 @@ func main() {
 			}
 		}
 		if rest == nil || dryRun {
+			eventLog.Emit(stats.Event{
+				Timestamp:   now,
+				Type:        "INTENT",
+				Simulated:   true,
+				Symbol:      rawBest,
+				Side:        best.Side,
+				TF:          "1m",
+				Strategy:    best.Strat,
+				Score:       best.Entry.CurrentScore,
+				Slope:       best.Entry.ScoreSlope,
+				VolumeRatio: 0,
+				EntryPx:     best.Sig.Entry,
+				Reason:      "dry_run_intent",
+			})
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
 			if paper.enabled {
 				if len(entryDepth) == 0 {
@@ -1058,6 +1236,19 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
+					eventLog.Emit(stats.Event{
+						Timestamp: now,
+						Type:      "POSITION_OPEN",
+						Simulated: true,
+						Symbol:    pp.Symbol,
+						Side:      pp.Side,
+						TF:        "1m",
+						Strategy:  best.Strat,
+						Score:     best.Entry.CurrentScore,
+						Slope:     best.Entry.ScoreSlope,
+						EntryPx:   pp.Entry,
+						Reason:    "paper_enter",
+					})
 					tg.Sendf("%s", tgPre(fmt.Sprintf("PAPER ENTER | %s %s\nmargin=$%.2f lev=%dx grade=%s conf=%.2f\nreason=%s\nentry=%s sl=%s\ntp1=%s tp2=%s tp3=%s",
 						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
 						fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))))
@@ -1193,12 +1384,59 @@ func main() {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
+		eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      "INTENT",
+			Symbol:    strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+			Side:      best.Side,
+			TF:        "1m",
+			Strategy:  best.Strat,
+			Score:     best.Entry.CurrentScore,
+			Slope:     best.Entry.ScoreSlope,
+			EntryPx:   best.Sig.Entry,
+			Reason:    "live_intent",
+		})
+		eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      "ORDER_SUBMIT",
+			Symbol:    strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+			Side:      best.Side,
+			TF:        "1m",
+			Strategy:  best.Strat,
+			Score:     best.Entry.CurrentScore,
+			Slope:     best.Entry.ScoreSlope,
+			EntryPx:   best.Sig.Entry,
+		})
 		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev); err != nil {
 			fmt.Println("live-lite: place error:", err)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "ORDER_REJECT",
+				Symbol:    strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+				Side:      best.Side,
+				TF:        "1m",
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				EntryPx:   best.Sig.Entry,
+				Reason:    err.Error(),
+			})
 			if tgVerbose {
 				tg.Sendf("order error %s %s\n%v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
 			}
 		} else {
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "ORDER_FILL",
+				Symbol:    strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+				Side:      best.Side,
+				TF:        "1m",
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				EntryPx:   best.Sig.Entry,
+				Reason:    "entry_accepted",
+			})
 			lastOrderAt = time.Now()
 			lastOrderBySymbol[strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))] = lastOrderAt
 			dayKey := time.Now().UTC().Format("2006-01-02")
@@ -1684,6 +1922,153 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 	return out
 }
 
+func loadDiscoveryConfig() discovery.Config {
+	cfg := discovery.DefaultConfig()
+	cfg.Enabled = envBool("LIVE_DISCOVERY_ENABLE", true)
+	cfg.TopN = envInt("LIVE_DISCOVERY_TOP_N", 10)
+	cfg.MinVolumeRatio = envFloat("LIVE_DISCOVERY_MIN_VOLUME_RATIO", 1.5)
+	cfg.MinVolatility = envFloat("LIVE_DISCOVERY_MIN_VOLATILITY", 0)
+	cfg.LookbackMinutes = envInt("LIVE_DISCOVERY_LOOKBACK_MIN", 60)
+	cfg.RefreshSeconds = envInt("LIVE_DISCOVERY_REFRESH_SEC", 60)
+	if cfg.TopN <= 0 {
+		cfg.TopN = 10
+	}
+	if cfg.LookbackMinutes <= 0 {
+		cfg.LookbackMinutes = 60
+	}
+	return cfg
+}
+
+func loadEntryGateConfig() gate.Config {
+	cfg := gate.DefaultConfig()
+	cfg.MinGrade = envStr("LIVE_GATE_MIN_GRADE", "B")
+	cfg.MinScore = envFloat("LIVE_GATE_MIN_SCORE", 75)
+	cfg.MinSlope = envFloat("LIVE_GATE_MIN_SLOPE", 0.15)
+	cfg.RequireVolumeSpike = envBool("LIVE_GATE_REQUIRE_VOLUME_SPIKE", true)
+	cfg.MinVolumeRatio = envFloat("LIVE_GATE_MIN_VOLUME_RATIO", 1.5)
+	cfg.RequireMTF = envBool("LIVE_GATE_REQUIRE_MTF", true)
+	cfg.MTF.EMAFast = envInt("LIVE_GATE_EMA_FAST", 8)
+	cfg.MTF.EMASlow = envInt("LIVE_GATE_EMA_SLOW", 20)
+	cfg.MTF.Use15m = envBool("LIVE_GATE_MTF_USE_15M", false)
+	cfg.RequireRegime = envBool("LIVE_GATE_REQUIRE_REGIME", false)
+	cfg.Regime.ProxySymbol = envStr("LIVE_GATE_REGIME_PROXY", "BTCUSDT")
+	cfg.Regime.MinATRPct = envFloat("LIVE_GATE_REGIME_MIN_ATR_PCT", 0.8)
+	return cfg
+}
+
+func filterUniverseRows(rows []market.Scored, universe []string) []market.Scored {
+	if len(universe) == 0 {
+		return rows
+	}
+	allow := make(map[string]struct{}, len(universe))
+	for _, s := range universe {
+		allow[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))] = struct{}{}
+	}
+	out := make([]market.Scored, 0, len(rows))
+	for _, r := range rows {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(r.Symbol)))
+		if _, ok := allow[raw]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func buildDiscoveryCandles(c *aster.Client, longRows, shortRows []market.Scored, cfg discovery.Config) map[string][]types.Candle {
+	if c == nil {
+		return map[string][]types.Candle{}
+	}
+	maxLoad := cfg.TopN * 3
+	if maxLoad < 20 {
+		maxLoad = 20
+	}
+	seen := map[string]struct{}{}
+	load := make([]string, 0, maxLoad)
+	add := func(rows []market.Scored) {
+		for _, r := range rows {
+			raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(r.Symbol)))
+			if raw == "" {
+				continue
+			}
+			if _, ok := seen[raw]; ok {
+				continue
+			}
+			seen[raw] = struct{}{}
+			load = append(load, raw)
+			if len(load) >= maxLoad {
+				return
+			}
+		}
+	}
+	add(longRows)
+	if len(load) < maxLoad {
+		add(shortRows)
+	}
+	out := make(map[string][]types.Candle, len(load))
+	limit := cfg.LookbackMinutes
+	if limit < 30 {
+		limit = 30
+	}
+	for _, sym := range load {
+		bars, err := c.LoadCandles(sym, types.TF1m, limit)
+		if err != nil || len(bars) == 0 {
+			continue
+		}
+		cs := make([]types.Candle, 0, len(bars))
+		for _, b := range bars {
+			cs = append(cs, b)
+		}
+		out[sym] = cs
+	}
+	return out
+}
+
+func buildGateInput(c *aster.Client, cand candidate, cfg gate.Config) gate.Input {
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(cand.Entry.Symbol)))
+	in := gate.Input{
+		Symbol: raw,
+		Side:   cand.Side,
+		Grade:  cand.Entry.CurrentGrade,
+		Score:  cand.Entry.CurrentScore,
+		Slope:  cand.Entry.ScoreSlope,
+	}
+	bars, err := c.LoadCandles(raw, types.TF1m, 120)
+	if err == nil && len(bars) > 25 {
+		in.VolumeRatio, _ = discovery.VolumeRatio(bars, 20)
+	}
+	mtfTFs := cfg.MTF.TFs
+	if len(mtfTFs) == 0 {
+		mtfTFs = []string{"1m", "5m"}
+	}
+	for _, tfS := range mtfTFs {
+		tf, ok := types.ParseTF(tfS)
+		if !ok {
+			continue
+		}
+		b, err := c.LoadCandles(raw, tf, 64)
+		if err != nil || len(b) < cfg.MTF.EMASlow+1 {
+			continue
+		}
+		closes := make([]float64, 0, len(b))
+		for _, x := range b {
+			closes = append(closes, x.C)
+		}
+		fast := indicators.EMA(closes, cfg.MTF.EMAFast)
+		slow := indicators.EMA(closes, cfg.MTF.EMASlow)
+		if len(fast) == 0 || len(slow) == 0 {
+			continue
+		}
+		in.MTF = append(in.MTF, gate.MTFSnapshot{
+			TF:      tf.String(),
+			EMAFast: fast[len(fast)-1],
+			EMASlow: slow[len(slow)-1],
+		})
+	}
+	return in
+}
+
+func boolPtr(v bool) *bool { return &v }
+
 func fetchOrderBooks(c *aster.Client, symbols []string, limit int) map[string]aster.OrderBook {
 	out := map[string]aster.OrderBook{}
 	if c == nil || len(symbols) == 0 {
@@ -2145,6 +2530,25 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 		fmt.Sprintf("%.2f", holdMin),
 	})
 	w.Flush()
+	if m.eventLog != nil {
+		evtType := "ORDER_FILL"
+		if strings.EqualFold(action, "CLOSE") || strings.EqualFold(action, "FORCE_CLOSE") || strings.EqualFold(action, "STOP") || strings.EqualFold(action, "TP") {
+			evtType = "POSITION_CLOSE"
+		}
+		m.eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      evtType,
+			Symbol:    p.Symbol,
+			Side:      p.Side,
+			TF:        "1m",
+			Strategy:  p.EntryReason,
+			EntryPx:   p.EntryPrice,
+			ExitPx:    fillPx,
+			PnLUSD:    pnl,
+			PnLPct:    pct,
+			Reason:    strings.ToUpper(strings.TrimSpace(reason)),
+		})
+	}
 	return w.Error()
 }
 
@@ -3409,6 +3813,13 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 	return strings.TrimSpace(b.String())
 }
 
+func buildWindowReport(label string, now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%s) session=%s\n\n", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now))
+	b.WriteString(buildHourlyDigest(now, p, meta, longInPlay, shortInPlay, topN))
+	return b.String()
+}
+
 func (p *paperTrader) Equity(meta map[string]symbolMeta) float64 {
 	if p == nil || !p.enabled {
 		return 0
@@ -4407,6 +4818,39 @@ func (p *paperTrader) logTrade(now time.Time, symbol, side string, entry, exit, 
 		fmt.Sprintf("%.8f", p.balance),
 		fmt.Sprintf("%.2f", holdMin),
 	}
+	if p != nil && p.eventLog != nil {
+		pnlPct := 0.0
+		if entry > 0 {
+			if strings.EqualFold(side, "BUY") {
+				pnlPct = ((exit - entry) / entry) * 100.0
+			} else {
+				pnlPct = ((entry - exit) / entry) * 100.0
+			}
+		}
+		riskR := 0.0
+		if entry > 0 && stop > 0 {
+			risk := math.Abs(entry-stop) * qty
+			if risk > 0 {
+				riskR = net / risk
+			}
+		}
+		p.eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      "POSITION_CLOSE",
+			Simulated: true,
+			Symbol:    symbol,
+			Side:      side,
+			TF:        "1m",
+			Strategy:  reason,
+			EntryPx:   entry,
+			ExitPx:    exit,
+			RiskR:     riskR,
+			PnLUSD:    net,
+			PnLPct:    pnlPct,
+			Fees:      fee,
+			Reason:    reason,
+		})
+	}
 	if err := w.Write(row); err != nil {
 		return err
 	}
@@ -4772,6 +5216,11 @@ func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64)
 }
 
 func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) bool {
+	ok, _, _, _ := orderbookEntryDecision(ob, side, levels, minImb, maxSpreadBps)
+	return ok
+}
+
+func orderbookEntryDecision(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) (bool, string, float64, float64) {
 	if levels <= 0 {
 		levels = 5
 	}
@@ -4782,15 +5231,15 @@ func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb,
 		maxSpreadBps = 15
 	}
 	if len(ob.Bids) == 0 || len(ob.Asks) == 0 || ob.Bids[0][0] <= 0 || ob.Asks[0][0] <= 0 {
-		return false
+		return false, "orderbook_empty", 0, 0
 	}
 	mid := (ob.Bids[0][0] + ob.Asks[0][0]) / 2.0
 	if mid <= 0 {
-		return false
+		return false, "orderbook_bad_mid", 0, 0
 	}
 	spreadBps := ((ob.Asks[0][0] - ob.Bids[0][0]) / mid) * 10000.0
 	if spreadBps > maxSpreadBps {
-		return false
+		return false, "orderbook_spread", spreadBps, 0
 	}
 	nBid := minInt(levels, len(ob.Bids))
 	nAsk := minInt(levels, len(ob.Asks))
@@ -4803,13 +5252,16 @@ func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb,
 		askUSD += ob.Asks[i][0] * ob.Asks[i][1]
 	}
 	if bidUSD <= 0 || askUSD <= 0 {
-		return false
+		return false, "orderbook_depth_zero", spreadBps, 0
 	}
 	imb := bidUSD / askUSD
 	if strings.EqualFold(side, "SELL") {
 		imb = askUSD / bidUSD
 	}
-	return imb >= minImb
+	if imb < minImb {
+		return false, "orderbook_imbalance", spreadBps, imb
+	}
+	return true, "", spreadBps, imb
 }
 
 func orderbookRiskMetrics(rawSymbol, side string, depth map[string]aster.OrderBook, meta map[string]symbolMeta, levels int) (float64, float64) {
