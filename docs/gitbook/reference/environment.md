@@ -6,6 +6,7 @@ Primary reference file:
 ## Live-lite core
 - `LIVE_DRY_RUN`
 - `LIVE_ENABLE_LIVE_TRADING`
+- `LIVE_PURE_MODE`
 - `LIVE_SCAN_SEC`
 - `LIVE_MIN_GRADE`
 - `LIVE_MAX_OPEN_POS`

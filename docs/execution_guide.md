@@ -227,6 +227,7 @@ go run ./cmd/exec
 Recommended env overrides in `/opt/aster/env/live-lite.env`:
 
 ```bash
+LIVE_PURE_MODE=1
 LIVE_MARGIN_TYPE=ISOLATED
 LIVE_ENFORCE_MARGIN_TYPE=1
 LIVE_MULTI_ASSET_MODE=0

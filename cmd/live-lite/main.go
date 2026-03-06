@@ -685,6 +685,7 @@ func main() {
 			paperPath, fileExists(paperPath), livePath, fileExists(livePath), payoutPath, fileExists(payoutPath))
 	}
 
+	pureMode := envBool("LIVE_PURE_MODE", true)
 	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
 		scanEvery, dryRun, strings.ToUpper(minGrade),
 		reserveMode, reserveUSDT, fmt.Sprintf("%s(%.2f)", tradeMarginMode, tradeMargin), leverageMode)
@@ -694,6 +695,7 @@ func main() {
 	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
 	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d max_orders_hour=%d cooldown=%s allow_shorts=%v pause_file=%s stopout=%d/%s lock=%s\n",
 		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.maxOrdersPerHour, safety.orderCooldown, safety.allowShorts, safety.pauseFile, safety.stopoutCount, safety.stopoutWindow, safety.stopoutLock)
+	fmt.Printf("mode: pure_mode=%v\n", pureMode)
 	if execMgr != nil {
 		fmt.Printf("execution: margin_type=%s enforce_isolated=%v multi_asset_mode=%v\n",
 			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
@@ -733,6 +735,9 @@ func main() {
 		envBool("LIVE_EVENTS_STDOUT", false),
 		dryRun,
 	)
+	if pureMode {
+		discoveryCfg.Enabled = false
+	}
 	if paper != nil {
 		paper.eventLog = eventLog
 	}
@@ -1021,7 +1026,7 @@ func main() {
 				Score:     c.Entry.CurrentScore,
 				Slope:     c.Entry.ScoreSlope,
 			})
-			if !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
+			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
 				deny := []string{"asia_quality_gate"}
 				f := false
 				eventLog.Emit(stats.Event{
@@ -1037,22 +1042,24 @@ func main() {
 				})
 				continue
 			}
-			gateInput := buildGateInput(client, c, gateCfg)
-			dec := gate.Evaluate(gateInput, gateCfg)
-			eventLog.Emit(stats.Event{
-				Timestamp:   now,
-				Type:        "GATE_DECISION",
-				Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
-				Side:        c.Side,
-				Strategy:    c.Strat,
-				Score:       c.Entry.CurrentScore,
-				Slope:       c.Entry.ScoreSlope,
-				VolumeRatio: gateInput.VolumeRatio,
-				GateAllow:   &dec.Allow,
-				GateReasons: dec.Reasons,
-			})
-			if !dec.Allow {
-				continue
+			if !pureMode {
+				gateInput := buildGateInput(client, c, gateCfg)
+				dec := gate.Evaluate(gateInput, gateCfg)
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					VolumeRatio: gateInput.VolumeRatio,
+					GateAllow:   &dec.Allow,
+					GateReasons: dec.Reasons,
+				})
+				if !dec.Allow {
+					continue
+				}
 			}
 			filtered = append(filtered, c)
 		}
@@ -1118,7 +1125,7 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
-		if !symbolCooldown.Allow(rawBest, now) {
+		if !pureMode && !symbolCooldown.Allow(rawBest, now) {
 			st.TopRejectReason = "symbol_cooldown"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1137,7 +1144,7 @@ func main() {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
-		if !intentDedupe.Allow(rawBest, best.Side, now) {
+		if !pureMode && !intentDedupe.Allow(rawBest, best.Side, now) {
 			st.TopRejectReason = "intent_dedupe"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1198,25 +1205,27 @@ func main() {
 				stopPx = entryPx * (1 + d)
 			}
 		}
-		riskDec := risk.Approve(riskShell, risk.Input{
-			Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
-			Entry:             entryPx,
-			Stop:              stopPx,
-			Leverage:          float64(maxInt(1, effectiveLev)),
-			NotionalUSD:       effectiveMargin * float64(maxInt(1, effectiveLev)),
-			FundingRate:       metaBySymbol[rawBest].FundingRate,
-			HoldHours:         riskHoldHours,
-			SpreadBps:         spreadBps,
-			BookImbalance:     bookImb,
-			RecentSlippageBps: 0,
-			VenueHealthy:      metaBySymbol[rawBest].LastPrice > 0,
-		})
-		if !riskDec.Approved {
-			st.TopRejectReason = riskDec.RejectReason
-			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
-			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
-			continue
+		if !pureMode {
+			riskDec := risk.Approve(riskShell, risk.Input{
+				Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
+				Entry:             entryPx,
+				Stop:              stopPx,
+				Leverage:          float64(maxInt(1, effectiveLev)),
+				NotionalUSD:       effectiveMargin * float64(maxInt(1, effectiveLev)),
+				FundingRate:       metaBySymbol[rawBest].FundingRate,
+				HoldHours:         riskHoldHours,
+				SpreadBps:         spreadBps,
+				BookImbalance:     bookImb,
+				RecentSlippageBps: 0,
+				VenueHealthy:      metaBySymbol[rawBest].LastPrice > 0,
+			})
+			if !riskDec.Approved {
+				st.TopRejectReason = riskDec.RejectReason
+				statusStore.Set(st)
+				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
+				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+				continue
+			}
 		}
 
 		if inMaint {
@@ -1285,7 +1294,7 @@ func main() {
 			continue
 		}
 		nowLocal := time.Now()
-		if safety.stopoutCount > 0 && safety.stopoutWindow > 0 && safety.stopoutLock > 0 && execMgr != nil {
+		if !pureMode && safety.stopoutCount > 0 && safety.stopoutWindow > 0 && safety.stopoutLock > 0 && execMgr != nil {
 			raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 			cnt := execMgr.StopoutCountSince(raw, nowLocal.Add(-safety.stopoutWindow))
 			if cnt >= safety.stopoutCount {
@@ -1294,31 +1303,33 @@ func main() {
 				}
 			}
 		}
-		if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
-			st.TopRejectReason = reason
-			statusStore.Set(st)
-			fmt.Println("live-lite: safety skip:", reason)
-			if tgVerbose {
-				tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+		if !pureMode {
+			if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
+				st.TopRejectReason = reason
+				statusStore.Set(st)
+				fmt.Println("live-lite: safety skip:", reason)
+				if tgVerbose {
+					tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+				}
+				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+				continue
 			}
-			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
-			continue
 		}
-		if inEventLockout(time.Now(), eventLockoutMin) {
+		if !pureMode && inEventLockout(time.Now(), eventLockoutMin) {
 			st.TopRejectReason = "event_lockout"
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=event_lockout")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
-		if isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
+		if !pureMode && isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
 			st.TopRejectReason = "correlated_exposure_gate"
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=correlated_exposure_gate")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
-		if requireShadowDays > 0 && !shadowReady(requireShadowDays, shadowEquityFile, now) {
+		if !pureMode && requireShadowDays > 0 && !shadowReady(requireShadowDays, shadowEquityFile, now) {
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
 				fmt.Println("live-lite:", msg)
@@ -1369,7 +1380,7 @@ func main() {
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
-		if reserveGate != nil && reserveGate.block(baseBal) {
+		if !pureMode && reserveGate != nil && reserveGate.block(baseBal) {
 			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
 				tg.Sendf("reserve lock: base %.2f below threshold, entries paused until reserve recovers", baseBal)
