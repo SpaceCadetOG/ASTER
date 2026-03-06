@@ -3590,8 +3590,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 5)) * time.Minute
-	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.0)
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
 	changed := false
 	for sym, p := range m.positions {
 		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
@@ -3602,6 +3603,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			continue
 		}
 		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
+			continue
+		}
+		if minMFER > 0 && p.MaxFavorableR < minMFER {
 			continue
 		}
 		mark := p.LastMark
@@ -4219,8 +4223,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 5)) * time.Minute
-	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.0)
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
 	changed := false
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
@@ -4231,6 +4236,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			continue
 		}
 		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
+			continue
+		}
+		if minMFER > 0 && pos.MaxFavorableR < minMFER {
 			continue
 		}
 		m := meta[raw]
@@ -5219,13 +5227,13 @@ func shouldExitOnMomentumFade(side string, mv momentumView, slopeMax float64) bo
 			return false
 		}
 		st := mv.Long.State
-		return mv.Long.ScoreSlope <= slopeMax || st == inplay.StateCooling || st == inplay.StateDumping
+		return (st == inplay.StateCooling || st == inplay.StateDumping) && mv.Long.ScoreSlope <= slopeMax
 	}
 	if mv.Short == nil {
 		return false
 	}
 	st := mv.Short.State
-	return mv.Short.ScoreSlope <= slopeMax || st == inplay.StateCooling || st == inplay.StateDumping
+	return (st == inplay.StateCooling || st == inplay.StateDumping) && mv.Short.ScoreSlope <= slopeMax
 }
 
 func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64) string {

@@ -69,6 +69,7 @@ Primary reference file:
 - `LIVE_MAINT1_*` (night maintenance)
 - `LIVE_MAINT2_*` (EOD maintenance)
 - `LIVE_PRE_EOD_EXIT_*`
+- `LIVE_MOMENTUM_EXIT_*`
 - `LIVE_MAINT_WARMUP_MIN`
 
 ## Payout cycle

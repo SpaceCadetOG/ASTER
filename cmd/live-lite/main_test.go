@@ -233,7 +233,7 @@ func TestShouldExitOnMomentumFade(t *testing.T) {
 		t.Fatalf("expected BUY momentum fade exit")
 	}
 	mv2 := momentumView{
-		Short: &inplay.Entry{State: inplay.StateCooling, ScoreSlope: 0.04},
+		Short: &inplay.Entry{State: inplay.StateCooling, ScoreSlope: -0.04},
 		Long:  &inplay.Entry{State: inplay.StateInPlay, ScoreSlope: 0.03},
 	}
 	if !shouldExitOnMomentumFade("SELL", mv2, 0.0) {
