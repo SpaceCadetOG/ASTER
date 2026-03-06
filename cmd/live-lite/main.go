@@ -468,7 +468,7 @@ func main() {
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
 	bNearAOnly := envBool("LIVE_B_NEAR_A_ONLY", true)
 	bNearAScoreMin := envFloat("LIVE_B_NEAR_A_SCORE_MIN", 92.0)
-	obFilterEnable := envBool("LIVE_OB_FILTER_ENABLE", true)
+	obFilterEnable := envBool("LIVE_OB_FILTER_ENABLE", false)
 	obLevels := envInt("LIVE_OB_LEVELS", 5)
 	obImbMin := envFloat("LIVE_OB_IMBALANCE_MIN", 1.10)
 	obMaxSpreadBps := envFloat("LIVE_OB_MAX_SPREAD_BPS", 10)
