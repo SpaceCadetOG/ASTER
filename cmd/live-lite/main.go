@@ -750,12 +750,35 @@ func main() {
 		longRows = filterBlockedScored(longRows, safety.blockSymbols)
 		shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
 		if discoveryCfg.Enabled {
+			baseLongRows := append([]market.Scored(nil), longRows...)
+			baseShortRows := append([]market.Scored(nil), shortRows...)
 			candleBySymbol := buildDiscoveryCandles(client, longRows, shortRows, discoveryCfg)
 			snaps := discovery.BuildSnapshots(longRows, candleBySymbol)
 			universe := discovery.SelectUniverse(snaps, discoveryCfg)
 			if len(universe) > 0 {
 				longRows = filterUniverseRows(longRows, universe)
 				shortRows = filterUniverseRows(shortRows, universe)
+				if len(longRows) == 0 && len(shortRows) == 0 {
+					// Discovery produced an empty active universe after filtering; fallback to full scanner rows.
+					fmt.Println("live-lite: discovery_fallback_active reason=filtered_universe_empty")
+					eventLog.Emit(stats.Event{
+						Timestamp: now,
+						Type:      "METRICS_SNAPSHOT",
+						Reason:    "discovery_fallback_active:filtered_universe_empty",
+					})
+					longRows = baseLongRows
+					shortRows = baseShortRows
+				}
+			} else {
+				// Empty discovery result should never hard-stop trading.
+				fmt.Println("live-lite: discovery_fallback_active reason=empty_universe")
+				eventLog.Emit(stats.Event{
+					Timestamp: now,
+					Type:      "METRICS_SNAPSHOT",
+					Reason:    "discovery_fallback_active:empty_universe",
+				})
+				longRows = baseLongRows
+				shortRows = baseShortRows
 			}
 		}
 		metaBySymbol := buildSymbolMeta(longRows, shortRows)
