@@ -393,4 +393,5 @@ Paper continuity:
   - `/positions`
   - `/pause`
   - `/resume`
-  - `/forceflat`
+  - `/close SYMBOL`
+  - `/closeall`

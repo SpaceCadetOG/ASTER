@@ -7528,7 +7528,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"/pause - pause new entries (risk management still runs)",
 			"/resume - resume new entries",
 			"/close SYMBOL - close one symbol now (live + paper paths)",
-			"/closeall - close all open positions now (replaces /forceflat)",
+			"/closeall - close all open positions now",
 		}, "\n")
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
@@ -7616,7 +7616,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return fmt.Sprintf("no active position for %s", sym)
 		}
 		return fmt.Sprintf("close requested for %s", sym)
-	case strings.HasPrefix(cmd, "/closeall"), strings.HasPrefix(cmd, "/forceflat"):
+	case strings.HasPrefix(cmd, "/closeall"):
 		now := time.Now().UTC()
 		meta := c.getMeta()
 		if c.execMgr != nil {

@@ -42,7 +42,8 @@ In your bot chat:
 - `/balance`
 - `/positions`
 - `/pause` and `/resume`
-- `/forceflat`
+- `/close SYMBOL`
+- `/closeall`
 
 ## 5) Promote to live-lite mode
 

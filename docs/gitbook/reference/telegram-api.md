@@ -17,8 +17,10 @@ Source: `cmd/live-lite/main.go` (`handleCommand`)
   - Create pause file and block new entries.
 - `/resume`
   - Remove pause file and resume entries.
-- `/forceflat`
-  - Force close open positions (live + paper paths).
+- `/close SYMBOL`
+  - Force close one symbol (live + paper paths).
+- `/closeall`
+  - Force close all open positions (live + paper paths).
 
 ## Delivery behavior
 

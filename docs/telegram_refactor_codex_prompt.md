@@ -60,7 +60,6 @@ Current command behavior:
 - `/resume`
 - `/close SYMBOL`
 - `/closeall`
-- `/forceflat`
 
 Current command handling facts:
 - `/status` reads from `liveLiteStatusStore`

@@ -30,7 +30,7 @@ Timezone baseline: America/Chicago
 | Session-tagged digest/status exists | `cmd/live-lite/main.go` (`sessionTag`, hourly digest output paths) | 0.95 | Formatting still dense in long tables |
 | Pre-EOD sweep exists | `cmd/live-lite/main.go` (`ApplyPreEODExit`, `LIVE_PRE_EOD_EXIT_*`) | 0.95 | Can close good trades early if momentum proxy noisy |
 | Daily payout flow exists with state machine | `cmd/live-lite/main.go` (`payoutManager`, states `IDLE/PENDING_CLOSE/DONE/DONE_FALLBACK`) | 0.95 | Live payout action is alert/debit flow, not on-chain transfer |
-| Telegram commands exist | `cmd/live-lite/main.go` (`/help`, `/status`, `/balance`, `/positions`, `/pause`, `/resume`, `/forceflat`) | 0.95 | No auth layer beyond chat-id allowlist |
+| Telegram commands exist | `cmd/live-lite/main.go` (`/help`, `/status`, `/balance`, `/positions`, `/pause`, `/resume`, `/close SYMBOL`, `/closeall`) | 0.95 | No auth layer beyond chat-id allowlist |
 | Fill journaling exists | `cmd/live-lite/main.go` (`LIVE_TRADES_FILE`, logFill/sendFillReceipt) | 0.90 | Funding impact and modeled slippage not complete in live journals |
 | Stale timer-exit architecture is absent | `rg` on `cmd/live-lite/main.go` shows no stale-exit path | 0.90 | Momentum/pre-EOD exits can still behave similarly if thresholds too tight |
 | Backtest costs modeled partially | `internal/backtest/engine.go` has fee/slippage bps | 0.90 | Funding, liquidation distance, L2 depth slippage missing |
