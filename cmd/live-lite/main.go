@@ -44,6 +44,11 @@ type candidate struct {
 	VolumeUSD    float64
 	Sig          strategies.Signal
 	RejectReason string
+	LastClose    float64
+	SessionVWAP  float64
+	EMA9         float64
+	FastSlope    float64
+	SlowSlope    float64
 }
 
 type positionView struct {
@@ -166,46 +171,47 @@ type paperPosition struct {
 }
 
 type paperTrader struct {
-	enabled       bool
-	startBal      float64
-	balance       float64
-	reserve       float64
-	feeBps        float64
-	makerFeeBps   float64
-	takerFeeBps   float64
-	stopPct       float64
-	tp1R          float64
-	tp2R          float64
-	tp3R          float64
-	tp1Frac       float64
-	tp2Frac       float64
-	tp3Frac       float64
-	trailAfterTP  int
-	trailStopPct  float64
-	stateFile     string
-	tradesCSV     string
-	equityCSV     string
-	maxOpen       int
-	positions     map[string]*paperPosition
-	reportLoc     *time.Location
-	dayStats      map[string]*paperDayStats
-	minStopPct    float64
-	maxStopPct    float64
-	minTP1RR      float64
-	beLockBps     float64
-	fundingEvery  time.Duration
-	fundingBySym  map[string]time.Duration
-	lastFundKey   map[string]string
-	openCostMode  string
-	onExit        func(string)
-	lossCooldown  time.Duration
-	lastExitAt    map[string]time.Time
-	lastExitLoss  map[string]bool
-	lossStreak    map[string]int
-	lockUntil     map[string]time.Time
-	maxLossStreak int
-	lossLock      time.Duration
-	eventLog      *stats.EventLogger
+	enabled            bool
+	startBal           float64
+	balance            float64
+	reserve            float64
+	feeBps             float64
+	makerFeeBps        float64
+	takerFeeBps        float64
+	stopPct            float64
+	tp1R               float64
+	tp2R               float64
+	tp3R               float64
+	tp1Frac            float64
+	tp2Frac            float64
+	tp3Frac            float64
+	trailAfterTP       int
+	trailStopPct       float64
+	stateFile          string
+	tradesCSV          string
+	equityCSV          string
+	maxOpen            int
+	positions          map[string]*paperPosition
+	reportLoc          *time.Location
+	dayStats           map[string]*paperDayStats
+	minStopPct         float64
+	maxStopPct         float64
+	minTP1RR           float64
+	beLockBps          float64
+	fundingEvery       time.Duration
+	fundingBySym       map[string]time.Duration
+	lastFundKey        map[string]string
+	openCostMode       string
+	onExit             func(string)
+	lossCooldown       time.Duration
+	lastExitAt         map[string]time.Time
+	lastExitLoss       map[string]bool
+	lossStreak         map[string]int
+	lockUntil          map[string]time.Time
+	maxLossStreak      int
+	lossLock           time.Duration
+	eventLog           *stats.EventLogger
+	stressRoundtripBps float64
 }
 
 type paperDayStats struct {
@@ -296,33 +302,37 @@ type liveExecStore struct {
 }
 
 type liveExecManager struct {
-	rest            *aster.RESTAuth
-	tg              *telegramSink
-	path            string
-	tradesCSV       string
-	fillReceipt     bool
-	entryTimeout    time.Duration
-	stopPct         float64
-	tp1R            float64
-	tp2R            float64
-	tp3R            float64
-	tp1Frac         float64
-	tp2Frac         float64
-	tp3Frac         float64
-	trailAfterTP    int
-	trailStopPct    float64
-	trailStepBps    float64
-	minStopPct      float64
-	maxStopPct      float64
-	minTP1RR        float64
-	beLockBps       float64
-	marginType      string
-	enforceIsolated bool
-	multiAssetMode  bool
-	positions       map[string]*livePosition
-	dayRealized     map[string]float64
-	reportLoc       *time.Location
-	eventLog        *stats.EventLogger
+	rest                 *aster.RESTAuth
+	tg                   *telegramSink
+	path                 string
+	tradesCSV            string
+	fillReceipt          bool
+	entryTimeout         time.Duration
+	stopPct              float64
+	tp1R                 float64
+	tp2R                 float64
+	tp3R                 float64
+	tp1Frac              float64
+	tp2Frac              float64
+	tp3Frac              float64
+	trailAfterTP         int
+	trailStopPct         float64
+	trailStepBps         float64
+	minStopPct           float64
+	maxStopPct           float64
+	minTP1RR             float64
+	beLockBps            float64
+	marginType           string
+	enforceIsolated      bool
+	multiAssetMode       bool
+	positions            map[string]*livePosition
+	dayRealized          map[string]float64
+	reportLoc            *time.Location
+	eventLog             *stats.EventLogger
+	recoverStopRetries   int
+	recoverStopBackoff   time.Duration
+	recoverATRMult       float64
+	recoverForceFlatFail bool
 }
 
 type liveExecSnapshot struct {
@@ -607,6 +617,35 @@ func main() {
 	preEODEndMin := envInt("LIVE_PRE_EOD_EXIT_END_MIN", 0)
 	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 0)) * time.Minute
 	preEODUpnlPctMax := envFloat("LIVE_PRE_EOD_EXIT_UPNL_PCT_MAX", 0.30)
+	preEODEntryBlockMin := envInt("LIVE_PRE_EOD_ENTRY_BLOCK_MIN", 60)
+	postSLCooldown := time.Duration(envInt("POST_SL_COOLDOWN_MIN", 30)) * time.Minute
+	allowDeadSessionTrading := envBool("ALLOW_DEAD_SESSION_TRADING", false)
+	inertiaEnable := envBool("LIVE_INERTIA_BREAKER_ENABLE", true)
+	inertiaScoreMin := envFloat("LIVE_INERTIA_SCORE_MIN", 80)
+	inertiaSlowMin := envFloat("LIVE_INERTIA_SLOW_SLOPE_MIN", 0.5)
+	inertiaFastMax := envFloat("LIVE_INERTIA_FAST_SLOPE_MAX", -1.0)
+	inertiaSlowN := envInt("LIVE_INERTIA_SLOW_N", 15)
+	inertiaFastN := envInt("LIVE_INERTIA_FAST_N", 3)
+	reversalTopLongN := envInt("LIVE_REVERSAL_TOP_LONG_N", 5)
+	reversalVolSpike := envFloat("LIVE_REVERSAL_VOL_SPIKE_MIN", 3.0)
+	if postSLCooldown < 0 {
+		postSLCooldown = 0
+	}
+	if preEODEntryBlockMin < 0 {
+		preEODEntryBlockMin = 0
+	}
+	if inertiaSlowN < 2 {
+		inertiaSlowN = 15
+	}
+	if inertiaFastN < 2 {
+		inertiaFastN = 3
+	}
+	if reversalTopLongN <= 0 {
+		reversalTopLongN = 5
+	}
+	if reversalVolSpike <= 0 {
+		reversalVolSpike = 3.0
+	}
 	maintMidnight := maintenanceWindow{
 		Name:      "M1",
 		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
@@ -1016,8 +1055,8 @@ func main() {
 			paper,
 		)
 
-		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin)
-		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct)
+		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN)
+		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike)
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
 			eventLog.Emit(stats.Event{
@@ -1030,6 +1069,21 @@ func main() {
 				Score:     c.Entry.CurrentScore,
 				Slope:     c.Entry.ScoreSlope,
 			})
+			if c.RejectReason == "STATE_INERTIA_KILL" || c.RejectReason == "VWAP_EMA_LONG_INVALIDATION" {
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					GateAllow:   &f,
+					GateReasons: []string{c.RejectReason},
+				})
+				continue
+			}
 			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
 				deny := []string{"asia_quality_gate"}
 				f := false
@@ -1129,6 +1183,63 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
+		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
+			st.TopRejectReason = "POST_SL_COOLDOWN"
+			statusStore.Set(st)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "GATE_DECISION",
+				Symbol:    rawBest,
+				Side:      best.Side,
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				GateAllow: boolPtr(false),
+				GateReasons: []string{
+					"POST_SL_COOLDOWN",
+				},
+			})
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if !allowDeadSessionTrading && data.CurrentRegimeCT(now) == data.RegimeDead {
+			st.TopRejectReason = "DEAD_SESSION_BLOCK"
+			statusStore.Set(st)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "GATE_DECISION",
+				Symbol:    rawBest,
+				Side:      best.Side,
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				GateAllow: boolPtr(false),
+				GateReasons: []string{
+					"DEAD_SESSION_BLOCK",
+				},
+			})
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
+		if preEODEntryBlockMin > 0 && inPreEODEntryBlock(localMaintNow, maintEOD, preEODEntryBlockMin) {
+			st.TopRejectReason = "PRE_EOD_ENTRY_BLOCK"
+			statusStore.Set(st)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "GATE_DECISION",
+				Symbol:    rawBest,
+				Side:      best.Side,
+				Strategy:  best.Strat,
+				Score:     best.Entry.CurrentScore,
+				Slope:     best.Entry.ScoreSlope,
+				GateAllow: boolPtr(false),
+				GateReasons: []string{
+					"PRE_EOD_ENTRY_BLOCK",
+				},
+			})
+			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+			continue
+		}
 		if !pureMode && !symbolCooldown.Allow(rawBest, now) {
 			st.TopRejectReason = "symbol_cooldown"
 			statusStore.Set(st)
@@ -2263,45 +2374,50 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		lossCooldown = 0
 	}
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
+	stressRoundtripBps := envFloat("PAPER_STRESS_BPS_ROUNDTRIP", 0)
+	if stressRoundtripBps < 0 {
+		stressRoundtripBps = 0
+	}
 	p := &paperTrader{
-		enabled:       enabled,
-		startBal:      start,
-		balance:       start,
-		reserve:       reserveUSDT,
-		feeBps:        feeBps,
-		makerFeeBps:   makerFeeBps,
-		takerFeeBps:   takerFeeBps,
-		stopPct:       stopPct,
-		tp1R:          tp1R,
-		tp2R:          tp2R,
-		tp3R:          tp3R,
-		tp1Frac:       tp1Frac,
-		tp2Frac:       tp2Frac,
-		tp3Frac:       tp3Frac,
-		trailAfterTP:  trailAfterTP,
-		trailStopPct:  trailStopPct,
-		stateFile:     envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
-		tradesCSV:     resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
-		equityCSV:     resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
-		maxOpen:       maxOpen,
-		positions:     map[string]*paperPosition{},
-		reportLoc:     reportLoc,
-		dayStats:      map[string]*paperDayStats{},
-		minStopPct:    minStopPct,
-		maxStopPct:    maxStopPct,
-		minTP1RR:      minTP1RR,
-		beLockBps:     beLockBps,
-		fundingEvery:  fundingEvery,
-		fundingBySym:  fundingBySym,
-		lastFundKey:   map[string]string{},
-		openCostMode:  openCostMode,
-		lossCooldown:  lossCooldown,
-		lastExitAt:    map[string]time.Time{},
-		lastExitLoss:  map[string]bool{},
-		lossStreak:    map[string]int{},
-		lockUntil:     map[string]time.Time{},
-		maxLossStreak: maxLossStreak,
-		lossLock:      lossLock,
+		enabled:            enabled,
+		startBal:           start,
+		balance:            start,
+		reserve:            reserveUSDT,
+		feeBps:             feeBps,
+		makerFeeBps:        makerFeeBps,
+		takerFeeBps:        takerFeeBps,
+		stopPct:            stopPct,
+		tp1R:               tp1R,
+		tp2R:               tp2R,
+		tp3R:               tp3R,
+		tp1Frac:            tp1Frac,
+		tp2Frac:            tp2Frac,
+		tp3Frac:            tp3Frac,
+		trailAfterTP:       trailAfterTP,
+		trailStopPct:       trailStopPct,
+		stateFile:          envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
+		tradesCSV:          resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
+		equityCSV:          resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
+		maxOpen:            maxOpen,
+		positions:          map[string]*paperPosition{},
+		reportLoc:          reportLoc,
+		dayStats:           map[string]*paperDayStats{},
+		minStopPct:         minStopPct,
+		maxStopPct:         maxStopPct,
+		minTP1RR:           minTP1RR,
+		beLockBps:          beLockBps,
+		fundingEvery:       fundingEvery,
+		fundingBySym:       fundingBySym,
+		lastFundKey:        map[string]string{},
+		openCostMode:       openCostMode,
+		lossCooldown:       lossCooldown,
+		lastExitAt:         map[string]time.Time{},
+		lastExitLoss:       map[string]bool{},
+		lossStreak:         map[string]int{},
+		lockUntil:          map[string]time.Time{},
+		maxLossStreak:      maxLossStreak,
+		lossLock:           lossLock,
+		stressRoundtripBps: stressRoundtripBps,
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -2466,35 +2582,48 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 	}
 
 	m := &liveExecManager{
-		rest:            rest,
-		tg:              tg,
-		path:            resolveStatePath(envStr("LIVE_STATE_FILE", "out/live_exec_state.json")),
-		tradesCSV:       resolveStatePath(envStr("LIVE_TRADES_FILE", "out/live_trades.csv")),
-		fillReceipt:     envBool("LIVE_TG_FILL_RECEIPT_ENABLE", true),
-		entryTimeout:    time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
-		stopPct:         stopPct,
-		tp1R:            tp1R,
-		tp2R:            tp2R,
-		tp3R:            tp3R,
-		tp1Frac:         tp1Frac,
-		tp2Frac:         tp2Frac,
-		tp3Frac:         tp3Frac,
-		trailAfterTP:    trailAfterTP,
-		trailStopPct:    trailStopPct,
-		trailStepBps:    trailStepBps,
-		minStopPct:      minStopPct,
-		maxStopPct:      maxStopPct,
-		minTP1RR:        minTP1RR,
-		beLockBps:       beLockBps,
-		marginType:      marginType,
-		enforceIsolated: enforceIsolated,
-		multiAssetMode:  multiAssetMode,
-		positions:       map[string]*livePosition{},
-		dayRealized:     map[string]float64{},
-		reportLoc:       reportLoc,
+		rest:                 rest,
+		tg:                   tg,
+		path:                 resolveStatePath(envStr("LIVE_STATE_FILE", "out/live_exec_state.json")),
+		tradesCSV:            resolveStatePath(envStr("LIVE_TRADES_FILE", "out/live_trades.csv")),
+		fillReceipt:          envBool("LIVE_TG_FILL_RECEIPT_ENABLE", true),
+		entryTimeout:         time.Duration(envInt("LIVE_ENTRY_TIMEOUT_SEC", 90)) * time.Second,
+		stopPct:              stopPct,
+		tp1R:                 tp1R,
+		tp2R:                 tp2R,
+		tp3R:                 tp3R,
+		tp1Frac:              tp1Frac,
+		tp2Frac:              tp2Frac,
+		tp3Frac:              tp3Frac,
+		trailAfterTP:         trailAfterTP,
+		trailStopPct:         trailStopPct,
+		trailStepBps:         trailStepBps,
+		minStopPct:           minStopPct,
+		maxStopPct:           maxStopPct,
+		minTP1RR:             minTP1RR,
+		beLockBps:            beLockBps,
+		marginType:           marginType,
+		enforceIsolated:      enforceIsolated,
+		multiAssetMode:       multiAssetMode,
+		positions:            map[string]*livePosition{},
+		dayRealized:          map[string]float64{},
+		reportLoc:            reportLoc,
+		recoverStopRetries:   envInt("LIVE_RECOVERY_STOP_RETRIES", 3),
+		recoverStopBackoff:   time.Duration(envInt("LIVE_RECOVERY_STOP_RETRY_SEC", 1)) * time.Second,
+		recoverATRMult:       envFloat("LIVE_RECOVERY_ATR_MULT", 1.5),
+		recoverForceFlatFail: envBool("LIVE_RECOVERY_FORCE_FLAT_ON_STOP_FAIL", true),
 	}
 	if m.entryTimeout <= 0 {
 		m.entryTimeout = 90 * time.Second
+	}
+	if m.recoverStopRetries <= 0 {
+		m.recoverStopRetries = 3
+	}
+	if m.recoverStopBackoff <= 0 {
+		m.recoverStopBackoff = time.Second
+	}
+	if m.recoverATRMult <= 0 {
+		m.recoverATRMult = 1.5
 	}
 	_ = m.load()
 	return m
@@ -2782,17 +2911,75 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			CloseReason:  "RECOVERED_POSITION",
 		}
 		stopPct := clamp(m.stopPct/100.0, m.minStopPct/100.0, m.maxStopPct/100.0)
+		if atrPct := estimateATRPct(sym, 64, 14); atrPct > 0 {
+			stopPct = clamp(atrPct*m.recoverATRMult, m.minStopPct/100.0, m.maxStopPct/100.0)
+		}
 		if strings.EqualFold(side, "BUY") {
 			p.StopPrice = entry * (1 - stopPct)
 		} else {
 			p.StopPrice = entry * (1 + stopPct)
 		}
 		m.positions[sym] = p
-		_ = m.placeOrReplaceStop(p)
+		if m.tg != nil {
+			m.tg.Sendf("ORPHAN_RECOVERED %s %s\nqty=%.6f entry=%s", p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice))
+		}
+		attachErr := m.placeOrReplaceStopWithRetry(p)
+		if attachErr != nil && m.recoverForceFlatFail {
+			if errClose := m.forceFlatRecovered(p); errClose == nil {
+				p.State = execClosed
+				p.CloseReason = "RECOVERY_FORCE_FLAT"
+				p.ClosedAt = now
+				p.UpdatedAt = now
+				if m.tg != nil {
+					m.tg.Sendf("RECOVERY_FORCE_FLAT %s %s\nreason=stop_attach_failed", p.Symbol, p.Side)
+				}
+			}
+		} else if attachErr == nil && m.tg != nil {
+			m.tg.Sendf("EMERGENCY_STOP_ATTACHED %s %s\nstop=%s", p.Symbol, p.Side, fmtPrice(p.StopPrice))
+		}
 		importedRemote++
 	}
 	_ = m.save()
 	return closedLocal, importedRemote, nil
+}
+
+func (m *liveExecManager) placeOrReplaceStopWithRetry(p *livePosition) error {
+	var err error
+	for i := 0; i < m.recoverStopRetries; i++ {
+		err = m.placeOrReplaceStop(p)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(m.recoverStopBackoff)
+	}
+	return err
+}
+
+func (m *liveExecManager) forceFlatRecovered(p *livePosition) error {
+	if m == nil || m.rest == nil || p == nil || p.RemainingQty <= 0 {
+		return fmt.Errorf("invalid recovered position")
+	}
+	meta, err := m.rest.SymbolMeta(p.Symbol, true)
+	if err != nil {
+		return err
+	}
+	closeSide := "SELL"
+	if strings.EqualFold(p.Side, "SELL") {
+		closeSide = "BUY"
+	}
+	qty, _, err := m.rest.RoundQty(p.Symbol, p.RemainingQty)
+	if err != nil {
+		return err
+	}
+	vals := url.Values{}
+	vals.Set("symbol", p.Symbol)
+	vals.Set("side", closeSide)
+	vals.Set("type", "MARKET")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
+	_, err = m.rest.PlaceOrder(vals)
+	return err
 }
 
 func (m *liveExecManager) isActive(p *livePosition) bool {
@@ -2881,6 +3068,29 @@ func (m *liveExecManager) StopoutCountSince(symbol string, since time.Time) int 
 		}
 	}
 	return n
+}
+
+func (m *liveExecManager) HadRecentStopLoss(symbol, side string, now time.Time, cooldown time.Duration) bool {
+	if m == nil || cooldown <= 0 {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	cutoff := now.Add(-cooldown)
+	for _, p := range m.positions {
+		if p == nil || p.State != execClosed || p.ClosedAt.IsZero() || p.ClosedAt.Before(cutoff) {
+			continue
+		}
+		if strings.ToUpper(strings.TrimSpace(p.Symbol)) != raw {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(p.CloseReason), "STOP_HIT") {
+			continue
+		}
+		if side == "" || strings.EqualFold(strings.TrimSpace(side), strings.TrimSpace(p.Side)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int) error {
@@ -3976,6 +4186,21 @@ func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 	_ = p.save()
 }
 
+func (p *paperTrader) hadRecentStopLoss(symbol string, now time.Time, cooldown time.Duration) bool {
+	if p == nil || cooldown <= 0 {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	t := p.lastExitAt[raw]
+	if t.IsZero() {
+		return false
+	}
+	if !p.lastExitLoss[raw] {
+		return false
+	}
+	return now.Sub(t) < cooldown
+}
+
 func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook) (*paperPosition, error) {
 	if p == nil || !p.enabled {
 		return nil, nil
@@ -4022,6 +4247,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	fillPx := paperSimFillPrice(strings.ToUpper(c.Side), qty, m, ob, data.CurrentRegimeCT(now), true)
 	if fillPx > 0 {
 		entry = fillPx
+	}
+	if p.stressRoundtripBps > 0 {
+		entry = applyBpsAdverse(entry, strings.ToUpper(c.Side), p.stressRoundtripBps)
 	}
 	feeRate := p.feeRateBpsForReason("ENTRY")
 	entryFee := (entry * qty) * feeRate / 10000.0
@@ -4767,6 +4995,17 @@ func applyRegimeSlip(px float64, side string, regime data.Regime, mid, volUSD fl
 	return px * (1 - d)
 }
 
+func applyBpsAdverse(px float64, side string, bps float64) float64 {
+	if px <= 0 || bps <= 0 {
+		return px
+	}
+	d := bps / 10000.0
+	if strings.EqualFold(side, "BUY") {
+		return px * (1 + d)
+	}
+	return px * (1 - d)
+}
+
 func topOfBook(ob aster.OrderBook, fallback float64) (bid, ask float64) {
 	if len(ob.Bids) > 0 {
 		bid = ob.Bids[0][0]
@@ -5007,7 +5246,7 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 	return out, conf
 }
 
-func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64) []candidate {
+func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64, reversalTopLongN int) []candidate {
 	minVal := gradeValue(minGrade)
 	revMinVal := gradeValue(reversalMinGrade)
 	if reversalSlopeMin < 0 {
@@ -5065,6 +5304,22 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			})
 		}
 	}
+	if enableMomentumReversal {
+		n := minInt(reversalTopLongN, len(longInPlay))
+		for i := 0; i < n; i++ {
+			e := longInPlay[i]
+			if !allow(e) || gradeValue(e.CurrentGrade) < revMinVal {
+				continue
+			}
+			flip := e
+			flip.Rank = e.Rank + 8 + 4*abs(e.ScoreSlope)
+			out = append(out, candidate{
+				Entry: flip,
+				Side:  "SELL",
+				Strat: "mom_reversal_short",
+			})
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Entry.Rank > out[j].Entry.Rank })
 	return out
 }
@@ -5079,7 +5334,7 @@ func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asi
 	return c.Conf >= asiaStrongConfMin
 }
 
-func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64) []candidate {
+func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64) []candidate {
 	if len(in) == 0 {
 		return in
 	}
@@ -5089,7 +5344,12 @@ func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targe
 		topN = len(out)
 	}
 	for i := 0; i < topN; i++ {
-		out[i] = enrichCandidate(c, out[i], stopMode, targetMode, vpMinTargetPct)
+		out[i] = enrichCandidate(c, out[i], stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike)
+	}
+	for i := topN; i < len(out); i++ {
+		if strings.EqualFold(out[i].Strat, "mom_reversal_short") {
+			out[i] = enrichCandidate(c, out[i], stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		ri := out[i].Entry.Rank * (1 + out[i].Conf)
@@ -5099,7 +5359,7 @@ func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targe
 	return out
 }
 
-func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode string, vpMinTargetPct float64) candidate {
+func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64) candidate {
 	raw := strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol))
 	bars, err := c.LoadCandles(raw, types.TF1m, 240)
 	if err != nil || len(bars) < 30 {
@@ -5112,6 +5372,44 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 	}
 	fe := features.NewEngine(features.Config{})
 	snap := fe.Eval(fc)
+	cand.LastClose = fc[len(fc)-1].C
+	cand.EMA9 = emaLast(fc, 9)
+	cand.SessionVWAP = sessionVWAP(fc)
+	cand.SlowSlope = closeSlopePct(fc, inertiaSlowN)
+	cand.FastSlope = closeSlopePct(fc, inertiaFastN)
+	if inertiaEnable &&
+		strings.EqualFold(cand.Side, "BUY") &&
+		strings.EqualFold(cand.Strat, "") &&
+		cand.Entry.CurrentScore >= inertiaScoreMin &&
+		cand.SlowSlope > inertiaSlowMin &&
+		cand.FastSlope < inertiaFastMax {
+		cand.Strat = "none"
+		cand.Conf = 0
+		cand.RejectReason = "STATE_INERTIA_KILL"
+		return cand
+	}
+	if strings.EqualFold(cand.Strat, "mom_reversal_short") {
+		lastVol := fc[len(fc)-1].V
+		avgVol := smaVolume(fc, 20)
+		volSpike := 0.0
+		if avgVol > 0 {
+			volSpike = lastVol / avgVol
+		}
+		if cand.LastClose < cand.EMA9 && volSpike >= reversalVolSpike {
+			cand.Conf = 0.62 + min(0.18, (volSpike-reversalVolSpike)*0.05)
+			cand.Sig = strategies.Signal{
+				Active: true,
+				Name:   "mom_reversal_short",
+				Side:   features.SideShort,
+			}
+			cand.RejectReason = ""
+			return cand
+		}
+		cand.Strat = "none"
+		cand.Conf = 0
+		cand.RejectReason = "mom_reversal_short_not_ready"
+		return cand
+	}
 	rt := strategies.NewRouter(strategies.RouterConfig{
 		MinGrade:                  "B",
 		MinScore:                  0,
@@ -5171,6 +5469,15 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 	cand.Strat = chosen.Name
 	cand.Conf = chosen.Confidence
 	cand.RejectReason = chosen.RejectReason
+	if strings.EqualFold(cand.Side, "BUY") &&
+		cand.Entry.State == inplay.StateCooling &&
+		(cand.Strat == "failed_auction_magnet" || cand.Strat == "bos_pb" || cand.Strat == "fa") &&
+		cand.SessionVWAP > 0 && cand.EMA9 > 0 &&
+		cand.LastClose < cand.SessionVWAP && cand.LastClose < cand.EMA9 {
+		cand.Strat = "none"
+		cand.Conf = 0
+		cand.RejectReason = "VWAP_EMA_LONG_INVALIDATION"
+	}
 	return cand
 }
 
@@ -5186,6 +5493,108 @@ func min(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func emaLast(c []features.Candle, n int) float64 {
+	if len(c) == 0 {
+		return 0
+	}
+	if n <= 1 {
+		return c[len(c)-1].C
+	}
+	alpha := 2.0 / (float64(n) + 1.0)
+	ema := c[0].C
+	for i := 1; i < len(c); i++ {
+		ema = alpha*c[i].C + (1-alpha)*ema
+	}
+	return ema
+}
+
+func sessionVWAP(c []features.Candle) float64 {
+	dayKey := ""
+	pv := 0.0
+	vol := 0.0
+	for i := 0; i < len(c); i++ {
+		k := data.DayKeyNY17CT(c[i].Ts)
+		if dayKey == "" {
+			dayKey = k
+		}
+		if k != dayKey {
+			pv = 0
+			vol = 0
+			dayKey = k
+		}
+		typ := (c[i].H + c[i].L + c[i].C) / 3.0
+		pv += typ * c[i].V
+		vol += c[i].V
+	}
+	if vol <= 0 {
+		return 0
+	}
+	return pv / vol
+}
+
+func closeSlopePct(c []features.Candle, n int) float64 {
+	if len(c) < 2 {
+		return 0
+	}
+	if n < 2 {
+		n = 2
+	}
+	if n > len(c)-1 {
+		n = len(c) - 1
+	}
+	start := c[len(c)-1-n].C
+	end := c[len(c)-1].C
+	if start <= 0 || end <= 0 {
+		return 0
+	}
+	return ((end / start) - 1.0) * 100.0
+}
+
+func smaVolume(c []features.Candle, n int) float64 {
+	if len(c) == 0 {
+		return 0
+	}
+	if n <= 0 || n > len(c) {
+		n = len(c)
+	}
+	sum := 0.0
+	for i := len(c) - n; i < len(c); i++ {
+		sum += c[i].V
+	}
+	return sum / float64(n)
+}
+
+func estimateATRPct(symbol string, candlesN, atrN int) float64 {
+	if candlesN < atrN+2 {
+		candlesN = atrN + 2
+	}
+	bars, err := aster.LoadCandles(symbol, types.TF1m, candlesN)
+	if err != nil || len(bars) < atrN+2 {
+		return 0
+	}
+	trs := make([]float64, 0, len(bars)-1)
+	for i := 1; i < len(bars); i++ {
+		hi := bars[i].H
+		lo := bars[i].L
+		pc := bars[i-1].C
+		tr := maxFloat(hi-lo, maxFloat(abs(hi-pc), abs(lo-pc)))
+		trs = append(trs, tr)
+	}
+	if len(trs) < atrN {
+		return 0
+	}
+	sum := 0.0
+	for i := len(trs) - atrN; i < len(trs); i++ {
+		sum += trs[i]
+	}
+	atr := sum / float64(atrN)
+	lastClose := bars[len(bars)-1].C
+	if atr <= 0 || lastClose <= 0 {
+		return 0
+	}
+	return atr / lastClose
 }
 
 func printInPlay(tag string, entries []inplay.Entry) {
@@ -5259,6 +5668,30 @@ func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64)
 		return "PRE_EOD_WEAK_PNL"
 	}
 	return ""
+}
+
+func inPreEODEntryBlock(now time.Time, eod maintenanceWindow, blockMin int) bool {
+	if blockMin <= 0 {
+		return false
+	}
+	start := time.Date(now.Year(), now.Month(), now.Day(), eod.StartHour, eod.StartMin, 0, 0, now.Location())
+	if now.After(start) || now.Equal(start) {
+		return false
+	}
+	return now.Add(time.Duration(blockMin) * time.Minute).After(start)
+}
+
+func hasRecentStopLoss(symbol, side string, now time.Time, cooldown time.Duration, paper *paperTrader, execMgr *liveExecManager) bool {
+	if cooldown <= 0 {
+		return false
+	}
+	if paper != nil && paper.hadRecentStopLoss(symbol, now, cooldown) {
+		return true
+	}
+	if execMgr != nil && execMgr.HadRecentStopLoss(symbol, side, now, cooldown) {
+		return true
+	}
+	return false
 }
 
 func orderbookSupportsEntry(ob aster.OrderBook, side string, levels int, minImb, maxSpreadBps float64) bool {
