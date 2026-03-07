@@ -24,6 +24,9 @@ type RouterConfig struct {
 	MinConfluenceScore        float64
 	UseSessionRegimeRisk      bool
 	AllowDeadZoneOnlyAPlus    bool
+	StrategyWeight            float64
+	FlowWeight                float64
+	StructureWeight           float64
 	RiskPolicy                RiskPolicyConfig
 }
 
@@ -49,6 +52,15 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	if cfg.MinConfluenceScore <= 0 {
 		cfg.MinConfluenceScore = 0.58
+	}
+	if cfg.StrategyWeight <= 0 {
+		cfg.StrategyWeight = 0.50
+	}
+	if cfg.FlowWeight <= 0 {
+		cfg.FlowWeight = 0.30
+	}
+	if cfg.StructureWeight <= 0 {
+		cfg.StructureWeight = 0.20
 	}
 	if cfg.RiskPolicy.StopMode == "" {
 		cfg.RiskPolicy = DefaultRiskPolicy()
@@ -111,7 +123,17 @@ func (r *Router) Eval(ctx Context) []Candidate {
 				continue
 			}
 		}
-		if sig.Confidence < r.cfg.MinConfluenceScore {
+		con := r.scoreConfluence(ctx, sig)
+		sig.ConfluenceScore = con
+		if sig.Confluence == nil {
+			sig.Confluence = map[string]float64{}
+		}
+		sig.Confluence["strategy"] = con.StrategyScore
+		sig.Confluence["flow"] = con.FlowScore
+		sig.Confluence["structure"] = con.StructureScore
+		sig.Confluence["total"] = con.TotalScore
+		sig.Reasons = append(sig.Reasons, con.Reasons...)
+		if !con.Approved {
 			sig.RejectReason = "below_min_confluence"
 			continue
 		}
@@ -136,7 +158,7 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		if r.cfg.UseSessionRegimeRisk {
 			sig.RegimeTag = string(data.CurrentRegimeCT(sig.Ts))
 		}
-		candScore := sig.Confidence * scoreNorm * whaleBoost
+		candScore := con.TotalScore * scoreNorm * whaleBoost
 		out = append(out, Candidate{Signal: sig, Score: candScore})
 	}
 	if len(out) <= 1 || !r.cfg.MaxOne {
@@ -149,6 +171,70 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		}
 	}
 	return []Candidate{best}
+}
+
+func (r *Router) scoreConfluence(ctx Context, sig Signal) ConfluenceScore {
+	sc := clamp01(sig.Confidence)
+	fs := 0.5
+	reasons := make([]string, 0, 4)
+	if ctx.Snapshot.Flow.VolumeSpike {
+		fs += 0.2
+		reasons = append(reasons, "flow_volume_spike")
+	}
+	if sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m > 0 {
+		fs += 0.2
+		reasons = append(reasons, "flow_whale_aligned")
+	}
+	if sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m < 0 {
+		fs += 0.2
+		reasons = append(reasons, "flow_whale_aligned")
+	}
+	if sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m < 0 {
+		fs -= 0.2
+		reasons = append(reasons, "flow_whale_against")
+	}
+	if sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m > 0 {
+		fs -= 0.2
+		reasons = append(reasons, "flow_whale_against")
+	}
+	if fs < 0 {
+		fs = 0
+	}
+	if fs > 1 {
+		fs = 1
+	}
+	ss := 0.5
+	if sig.Side == features.SideLong && ctx.Snapshot.Structure.Trend == features.TrendBull {
+		ss += 0.25
+		reasons = append(reasons, "structure_trend_aligned")
+	}
+	if sig.Side == features.SideShort && ctx.Snapshot.Structure.Trend == features.TrendBear {
+		ss += 0.25
+		reasons = append(reasons, "structure_trend_aligned")
+	}
+	if ctx.Snapshot.Sweep != nil && ctx.Snapshot.Sweep.Strength > 0 {
+		ss += 0.15
+		reasons = append(reasons, "structure_sweep_active")
+	}
+	if ctx.Snapshot.VP.POCShare > 0.35 {
+		ss += 0.10
+		reasons = append(reasons, "structure_vp_concentration")
+	}
+	if ss < 0 {
+		ss = 0
+	}
+	if ss > 1 {
+		ss = 1
+	}
+	total := sc*r.cfg.StrategyWeight + fs*r.cfg.FlowWeight + ss*r.cfg.StructureWeight
+	return ConfluenceScore{
+		TotalScore:     total,
+		StrategyScore:  sc,
+		FlowScore:      fs,
+		StructureScore: ss,
+		Reasons:        reasons,
+		Approved:       total >= r.cfg.MinConfluenceScore,
+	}
 }
 
 func abs(x float64) float64 {

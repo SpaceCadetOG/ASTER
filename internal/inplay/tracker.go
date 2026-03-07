@@ -13,11 +13,12 @@ import (
 type State string
 
 const (
-	StateHeating State = "heating"
-	StateInPlay  State = "in-play"
-	StateCooling State = "cooling"
-	StatePumping State = "pumping"
-	StateDumping State = "dumping"
+	StateHeating   State = "heating"
+	StateInPlay    State = "in-play"
+	StateCooling   State = "cooling"
+	StatePumping   State = "pumping"
+	StateDumping   State = "dumping"
+	StateExhausted State = "exhausted"
 )
 
 type Entry struct {
@@ -154,12 +155,16 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 		dropPct := peakDropPct(ss.history)
 		aPlusLosing := gradeValue(g) >= gradeValue("A+") && (dropPct >= 0.08 || slope <= -0.8) && (!priceFav || volFall)
 		momentumLoss := (falling && !priceFav && volFall) || signFlipAgainst || aPlusLosing
+		exhausted := (ss.state == StatePumping || ss.state == StateInPlay || gradeValue(g) >= gradeValue("A")) &&
+			(dropPct >= 0.06 || (slope < -0.45 && volFall) || signFlipAgainst)
 
 		switch {
 		case gradeOK && volOK && rising && priceFav && volRise:
 			ss.state = StatePumping
 		case gradeOK && volOK && rising:
 			ss.state = StateInPlay
+		case exhausted:
+			ss.state = StateExhausted
 		case momentumLoss:
 			ss.state = StateDumping
 		case rising || (slope > 0 && (priceFav || !volFall)):
@@ -223,6 +228,8 @@ func rankFor(e Entry) float64 {
 		stateBoost = -5
 	case StateDumping:
 		stateBoost = -12
+	case StateExhausted:
+		stateBoost = -18
 	}
 	momentum := 0.0
 	if e.Momentum {

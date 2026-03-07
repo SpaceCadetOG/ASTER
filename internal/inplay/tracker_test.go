@@ -42,8 +42,30 @@ func TestTrackerStatesPumpingAndDumpingLong(t *testing.T) {
 	if len(es) != 1 {
 		t.Fatalf("expected 1 entry after dump")
 	}
-	if es[0].State != StateDumping && es[0].State != StateCooling {
-		t.Fatalf("expected dumping/cooling, got %s", es[0].State)
+	if es[0].State != StateDumping && es[0].State != StateCooling && es[0].State != StateExhausted {
+		t.Fatalf("expected dumping/cooling/exhausted, got %s", es[0].State)
+	}
+}
+
+func TestTrackerExhaustedTransition(t *testing.T) {
+	trk := NewTracker("long", Config{MinGrade: "C", MinVolumeUSD: 1000, HistoryN: 6, RiseN: 3, DropGradeScans: 10, FallScans: 10, TTL: time.Hour})
+	now := time.Now().UTC()
+	grades := map[string]string{"BARDUSDT": "A+"}
+	rows := []market.Scored{{Market: market.Market{Symbol: "BARDUSDT", VolumeUSD: 3000, LastPrice: 1.0, Change24h: 20}, Score: 95, Eligible: true}}
+	trk.Update(now, rows, grades)
+	rows[0].LastPrice, rows[0].Score, rows[0].VolumeUSD = 1.08, 103, 3200
+	trk.Update(now.Add(1*time.Minute), rows, grades)
+	rows[0].LastPrice, rows[0].Score, rows[0].VolumeUSD = 1.12, 110, 3300
+	trk.Update(now.Add(2*time.Minute), rows, grades)
+	rows[0].LastPrice, rows[0].Score, rows[0].VolumeUSD = 1.03, 86, 1800
+	rows[0].Change24h = 4
+	trk.Update(now.Add(3*time.Minute), rows, grades)
+	es := trk.Entries()
+	if len(es) != 1 {
+		t.Fatalf("expected 1 entry")
+	}
+	if es[0].State != StateExhausted && es[0].State != StateDumping {
+		t.Fatalf("expected exhausted/dumping, got %s", es[0].State)
 	}
 }
 
@@ -82,7 +104,7 @@ func TestTrackerStatesPumpingAndDumpingShort(t *testing.T) {
 	if len(es) != 1 {
 		t.Fatalf("expected 1 entry after reverse")
 	}
-	if es[0].State != StateDumping && es[0].State != StateCooling {
-		t.Fatalf("expected dumping/cooling, got %s", es[0].State)
+	if es[0].State != StateDumping && es[0].State != StateCooling && es[0].State != StateExhausted {
+		t.Fatalf("expected dumping/cooling/exhausted, got %s", es[0].State)
 	}
 }
