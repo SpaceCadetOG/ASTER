@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-machine/internal/flow"
@@ -22,6 +24,48 @@ type aggTrade struct {
 	S string `json:"s"`
 }
 
+type oflowStatus struct {
+	mu         sync.RWMutex
+	StartedAt  time.Time `json:"started_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Connected  bool      `json:"connected"`
+	WindowSec  int       `json:"window_sec"`
+	LargeUSD   float64   `json:"large_usd"`
+	TopN       int       `json:"top_n"`
+	LastSymbol string    `json:"last_symbol,omitempty"`
+	LastUSD    float64   `json:"last_usd,omitempty"`
+	LastSide   string    `json:"last_side,omitempty"`
+	Events     int64     `json:"events"`
+}
+
+func (s *oflowStatus) snapshot() oflowStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return *s
+}
+
+func startStatusServer(addr string, st *oflowStatus) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(st.snapshot())
+	})
+	go func() {
+		fmt.Println("oflow status server:", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			fmt.Println("oflow status server error:", err)
+		}
+	}()
+}
+
 func main() {
 	syms := parseSymbols("OFLOW_SYMBOLS", []string{"btcusdt", "ethusdt", "solusdt"})
 	windowSec := envInt("OFLOW_WINDOW_SEC", 20)
@@ -34,6 +78,13 @@ func main() {
 
 	windowDur := time.Duration(windowSec) * time.Second
 	windows := make(map[string]*flow.Window, len(syms))
+	st := &oflowStatus{
+		StartedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		WindowSec: windowSec,
+		LargeUSD:  largeUSD,
+		TopN:      topN,
+	}
 	for _, s := range syms {
 		windows[strings.ToUpper(strings.TrimSuffix(s, "usdt"))] = flow.NewWindow(windowDur, largeUSD)
 	}
@@ -45,6 +96,7 @@ func main() {
 	wsURL := "wss://fstream.asterdex.com/stream?streams=" + strings.Join(streams, "/")
 	fmt.Printf("oflow started (window=%ds, large>=$%.0f)\n", windowSec, largeUSD)
 	fmt.Println(wsURL)
+	startStatusServer(envStr("OFLOW_HTTP_ADDR", ":8090"), st)
 
 	go func() {
 		tk := time.NewTicker(time.Duration(printEveryMS) * time.Millisecond)
@@ -57,15 +109,27 @@ func main() {
 	for {
 		conn, err := ws.Dial(context.Background(), wsURL, 10*time.Second)
 		if err != nil {
+			st.mu.Lock()
+			st.Connected = false
+			st.UpdatedAt = time.Now().UTC()
+			st.mu.Unlock()
 			fmt.Println("dial error:", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		st.mu.Lock()
+		st.Connected = true
+		st.UpdatedAt = time.Now().UTC()
+		st.mu.Unlock()
 
 		for {
 			b, err := conn.ReadText(70 * time.Second)
 			if err != nil {
 				_ = conn.Close()
+				st.mu.Lock()
+				st.Connected = false
+				st.UpdatedAt = time.Now().UTC()
+				st.mu.Unlock()
 				break
 			}
 
@@ -86,6 +150,10 @@ func main() {
 				continue
 			}
 			usd := p * q
+			side := "SELL"
+			if !t.M {
+				side = "BUY"
+			}
 			symbol := strings.ToUpper(strings.TrimSuffix(strings.TrimSpace(t.S), "USDT"))
 			w, ok := windows[symbol]
 			if !ok {
@@ -97,10 +165,25 @@ func main() {
 				USD:   usd,
 				IsBuy: !t.M,
 			})
+			st.mu.Lock()
+			st.UpdatedAt = time.Now().UTC()
+			st.Events++
+			st.LastSymbol = symbol
+			st.LastUSD = usd
+			st.LastSide = side
+			st.mu.Unlock()
 		}
 
 		time.Sleep(1500 * time.Millisecond)
 	}
+}
+
+func envStr(k, def string) string {
+	s := strings.TrimSpace(os.Getenv(k))
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 func printOflow(windows map[string]*flow.Window, windowSec int, topN int) {

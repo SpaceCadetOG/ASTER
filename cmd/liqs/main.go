@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-machine/internal/colorx"
@@ -24,6 +26,47 @@ type liqEvt struct {
 	USD    float64
 }
 
+type liqsStatus struct {
+	mu         sync.RWMutex
+	StartedAt  time.Time `json:"started_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Connected  bool      `json:"connected"`
+	MinUSD     float64   `json:"min_usd"`
+	WindowSec  int       `json:"window_sec"`
+	LastSymbol string    `json:"last_symbol,omitempty"`
+	LastUSD    float64   `json:"last_usd,omitempty"`
+	LastSide   string    `json:"last_side,omitempty"`
+	Events     int64     `json:"events"`
+}
+
+func (s *liqsStatus) snapshot() liqsStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return *s
+}
+
+func startStatusServer(addr string, st *liqsStatus) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(st.snapshot())
+	})
+	go func() {
+		fmt.Println("liqs status server:", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			fmt.Println("liqs status server error:", err)
+		}
+	}()
+}
+
 func main() {
 	syms := parseSymbols("LIQ_SYMBOLS", nil)
 	minUSD := envFloat("LIQ_MIN_USD", 0)
@@ -35,6 +78,12 @@ func main() {
 
 	windowDur := time.Duration(windowSec) * time.Second
 	windows := map[string]*flow.Window{}
+	st := &liqsStatus{
+		StartedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		MinUSD:    minUSD,
+		WindowSec: windowSec,
+	}
 	allowed := map[string]struct{}{}
 	for _, s := range syms {
 		key := strings.ToUpper(strings.TrimSuffix(s, "usdt"))
@@ -50,6 +99,7 @@ func main() {
 	urls := liquidationURLs(syms)
 	urlIdx := 0
 	lastSummary := time.Now()
+	startStatusServer(envStr("LIQS_HTTP_ADDR", ":8093"), st)
 
 	for {
 		wsURL := urls[urlIdx%len(urls)]
@@ -58,15 +108,27 @@ func main() {
 
 		conn, err := ws.Dial(context.Background(), wsURL, 10*time.Second)
 		if err != nil {
+			st.mu.Lock()
+			st.Connected = false
+			st.UpdatedAt = time.Now().UTC()
+			st.mu.Unlock()
 			fmt.Println("dial error:", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		st.mu.Lock()
+		st.Connected = true
+		st.UpdatedAt = time.Now().UTC()
+		st.mu.Unlock()
 
 		for {
 			b, err := conn.ReadText(70 * time.Second)
 			if err != nil {
 				_ = conn.Close()
+				st.mu.Lock()
+				st.Connected = false
+				st.UpdatedAt = time.Now().UTC()
+				st.mu.Unlock()
 				break
 			}
 			if printRaw {
@@ -91,6 +153,13 @@ func main() {
 					windows[sym] = w
 				}
 				w.Add(flow.Event{Ts: e.Ts, USD: e.USD, IsBuy: strings.EqualFold(e.Side, "BUY")})
+				st.mu.Lock()
+				st.UpdatedAt = time.Now().UTC()
+				st.Events++
+				st.LastSymbol = sym
+				st.LastUSD = e.USD
+				st.LastSide = e.Side
+				st.mu.Unlock()
 
 				if e.USD >= minUSD {
 					side := colorx.Sell(e.Side)
@@ -316,6 +385,14 @@ func envBool(k string, def bool) bool {
 	}
 	s = strings.ToLower(s)
 	return !(s == "0" || s == "false" || s == "no" || s == "off")
+}
+
+func envStr(k, def string) string {
+	s := strings.TrimSpace(os.Getenv(k))
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 func asString(v any) string {

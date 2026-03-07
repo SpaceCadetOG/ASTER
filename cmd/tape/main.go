@@ -5,14 +5,56 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-machine/internal/colorx"
 	"go-machine/internal/ws"
 )
+
+type tapeStatus struct {
+	mu         sync.RWMutex
+	StartedAt  time.Time `json:"started_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Connected  bool      `json:"connected"`
+	MinUSD     float64   `json:"min_usd"`
+	LastSymbol string    `json:"last_symbol,omitempty"`
+	LastUSD    float64   `json:"last_usd,omitempty"`
+	LastSide   string    `json:"last_side,omitempty"`
+	Events     int64     `json:"events"`
+}
+
+func (s *tapeStatus) snapshot() tapeStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return *s
+}
+
+func startStatusServer(addr string, st *tapeStatus) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(st.snapshot())
+	})
+	go func() {
+		fmt.Println("tape status server:", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			fmt.Println("tape status server error:", err)
+		}
+	}()
+}
 
 func main() {
 	syms := strings.Split(strings.TrimSpace(os.Getenv("TAPE_SYMBOLS")), ",")
@@ -43,19 +85,37 @@ func main() {
 	wsURL := "wss://fstream.asterdex.com/stream?streams=" + strings.Join(streams, "/")
 	fmt.Printf("ASTER tape connected (min $%.0f)\n", minUSD)
 	fmt.Println(wsURL)
+	st := &tapeStatus{
+		StartedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		MinUSD:    minUSD,
+	}
+	startStatusServer(envStr("TAPE_HTTP_ADDR", ":8091"), st)
 
 	for {
 		conn, err := ws.Dial(context.Background(), wsURL, 10*time.Second)
 		if err != nil {
+			st.mu.Lock()
+			st.Connected = false
+			st.UpdatedAt = time.Now().UTC()
+			st.mu.Unlock()
 			fmt.Println("dial error:", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		st.mu.Lock()
+		st.Connected = true
+		st.UpdatedAt = time.Now().UTC()
+		st.mu.Unlock()
 
 		for {
 			b, err := conn.ReadText(70 * time.Second)
 			if err != nil {
 				_ = conn.Close()
+				st.mu.Lock()
+				st.Connected = false
+				st.UpdatedAt = time.Now().UTC()
+				st.mu.Unlock()
 				break
 			}
 
@@ -98,9 +158,20 @@ func main() {
 			} else {
 				side = colorx.Sell(side)
 			}
+			plainSide := "SELL"
+			if !t.M {
+				plainSide = "BUY"
+			}
 
 			size := colorx.BySize(usd, fmt.Sprintf("$%.0f", usd))
 			sym := strings.TrimSuffix(strings.ToUpper(t.S), "USDT")
+			st.mu.Lock()
+			st.UpdatedAt = time.Now().UTC()
+			st.Events++
+			st.LastSymbol = sym
+			st.LastUSD = usd
+			st.LastSide = plainSide
+			st.mu.Unlock()
 			sec := time.UnixMilli(t.T).Format("15:04:05")
 
 			fmt.Printf("%s %s %-8s %s\n", sec, side, sym, size)
@@ -108,4 +179,12 @@ func main() {
 
 		time.Sleep(1500 * time.Millisecond)
 	}
+}
+
+func envStr(k, def string) string {
+	s := strings.TrimSpace(os.Getenv(k))
+	if s == "" {
+		return def
+	}
+	return s
 }
