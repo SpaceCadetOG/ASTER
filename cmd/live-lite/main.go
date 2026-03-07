@@ -603,8 +603,6 @@ func main() {
 	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
 	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 0)) * time.Minute
 	preEODExitEnable := envBool("LIVE_PRE_EOD_EXIT_ENABLE", true)
-	preEODStartHour := envInt("LIVE_PRE_EOD_EXIT_START_HOUR", 15)
-	preEODStartMin := envInt("LIVE_PRE_EOD_EXIT_START_MIN", 0)
 	preEODEndHour := envInt("LIVE_PRE_EOD_EXIT_END_HOUR", 16)
 	preEODEndMin := envInt("LIVE_PRE_EOD_EXIT_END_MIN", 0)
 	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 0)) * time.Minute
@@ -639,6 +637,7 @@ func main() {
 	lastPreUSReportDay := ""
 	lastM1ReportDay := ""
 	lastM2ReportDay := ""
+	lastPreEODDecisionDay := ""
 	lastHourlyKey := ""
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
@@ -856,12 +855,17 @@ func main() {
 		if execMgr != nil {
 			execMgr.ApplyMomentumExit(now, momBySymbol)
 		}
-		if preEODExitEnable && inMinuteWindow(localMaintNow.Hour(), localMaintNow.Minute(), preEODStartHour, preEODStartMin, preEODEndHour, preEODEndMin) {
-			if paper.enabled {
-				paper.ApplyPreEODExit(now, momBySymbol, metaBySymbol, paperDepth, preEODMinHold, preEODUpnlPctMax)
-			}
-			if execMgr != nil {
-				execMgr.ApplyPreEODExit(now, momBySymbol, preEODMinHold, preEODUpnlPctMax)
+		if preEODExitEnable {
+			dayKey := localMaintNow.Format("2006-01-02")
+			decisionNow := localMaintNow.Hour() == preEODEndHour && localMaintNow.Minute() == preEODEndMin
+			if decisionNow && lastPreEODDecisionDay != dayKey {
+				if paper.enabled {
+					paper.ApplyPreEODExit(now, momBySymbol, metaBySymbol, paperDepth, preEODMinHold, preEODUpnlPctMax)
+				}
+				if execMgr != nil {
+					execMgr.ApplyPreEODExit(now, momBySymbol, preEODMinHold, preEODUpnlPctMax)
+				}
+				lastPreEODDecisionDay = dayKey
 			}
 		}
 		printInPlay("LONG", longInPlay)
