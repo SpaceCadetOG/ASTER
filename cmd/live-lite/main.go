@@ -661,6 +661,7 @@ func main() {
 	lastM2ReportDay := ""
 	lastPreEODDecisionDay := ""
 	lastHourlyKey := ""
+	var lastPulseSentAt time.Time
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
 		LastEndDay:   map[string]string{},
@@ -673,7 +674,7 @@ func main() {
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
 	if paper != nil && tg != nil && tg.Enabled() {
 		paper.onExit = func(msg string) {
-			tg.Sendf("%s", tgPre(msg))
+			tg.Sendf("%s", msg)
 		}
 	}
 	cmdCtx = &telegramCommandCtx{
@@ -845,8 +846,11 @@ func main() {
 			if localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute) {
 				dayKey := localNow.Format("2006-01-02")
 				if dayKey != lastSODReportDay {
-					tg.Sendf("%s", tgPre(buildSODReport(localNow, paper, metaBySymbol)))
-					lastSODReportDay = dayKey
+					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+						tg.Sendf("%s", buildSODReport(localNow, paper, metaBySymbol))
+						lastPulseSentAt = now
+						lastSODReportDay = dayKey
+					}
 				}
 			}
 		}
@@ -903,14 +907,20 @@ func main() {
 		if paper.enabled && tg != nil && tg.Enabled() && hourlyEnable {
 			hk := localMaintNow.Format("2006-01-02 15")
 			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
-				tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
-				lastHourlyKey = hk
+				if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+					lastPulseSentAt = now
+					lastHourlyKey = hk
+				}
 			}
 			if localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute) {
 				dayKey := localMaintNow.Format("2006-01-02")
 				if dayKey != lastPreUSReportDay {
-					tg.Sendf("%s", tgPre(buildWindowReport("Pre-US Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
-					lastPreUSReportDay = dayKey
+					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+						tg.Sendf("%s", buildWindowReport("Pre-US Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+						lastPulseSentAt = now
+						lastPreUSReportDay = dayKey
+					}
 				}
 			}
 		}
@@ -1404,9 +1414,9 @@ func main() {
 						EntryPx:   pp.Entry,
 						Reason:    "paper_enter",
 					})
-					tg.Sendf("%s", tgPre(fmt.Sprintf("PAPER ENTER | %s %s\nmargin=$%.2f lev=%dx grade=%s conf=%.2f\nreason=%s\nentry=%s sl=%s\ntp1=%s tp2=%s tp3=%s",
+					tg.Sendf("🟦 <b>PAPER ENTER | %s %s</b>\n• <b>Margin:</b> $%.2f | <b>Lev:</b> %dx | <b>Grade:</b> %s | <b>Conf:</b> %.2f\n• <b>Setup:</b> <code>%s</code>\n• <b>Entry:</b> %s | <b>SL:</b> %s\n• <b>TP1:</b> %s | <b>TP2:</b> %s | <b>TP3:</b> %s",
 						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
-						fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))))
+						fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))
 				}
 			}
 			if tgVerbose {
@@ -1670,66 +1680,175 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 
 func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
 	if p == nil || !p.enabled {
-		return fmt.Sprintf("Hourly Digest (%s) session=%s\npaper=disabled", now.Format("15:04 MST"), sessionTag(now))
+		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
+			Title:     "HOURLY DIGEST",
+			TimeLabel: now.Format("15:04 MST"),
+			Session:   sessionTag(now),
+		})
 	}
-	dayKey := now.In(p.reportLoc).Format("2006-01-02")
-	realized := 0.0
-	if ds := p.dayStats[dayKey]; ds != nil {
-		realized = ds.Net
-	}
-	openPnL := 0.0
-	for raw, pos := range p.positions {
-		if pos == nil {
-			continue
-		}
-		m := meta[raw]
-		if strings.EqualFold(pos.Side, "BUY") {
-			openPnL += (m.LastPrice - pos.Entry) * pos.Qty
-		} else {
-			openPnL += (pos.Entry - m.LastPrice) * pos.Qty
-		}
-	}
-	eq := p.balance + openPnL
-	paperMsg := p.TradeUpdateMessage(meta, topN)
+	pulse, cards := buildPaperPulseAndCards("HOURLY DIGEST", now, p, meta)
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, 2)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Hourly Digest (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
-	fmt.Fprintf(&b, "realized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n\n",
-		realized, openPnL, realized+openPnL, p.balance, eq)
-	b.WriteString(strings.TrimSpace(paperMsg))
-	b.WriteString("\n\nIn-Play Scanner\n")
-	appendInPlayRows(&b, "LONG", longInPlay, meta, 3)
-	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 3)
+	b.WriteString(notify.BuildSessionPulseHTML(pulse))
+	for _, c := range cards {
+		b.WriteString("\n\n")
+		b.WriteString(notify.BuildPositionCard(c))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
 	return strings.TrimSpace(b.String())
 }
 
 func buildSODReport(now time.Time, p *paperTrader, meta map[string]symbolMeta) string {
 	if p == nil || !p.enabled {
-		return fmt.Sprintf("SOD Report (%s) session=%s\npaper=disabled", now.Format("15:04 MST"), sessionTag(now))
+		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
+			Title:     "SOD REPORT",
+			TimeLabel: now.Format("15:04 MST"),
+			Session:   sessionTag(now),
+		})
 	}
+	pulse, cards := buildPaperPulseAndCards("SOD REPORT", now, p, meta)
+	var b strings.Builder
+	b.WriteString(notify.BuildSessionPulseHTML(pulse))
+	for _, c := range cards {
+		b.WriteString("\n\n")
+		b.WriteString(notify.BuildPositionCard(c))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func buildPaperPulseAndCards(title string, now time.Time, p *paperTrader, meta map[string]symbolMeta) (notify.PulseSnapshot, []notify.PositionCard) {
 	dayKey := now.In(p.reportLoc).Format("2006-01-02")
 	realized := 0.0
 	if ds := p.dayStats[dayKey]; ds != nil {
 		realized = ds.Net
 	}
 	openPnL := 0.0
+	cards := make([]notify.PositionCard, 0, len(p.positions))
 	for raw, pos := range p.positions {
 		if pos == nil {
 			continue
 		}
 		m := meta[raw]
-		if strings.EqualFold(pos.Side, "BUY") {
-			openPnL += (m.LastPrice - pos.Entry) * pos.Qty
-		} else {
-			openPnL += (pos.Entry - m.LastPrice) * pos.Qty
+		mark := m.LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			mark = pos.Entry
+		}
+		upnl, pct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
+		openPnL += upnl
+		conf := estimateConfluenceFromReason(pos.EntryReason)
+		cards = append(cards, notify.PositionCard{
+			Symbol:           raw,
+			Side:             pos.Side,
+			EntryPrice:       pos.Entry,
+			MarkPrice:        mark,
+			UnrealizedPnL:    upnl,
+			UnrealizedPnLPct: pct,
+			Leverage:         maxInt(pos.Leverage, 1),
+			Setup:            pos.EntryReason,
+			Confluence:       conf,
+			AgeMin:           int(now.Sub(pos.OpenedAt).Minutes()),
+			StopLoss:         pos.Stop,
+			TakeProfit:       firstPositive(pos.TP1, pos.TP2, pos.TP3),
+		})
+	}
+	sort.Slice(cards, func(i, j int) bool { return cards[i].UnrealizedPnL > cards[j].UnrealizedPnL })
+	eq := p.balance + openPnL
+	net := realized + openPnL
+	netPct := 0.0
+	if p.startBal > 0 {
+		netPct = (net / p.startBal) * 100.0
+	}
+	return notify.PulseSnapshot{
+		Title:     title,
+		TimeLabel: now.Format("15:04 MST"),
+		Session:   sessionTag(now),
+		Balance:   p.balance,
+		Equity:    eq,
+		Realized:  realized,
+		OpenPnL:   openPnL,
+		NetDay:    net,
+		OpenCount: len(cards),
+		NetDayPct: netPct,
+	}, cards
+}
+
+func topScanSnapshot(longInPlay, shortInPlay []inplay.Entry, topN int) ([]notify.ScanItem, []notify.ScanItem, string) {
+	if topN <= 0 {
+		topN = 2
+	}
+	toItems := func(rows []inplay.Entry) []notify.ScanItem {
+		n := len(rows)
+		if n > topN {
+			n = topN
+		}
+		out := make([]notify.ScanItem, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, notify.ScanItem{
+				Symbol: strings.ToUpper(aster.RawSymbol(rows[i].Symbol)),
+				Grade:  rows[i].CurrentGrade,
+				Score:  rows[i].CurrentScore,
+			})
+		}
+		return out
+	}
+	longs := toItems(longInPlay)
+	shorts := toItems(shortInPlay)
+	bias := "NEUTRAL"
+	if len(longInPlay) > 0 && len(shortInPlay) == 0 {
+		bias = "LONG"
+	} else if len(shortInPlay) > 0 && len(longInPlay) == 0 {
+		bias = "SHORT"
+	} else if len(longInPlay) > 0 && len(shortInPlay) > 0 {
+		if longInPlay[0].CurrentScore-shortInPlay[0].CurrentScore > 8 {
+			bias = "LONG"
+		} else if shortInPlay[0].CurrentScore-longInPlay[0].CurrentScore > 8 {
+			bias = "SHORT"
 		}
 	}
-	eq := p.balance + openPnL
-	var b strings.Builder
-	fmt.Fprintf(&b, "SOD Report (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
-	fmt.Fprintf(&b, "bal=%.2f eq=%.2f realizedToday=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d\n\n",
-		p.balance, eq, realized, openPnL, realized+openPnL, len(p.positions), p.maxOpen)
-	b.WriteString(strings.TrimSpace(p.PositionsTable(meta)))
-	return strings.TrimSpace(b.String())
+	return longs, shorts, bias
+}
+
+func estimateConfluenceFromReason(reason string) float64 {
+	r := strings.ToLower(strings.TrimSpace(reason))
+	switch r {
+	case "vwap_confluence", "vp_trend", "pd_levels_retest":
+		return 0.66
+	case "failed_auction_magnet", "fa", "lsr", "bos_pb":
+		return 0.60
+	case "":
+		return 0.55
+	default:
+		return 0.58
+	}
+}
+
+func firstPositive(vals ...float64) float64 {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func exitAlertEmoji(reason string) string {
+	r := strings.ToUpper(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(r, "WHALE_DIVERGENCE"), strings.Contains(r, "HVN_FRONT"), strings.Contains(r, "FRONT_RUN"):
+		return "⚠️"
+	case strings.Contains(r, "STOP"), strings.Contains(r, "SL"):
+		return "🛑"
+	case strings.Contains(r, "TP"):
+		return "✅"
+	case strings.Contains(r, "MOMENTUM"):
+		return "📉"
+	default:
+		return "ℹ️"
+	}
 }
 
 func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta map[string]symbolMeta, limit int) {
@@ -1847,6 +1966,13 @@ func inMinuteWindow(hour, min, startHour, startMin, endHour, endMin int) bool {
 		return nowM >= startM && nowM < endM
 	}
 	return nowM >= startM || nowM < endM
+}
+
+func shouldSendPulse(now, last time.Time, minGap time.Duration) bool {
+	if minGap <= 0 || last.IsZero() {
+		return true
+	}
+	return now.Sub(last) >= minGap
 }
 
 func runMaintenanceHook(path string, timeout time.Duration) error {
@@ -2779,11 +2905,13 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 		dayRealized = m.dayRealized[dayKey]
 	}
 	holdMin := now.Sub(p.CreatedAt).Minutes()
-	m.tg.Sendf("fill receipt %s %s\naction=%s reason=%s qty=%.6f fill=%s pnl=%+.2f (%+.2f%%)\nhold=%.1fm dayRealized=%+.2f session=%s",
+	reasonU := strings.ToUpper(strings.TrimSpace(reason))
+	m.tg.Sendf("%s <b>FILL %s %s</b>\n• <b>Action:</b> %s | <b>Reason:</b> %s\n• <b>Qty:</b> %.6f | <b>Fill:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Hold:</b> %.1fm | <b>Day Realized:</b> %+.2f\n• <b>Session:</b> %s",
+		exitAlertEmoji(reasonU),
 		p.Symbol,
 		p.Side,
 		strings.ToUpper(strings.TrimSpace(action)),
-		strings.ToUpper(strings.TrimSpace(reason)),
+		reasonU,
 		qty,
 		fmtPrice(fillPx),
 		pnl,
@@ -4270,10 +4398,24 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 }
 
 func buildWindowReport(label string, now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
+	if p == nil || !p.enabled {
+		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
+			Title:     strings.TrimSpace(label),
+			TimeLabel: now.Format("15:04 MST"),
+			Session:   sessionTag(now),
+		})
+	}
+	pulse, cards := buildPaperPulseAndCards(strings.TrimSpace(label), now, p, meta)
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, 2)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%s) session=%s\n\n", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now))
-	b.WriteString(buildHourlyDigest(now, p, meta, longInPlay, shortInPlay, topN))
-	return b.String()
+	b.WriteString(notify.BuildSessionPulseHTML(pulse))
+	for _, c := range cards {
+		b.WriteString("\n\n")
+		b.WriteString(notify.BuildPositionCard(c))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
+	return strings.TrimSpace(b.String())
 }
 
 func (p *paperTrader) Equity(meta map[string]symbolMeta) float64 {
@@ -4931,10 +5073,11 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		if ds := p.dayStats[dayKey]; ds != nil {
 			realizedToday = ds.Net
 		}
+		reasonU := strings.ToUpper(strings.TrimSpace(reason))
 		p.onExit(fmt.Sprintf(
-			"PAPER EXIT | %s %s\nqty=%.6f exit=%s pnl=%+.2f (%+.2f%%)\nreason=%s hold=%.1fm rem=%.6f\nrealizedToday=%+.2f balance=$%.2f session=%s",
-			symbol, pos.Side, qty, fmtPrice(exitPrice), net, pct, strings.ToUpper(strings.TrimSpace(reason)), holdMin, pos.Qty,
-			realizedToday, p.balance, sessionTag(now.In(loc)),
+			"%s <b>PAPER EXIT | %s %s</b>\n• <b>Qty:</b> %.6f | <b>Exit:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Reason:</b> %s | <b>Hold:</b> %.1fm\n• <b>Remaining:</b> %.6f | <b>Session:</b> %s\n• <b>Realized Today:</b> %+.2f | <b>Balance:</b> $%.2f",
+			exitAlertEmoji(reasonU), symbol, pos.Side, qty, fmtPrice(exitPrice), net, pct, reasonU, holdMin, pos.Qty, sessionTag(now.In(loc)),
+			realizedToday, p.balance,
 		))
 	}
 	_ = p.logTrade(now, symbol, pos.Side, pos.Entry, exitPrice, qty, pos.Leverage, pos.Margin, pos.Stop, exitPrice, reason, gross, fee, net, holdMin)

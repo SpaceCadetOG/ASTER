@@ -257,9 +257,7 @@ func (t *Telegram) send(chatID, msg string) error {
 	form.Set("chat_id", chatID)
 	form.Set("text", msg)
 	form.Set("disable_web_page_preview", "true")
-	if strings.HasPrefix(msg, "<pre>") && strings.HasSuffix(msg, "</pre>") {
-		form.Set("parse_mode", "HTML")
-	}
+	form.Set("parse_mode", "HTML")
 	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
