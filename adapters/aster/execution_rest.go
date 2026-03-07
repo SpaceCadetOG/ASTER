@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+type BracketUpdate struct {
+	Symbol         string
+	PositionSide   string
+	CloseSide      string
+	Qty            float64
+	QtyPrecision   int
+	PricePrecision int
+	OldStopOrderID int64
+	OldTPOrderID   int64
+	NewStopPrice   float64
+	NewTPPrice     float64
+}
+
 type SymbolMeta struct {
 	Symbol         string  `json:"symbol"`
 	TickSize       float64 `json:"tickSize"`
@@ -394,4 +407,71 @@ func (r *RESTAuth) ChangeMarginType(symbol, marginType string) (map[string]any, 
 		return nil, err
 	}
 	return out, nil
+}
+
+func (r *RESTAuth) ReplaceStopOrder(symbol, side string, oldOrderID int64, qty, stopPrice float64, qtyPrecision, pricePrecision int) (map[string]any, error) {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" {
+		return nil, fmt.Errorf("symbol required")
+	}
+	if oldOrderID > 0 {
+		_, _ = r.CancelOrder(sym, oldOrderID)
+	}
+	vals := url.Values{}
+	vals.Set("symbol", sym)
+	vals.Set("side", strings.ToUpper(strings.TrimSpace(side)))
+	vals.Set("type", "STOP_MARKET")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatPrecision(qty, qtyPrecision))
+	vals.Set("stopPrice", formatPrecision(stopPrice, pricePrecision))
+	return r.PlaceOrder(vals)
+}
+
+func (r *RESTAuth) ReplaceTakeProfitOrder(symbol, side string, oldOrderID int64, qty, tpPrice float64, qtyPrecision, pricePrecision int) (map[string]any, error) {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" {
+		return nil, fmt.Errorf("symbol required")
+	}
+	if oldOrderID > 0 {
+		_, _ = r.CancelOrder(sym, oldOrderID)
+	}
+	vals := url.Values{}
+	vals.Set("symbol", sym)
+	vals.Set("side", strings.ToUpper(strings.TrimSpace(side)))
+	vals.Set("type", "LIMIT")
+	vals.Set("timeInForce", "GTC")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatPrecision(qty, qtyPrecision))
+	vals.Set("price", formatPrecision(tpPrice, pricePrecision))
+	return r.PlaceOrder(vals)
+}
+
+func (r *RESTAuth) UpdateBracket(req BracketUpdate) (stopOut, tpOut map[string]any, err error) {
+	stopOut = map[string]any{}
+	tpOut = map[string]any{}
+	if req.Symbol == "" {
+		return stopOut, tpOut, fmt.Errorf("symbol required")
+	}
+	if req.NewStopPrice > 0 {
+		stopOut, err = r.ReplaceStopOrder(req.Symbol, req.CloseSide, req.OldStopOrderID, req.Qty, req.NewStopPrice, req.QtyPrecision, req.PricePrecision)
+		if err != nil {
+			return stopOut, tpOut, err
+		}
+	}
+	if req.NewTPPrice > 0 {
+		tpOut, err = r.ReplaceTakeProfitOrder(req.Symbol, req.CloseSide, req.OldTPOrderID, req.Qty, req.NewTPPrice, req.QtyPrecision, req.PricePrecision)
+		if err != nil {
+			return stopOut, tpOut, err
+		}
+	}
+	return stopOut, tpOut, nil
+}
+
+func formatPrecision(v float64, prec int) string {
+	if prec < 0 {
+		prec = 8
+	}
+	return strconv.FormatFloat(v, 'f', prec, 64)
 }

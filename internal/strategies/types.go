@@ -7,27 +7,37 @@ import (
 )
 
 type Signal struct {
-	Active        bool
-	Name          string
-	Side          features.Side
-	Entry         float64
-	Stop          float64
-	TP1           float64
-	TP2           float64
-	Confidence    float64
-	Tags          []string
-	Invalidation  string
-	VPSetup       string
-	VPLevel       float64
-	VPTargetLevel float64
-	StopMode      string
-	TargetMode    string
-	RejectReason  string
-	Reasons       []string
-	Confluence    map[string]float64
-	RegimeTag     string
-	SignalSource  []string
-	Ts            time.Time
+	Active          bool
+	Name            string
+	Side            features.Side
+	Entry           float64
+	Stop            float64
+	TP1             float64
+	TP2             float64
+	Confidence      float64
+	Tags            []string
+	Invalidation    string
+	VPSetup         string
+	VPLevel         float64
+	VPTargetLevel   float64
+	StopMode        string
+	TargetMode      string
+	RejectReason    string
+	Reasons         []string
+	Confluence      map[string]float64
+	ConfluenceScore ConfluenceScore
+	RegimeTag       string
+	SignalSource    []string
+	Ts              time.Time
+}
+
+type ConfluenceScore struct {
+	TotalScore     float64
+	StrategyScore  float64
+	FlowScore      float64
+	StructureScore float64
+	Reasons        []string
+	Approved       bool
 }
 
 type Context struct {

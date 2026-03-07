@@ -23,7 +23,9 @@ import (
 	"go-machine/adapters/aster"
 	"go-machine/internal/data"
 	"go-machine/internal/discovery"
+	exitmgr "go-machine/internal/execution"
 	"go-machine/internal/features"
+	flowfeed "go-machine/internal/flow"
 	"go-machine/internal/gate"
 	"go-machine/internal/indicators"
 	"go-machine/internal/inplay"
@@ -146,28 +148,31 @@ type symbolMeta struct {
 }
 
 type paperPosition struct {
-	Symbol        string
-	Side          string
-	Entry         float64
-	Qty           float64 // remaining qty
-	InitialQty    float64
-	Margin        float64
-	Leverage      int
-	Stop          float64
-	TP1           float64
-	TP2           float64
-	TP3           float64
-	HitTP1        bool
-	HitTP2        bool
-	HitTP3        bool
-	TrailOn       bool
-	TrailStop     float64
-	TrailRef      float64
-	Realized      float64
-	OpenedAt      time.Time
-	MaxFavorableR float64
-	LastMark      float64
-	EntryReason   string
+	Symbol           string
+	Side             string
+	Entry            float64
+	Qty              float64 // remaining qty
+	InitialQty       float64
+	Margin           float64
+	Leverage         int
+	Stop             float64
+	TP1              float64
+	TP2              float64
+	TP3              float64
+	HitTP1           bool
+	HitTP2           bool
+	HitTP3           bool
+	TrailOn          bool
+	TrailStop        float64
+	TrailRef         float64
+	Realized         float64
+	OpenedAt         time.Time
+	MaxFavorableR    float64
+	MaxAdverseR      float64
+	LastMark         float64
+	EntryReason      string
+	OpposingFriction float64
+	StallBars        int
 }
 
 type paperTrader struct {
@@ -212,6 +217,7 @@ type paperTrader struct {
 	lossLock           time.Duration
 	eventLog           *stats.EventLogger
 	stressRoundtripBps float64
+	exitManager        *exitmgr.Manager
 }
 
 type paperDayStats struct {
@@ -293,6 +299,8 @@ type livePosition struct {
 	EntryVolumeUSD float64   `json:"entryVolumeUsd,omitempty"`
 	RegimeTag      string    `json:"regimeTag,omitempty"`
 	MaxFavorableR  float64   `json:"maxFavorableR,omitempty"`
+	MaxAdverseR    float64   `json:"maxAdverseR,omitempty"`
+	StallBars      int       `json:"stallBars,omitempty"`
 	LastMark       float64   `json:"lastMark,omitempty"`
 	RealizedPnL    float64   `json:"realizedPnl,omitempty"`
 }
@@ -333,6 +341,7 @@ type liveExecManager struct {
 	recoverStopBackoff   time.Duration
 	recoverATRMult       float64
 	recoverForceFlatFail bool
+	exitManager          *exitmgr.Manager
 }
 
 type liveExecSnapshot struct {
@@ -628,6 +637,8 @@ func main() {
 	inertiaFastN := envInt("LIVE_INERTIA_FAST_N", 3)
 	reversalTopLongN := envInt("LIVE_REVERSAL_TOP_LONG_N", 5)
 	reversalVolSpike := envFloat("LIVE_REVERSAL_VOL_SPIKE_MIN", 3.0)
+	flowFeedPath := envStr("LIVE_FLOW_FEED_FILE", "")
+	flowFeedTTL := time.Duration(envInt("LIVE_FLOW_FEED_TTL_SEC", 300)) * time.Second
 	if postSLCooldown < 0 {
 		postSLCooldown = 0
 	}
@@ -782,6 +793,7 @@ func main() {
 	if execMgr != nil {
 		execMgr.eventLog = eventLog
 	}
+	externalFlowFeed := flowfeed.NewFileFeed(flowFeedPath, flowFeedTTL)
 	for {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
@@ -888,11 +900,12 @@ func main() {
 		longInPlay := longTrk.Entries()
 		shortInPlay := shortTrk.Entries()
 		momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
+		externalFlow := externalFlowFeed.Snapshot(now)
 		if paper.enabled {
-			paper.ApplyMomentumExit(now, momBySymbol, metaBySymbol, paperDepth)
+			paper.ApplyMomentumExit(now, momBySymbol, metaBySymbol, paperDepth, externalFlow)
 		}
 		if execMgr != nil {
-			execMgr.ApplyMomentumExit(now, momBySymbol)
+			execMgr.ApplyMomentumExit(now, momBySymbol, externalFlow)
 		}
 		if preEODExitEnable {
 			dayKey := localMaintNow.Format("2006-01-02")
@@ -1183,6 +1196,29 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
+		if sig, ok := externalFlow[rawBest]; ok {
+			if sig.LiqSpike {
+				if (strings.EqualFold(best.Side, "BUY") && sig.FlowDelta < 0) || (strings.EqualFold(best.Side, "SELL") && sig.FlowDelta > 0) {
+					st.TopRejectReason = "external_liq_flow_against"
+					statusStore.Set(st)
+					eventLog.Emit(stats.Event{
+						Timestamp: now,
+						Type:      "GATE_DECISION",
+						Symbol:    rawBest,
+						Side:      best.Side,
+						Strategy:  best.Strat,
+						Score:     best.Entry.CurrentScore,
+						Slope:     best.Entry.ScoreSlope,
+						GateAllow: boolPtr(false),
+						GateReasons: []string{
+							"external_liq_flow_against",
+						},
+					})
+					waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+					continue
+				}
+			}
+		}
 		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
 			st.TopRejectReason = "POST_SL_COOLDOWN"
 			statusStore.Set(st)
@@ -1876,6 +1912,15 @@ func updateFavorableRLive(p *livePosition, mark float64) {
 	if fav > p.MaxFavorableR {
 		p.MaxFavorableR = fav
 	}
+	adv := 0.0
+	if strings.EqualFold(p.Side, "BUY") {
+		adv = (p.EntryPrice - mark) / risk
+	} else {
+		adv = (mark - p.EntryPrice) / risk
+	}
+	if adv > p.MaxAdverseR {
+		p.MaxAdverseR = adv
+	}
 }
 
 func updateFavorableRPaper(p *paperPosition, mark float64) {
@@ -1894,6 +1939,15 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	}
 	if fav > p.MaxFavorableR {
 		p.MaxFavorableR = fav
+	}
+	adv := 0.0
+	if strings.EqualFold(p.Side, "BUY") {
+		adv = (p.Entry - mark) / risk
+	} else {
+		adv = (mark - p.Entry) / risk
+	}
+	if adv > p.MaxAdverseR {
+		p.MaxAdverseR = adv
 	}
 }
 
@@ -2418,6 +2472,16 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		maxLossStreak:      maxLossStreak,
 		lossLock:           lossLock,
 		stressRoundtripBps: stressRoundtripBps,
+		exitManager: exitmgr.NewManager(exitmgr.Config{
+			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 8),
+			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.25),
+			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.70),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
+			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
+			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
+			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+		}),
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -2612,6 +2676,16 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager
 		recoverStopBackoff:   time.Duration(envInt("LIVE_RECOVERY_STOP_RETRY_SEC", 1)) * time.Second,
 		recoverATRMult:       envFloat("LIVE_RECOVERY_ATR_MULT", 1.5),
 		recoverForceFlatFail: envBool("LIVE_RECOVERY_FORCE_FLAT_ON_STOP_FAIL", true),
+		exitManager: exitmgr.NewManager(exitmgr.Config{
+			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 8),
+			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.25),
+			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.70),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
+			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
+			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
+			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+		}),
 	}
 	if m.entryTimeout <= 0 {
 		m.entryTimeout = 90 * time.Second
@@ -3303,6 +3377,11 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 	if p.RemainingQty > 0 {
 		mark, err := m.currentMark(p.Symbol)
 		if err == nil && mark > 0 {
+			if p.LastMark > 0 && abs(mark-p.LastMark)/maxFloat(p.EntryPrice, 1e-9) < 0.0006 {
+				p.StallBars++
+			} else {
+				p.StallBars = 0
+			}
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
@@ -3322,6 +3401,45 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			}
 			if updated {
 				changed = true
+			}
+			if m.exitManager != nil {
+				mv := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+					Side:          p.Side,
+					Entry:         p.EntryPrice,
+					Stop:          p.StopPrice,
+					Mark:          mark,
+					MFER:          p.MaxFavorableR,
+					MAER:          p.MaxAdverseR,
+					BarsHeld:      int(now.Sub(p.CreatedAt) / time.Minute),
+					StallBars:     p.StallBars,
+					NearFriction:  p.VPTargetLevel > 0 && abs(mark-p.VPTargetLevel)/maxFloat(mark, 1e-9) < 0.002,
+					UnrealizedPct: abs((mark-p.EntryPrice)/maxFloat(p.EntryPrice, 1e-9)) * 100,
+				})
+				if mv.MoveStopToBE {
+					be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
+						p.StopPrice = be
+						_ = m.placeOrReplaceStop(p)
+						changed = true
+					}
+				}
+				if mv.TightenStop {
+					if (strings.EqualFold(p.Side, "BUY") && mv.TightenToPrice > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && mv.TightenToPrice < p.StopPrice) {
+						p.StopPrice = mv.TightenToPrice
+						_ = m.placeOrReplaceStop(p)
+						changed = true
+					}
+				}
+				if mv.FullExit {
+					_ = m.cancelRemainingExits(p)
+					if err := m.closeSymbolMarket(p.Symbol); err == nil {
+						p.State = execClosed
+						p.CloseReason = mv.Reason
+						p.ClosedAt = now
+						p.UpdatedAt = now
+						changed = true
+					}
+				}
 			}
 		}
 	}
@@ -3517,6 +3635,11 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
 		p.TP3Price = p.EntryPrice * (1 - stopPct*tp3R)
 	}
+	if m.exitManager != nil {
+		p.TP1Price = m.exitManager.FrontRunTarget(p.Side, p.TP1Price, p.VPTargetLevel)
+		p.TP2Price = m.exitManager.FrontRunTarget(p.Side, p.TP2Price, p.VPTargetLevel)
+		p.TP3Price = m.exitManager.FrontRunTarget(p.Side, p.TP3Price, p.VPTargetLevel)
+	}
 	p.TP1Price, p.TP2Price, p.TP3Price = enforceTPProgression(p.Side, p.TP1Price, p.TP2Price, p.TP3Price)
 	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
 		return fmt.Errorf("invalid bracket levels stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f",
@@ -3643,15 +3766,15 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if strings.EqualFold(p.Side, "SELL") {
 		closeSide = "BUY"
 	}
-	vals := url.Values{}
-	vals.Set("symbol", p.Symbol)
-	vals.Set("side", closeSide)
-	vals.Set("type", "STOP_MARKET")
-	vals.Set("positionSide", "BOTH")
-	vals.Set("reduceOnly", "true")
-	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
-	vals.Set("stopPrice", formatFloat(stopPx, meta.PricePrecision))
-	out, err := m.rest.PlaceOrder(vals)
+	out, err := m.rest.ReplaceStopOrder(
+		p.Symbol,
+		closeSide,
+		p.StopOrderID,
+		qty,
+		stopPx,
+		meta.QtyPrecision,
+		meta.PricePrecision,
+	)
 	if err != nil {
 		return err
 	}
@@ -3810,7 +3933,7 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 	return nil
 }
 
-func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView) {
+func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView, ext map[string]flowfeed.ExternalSignal) {
 	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(m.positions) == 0 {
 		return
 	}
@@ -3844,6 +3967,36 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 		if upct < minUpnlPct {
 			continue
+		}
+		if m.exitManager != nil {
+			dec := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+				Side:          p.Side,
+				Entry:         p.EntryPrice,
+				Stop:          p.StopPrice,
+				Mark:          mark,
+				MFER:          p.MaxFavorableR,
+				MAER:          p.MaxAdverseR,
+				BarsHeld:      int(now.Sub(p.CreatedAt) / time.Minute),
+				StallBars:     p.StallBars,
+				WeakFlow:      shouldExitOnMomentumFade(p.Side, mv, slopeMax),
+				LiqSpike:      ext[sym].LiqSpike,
+				UnrealizedPct: upct,
+			})
+			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
+				q := p.RemainingQty * dec.PartialExitPct
+				if q > 0 && q < p.RemainingQty {
+					if err := m.closeSymbolMarketQty(sym, q); err == nil {
+						p.RemainingQty -= q
+					}
+				}
+			}
+			if dec.MoveStopToBE {
+				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
+					p.StopPrice = be
+					_ = m.placeOrReplaceStop(p)
+				}
+			}
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 		dayRealized := m.addDayRealized(now, pnl)
@@ -3952,6 +4105,49 @@ func (m *liveExecManager) closeSymbolMarket(symbol string) error {
 		if _, err := m.rest.PlaceOrder(vals); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (m *liveExecManager) closeSymbolMarketQty(symbol string, qty float64) error {
+	if qty <= 0 {
+		return nil
+	}
+	rows, err := m.rest.PositionRisk(symbol)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		amt := mapFloat(row["positionAmt"])
+		if amt == 0 {
+			continue
+		}
+		side := "SELL"
+		if amt < 0 {
+			side = "BUY"
+		}
+		meta, err := m.rest.SymbolMeta(symbol, true)
+		if err != nil {
+			return err
+		}
+		q, _, err := m.rest.RoundQty(symbol, min(abs(amt), qty))
+		if err != nil {
+			return err
+		}
+		if q <= 0 {
+			continue
+		}
+		vals := url.Values{}
+		vals.Set("symbol", symbol)
+		vals.Set("side", side)
+		vals.Set("type", "MARKET")
+		vals.Set("positionSide", "BOTH")
+		vals.Set("reduceOnly", "true")
+		vals.Set("quantity", formatFloat(q, meta.QtyPrecision))
+		if _, err := m.rest.PlaceOrder(vals); err != nil {
+			return err
+		}
+		return nil
 	}
 	return nil
 }
@@ -4321,6 +4517,11 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		tp2 = entry * (1 - tp2Pct)
 		tp3 = entry * (1 - tp3Pct)
 	}
+	if p.exitManager != nil {
+		tp1 = p.exitManager.FrontRunTarget(c.Side, tp1, c.Sig.VPTargetLevel)
+		tp2 = p.exitManager.FrontRunTarget(c.Side, tp2, c.Sig.VPTargetLevel)
+		tp3 = p.exitManager.FrontRunTarget(c.Side, tp3, c.Sig.VPTargetLevel)
+	}
 	tp1, tp2, tp3 = enforceTPProgression(c.Side, tp1, tp2, tp3)
 	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
 		return nil, fmt.Errorf("invalid paper bracket levels")
@@ -4332,20 +4533,21 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	p.balance -= entryFee
 	pos := &paperPosition{
-		Symbol:      raw,
-		Side:        strings.ToUpper(c.Side),
-		Entry:       entry,
-		Qty:         qty,
-		InitialQty:  qty,
-		Margin:      margin,
-		Leverage:    lev,
-		Stop:        stop,
-		TP1:         tp1,
-		TP2:         tp2,
-		TP3:         tp3,
-		TrailRef:    entry,
-		OpenedAt:    now,
-		EntryReason: c.Strat,
+		Symbol:           raw,
+		Side:             strings.ToUpper(c.Side),
+		Entry:            entry,
+		Qty:              qty,
+		InitialQty:       qty,
+		Margin:           margin,
+		Leverage:         lev,
+		Stop:             stop,
+		TP1:              tp1,
+		TP2:              tp2,
+		TP3:              tp3,
+		TrailRef:         entry,
+		OpenedAt:         now,
+		EntryReason:      c.Strat,
+		OpposingFriction: c.Sig.VPTargetLevel,
 	}
 	p.positions[raw] = pos
 	_ = p.save()
@@ -4375,6 +4577,11 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		sideBuy := strings.EqualFold(pos.Side, "BUY")
 		mark := m.LastPrice
+		if pos.LastMark > 0 && abs(mark-pos.LastMark)/maxFloat(pos.Entry, 1e-9) < 0.0006 {
+			pos.StallBars++
+		} else {
+			pos.StallBars = 0
+		}
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
@@ -4385,6 +4592,41 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				pos.Stop = be
 			}
 		}
+		frTP1 := pos.TP1
+		frTP2 := pos.TP2
+		frTP3 := pos.TP3
+		if p.exitManager != nil {
+			frTP1 = p.exitManager.FrontRunTarget(pos.Side, pos.TP1, pos.OpposingFriction)
+			frTP2 = p.exitManager.FrontRunTarget(pos.Side, pos.TP2, pos.OpposingFriction)
+			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
+			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+				Side:          pos.Side,
+				Entry:         pos.Entry,
+				Stop:          pos.Stop,
+				Mark:          mark,
+				MFER:          pos.MaxFavorableR,
+				MAER:          pos.MaxAdverseR,
+				BarsHeld:      int(now.Sub(pos.OpenedAt) / time.Minute),
+				StallBars:     pos.StallBars,
+				NearFriction:  p.hitPrice(sideBuy, mark, pos.OpposingFriction),
+				UnrealizedPct: abs((mark-pos.Entry)/maxFloat(pos.Entry, 1e-9)) * 100,
+			})
+			if dec.MoveStopToBE {
+				be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
+					pos.Stop = be
+				}
+			}
+			if dec.TightenStop {
+				if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
+					pos.Stop = dec.TightenToPrice
+				}
+			}
+			if dec.FullExit {
+				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, meta[raw], depth[raw])
+				continue
+			}
+		}
 
 		// 1) Hard stop has highest priority.
 		if (sideBuy && mark <= pos.Stop) || (!sideBuy && mark >= pos.Stop) {
@@ -4393,9 +4635,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 
 		// 2) Scale-out targets.
-		if !pos.HitTP1 && p.hitPrice(sideBuy, mark, pos.TP1) {
+		if !pos.HitTP1 && p.hitPrice(sideBuy, mark, frTP1) {
 			q := p.targetQty(pos.InitialQty, p.tp1Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP1", pos.TP1, q, meta[raw], depth[raw])
+			p.exitPortion(now, pos, "TP1", frTP1, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -4408,9 +4650,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		if pos == nil {
 			continue
 		}
-		if !pos.HitTP2 && p.hitPrice(sideBuy, mark, pos.TP2) {
+		if !pos.HitTP2 && p.hitPrice(sideBuy, mark, frTP2) {
 			q := p.targetQty(pos.InitialQty, p.tp2Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP2", pos.TP2, q, meta[raw], depth[raw])
+			p.exitPortion(now, pos, "TP2", frTP2, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -4425,9 +4667,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		if pos == nil {
 			continue
 		}
-		if !pos.HitTP3 && p.hitPrice(sideBuy, mark, pos.TP3) {
+		if !pos.HitTP3 && p.hitPrice(sideBuy, mark, frTP3) {
 			q := p.targetQty(pos.InitialQty, p.tp3Frac, pos.Qty)
-			p.exitPortion(now, pos, "TP3", pos.TP3, q, meta[raw], depth[raw])
+			p.exitPortion(now, pos, "TP3", frTP3, q, meta[raw], depth[raw])
 			pos = p.positions[raw]
 			if pos == nil {
 				continue
@@ -4461,7 +4703,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 	}
 }
 
-func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook) {
+func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook, ext map[string]flowfeed.ExternalSignal) {
 	if p == nil || !p.enabled || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(p.positions) == 0 {
 		return
 	}
@@ -4495,6 +4737,40 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		_, upnlPct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		if upnlPct < minUpnlPct {
 			continue
+		}
+		if p.exitManager != nil {
+			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+				Side:          pos.Side,
+				Entry:         pos.Entry,
+				Stop:          pos.Stop,
+				Mark:          mark,
+				MFER:          pos.MaxFavorableR,
+				MAER:          pos.MaxAdverseR,
+				BarsHeld:      int(now.Sub(pos.OpenedAt) / time.Minute),
+				StallBars:     pos.StallBars,
+				WeakFlow:      shouldExitOnMomentumFade(pos.Side, mv, slopeMax),
+				LiqSpike:      ext[raw].LiqSpike,
+				UnrealizedPct: upnlPct,
+			})
+			if dec.MoveStopToBE {
+				be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+				if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
+					pos.Stop = be
+				}
+			}
+			if dec.PartialExitPct > 0 && pos.Qty > 0 {
+				q := pos.Qty * dec.PartialExitPct
+				if q > 0 && q < pos.Qty {
+					p.exitPortion(now, pos, "SOFT_LIQ_SPIKE_PARTIAL", mark, q, m, depth[raw])
+					changed = true
+					continue
+				}
+			}
+			if dec.FullExit {
+				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])
+				changed = true
+				continue
+			}
 		}
 		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
 		changed = true
@@ -5266,6 +5542,9 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if !allow(e) {
 			continue
 		}
+		if e.State == inplay.StateExhausted {
+			continue
+		}
 		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
 			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
@@ -5285,6 +5564,9 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	}
 	for _, e := range shortInPlay {
 		if !allow(e) {
+			continue
+		}
+		if e.State == inplay.StateExhausted {
 			continue
 		}
 		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
@@ -5424,6 +5706,9 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		UseSessionRegimeRisk:      true,
 		AllowDeadZoneOnlyAPlus:    true,
 		MinConfluenceScore:        0.58,
+		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
+		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
+		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
 		RejectIfTargetTooClosePct: vpMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(stopMode),

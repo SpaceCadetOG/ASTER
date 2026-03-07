@@ -309,6 +309,9 @@ LIVE_INERTIA_SLOW_SLOPE_MIN=0.5
 LIVE_INERTIA_FAST_SLOPE_MAX=-1.0
 LIVE_INERTIA_SLOW_N=15
 LIVE_INERTIA_FAST_N=3
+LIVE_CONFLUENCE_STRATEGY_WEIGHT=0.50
+LIVE_CONFLUENCE_FLOW_WEIGHT=0.30
+LIVE_CONFLUENCE_STRUCTURE_WEIGHT=0.20
 LIVE_MOMENTUM_EXIT_ENABLE=1
 LIVE_MOMENTUM_EXIT_SLOPE_MAX=0.0
 LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN=10
@@ -323,6 +326,16 @@ LIVE_PAPER_FUNDING_INTERVAL_MIN=480
 LIVE_PAPER_FUNDING_INTERVALS=BTCUSDT:480,ETHUSDT:480
 LIVE_PAPER_OPEN_COST_MODE=aster
 PAPER_STRESS_BPS_ROUNDTRIP=6
+LIVE_TP_FRONT_RUN_PCT=0.001
+LIVE_EXIT_NO_FT_BARS=8
+LIVE_EXIT_NO_FT_MIN_MFE_R=0.25
+LIVE_EXIT_NO_FT_MIN_MAE_R=0.70
+LIVE_EXIT_WEAK_FLOW_BE_R=0.45
+LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT=0.35
+LIVE_EXIT_STALL_BARS=3
+LIVE_EXIT_STALL_TIGHTEN_TO_R=0.20
+LIVE_FLOW_FEED_FILE=out/flow_signals.json
+LIVE_FLOW_FEED_TTL_SEC=300
 LIVE_PAYOUT_ENABLE=1
 LIVE_PAYOUT_MODE=telegram_alert
 LIVE_PAYOUT_CYCLE_DAYS=1
@@ -370,6 +383,8 @@ Paper continuity:
 - Live fills are journaled to `LIVE_TRADES_FILE`; enable second per-fill Telegram receipt with `LIVE_TG_FILL_RECEIPT_ENABLE=1`.
 - Reject reasons now include: `POST_SL_COOLDOWN`, `STATE_INERTIA_KILL`, `VWAP_EMA_LONG_INVALIDATION`, `DEAD_SESSION_BLOCK`, and `PRE_EOD_ENTRY_BLOCK`.
 - Boot reconciliation emits `ORPHAN_RECOVERED`, `EMERGENCY_STOP_ATTACHED`, and `RECOVERY_FORCE_FLAT` (fallback) when applicable.
+- Exit management is centralized with context-aware soft protection (no-follow-through exits, BE upgrades, liquidity-spike partials, and TP front-running vs VP friction).
+- Optional external flow/liquidation integration path is file-based (`LIVE_FLOW_FEED_FILE`) to cleanly consume outputs from separate stream modules (`oflow`, `whale`, `liqs`, `tape`) without direct hard coupling.
 - To avoid state resets across different working directories, set `LIVE_STATE_DIR` to a stable absolute path (example: `/opt/aster/state`).
 - Telegram command handlers:
   - `/help`
