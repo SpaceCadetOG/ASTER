@@ -521,7 +521,10 @@ func main() {
 		if nClosed, nImported, err := execMgr.ReconcileBootState(); err != nil {
 			fmt.Println("live-lite: boot reconcile warning:", err)
 		} else if nClosed > 0 || nImported > 0 {
-			tg.Sendf("boot reconcile complete\nclosed_local=%d imported_remote=%d", nClosed, nImported)
+			tg.Sendf("%s", notify.BuildEventHTML("🧩", "BOOT RECONCILE COMPLETE",
+				fmt.Sprintf("<b>Closed local:</b> %d", nClosed),
+				fmt.Sprintf("<b>Imported remote:</b> %d", nImported),
+			))
 		}
 	}
 	statusStore := newLiveLiteStatusStore()
@@ -726,10 +729,14 @@ func main() {
 		fmt.Printf("payout: mode=%s cycle=%dd anchor=%02d:%02d deadline=%dm tz=%s\n",
 			payoutMgr.mode, payoutMgr.cycleDays, payoutMgr.anchorHour, payoutMgr.anchorMin, payoutMgr.deadlineMin, payoutMgr.loc.String())
 	}
-	tg.Sendf("live-lite started\nscan=%s dry_run=%v min_grade=%s digest=%s maint=%s/%s",
-		scanEvery, dryRun, strings.ToUpper(minGrade), digestEvery,
-		fmt.Sprintf("%02d:%02d-%02d:%02d", maintMidnight.StartHour, maintMidnight.StartMin, maintMidnight.EndHour, maintMidnight.EndMin),
-		fmt.Sprintf("%02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin))
+	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE-LITE STARTED",
+		fmt.Sprintf("<b>Scan:</b> %s", scanEvery),
+		fmt.Sprintf("<b>Dry Run:</b> %v", dryRun),
+		fmt.Sprintf("<b>Min Grade:</b> %s", strings.ToUpper(minGrade)),
+		fmt.Sprintf("<b>Digest:</b> %s", digestEvery),
+		fmt.Sprintf("<b>Maint M1:</b> %02d:%02d-%02d:%02d", maintMidnight.StartHour, maintMidnight.StartMin, maintMidnight.EndHour, maintMidnight.EndMin),
+		fmt.Sprintf("<b>Maint M2:</b> %02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin),
+	))
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
 	if reconEvery <= 0 {
@@ -831,7 +838,10 @@ func main() {
 			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
 				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyReportDay {
-					tg.Sendf("EOD Daily Dispatch (%s) at %s", dayKey, localNow.Format("15:04 MST"))
+					tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
+						fmt.Sprintf("<b>Day:</b> %s", dayKey),
+						fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
+					))
 					if msg, ok := paper.DailyReportMessage(dayKey); ok {
 						tg.Sendf("%s", msg)
 					}
@@ -958,7 +968,10 @@ func main() {
 						}
 						msg := fmt.Sprintf("KILL_SWITCH daily loss hit: eq=%.4f start=%.4f limit=%.4f", eq, dayStartEq[dayKey], minEq)
 						fmt.Println("live-lite:", msg)
-						tg.Sendf("%s", msg)
+						tg.Sendf("%s", notify.BuildEventHTML("🛑", "KILL SWITCH",
+							fmt.Sprintf("<b>Equity:</b> %.4f", eq),
+							fmt.Sprintf("<b>Start:</b> %.4f | <b>Limit:</b> %.4f", dayStartEq[dayKey], minEq),
+						))
 					}
 				}
 			}
@@ -970,22 +983,22 @@ func main() {
 			dayKey := localMaintNow.Format("2006-01-02")
 			if maintState.LastStartDay[maintWindow.Name] != dayKey {
 				maintState.LastStartDay[maintWindow.Name] = dayKey
-				tg.Sendf("maintenance start %s\nwindow=%02d:%02d-%02d:%02d %s\nsession=%s",
-					maintWindow.Name,
-					maintWindow.StartHour, maintWindow.StartMin,
-					maintWindow.EndHour, maintWindow.EndMin,
-					maintLoc.String(),
-					sessionTag(localMaintNow))
+				tg.Sendf("%s", notify.BuildEventHTML("🛠️", "MAINTENANCE START",
+					fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+					fmt.Sprintf("<b>Range:</b> %02d:%02d-%02d:%02d %s",
+						maintWindow.StartHour, maintWindow.StartMin, maintWindow.EndHour, maintWindow.EndMin, maintLoc.String()),
+					fmt.Sprintf("<b>Session:</b> %s", sessionTag(localMaintNow)),
+				))
 				if paper.enabled && tg != nil && tg.Enabled() {
 					switch maintWindow.Name {
 					case "M1":
 						if lastM1ReportDay != dayKey {
-							tg.Sendf("%s", tgPre(buildWindowReport("M1 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+							tg.Sendf("%s", buildWindowReport("M1 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
 							lastM1ReportDay = dayKey
 						}
 					case "M2":
 						if lastM2ReportDay != dayKey {
-							tg.Sendf("%s", tgPre(buildWindowReport("EOD/M2 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
+							tg.Sendf("%s", buildWindowReport("EOD/M2 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
 							lastM2ReportDay = dayKey
 						}
 					}
@@ -1003,14 +1016,21 @@ func main() {
 					paper.ForceCloseAll(now, metaBySymbol, paperDepth, "EOD_FORCE_FLAT")
 					_ = paper.save()
 				}
-				tg.Sendf("maintenance flat complete %s", maintWindow.Name)
+				tg.Sendf("%s", notify.BuildEventHTML("✅", "MAINTENANCE FLAT COMPLETE",
+					fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+				))
 			}
 			if maintWindow.HookPath != "" && maintState.HookDoneDay[maintWindow.Name] != dayKey {
 				maintState.HookDoneDay[maintWindow.Name] = dayKey
 				if err := runMaintenanceHook(maintWindow.HookPath, maintWindow.HookTO); err != nil {
-					tg.Sendf("maintenance hook error %s\n%v", maintWindow.Name, err)
+					tg.Sendf("%s", notify.BuildEventHTML("❌", "MAINTENANCE HOOK ERROR",
+						fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+						fmt.Sprintf("<b>Error:</b> %v", err),
+					))
 				} else {
-					tg.Sendf("maintenance hook complete %s", maintWindow.Name)
+					tg.Sendf("%s", notify.BuildEventHTML("✅", "MAINTENANCE HOOK COMPLETE",
+						fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+					))
 				}
 			}
 		} else {
@@ -1019,7 +1039,11 @@ func main() {
 				if maintState.LastStartDay[w.Name] == dayKey && maintState.LastEndDay[w.Name] != dayKey {
 					maintState.LastEndDay[w.Name] = dayKey
 					maintState.LastEndAt[w.Name] = localMaintNow
-					tg.Sendf("maintenance end %s\ntrading resumed\nsession=%s", w.Name, sessionTag(localMaintNow))
+					tg.Sendf("%s", notify.BuildEventHTML("🟢", "MAINTENANCE END",
+						fmt.Sprintf("<b>Window:</b> %s", w.Name),
+						"<b>Trading:</b> resumed",
+						fmt.Sprintf("<b>Session:</b> %s", sessionTag(localMaintNow)),
+					))
 				}
 			}
 		}
@@ -1171,9 +1195,12 @@ func main() {
 			best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
-			tg.Sendf("top %s %s | g=%s s=%.2f slope=%+.3f rank=%.2f | %s conf=%.2f",
-				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, best.Entry.CurrentGrade,
-				best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
+			tg.Sendf("%s", notify.BuildEventHTML("🎯", "TOP CANDIDATE",
+				fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+				fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
+				fmt.Sprintf("<b>Slope:</b> %+.3f | <b>Rank:</b> %.2f", best.Entry.ScoreSlope, best.Entry.Rank),
+				fmt.Sprintf("<b>Setup:</b> <code>%s</code> | <b>Conf:</b> %.2f", best.Strat, best.Conf),
+			))
 			lastTopKey = topKey
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
@@ -1420,8 +1447,11 @@ func main() {
 				}
 			}
 			if tgVerbose {
-				tg.Sendf("DRY_RUN intent %s %s margin=$%.2f grade=%s score=%.2f",
-					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveMargin, best.Entry.CurrentGrade, best.Entry.CurrentScore)
+				tg.Sendf("%s", notify.BuildEventHTML("🧪", "DRY RUN INTENT",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
+					fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
+				))
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1442,7 +1472,10 @@ func main() {
 				statusStore.Set(st)
 				fmt.Println("live-lite: safety skip:", reason)
 				if tgVerbose {
-					tg.Sendf("safety skip %s %s: %s", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, reason)
+					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
+						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+						fmt.Sprintf("<b>Reason:</b> %s", reason),
+					))
 				}
 				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 				continue
@@ -1466,7 +1499,7 @@ func main() {
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
 				fmt.Println("live-lite:", msg)
-				tg.Sendf("%s", msg)
+				tg.Sendf("%s", notify.BuildEventHTML("⏳", "SHADOW GATE ACTIVE", fmt.Sprintf("<b>Requirement:</b> %s", msg)))
 				shadowWarnAt = now
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
@@ -1491,8 +1524,10 @@ func main() {
 		if avail < safety.minAvailUSDT {
 			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
 			if tgVerbose {
-				tg.Sendf("safety skip %s %s: available %.4f < min %.4f",
-					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, avail, safety.minAvailUSDT)
+				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Available:</b> %.4f < <b>Min:</b> %.4f", avail, safety.minAvailUSDT),
+				))
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1507,8 +1542,10 @@ func main() {
 		if usable < effectiveMargin {
 			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
-				tg.Sendf("skip %s %s: usable %.4f < margin %.4f",
-					strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, usable, effectiveMargin)
+				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Usable:</b> %.4f | <b>Required Margin:</b> %.4f", usable, effectiveMargin),
+				))
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1516,7 +1553,10 @@ func main() {
 		if !pureMode && reserveGate != nil && reserveGate.block(baseBal) {
 			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
-				tg.Sendf("reserve lock: base %.2f below threshold, entries paused until reserve recovers", baseBal)
+				tg.Sendf("%s", notify.BuildEventHTML("🔒", "RESERVE LOCK ACTIVE",
+					fmt.Sprintf("<b>Base:</b> %.2f below threshold", baseBal),
+					"<b>Entries:</b> paused until reserve recovers",
+				))
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1535,7 +1575,10 @@ func main() {
 		if openCount >= maxOpenPos {
 			fmt.Printf("live-lite: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
-				tg.Sendf("skip %s %s: open positions=%d max=%d", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, openCount, maxOpenPos)
+				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Open:</b> %d | <b>Max:</b> %d", openCount, maxOpenPos),
+				))
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1589,7 +1632,10 @@ func main() {
 				Reason:    err.Error(),
 			})
 			if tgVerbose {
-				tg.Sendf("order error %s %s\n%v", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, err)
+				tg.Sendf("%s", notify.BuildEventHTML("❌", "ORDER ERROR",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Error:</b> %v", err),
+				))
 			}
 		} else {
 			eventLog.Emit(stats.Event{
@@ -1610,8 +1656,11 @@ func main() {
 			hourKey := time.Now().UTC().Format("2006-01-02T15")
 			orderCountByDay[dayKey]++
 			orderCountByHour[hourKey]++
-			tg.Sendf("order placed %s %s\nmargin=$%.2f grade=%s",
-				strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveMargin, best.Entry.CurrentGrade)
+			tg.Sendf("%s", notify.BuildEventHTML("✅", "ORDER PLACED",
+				fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+				fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
+				fmt.Sprintf("<b>Grade:</b> %s", best.Entry.CurrentGrade),
+			))
 		}
 
 		waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
@@ -1623,59 +1672,16 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 		return
 	}
 	now := time.Now().UTC()
-	var b strings.Builder
 	mode := "LIVE"
 	if dryRun {
 		mode = "DRY_RUN"
 	}
-	fmt.Fprintf(&b, "Live-Lite Digest (%s) %s UTC regime=%s\n", mode, now.Format("15:04"), data.CurrentRegimeCT(now))
-	appendList := func(tag string, rows []inplay.Entry) {
-		fmt.Fprintf(&b, "\n%s (%d)\n", tag, len(rows))
-		if len(rows) == 0 {
-			b.WriteString("- none\n")
-			return
-		}
-		n := len(rows)
-		if n > limit {
-			n = limit
-		}
-		for i := 0; i < n; i++ {
-			e := rows[i]
-			fs := e.FirstSeen.UTC().Format("15:04")
-			raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
-			m := meta[raw]
-			price := "n/a"
-			move := "0.00%"
-			status := string(e.State)
-			switch e.State {
-			case inplay.StateInPlay:
-				status = "IN_PLAY"
-			case inplay.StateHeating:
-				status = "HEATING"
-			case inplay.StateCooling:
-				status = "COOLING"
-			case inplay.StatePumping:
-				status = "PUMPING"
-			case inplay.StateDumping:
-				status = "DUMPING"
-			}
-			slopeArrow := "→"
-			if e.ScoreSlope > 0 {
-				slopeArrow = "↑"
-			} else if e.ScoreSlope < 0 {
-				slopeArrow = "↓"
-			}
-			if m.LastPrice > 0 {
-				price = fmtPrice(m.LastPrice)
-			}
-			move = fmt.Sprintf("%+.2f%%", m.Move24h)
-			fmt.Fprintf(&b, "%d) %s %s g=%s s=%.2f %s%.3f\n", i+1, raw, status, e.CurrentGrade, e.CurrentScore, slopeArrow, abs(e.ScoreSlope))
-			fmt.Fprintf(&b, "   px=%s 24h=%s seen=%s\n", price, move, fs)
-		}
-	}
-	appendList("LONG", longInPlay)
-	appendList("SHORT", shortInPlay)
-	tg.Sendf("%s", strings.TrimSpace(b.String()))
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, maxInt(1, limit))
+	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE-LITE DIGEST",
+		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
+		fmt.Sprintf("<b>Regime:</b> %s", data.CurrentRegimeCT(now)),
+		notify.BuildScannerSnapshotHTML(longTop, shortTop, bias),
+	))
 }
 
 func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
@@ -3095,7 +3101,10 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		}
 		m.positions[sym] = p
 		if m.tg != nil {
-			m.tg.Sendf("ORPHAN_RECOVERED %s %s\nqty=%.6f entry=%s", p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice))
+			m.tg.Sendf("%s", notify.BuildEventHTML("🧩", "ORPHAN RECOVERED",
+				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
+			))
 		}
 		attachErr := m.placeOrReplaceStopWithRetry(p)
 		if attachErr != nil && m.recoverForceFlatFail {
@@ -3105,11 +3114,17 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 				p.ClosedAt = now
 				p.UpdatedAt = now
 				if m.tg != nil {
-					m.tg.Sendf("RECOVERY_FORCE_FLAT %s %s\nreason=stop_attach_failed", p.Symbol, p.Side)
+					m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "RECOVERY FORCE FLAT",
+						fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+						"<b>Reason:</b> stop_attach_failed",
+					))
 				}
 			}
 		} else if attachErr == nil && m.tg != nil {
-			m.tg.Sendf("EMERGENCY_STOP_ATTACHED %s %s\nstop=%s", p.Symbol, p.Side, fmtPrice(p.StopPrice))
+			m.tg.Sendf("%s", notify.BuildEventHTML("🛟", "EMERGENCY STOP ATTACHED",
+				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+				fmt.Sprintf("<b>Stop:</b> %s", fmtPrice(p.StopPrice)),
+			))
 		}
 		importedRemote++
 	}
@@ -3376,8 +3391,11 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	fmt.Printf("live-lite: entry submitted %s %s qty=%s px=%s orderId=%d\n",
 		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID)
 	if m.tg != nil {
-		m.tg.Sendf("entry submitted %s %s\nqty=%s limit=%s id=%d",
-			rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID)
+		m.tg.Sendf("%s", notify.BuildEventHTML("📨", "ENTRY SUBMITTED",
+			fmt.Sprintf("<b>%s %s</b>", rawSym, p.Side),
+			fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
+			fmt.Sprintf("<b>Order ID:</b> %d", orderID),
+		))
 	}
 	return nil
 }
@@ -3438,8 +3456,11 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		}
 		fmt.Printf("live-lite: entry filled %s qty=%.6f avg=%.6f\n", p.Symbol, p.FilledQty, p.EntryPrice)
 		if m.tg != nil {
-			m.tg.Sendf("entry filled %s %s\nqty=%.6f avg=%s reason=%s conf=%.2f",
-				p.Symbol, p.Side, p.FilledQty, fmtPrice(p.EntryPrice), p.EntryReason, p.EntryConf)
+			m.tg.Sendf("%s", notify.BuildEventHTML("✅", "ENTRY FILLED",
+				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Avg:</b> %s", p.FilledQty, fmtPrice(p.EntryPrice)),
+				fmt.Sprintf("<b>Setup:</b> <code>%s</code> | <b>Conf:</b> %.2f", p.EntryReason, p.EntryConf),
+			))
 		}
 		_ = m.logFill(now, p, "ENTRY", "ENTRY_FILLED", p.FilledQty, p.EntryPrice, 0, 0)
 		m.sendFillReceipt(now, p, "ENTRY", "ENTRY_FILLED", p.FilledQty, p.EntryPrice, 0, 0)
@@ -3453,7 +3474,10 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 		p.UpdatedAt = now
 		fmt.Printf("live-lite: entry timeout/canceled %s orderId=%d\n", p.Symbol, p.EntryOrderID)
 		if m.tg != nil {
-			m.tg.Sendf("entry timeout %s\nid=%d", p.Symbol, p.EntryOrderID)
+			m.tg.Sendf("%s", notify.BuildEventHTML("⌛", "ENTRY TIMEOUT",
+				fmt.Sprintf("<b>%s</b>", p.Symbol),
+				fmt.Sprintf("<b>Order ID:</b> %d", p.EntryOrderID),
+			))
 		}
 		_ = m.logFill(now, p, "ENTRY", "ENTRY_TIMEOUT", 0, 0, 0, 0)
 		m.sendFillReceipt(now, p, "ENTRY", "ENTRY_TIMEOUT", 0, 0, 0, 0)
@@ -3564,7 +3588,10 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			p.ClosedAt = now
 			p.UpdatedAt = now
 			if m.tg != nil {
-				m.tg.Sendf("position closed %s\nreason=%s", p.Symbol, p.CloseReason)
+				m.tg.Sendf("%s", notify.BuildEventHTML("📪", "POSITION CLOSED",
+					fmt.Sprintf("<b>%s</b>", p.Symbol),
+					fmt.Sprintf("<b>Reason:</b> %s", p.CloseReason),
+				))
 			}
 			px := p.LastMark
 			if px <= 0 {
@@ -3602,8 +3629,11 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("tp1 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP1_HIT dayRealized=%+.2f",
-					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
+				m.tg.Sendf("%s", notify.BuildEventHTML("✅", "TP1 HIT",
+					fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", execQty, fmtPrice(fillPx)),
+					fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+				))
 			}
 			_ = m.logFill(now, p, "TP", "TP1_HIT", execQty, fillPx, pnl, pct)
 			m.sendFillReceipt(now, p, "TP", "TP1_HIT", execQty, fillPx, pnl, pct)
@@ -3628,8 +3658,11 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 				return true, err
 			}
 			if m.tg != nil {
-				m.tg.Sendf("tp2 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP2_HIT dayRealized=%+.2f",
-					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
+				m.tg.Sendf("%s", notify.BuildEventHTML("✅", "TP2 HIT",
+					fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", execQty, fmtPrice(fillPx)),
+					fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+				))
 			}
 			_ = m.logFill(now, p, "TP", "TP2_HIT", execQty, fillPx, pnl, pct)
 			m.sendFillReceipt(now, p, "TP", "TP2_HIT", execQty, fillPx, pnl, pct)
@@ -3650,8 +3683,11 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			dayRealized := m.addDayRealized(now, pnl)
 			m.maybeEnableTrail(p, 3)
 			if m.tg != nil {
-				m.tg.Sendf("tp3 hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=TP3_HIT dayRealized=%+.2f",
-					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
+				m.tg.Sendf("%s", notify.BuildEventHTML("✅", "TP3 HIT",
+					fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", execQty, fmtPrice(fillPx)),
+					fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+				))
 			}
 			_ = m.logFill(now, p, "TP", "TP3_HIT", execQty, fillPx, pnl, pct)
 			m.sendFillReceipt(now, p, "TP", "TP3_HIT", execQty, fillPx, pnl, pct)
@@ -3675,8 +3711,11 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 			p.RealizedPnL += pnl
 			dayRealized := m.addDayRealized(now, pnl)
 			if m.tg != nil {
-				m.tg.Sendf("stop hit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=STOP_HIT dayRealized=%+.2f",
-					p.Symbol, p.Side, execQty, fmtPrice(fillPx), pnl, pct, dayRealized)
+				m.tg.Sendf("%s", notify.BuildEventHTML("🛑", "STOP HIT",
+					fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", execQty, fmtPrice(fillPx)),
+					fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+				))
 			}
 			_ = m.logFill(now, p, "STOP", "STOP_HIT", execQty, fillPx, pnl, pct)
 			m.sendFillReceipt(now, p, "STOP", "STOP_HIT", execQty, fillPx, pnl, pct)
@@ -3943,7 +3982,10 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 		return false, err
 	}
 	if m.tg != nil {
-		m.tg.Sendf("trail move %s\nstop=%s mark=%s", p.Symbol, fmtPrice(p.StopPrice), fmtPrice(mark))
+		m.tg.Sendf("%s", notify.BuildEventHTML("📈", "TRAIL MOVE",
+			fmt.Sprintf("<b>%s</b>", p.Symbol),
+			fmt.Sprintf("<b>Stop:</b> %s | <b>Mark:</b> %s", fmtPrice(p.StopPrice), fmtPrice(mark)),
+		))
 	}
 	return true, nil
 }
@@ -4019,8 +4061,12 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 		_, _ = m.rest.CancelAllOrders(sym)
 		_ = m.closeSymbolMarket(sym)
 		if m.tg != nil {
-			m.tg.Sendf("forced close %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
-				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
+			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
+				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
+				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
+			))
 		}
 		_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
@@ -4056,8 +4102,12 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 	_, _ = m.rest.CancelAllOrders(raw)
 	_ = m.closeSymbolMarket(raw)
 	if m.tg != nil {
-		m.tg.Sendf("forced close %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
-			raw, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
+			fmt.Sprintf("<b>%s %s</b>", raw, p.Side),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
+			fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
+		))
 	}
 	_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 	m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
@@ -4145,8 +4195,11 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		p.ClosedAt = now
 		p.UpdatedAt = now
 		if m.tg != nil {
-			m.tg.Sendf("momentum exit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=MOMENTUM_FADE dayRealized=%+.2f",
-				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, dayRealized)
+			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji("MOMENTUM_FADE"), "MOMENTUM EXIT",
+				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+			))
 		}
 		_ = m.logFill(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
@@ -4194,8 +4247,12 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 		p.ClosedAt = now
 		p.UpdatedAt = now
 		if m.tg != nil {
-			m.tg.Sendf("pre-eod exit %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
-				sym, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
+			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT",
+				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
+				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
+			))
 		}
 		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
@@ -6966,7 +7023,16 @@ func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWin
 		)
 		msg += fmt.Sprintf("\ntrading_base=%.2f retained_for_next=%.2f withdrawable=%.2f", pm.state.TradingBase, retained, withdrawable)
 		msg += fmt.Sprintf("\nsession=%s", sessionTag(nowUTC.In(pm.loc)))
-		tg.Sendf("%s", tgPre(msg))
+		tg.Sendf("%s", notify.BuildEventHTML("💸", prefix,
+			fmt.Sprintf("<b>Cycle ID:</b> %s", execCycleID),
+			fmt.Sprintf("<b>Start Eq:</b> %.2f | <b>Close Eq:</b> %.2f", execStartEq, closeEq),
+			fmt.Sprintf("<b>Locked Profit:</b> %.2f | <b>Payout:</b> %.2f", newProfit, payoutAmt),
+			fmt.Sprintf("<b>Action:</b> %s | <b>Reason:</b> %s", actionType, actionReason),
+			fmt.Sprintf("<b>Executed:</b> %s | <b>Deadline:</b> %s", nowUTC.In(pm.loc).Format("2006-01-02 15:04:05 MST"), execDeadline.Format("2006-01-02 15:04 MST")),
+			fmt.Sprintf("<b>Next Close:</b> %s", nextCloseLocal.Format("2006-01-02 15:04 MST")),
+			fmt.Sprintf("<b>Trading Base:</b> %.2f | <b>Retained:</b> %.2f | <b>Withdrawable:</b> %.2f", pm.state.TradingBase, retained, withdrawable),
+			fmt.Sprintf("<b>Session:</b> %s", sessionTag(nowUTC.In(pm.loc))),
+		))
 	}
 }
 

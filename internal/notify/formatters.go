@@ -113,3 +113,24 @@ func renderScanLine(items []ScanItem) string {
 	}
 	return strings.Join(parts, " | ")
 }
+
+func BuildEventHTML(icon, title string, lines ...string) string {
+	icon = strings.TrimSpace(icon)
+	if icon == "" {
+		icon = "ℹ️"
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "UPDATE"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s <b>%s</b>", icon, title)
+	for _, l := range lines {
+		s := strings.TrimSpace(l)
+		if s == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n• %s", s)
+	}
+	return strings.TrimSpace(b.String())
+}
