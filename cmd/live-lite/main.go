@@ -6,7 +6,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"math"
 	"net/http"
@@ -30,6 +29,7 @@ import (
 	"go-machine/internal/indicators"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
+	"go-machine/internal/notify"
 	"go-machine/internal/risk"
 	"go-machine/internal/stats"
 	"go-machine/internal/strategies"
@@ -98,18 +98,8 @@ type reserveLockGate struct {
 	locked        bool
 }
 
-type telegramSink struct {
-	enabled  bool
-	token    string
-	chatID   string
-	timeout  time.Duration
-	dedupe   time.Duration
-	client   *http.Client
-	lastSent map[string]time.Time
-}
-
 type telegramCommandCtx struct {
-	tg      *telegramSink
+	tg      *notify.Telegram
 	rest    *aster.RESTAuth
 	execMgr *liveExecManager
 	paper   *paperTrader
@@ -118,24 +108,6 @@ type telegramCommandCtx struct {
 
 	metaMu sync.RWMutex
 	meta   map[string]symbolMeta
-}
-
-type tgUpdateResp struct {
-	OK     bool       `json:"ok"`
-	Result []tgUpdate `json:"result"`
-}
-
-type tgUpdate struct {
-	UpdateID int64      `json:"update_id"`
-	Message  *tgMessage `json:"message"`
-}
-
-type tgMessage struct {
-	MessageID int64  `json:"message_id"`
-	Text      string `json:"text"`
-	Chat      struct {
-		ID int64 `json:"id"`
-	} `json:"chat"`
 }
 
 type symbolMeta struct {
@@ -311,7 +283,7 @@ type liveExecStore struct {
 
 type liveExecManager struct {
 	rest                 *aster.RESTAuth
-	tg                   *telegramSink
+	tg                   *notify.Telegram
 	path                 string
 	tradesCSV            string
 	fillReceipt          bool
@@ -699,7 +671,7 @@ func main() {
 	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "A")
 	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.72)
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
-	if paper != nil && tg != nil && tg.enabled {
+	if paper != nil && tg != nil && tg.Enabled() {
 		paper.onExit = func(msg string) {
 			tg.Sendf("%s", tgPre(msg))
 		}
@@ -847,7 +819,7 @@ func main() {
 		if paper.enabled {
 			paper.CheckExit(now, metaBySymbol, paperDepth)
 		}
-		if paper.enabled && tg != nil && tg.enabled {
+		if paper.enabled && tg != nil && tg.Enabled() {
 			if !hourlyEnable && now.After(nextTradeUpdateAt) {
 				if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
 					tg.Sendf("%s", tgPre(msg))
@@ -878,7 +850,7 @@ func main() {
 				}
 			}
 		}
-		if tg != nil && tg.enabled && execMgr != nil && liveReceiptEnable {
+		if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
 			localNow := now.In(execMgr.reportLoc)
 			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
 				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
@@ -928,7 +900,7 @@ func main() {
 			TF:        "1m",
 			Reason:    fmt.Sprintf("long_inplay=%d short_inplay=%d", len(longInPlay), len(shortInPlay)),
 		})
-		if paper.enabled && tg != nil && tg.enabled && hourlyEnable {
+		if paper.enabled && tg != nil && tg.Enabled() && hourlyEnable {
 			hk := localMaintNow.Format("2006-01-02 15")
 			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 				tg.Sendf("%s", tgPre(buildHourlyDigest(localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit)))
@@ -994,7 +966,7 @@ func main() {
 					maintWindow.EndHour, maintWindow.EndMin,
 					maintLoc.String(),
 					sessionTag(localMaintNow))
-				if paper.enabled && tg != nil && tg.enabled {
+				if paper.enabled && tg != nil && tg.Enabled() {
 					switch maintWindow.Name {
 					case "M1":
 						if lastM1ReportDay != dayKey {
@@ -1636,8 +1608,8 @@ func main() {
 	}
 }
 
-func sendInPlayDigest(tg *telegramSink, longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, dryRun bool, limit int) {
-	if tg == nil || !tg.enabled {
+func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, dryRun bool, limit int) {
+	if tg == nil || !tg.Enabled() {
 		return
 	}
 	now := time.Now().UTC()
@@ -2567,7 +2539,7 @@ func (p *paperTrader) save() error {
 	return os.WriteFile(p.stateFile, b, 0o644)
 }
 
-func newLiveExecManager(rest *aster.RESTAuth, tg *telegramSink) *liveExecManager {
+func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecManager {
 	if rest == nil {
 		return nil
 	}
@@ -6726,7 +6698,7 @@ func (pm *payoutManager) save() error {
 	return os.WriteFile(pm.stateFile, b, 0o644)
 }
 
-func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWindow, ms *maintenanceState, paper *paperTrader, meta map[string]symbolMeta, acct accountSnapshot, execMgr *liveExecManager, tg *telegramSink) {
+func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWindow, ms *maintenanceState, paper *paperTrader, meta map[string]symbolMeta, acct accountSnapshot, execMgr *liveExecManager, tg *notify.Telegram) {
 	if pm == nil || !pm.enabled {
 		return
 	}
@@ -6831,7 +6803,7 @@ func (pm *payoutManager) maybeRun(nowUTC, localNow time.Time, eod maintenanceWin
 	pm.state.RunState = payoutIdle
 	_ = pm.save()
 
-	if tg != nil && tg.enabled && pm.notifyTelegram {
+	if tg != nil && tg.Enabled() && pm.notifyTelegram {
 		prefix := "PAYOUT CYCLE CLOSE"
 		if strings.HasPrefix(actionType, "FALLBACK_") {
 			prefix = "PAYOUT DEADLINE FALLBACK"
@@ -7500,145 +7472,12 @@ func fmtPrice(v float64) string {
 	}
 }
 
-func newTelegramSink() *telegramSink {
-	fileKV := getConfigKV()
-	token := cfgGet(fileKV, "LIVE_TG_BOT_TOKEN", "live_tg_bot_token")
-	if token == "" {
-		token = cfgGet(fileKV, "TELEGRAM_BOT_TOKEN", "telegram_bot_token", "tg_bot_token")
-	}
-	chatID := cfgGet(fileKV, "LIVE_TG_CHAT_ID", "live_tg_chat_id")
-	if chatID == "" {
-		chatID = cfgGet(fileKV, "TELEGRAM_CHAT_ID", "telegram_chat_id", "tg_chat_id")
-	}
-	timeoutSec := envInt("LIVE_TG_TIMEOUT_SEC", 5)
-	if timeoutSec <= 0 {
-		timeoutSec = 5
-	}
-	dedupeSec := envInt("LIVE_TG_DEDUPE_SEC", 30)
-	if dedupeSec < 0 {
-		dedupeSec = 0
-	}
-	return &telegramSink{
-		enabled:  token != "" && chatID != "",
-		token:    token,
-		chatID:   chatID,
-		timeout:  time.Duration(timeoutSec) * time.Second,
-		dedupe:   time.Duration(dedupeSec) * time.Second,
-		client:   &http.Client{Timeout: time.Duration(timeoutSec) * time.Second},
-		lastSent: map[string]time.Time{},
-	}
-}
-
-func (t *telegramSink) Sendf(format string, args ...any) {
-	if t == nil || !t.enabled {
-		return
-	}
-	msg := strings.TrimSpace(fmt.Sprintf(format, args...))
-	if msg == "" {
-		return
-	}
-	now := time.Now()
-	if t.dedupe > 0 {
-		if at, ok := t.lastSent[msg]; ok && now.Sub(at) < t.dedupe {
-			return
-		}
-		t.lastSent[msg] = now
-	}
-	_ = t.send(msg)
+func newTelegramSink() *notify.Telegram {
+	return notify.NewTelegramFromConfig(getConfigKV())
 }
 
 func tgPre(msg string) string {
-	msg = strings.TrimSpace(msg)
-	if msg == "" {
-		return ""
-	}
-	return "<pre>" + html.EscapeString(msg) + "</pre>"
-}
-
-func (t *telegramSink) send(msg string) error {
-	form := url.Values{}
-	form.Set("chat_id", t.chatID)
-	form.Set("text", msg)
-	form.Set("disable_web_page_preview", "true")
-	if strings.HasPrefix(msg, "<pre>") && strings.HasSuffix(msg, "</pre>") {
-		form.Set("parse_mode", "HTML")
-	}
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
-	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
-func (t *telegramSink) sendToChat(chatID, msg string) error {
-	if t == nil || !t.enabled {
-		return nil
-	}
-	form := url.Values{}
-	form.Set("chat_id", chatID)
-	form.Set("text", msg)
-	form.Set("disable_web_page_preview", "true")
-	if strings.HasPrefix(msg, "<pre>") && strings.HasSuffix(msg, "</pre>") {
-		form.Set("parse_mode", "HTML")
-	}
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.token)
-	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
-func (t *telegramSink) getUpdates(offset int64, timeoutSec int) ([]tgUpdate, error) {
-	if t == nil || !t.enabled {
-		return nil, nil
-	}
-	if timeoutSec <= 0 {
-		timeoutSec = 20
-	}
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=%d&offset=%d", t.token, timeoutSec, offset)
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("telegram getUpdates http %d: %s", resp.StatusCode, string(body))
-	}
-	var out tgUpdateResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	if !out.OK {
-		return nil, fmt.Errorf("telegram getUpdates response not ok")
-	}
-	return out.Result, nil
+	return notify.Pre(msg)
 }
 
 func (c *telegramCommandCtx) setMeta(meta map[string]symbolMeta) {
@@ -7668,37 +7507,13 @@ func (c *telegramCommandCtx) getMeta() map[string]symbolMeta {
 }
 
 func (c *telegramCommandCtx) run() {
-	if c == nil || c.tg == nil || !c.tg.enabled {
+	if c == nil || c.tg == nil || !c.tg.Enabled() {
 		return
 	}
-	var offset int64 = 0
-	for {
-		updates, err := c.tg.getUpdates(offset, 20)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		for _, u := range updates {
-			if u.UpdateID >= offset {
-				offset = u.UpdateID + 1
-			}
-			if u.Message == nil || strings.TrimSpace(u.Message.Text) == "" {
-				continue
-			}
-			chatID := strconv.FormatInt(u.Message.Chat.ID, 10)
-			if strings.TrimSpace(c.tg.chatID) != "" && chatID != strings.TrimSpace(c.tg.chatID) {
-				continue
-			}
-			reply := c.handleCommand(strings.TrimSpace(u.Message.Text))
-			if reply == "" {
-				continue
-			}
-			_ = c.tg.sendToChat(chatID, tgPre(reply))
-		}
-	}
+	c.tg.Listen(context.Background(), c.handleCommand)
 }
 
-func (c *telegramCommandCtx) handleCommand(msg string) string {
+func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	rawMsg := strings.TrimSpace(msg)
 	cmd := strings.ToLower(rawMsg)
 	fields := strings.Fields(rawMsg)
