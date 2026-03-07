@@ -3933,6 +3933,42 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 	return nil
 }
 
+func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) {
+	if m == nil || m.rest == nil {
+		return false, nil
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return false, fmt.Errorf("symbol required")
+	}
+	p, ok := m.positions[raw]
+	if !ok || p == nil || p.State == execClosed {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	mark, _ := m.currentMark(raw)
+	if mark <= 0 {
+		mark = p.EntryPrice
+	}
+	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+	dayRealized := m.addDayRealized(now, pnl)
+	_ = m.cancelRemainingExits(p)
+	_, _ = m.rest.CancelAllOrders(raw)
+	_ = m.closeSymbolMarket(raw)
+	if m.tg != nil {
+		m.tg.Sendf("forced close %s %s\nqty=%.6f px=%s pnl=%+.2f (%+.2f%%)\nreason=%s dayRealized=%+.2f",
+			raw, p.Side, p.RemainingQty, fmtPrice(mark), pnl, pct, reason, dayRealized)
+	}
+	_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+	m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+	p.State = execClosed
+	p.CloseReason = reason
+	p.ClosedAt = now
+	p.UpdatedAt = now
+	_ = m.save()
+	return true, nil
+}
+
 func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView, ext map[string]flowfeed.ExternalSignal) {
 	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(m.positions) == 0 {
 		return
@@ -4829,6 +4865,24 @@ func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, d
 		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
 	}
 	_ = p.save()
+}
+
+func (p *paperTrader) ForceCloseSymbol(now time.Time, symbol string, meta map[string]symbolMeta, depth map[string]aster.OrderBook, reason string) bool {
+	if p == nil || !p.enabled {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	pos := p.positions[raw]
+	if pos == nil {
+		return false
+	}
+	mark := meta[raw].LastPrice
+	if mark <= 0 {
+		mark = pos.Entry
+	}
+	p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+	_ = p.save()
+	return true
 }
 
 func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason string, exitPrice, qty float64, m symbolMeta, ob aster.OrderBook) {
@@ -7645,7 +7699,9 @@ func (c *telegramCommandCtx) run() {
 }
 
 func (c *telegramCommandCtx) handleCommand(msg string) string {
-	cmd := strings.ToLower(strings.TrimSpace(msg))
+	rawMsg := strings.TrimSpace(msg)
+	cmd := strings.ToLower(rawMsg)
+	fields := strings.Fields(rawMsg)
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		return strings.Join([]string{
@@ -7656,7 +7712,8 @@ func (c *telegramCommandCtx) handleCommand(msg string) string {
 			"/positions - open positions summary (paper table in dry-run, live tracked positions otherwise)",
 			"/pause - pause new entries (risk management still runs)",
 			"/resume - resume new entries",
-			"/forceflat - close open positions now (live + paper paths)",
+			"/close SYMBOL - close one symbol now (live + paper paths)",
+			"/closeall - close all open positions now (replaces /forceflat)",
 		}, "\n")
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
@@ -7719,16 +7776,41 @@ func (c *telegramCommandCtx) handleCommand(msg string) string {
 		}
 		_ = os.Remove(c.safety.pauseFile)
 		return "entries resumed"
-	case strings.HasPrefix(cmd, "/forceflat"):
+	case strings.HasPrefix(cmd, "/close "):
+		if len(fields) < 2 {
+			return "usage: /close SYMBOL"
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return "usage: /close SYMBOL"
+		}
+		now := time.Now().UTC()
+		meta := c.getMeta()
+		closed := false
+		if c.execMgr != nil {
+			ok, err := c.execMgr.ForceCloseSymbol(sym, "TG_CLOSE_SYMBOL")
+			if err != nil {
+				return fmt.Sprintf("close %s failed: %v", sym, err)
+			}
+			closed = closed || ok
+		}
+		if c.paper != nil && c.paper.enabled {
+			closed = closed || c.paper.ForceCloseSymbol(now, sym, meta, map[string]aster.OrderBook{}, "TG_CLOSE_SYMBOL")
+		}
+		if !closed {
+			return fmt.Sprintf("no active position for %s", sym)
+		}
+		return fmt.Sprintf("close requested for %s", sym)
+	case strings.HasPrefix(cmd, "/closeall"), strings.HasPrefix(cmd, "/forceflat"):
 		now := time.Now().UTC()
 		meta := c.getMeta()
 		if c.execMgr != nil {
-			_ = c.execMgr.ForceCloseAll("TG_FORCE_FLAT")
+			_ = c.execMgr.ForceCloseAll("TG_CLOSE_ALL")
 		}
 		if c.paper != nil && c.paper.enabled {
-			c.paper.ForceCloseAll(now, meta, map[string]aster.OrderBook{}, "TG_FORCE_FLAT")
+			c.paper.ForceCloseAll(now, meta, map[string]aster.OrderBook{}, "TG_CLOSE_ALL")
 		}
-		return "force flat requested"
+		return "close all requested"
 	default:
 		return ""
 	}
