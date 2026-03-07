@@ -202,7 +202,7 @@ func (t *Telegram) Listen(ctx context.Context, handler func(chatID string, text 
 			if strings.TrimSpace(reply) == "" {
 				continue
 			}
-			t.SendToChat(chatID, Pre(reply))
+			t.SendToChat(chatID, strings.TrimSpace(reply))
 		}
 	}
 }

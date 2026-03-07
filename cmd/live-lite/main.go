@@ -1778,6 +1778,7 @@ func buildPaperPulseAndCards(title string, now time.Time, p *paperTrader, meta m
 		OpenPnL:   openPnL,
 		NetDay:    net,
 		OpenCount: len(cards),
+		OpenCap:   p.maxOpen,
 		NetDayPct: netPct,
 	}, cards
 }
@@ -1855,6 +1856,28 @@ func exitAlertEmoji(reason string) string {
 	default:
 		return "ℹ️"
 	}
+}
+
+func cleanSymbol(sym string) string {
+	s := strings.ToUpper(strings.TrimSpace(sym))
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "-USD")
+	if s == "" {
+		return strings.ToUpper(strings.TrimSpace(sym))
+	}
+	return s
+}
+
+func summarizeOneLine(s string, max int) string {
+	x := strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	x = strings.Join(strings.Fields(x), " ")
+	if x == "" {
+		return "n/a"
+	}
+	if max > 0 && len(x) > max {
+		return x[:max-1] + "…"
+	}
+	return x
 }
 
 func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta map[string]symbolMeta, limit int) {
@@ -7728,85 +7751,114 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	fields := strings.Fields(rawMsg)
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
-		return strings.Join([]string{
-			"Commands:",
-			"/help - show this command guide",
-			"/status - runtime snapshot (mode, top candidate, in-play counts, exec state)",
-			"/balance - live account balances (all assets), available USDT, equityUSDTView, open positions",
-			"/positions - open positions summary (paper table in dry-run, live tracked positions otherwise)",
-			"/pause - pause new entries (risk management still runs)",
-			"/resume - resume new entries",
-			"/close SYMBOL - close one symbol now (live + paper paths)",
-			"/closeall - close all open positions now",
-		}, "\n")
+		return notify.BuildEventHTML("📘", "COMMANDS",
+			"<code>/status</code> runtime snapshot",
+			"<code>/balance</code> account holdings",
+			"<code>/positions</code> open trades",
+			"<code>/pause</code> pause new entries",
+			"<code>/resume</code> resume entries",
+			"<code>/close SYMBOL</code> close one symbol",
+			"<code>/closeall</code> close all positions",
+		)
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
-		return fmt.Sprintf("status\ndry_run=%v live_enabled=%v\nlong_inplay=%d short_inplay=%d\ntop=%s %s g=%s s=%.2f\navailable=%.2f\npaper=%s\nexec_open=%d pending=%d partial1=%d partial2=%d",
-			s.DryRun, s.LiveEnabled, s.LongInPlay, s.ShortInPlay,
-			s.TopSymbol, s.TopSide, s.TopGrade, s.TopScore,
-			s.AvailableUSDT,
-			s.PaperSummary,
-			s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2)
+		return notify.BuildEventHTML("🧭", "STATUS",
+			fmt.Sprintf("<b>Mode:</b> dry_run=%v live_enabled=%v", s.DryRun, s.LiveEnabled),
+			fmt.Sprintf("<b>In-Play:</b> long=%d short=%d", s.LongInPlay, s.ShortInPlay),
+			fmt.Sprintf("<b>Top:</b> %s %s | g=%s s=%.2f", cleanSymbol(s.TopSymbol), s.TopSide, s.TopGrade, s.TopScore),
+			fmt.Sprintf("<b>Available USDT:</b> %.2f", s.AvailableUSDT),
+			fmt.Sprintf("<b>Paper:</b> %s", summarizeOneLine(s.PaperSummary, 120)),
+			fmt.Sprintf("<b>Exec:</b> open=%d pending=%d partial1=%d partial2=%d", s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2),
+		)
 	case strings.HasPrefix(cmd, "/balance"):
 		if c.rest != nil {
 			assets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 			snap, err := fetchAccountSnapshot(c.rest, assets)
 			if err == nil {
 				eq := accountEquity(snap)
-				var b strings.Builder
-				fmt.Fprintf(&b, "balance (live)\navailableUSDT=%.4f\nequityUSDTView=%.4f\nopen_positions=%d\nbalances:\n",
-					snap.AvailableUSDT, eq, len(snap.Positions))
-				if len(snap.Balances) == 0 {
-					b.WriteString("(none)\n")
-				} else {
-					for _, x := range snap.Balances {
-						fmt.Fprintf(&b, "- %-6s bal=%-12.6f avail=%-12.6f upnl=%-10.6f\n",
-							strings.ToUpper(x.Asset), x.Balance, x.AvailableBalance, x.CrossUnPnl)
-					}
+				lines := []string{
+					fmt.Sprintf("<b>Available USDT:</b> %.4f", snap.AvailableUSDT),
+					fmt.Sprintf("<b>Equity (USDT view):</b> %.4f", eq),
+					fmt.Sprintf("<b>Open Positions:</b> %d", len(snap.Positions)),
 				}
-				return strings.TrimSpace(b.String())
+				if len(snap.Balances) == 0 {
+					lines = append(lines, "<b>Holdings:</b> none")
+				} else {
+					maxRows := 8
+					if len(snap.Balances) < maxRows {
+						maxRows = len(snap.Balances)
+					}
+					parts := make([]string, 0, maxRows)
+					for i := 0; i < maxRows; i++ {
+						x := snap.Balances[i]
+						parts = append(parts, fmt.Sprintf("%s %.4f", strings.ToUpper(x.Asset), x.Balance))
+					}
+					lines = append(lines, "<b>Holdings:</b> "+strings.Join(parts, " | "))
+				}
+				return notify.BuildEventHTML("💼", "BALANCE", lines...)
 			}
 		}
 		s := c.status.Snapshot()
-		return fmt.Sprintf("balance\navailableUSDT=%.4f", s.AvailableUSDT)
+		return notify.BuildEventHTML("💼", "BALANCE",
+			fmt.Sprintf("<b>Available USDT:</b> %.4f", s.AvailableUSDT),
+		)
 	case strings.HasPrefix(cmd, "/positions"):
 		if c.paper != nil && c.paper.enabled {
 			meta := c.getMeta()
-			return c.paper.PositionsTable(meta)
+			now := time.Now().In(c.paper.reportLoc)
+			pulse, cards := buildPaperPulseAndCards("POSITIONS", now, c.paper, meta)
+			if len(cards) == 0 {
+				return notify.BuildEventHTML("📦", "POSITIONS", "No active paper positions")
+			}
+			var b strings.Builder
+			b.WriteString(notify.BuildSessionPulseHTML(pulse))
+			for _, card := range cards {
+				b.WriteString("\n\n")
+				b.WriteString(notify.BuildPositionCard(card))
+			}
+			return b.String()
 		}
 		if c.execMgr != nil {
 			ex := c.execMgr.Snapshot(10)
+			if len(ex.Active) == 0 {
+				return notify.BuildEventHTML("📦", "POSITIONS", "No active live positions")
+			}
 			var b strings.Builder
-			fmt.Fprintf(&b, "live positions: open=%d pending=%d active=%d\n", ex.Open, ex.Pending, len(ex.Active))
+			b.WriteString(notify.BuildEventHTML("📦", "LIVE POSITIONS",
+				fmt.Sprintf("<b>Open:</b> %d | <b>Pending:</b> %d", ex.Open, ex.Pending),
+			))
 			for i, p := range ex.Active {
 				if i >= 10 {
 					break
 				}
-				fmt.Fprintf(&b, "%d) %s %s qty=%.6f entry=%s stop=%s reason=%s\n",
-					i+1, p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice), fmtPrice(p.StopPrice), p.EntryReason)
+				b.WriteString("\n\n")
+				b.WriteString(notify.BuildEventHTML("📍", fmt.Sprintf("%s %s", cleanSymbol(p.Symbol), p.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
+					fmt.Sprintf("<b>Stop:</b> %s | <b>Reason:</b> <code>%s</code>", fmtPrice(p.StopPrice), p.EntryReason),
+				))
 			}
 			return strings.TrimSpace(b.String())
 		}
-		return "positions unavailable"
+		return notify.BuildEventHTML("📦", "POSITIONS", "unavailable")
 	case strings.HasPrefix(cmd, "/pause"):
 		if c.safety.pauseFile == "" {
-			return "pause file is not configured"
+			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")
 		}
 		_ = os.WriteFile(c.safety.pauseFile, []byte(time.Now().Format(time.RFC3339)+" manual pause\n"), 0o644)
-		return "entries paused"
+		return notify.BuildEventHTML("⏸️", "ENTRIES PAUSED", "Risk management remains active")
 	case strings.HasPrefix(cmd, "/resume"):
 		if c.safety.pauseFile == "" {
-			return "pause file is not configured"
+			return notify.BuildEventHTML("⚠️", "RESUME", "Pause file is not configured")
 		}
 		_ = os.Remove(c.safety.pauseFile)
-		return "entries resumed"
+		return notify.BuildEventHTML("▶️", "ENTRIES RESUMED", "New entries are enabled")
 	case strings.HasPrefix(cmd, "/close "):
 		if len(fields) < 2 {
-			return "usage: /close SYMBOL"
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		if sym == "" {
-			return "usage: /close SYMBOL"
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>")
 		}
 		now := time.Now().UTC()
 		meta := c.getMeta()
@@ -7814,7 +7866,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if c.execMgr != nil {
 			ok, err := c.execMgr.ForceCloseSymbol(sym, "TG_CLOSE_SYMBOL")
 			if err != nil {
-				return fmt.Sprintf("close %s failed: %v", sym, err)
+				return notify.BuildEventHTML("❌", "CLOSE FAILED", fmt.Sprintf("%s: %v", cleanSymbol(sym), err))
 			}
 			closed = closed || ok
 		}
@@ -7822,9 +7874,9 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			closed = closed || c.paper.ForceCloseSymbol(now, sym, meta, map[string]aster.OrderBook{}, "TG_CLOSE_SYMBOL")
 		}
 		if !closed {
-			return fmt.Sprintf("no active position for %s", sym)
+			return notify.BuildEventHTML("ℹ️", "NO ACTIVE POSITION", cleanSymbol(sym))
 		}
-		return fmt.Sprintf("close requested for %s", sym)
+		return notify.BuildEventHTML("✅", "CLOSE REQUESTED", cleanSymbol(sym))
 	case strings.HasPrefix(cmd, "/closeall"):
 		now := time.Now().UTC()
 		meta := c.getMeta()
@@ -7834,7 +7886,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if c.paper != nil && c.paper.enabled {
 			c.paper.ForceCloseAll(now, meta, map[string]aster.OrderBook{}, "TG_CLOSE_ALL")
 		}
-		return "close all requested"
+		return notify.BuildEventHTML("⚠️", "CLOSE ALL REQUESTED", "All open positions are being closed")
 	default:
 		return ""
 	}

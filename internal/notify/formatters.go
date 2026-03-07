@@ -15,6 +15,7 @@ type PulseSnapshot struct {
 	OpenPnL   float64
 	NetDay    float64
 	OpenCount int
+	OpenCap   int
 	NetDayPct float64
 }
 
@@ -53,9 +54,9 @@ func BuildSessionPulseHTML(p PulseSnapshot) string {
 			"<b>💰 ACCOUNT OVERVIEW</b>\n"+
 			"• <b>Balance:</b> $%.2f | <b>Equity:</b> $%.2f\n"+
 			"• <b>Net Day:</b> %s %+.2f (%.2f%%)\n"+
-			"• <b>Realized:</b> %+.2f | <b>Open PnL:</b> %+.2f (%d pos)",
+			"• <b>Realized:</b> %+.2f | <b>Open PnL:</b> %+.2f (%s)",
 		title, strings.ToUpper(strings.TrimSpace(p.Session)), strings.TrimSpace(p.TimeLabel),
-		p.Balance, p.Equity, dayEmoji, p.NetDay, p.NetDayPct, p.Realized, p.OpenPnL, p.OpenCount,
+		p.Balance, p.Equity, dayEmoji, p.NetDay, p.NetDayPct, p.Realized, p.OpenPnL, openPosLabel(p.OpenCount, p.OpenCap),
 	))
 }
 
@@ -92,7 +93,7 @@ func BuildScannerSnapshotHTML(longs, shorts []ScanItem, bias string) string {
 			"⚡ <b>Bias:</b> %s",
 		renderScanLine(longs),
 		renderScanLine(shorts),
-		strings.ToUpper(strings.TrimSpace(bias)),
+		biasLabel(bias),
 	))
 }
 
@@ -109,9 +110,37 @@ func renderScanLine(items []ScanItem) string {
 	}
 	parts := make([]string, 0, len(items))
 	for _, it := range items {
-		parts = append(parts, fmt.Sprintf("%s (<b>%s</b>/%.0f)", strings.ToUpper(strings.TrimSpace(it.Symbol)), strings.TrimSpace(it.Grade), it.Score))
+		parts = append(parts, fmt.Sprintf("%s (<b>%s</b> · <b>%.0f</b>)", shortSymbol(it.Symbol), strings.TrimSpace(it.Grade), it.Score))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func openPosLabel(openCount, openCap int) string {
+	if openCap > 0 {
+		return fmt.Sprintf("%d/%d pos", openCount, openCap)
+	}
+	return fmt.Sprintf("%d pos", openCount)
+}
+
+func shortSymbol(sym string) string {
+	s := strings.ToUpper(strings.TrimSpace(sym))
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "-USD")
+	if s == "" {
+		return strings.ToUpper(strings.TrimSpace(sym))
+	}
+	return s
+}
+
+func biasLabel(b string) string {
+	switch strings.ToUpper(strings.TrimSpace(b)) {
+	case "LONG":
+		return "🟢 LONG"
+	case "SHORT":
+		return "🔴 SHORT"
+	default:
+		return "🟡 NEUTRAL"
+	}
 }
 
 func BuildEventHTML(icon, title string, lines ...string) string {
