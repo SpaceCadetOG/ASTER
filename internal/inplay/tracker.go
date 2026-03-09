@@ -29,9 +29,17 @@ type Entry struct {
 	ScoreSlope   float64   `json:"scoreSlope"`
 	FirstSeen    time.Time `json:"firstSeen"`
 	LastSeen     time.Time `json:"lastSeen"`
+	StateSince   time.Time `json:"stateSince"`
 	State        State     `json:"state"`
 	Momentum     bool      `json:"momentum"`
 	Rank         float64   `json:"rank"`
+	MarketConfidence float64 `json:"marketConfidence"`
+	Completeness     float64 `json:"completeness"`
+	Uncertainty      float64 `json:"uncertainty"`
+	TimeInStateMin   float64 `json:"timeInStateMin"`
+	StateBoostRaw    float64 `json:"stateBoostRaw"`
+	StateBoostDecayed float64 `json:"stateBoostDecayed"`
+	StalenessPenalty float64 `json:"stalenessPenalty"`
 }
 
 type Config struct {
@@ -42,6 +50,10 @@ type Config struct {
 	DropGradeScans int
 	FallScans      int
 	TTL            time.Duration
+	EnableStateDecay       bool
+	StateDecayMin          float64
+	EnableStalenessPenalty bool
+	StaleImpulseMin        float64
 }
 
 type scorePoint struct {
@@ -51,6 +63,9 @@ type scorePoint struct {
 	vol    float64
 	price  float64
 	change float64
+	completeness float64
+	confidence   float64
+	uncertainty  float64
 }
 
 type symbolState struct {
@@ -60,6 +75,7 @@ type symbolState struct {
 	dStreak    int
 	fallStreak int
 	state      State
+	stateSince time.Time
 }
 
 type Tracker struct {
@@ -88,6 +104,12 @@ func NewTracker(side string, cfg Config) *Tracker {
 	if cfg.TTL <= 0 {
 		cfg.TTL = 30 * time.Minute
 	}
+	if cfg.StateDecayMin <= 0 {
+		cfg.StateDecayMin = 25
+	}
+	if cfg.StaleImpulseMin <= 0 {
+		cfg.StaleImpulseMin = 20
+	}
 	return &Tracker{
 		side: strings.ToLower(strings.TrimSpace(side)),
 		cfg:  cfg,
@@ -115,7 +137,7 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 
 		ss := t.data[sym]
 		if ss == nil {
-			ss = &symbolState{firstSeen: now, state: StateHeating}
+			ss = &symbolState{firstSeen: now, state: StateHeating, stateSince: now}
 			t.data[sym] = ss
 		}
 		ss.lastSeen = now
@@ -126,6 +148,9 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 			vol:    r.VolumeUSD,
 			price:  r.LastPrice,
 			change: r.Change24h,
+			completeness: r.Completeness,
+			confidence:   r.Confidence,
+			uncertainty:  r.Uncertainty,
 		})
 		if len(ss.history) > t.cfg.HistoryN {
 			ss.history = append([]scorePoint(nil), ss.history[len(ss.history)-t.cfg.HistoryN:]...)
@@ -158,19 +183,24 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 		exhausted := (ss.state == StatePumping || ss.state == StateInPlay || gradeValue(g) >= gradeValue("A")) &&
 			(dropPct >= 0.06 || (slope < -0.45 && volFall) || signFlipAgainst)
 
+		nextState := ss.state
 		switch {
 		case gradeOK && volOK && rising && priceFav && volRise:
-			ss.state = StatePumping
+			nextState = StatePumping
 		case gradeOK && volOK && rising:
-			ss.state = StateInPlay
+			nextState = StateInPlay
 		case exhausted:
-			ss.state = StateExhausted
+			nextState = StateExhausted
 		case momentumLoss:
-			ss.state = StateDumping
+			nextState = StateDumping
 		case rising || (slope > 0 && (priceFav || !volFall)):
-			ss.state = StateHeating
+			nextState = StateHeating
 		default:
-			ss.state = StateCooling
+			nextState = StateCooling
+		}
+		if nextState != ss.state {
+			ss.state = nextState
+			ss.stateSince = now
 		}
 
 		if ss.dStreak >= t.cfg.DropGradeScans || ss.fallStreak >= t.cfg.FallScans {
@@ -205,17 +235,22 @@ func (t *Tracker) Entries() []Entry {
 			ScoreSlope:   slope,
 			FirstSeen:    ss.firstSeen,
 			LastSeen:     ss.lastSeen,
+			StateSince:   ss.stateSince,
 			State:        ss.state,
 			Momentum:     (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping,
+			MarketConfidence: clamp(last.confidence, 0, 1),
+			Completeness:     clamp(last.completeness, 0, 1),
+			Uncertainty:      clamp(last.uncertainty, 0, 1),
 		}
-		e.Rank = rankFor(e)
+		e.TimeInStateMin = maxF(0, ss.lastSeen.Sub(ss.stateSince).Minutes())
+		e.Rank, e.StateBoostRaw, e.StateBoostDecayed, e.StalenessPenalty = rankFor(e, t.cfg)
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Rank > out[j].Rank })
 	return out
 }
 
-func rankFor(e Entry) float64 {
+func rankFor(e Entry, cfg Config) (float64, float64, float64, float64) {
 	stateBoost := 0.0
 	switch e.State {
 	case StatePumping:
@@ -235,7 +270,21 @@ func rankFor(e Entry) float64 {
 	if e.Momentum {
 		momentum = 5
 	}
-	return 20*float64(gradeValue(e.CurrentGrade)) + 0.4*e.CurrentScore + 8*e.ScoreSlope + stateBoost + momentum
+	decayedBoost := stateBoost
+	if cfg.EnableStateDecay && cfg.StateDecayMin > 0 {
+		decayedBoost = stateBoost * math.Exp(-e.TimeInStateMin/cfg.StateDecayMin)
+	}
+	stalenessPenalty := 0.0
+	if cfg.EnableStalenessPenalty && cfg.StaleImpulseMin > 0 &&
+		e.TimeInStateMin >= cfg.StaleImpulseMin && math.Abs(e.ScoreSlope) < 0.08 && !e.Momentum {
+		stalenessPenalty = 6 + minF(12, (e.TimeInStateMin-cfg.StaleImpulseMin)*0.12)
+	}
+	confAdj := 0.0
+	if e.MarketConfidence > 0 {
+		confAdj = (e.MarketConfidence - 0.5) * 8
+	}
+	rank := 20*float64(gradeValue(e.CurrentGrade)) + 0.4*e.CurrentScore + 8*e.ScoreSlope + decayedBoost + momentum + confAdj - stalenessPenalty
+	return rank, stateBoost, decayedBoost, stalenessPenalty
 }
 
 func calcSlope(points []scorePoint) float64 {
@@ -366,4 +415,28 @@ func gradeValue(g string) int {
 	default:
 		return 0
 	}
+}
+
+func clamp(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func maxF(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minF(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }

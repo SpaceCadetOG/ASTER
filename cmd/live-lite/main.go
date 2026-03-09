@@ -30,6 +30,7 @@ import (
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 	"go-machine/internal/notify"
+	"go-machine/internal/reliability"
 	"go-machine/internal/risk"
 	"go-machine/internal/stats"
 	"go-machine/internal/strategies"
@@ -39,18 +40,19 @@ import (
 )
 
 type candidate struct {
-	Entry        inplay.Entry
-	Side         string // BUY/SELL
-	Strat        string
-	Conf         float64
-	VolumeUSD    float64
-	Sig          strategies.Signal
-	RejectReason string
-	LastClose    float64
-	SessionVWAP  float64
-	EMA9         float64
-	FastSlope    float64
-	SlowSlope    float64
+	Entry          inplay.Entry
+	Side           string // BUY/SELL
+	Strat          string
+	Conf           float64
+	VolumeUSD      float64
+	Sig            strategies.Signal
+	RejectReason   string
+	LastClose      float64
+	SessionVWAP    float64
+	EMA9           float64
+	FastSlope      float64
+	SlowSlope      float64
+	ReliabilityAdj float64
 }
 
 type positionView struct {
@@ -492,16 +494,43 @@ func main() {
 	}
 
 	inplayCfg := inplay.Config{
-		MinGrade:       envStr("INPLAY_MIN_GRADE", "C"),
-		MinVolumeUSD:   envFloat("INPLAY_MIN_VOL_USD", 1_000_000),
-		HistoryN:       envInt("INPLAY_HISTORY_N", 5),
-		RiseN:          envInt("INPLAY_RISE_N", 3),
-		DropGradeScans: envInt("INPLAY_DROP_SCANS", 2),
-		FallScans:      envInt("INPLAY_FALL_SCANS", 2),
-		TTL:            time.Duration(envInt("INPLAY_TTL_MIN", 30)) * time.Minute,
+		MinGrade:               envStr("INPLAY_MIN_GRADE", "C"),
+		MinVolumeUSD:           envFloat("INPLAY_MIN_VOL_USD", 1_000_000),
+		HistoryN:               envInt("INPLAY_HISTORY_N", 5),
+		RiseN:                  envInt("INPLAY_RISE_N", 3),
+		DropGradeScans:         envInt("INPLAY_DROP_SCANS", 2),
+		FallScans:              envInt("INPLAY_FALL_SCANS", 2),
+		TTL:                    time.Duration(envInt("INPLAY_TTL_MIN", 30)) * time.Minute,
+		EnableStateDecay:       envBool("RANK_ENABLE_STATE_DECAY", true),
+		StateDecayMin:          envFloat("RANK_STATE_DECAY_MIN", 25),
+		EnableStalenessPenalty: envBool("RANK_ENABLE_STALENESS_PENALTY", true),
+		StaleImpulseMin:        envFloat("RANK_STALE_IMPULSE_MIN", 20),
 	}
 	longTrk := inplay.NewTracker("long", inplayCfg)
 	shortTrk := inplay.NewTracker("short", inplayCfg)
+
+	candCfg := candidateSelectConfig{
+		UseContinuous:         envBool("LIVE_RANK_USE_CONTINUOUS", false),
+		MinNormalizedScore:    envFloat("LIVE_RANK_MIN_SCORE", 75.0),
+		MinCompleteness:       envFloat("LIVE_RANK_MIN_COMPLETENESS", 0.0),
+		MinConfidence:         envFloat("LIVE_RANK_MIN_CONFIDENCE", 0.0),
+		ReversalMinScore:      envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
+		ReversalMinConfidence: envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
+		ReversalMinComplete:   envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
+	}
+	rankSortCfg := rankSortConfig{
+		UseConfidence:      envBool("LIVE_RANK_SORT_USE_CONFIDENCE", true),
+		ConfidenceWeight:   envFloat("LIVE_RANK_SORT_CONF_WEIGHT", 1.0),
+		UseCompleteness:    envBool("LIVE_RANK_SORT_USE_COMPLETENESS", true),
+		CompletenessWeight: envFloat("LIVE_RANK_SORT_COMPLETENESS_WEIGHT", 0.6),
+		UseReliability:     envBool("LIVE_RANK_SORT_USE_RELIABILITY", false),
+		ReliabilityWeight:  envFloat("LIVE_RANK_SORT_RELIABILITY_WEIGHT", 1.0),
+	}
+	reliabilityStore := reliability.NewInMemoryStore(reliability.Config{
+		Enabled:    envBool("RANK_ENABLE_RELIABILITY", false),
+		MaxPenalty: envFloat("RANK_RELIABILITY_MAX_PENALTY", 8),
+		MaxBonus:   envFloat("RANK_RELIABILITY_MAX_BONUS", 4),
+	})
 
 	client := aster.New("")
 	cfgPath := resolveConfigPath()
@@ -711,24 +740,26 @@ func main() {
 	}
 
 	pureMode := envBool("LIVE_PURE_MODE", true)
-	fmt.Printf("live-lite started (scan=%s dry_run=%v min_grade=%s reserve=%s fixed=%.2f margin=%s lev_mode=%s)\n",
-		scanEvery, dryRun, strings.ToUpper(minGrade),
-		reserveMode, reserveUSDT, fmt.Sprintf("%s(%.2f)", tradeMarginMode, tradeMargin), leverageMode)
+	fmt.Println("live-lite started")
+	fmt.Printf("  scan=%s | dry_run=%v | min_grade=%s | margin=%s(%.2f) | reserve=%s(%.2f) | lev_mode=%s\n",
+		scanEvery, dryRun, strings.ToUpper(minGrade), tradeMarginMode, tradeMargin, reserveMode, reserveUSDT, leverageMode)
 	if cfgPath == "" {
 		cfgPath = "(none)"
 	}
-	fmt.Printf("live-lite config: ASTER_CONFIG=%s REST_BASE_URL=%s\n", cfgPath, effectiveRESTBaseURL())
-	fmt.Printf("safety: live_enabled=%v max_lev=%d min_avail=%.2f max_orders_day=%d max_orders_hour=%d cooldown=%s allow_shorts=%v pause_file=%s stopout=%d/%s lock=%s\n",
-		safety.enableLiveTrading, safety.maxLeverage, safety.minAvailUSDT, safety.maxOrdersPerDay, safety.maxOrdersPerHour, safety.orderCooldown, safety.allowShorts, safety.pauseFile, safety.stopoutCount, safety.stopoutWindow, safety.stopoutLock)
-	fmt.Printf("mode: pure_mode=%v\n", pureMode)
+	fmt.Printf("  config=%s | rest=%s | pure_mode=%v\n", cfgPath, effectiveRESTBaseURL(), pureMode)
+	fmt.Printf("  safety live=%v | shorts=%v | max_lev=%d | min_avail=%.2f | cooldown=%s | caps=%d/day %d/hour\n",
+		safety.enableLiveTrading, safety.allowShorts, safety.maxLeverage, safety.minAvailUSDT, safety.orderCooldown, safety.maxOrdersPerDay, safety.maxOrdersPerHour)
+	fmt.Printf("  stopout=%d/%s | lock=%s | pause=%s\n",
+		safety.stopoutCount, safety.stopoutWindow, safety.stopoutLock, safety.pauseFile)
 	if execMgr != nil {
-		fmt.Printf("execution: margin_type=%s enforce_isolated=%v multi_asset_mode=%v\n",
+		fmt.Printf("  execution=%s | isolated=%v | multi_asset=%v\n",
 			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
 	}
 	if payoutMgr != nil && payoutMgr.enabled {
-		fmt.Printf("payout: mode=%s cycle=%dd anchor=%02d:%02d deadline=%dm tz=%s\n",
+		fmt.Printf("  payout=%s | cycle=%dd | anchor=%02d:%02d | deadline=%dm | tz=%s\n",
 			payoutMgr.mode, payoutMgr.cycleDays, payoutMgr.anchorHour, payoutMgr.anchorMin, payoutMgr.deadlineMin, payoutMgr.loc.String())
 	}
+	fmt.Println()
 	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE-LITE STARTED",
 		fmt.Sprintf("<b>Scan:</b> %s", scanEvery),
 		fmt.Sprintf("<b>Dry Run:</b> %v", dryRun),
@@ -906,6 +937,7 @@ func main() {
 				lastPreEODDecisionDay = dayKey
 			}
 		}
+		printScanHeader(localMaintNow)
 		printInPlay("LONG", longInPlay)
 		printInPlay("SHORT", shortInPlay)
 		eventLog.Emit(stats.Event{
@@ -950,7 +982,7 @@ func main() {
 				if execMgr != nil {
 					realizedToday = execMgr.dayRealizedAt(now)
 				}
-				printAccountSnapshot(snap, accountAssets, realizedToday)
+				printAccountSnapshot(snap, realizedToday)
 				dayKey := now.Format("2006-01-02")
 				eq := accountEquity(snap)
 				if eq > 0 && dayStartEq[dayKey] == 0 {
@@ -1051,8 +1083,10 @@ func main() {
 			payoutMgr.maybeRun(now, localMaintNow, maintEOD, &maintState, paper, metaBySymbol, acct, execMgr, tg)
 		}
 		if paper.enabled {
-			fmt.Println(paper.Summary(metaBySymbol))
-			fmt.Println(paper.PositionsTable(metaBySymbol))
+			fmt.Println(paper.ConsoleSummary(metaBySymbol))
+			for _, line := range paper.ConsolePositions(metaBySymbol) {
+				fmt.Println(line)
+			}
 			_ = paper.LogEquity(now, metaBySymbol)
 		}
 		effectiveReserve := computeReserveUSDT(
@@ -1074,8 +1108,8 @@ func main() {
 			paper,
 		)
 
-		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN)
-		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike)
+		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
+		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore)
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
 			eventLog.Emit(stats.Event{
@@ -1169,9 +1203,9 @@ func main() {
 		if len(cands) == 0 {
 			statusStore.Set(st)
 			if data.CurrentRegimeCT(now) == data.RegimeAsia {
-				fmt.Println("live-lite: no trade candidate (asia quality gate)")
+				fmt.Println("signal: none (asia quality gate)")
 			} else {
-				fmt.Println("live-lite: no trade candidate")
+				fmt.Println("signal: none")
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -4408,6 +4442,90 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 		p.balance, eq, realized, openPnL, realized+openPnL, len(p.positions), p.maxOpen, openTxt)
 }
 
+func (p *paperTrader) ConsoleSummary(meta map[string]symbolMeta) string {
+	if p == nil || !p.enabled {
+		return ""
+	}
+	openPnL := 0.0
+	openCount := 0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		openCount++
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			continue
+		}
+		if strings.EqualFold(pos.Side, "BUY") {
+			openPnL += (mark - pos.Entry) * pos.Qty
+		} else {
+			openPnL += (pos.Entry - mark) * pos.Qty
+		}
+	}
+	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
+	realized := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realized = ds.Net
+	}
+	eq := p.balance + openPnL
+	return fmt.Sprintf("PAPER   eq=%.2f bal=%.2f pnl=%+.2f day=%+.2f open=%d/%d",
+		eq, p.balance, openPnL, realized+openPnL, openCount, p.maxOpen)
+}
+
+func (p *paperTrader) ConsolePositions(meta map[string]symbolMeta) []string {
+	if p == nil || !p.enabled {
+		return nil
+	}
+	type row struct {
+		sym   string
+		side  string
+		size  float64
+		entry float64
+		mark  float64
+		upnl  float64
+		lev   int
+	}
+	rows := make([]row, 0, len(p.positions))
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		upnl := 0.0
+		if mark > 0 {
+			if strings.EqualFold(pos.Side, "BUY") {
+				upnl = (mark - pos.Entry) * pos.Qty
+			} else {
+				upnl = (pos.Entry - mark) * pos.Qty
+			}
+		}
+		rows = append(rows, row{
+			sym:   raw,
+			side:  pos.Side,
+			size:  pos.Qty,
+			entry: pos.Entry,
+			mark:  mark,
+			upnl:  upnl,
+			lev:   maxInt(pos.Leverage, 1),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].upnl > rows[j].upnl })
+	if len(rows) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, minInt(len(rows), 3)+1)
+	limit := minInt(len(rows), 3)
+	for i := 0; i < limit; i++ {
+		r := rows[i]
+		lines = append(lines, formatConsolePositionLine("paper", r.sym, r.side, r.size, r.entry, r.mark, r.upnl, r.lev))
+	}
+	if len(rows) > limit {
+		lines = append(lines, fmt.Sprintf("  paper +%d more", len(rows)-limit))
+	}
+	return lines
+}
+
 func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 	if p == nil || !p.enabled {
 		return ""
@@ -5757,7 +5875,11 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 		}
 		out = append(out, r)
 		eligibleByScore = append(eligibleByScore, r)
-		conf[r.Symbol] = market.FallbackGradeDirectional(r.Score, r.Change24h, side)
+		grade := strings.TrimSpace(r.Grade)
+		if grade == "" || strings.EqualFold(grade, "N/A") {
+			grade = market.FallbackGradeDirectional(r.Score, r.Change24h, side)
+		}
+		conf[r.Symbol] = grade
 	}
 	sort.Slice(eligibleByScore, func(i, j int) bool { return eligibleByScore[i].Score > eligibleByScore[j].Score })
 	for i := 0; i < len(eligibleByScore) && i < gradeTopN; i++ {
@@ -5771,7 +5893,26 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 	return out, conf
 }
 
-func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64, reversalTopLongN int) []candidate {
+type candidateSelectConfig struct {
+	UseContinuous         bool
+	MinNormalizedScore    float64
+	MinCompleteness       float64
+	MinConfidence         float64
+	ReversalMinScore      float64
+	ReversalMinConfidence float64
+	ReversalMinComplete   float64
+}
+
+type rankSortConfig struct {
+	UseConfidence      bool
+	ConfidenceWeight   float64
+	UseCompleteness    bool
+	CompletenessWeight float64
+	UseReliability     bool
+	ReliabilityWeight  float64
+}
+
+func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64, reversalTopLongN int, cfg candidateSelectConfig) []candidate {
 	minVal := gradeValue(minGrade)
 	revMinVal := gradeValue(reversalMinGrade)
 	if reversalSlopeMin < 0 {
@@ -5786,6 +5927,35 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		}
 		return true
 	}
+	allowByQuality := func(e inplay.Entry, forReversal bool) bool {
+		if !cfg.UseContinuous {
+			return true
+		}
+		minScore := cfg.MinNormalizedScore
+		minConf := cfg.MinConfidence
+		minComp := cfg.MinCompleteness
+		if forReversal {
+			if cfg.ReversalMinScore > 0 {
+				minScore = cfg.ReversalMinScore
+			}
+			if cfg.ReversalMinConfidence > 0 {
+				minConf = cfg.ReversalMinConfidence
+			}
+			if cfg.ReversalMinComplete > 0 {
+				minComp = cfg.ReversalMinComplete
+			}
+		}
+		if e.CurrentScore < minScore {
+			return false
+		}
+		if e.MarketConfidence < minConf {
+			return false
+		}
+		if e.Completeness < minComp {
+			return false
+		}
+		return true
+	}
 	out := make([]candidate, 0, len(longInPlay)+len(shortInPlay))
 	for _, e := range longInPlay {
 		if !allow(e) {
@@ -5794,14 +5964,24 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if e.State == inplay.StateExhausted {
 			continue
 		}
-		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
-			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
+		longContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && e.ScoreSlope > 0
+		if cfg.UseContinuous {
+			longContinuationOK = longContinuationOK && allowByQuality(e, false)
+		} else {
+			longContinuationOK = longContinuationOK && gradeValue(e.CurrentGrade) >= minVal
+		}
+		if longContinuationOK {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
 		}
-		if enableMomentumReversal &&
-			gradeValue(e.CurrentGrade) >= revMinVal &&
+		reversalOK := enableMomentumReversal &&
 			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay) {
+			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay)
+		if cfg.UseContinuous {
+			reversalOK = reversalOK && allowByQuality(e, true)
+		} else {
+			reversalOK = reversalOK && gradeValue(e.CurrentGrade) >= revMinVal
+		}
+		if reversalOK {
 			flip := e
 			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
 			out = append(out, candidate{
@@ -5818,14 +5998,24 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if e.State == inplay.StateExhausted {
 			continue
 		}
-		if (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) &&
-			gradeValue(e.CurrentGrade) >= minVal && e.ScoreSlope > 0 {
+		shortContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && e.ScoreSlope > 0
+		if cfg.UseContinuous {
+			shortContinuationOK = shortContinuationOK && allowByQuality(e, false)
+		} else {
+			shortContinuationOK = shortContinuationOK && gradeValue(e.CurrentGrade) >= minVal
+		}
+		if shortContinuationOK {
 			out = append(out, candidate{Entry: e, Side: "SELL"})
 		}
-		if enableMomentumReversal &&
-			gradeValue(e.CurrentGrade) >= revMinVal &&
+		reversalOK := enableMomentumReversal &&
 			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay) {
+			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay)
+		if cfg.UseContinuous {
+			reversalOK = reversalOK && allowByQuality(e, true)
+		} else {
+			reversalOK = reversalOK && gradeValue(e.CurrentGrade) >= revMinVal
+		}
+		if reversalOK {
 			flip := e
 			flip.Rank = e.Rank + 6*abs(e.ScoreSlope)
 			out = append(out, candidate{
@@ -5839,7 +6029,14 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		n := minInt(reversalTopLongN, len(longInPlay))
 		for i := 0; i < n; i++ {
 			e := longInPlay[i]
-			if !allow(e) || gradeValue(e.CurrentGrade) < revMinVal {
+			if !allow(e) {
+				continue
+			}
+			if cfg.UseContinuous {
+				if !allowByQuality(e, true) {
+					continue
+				}
+			} else if gradeValue(e.CurrentGrade) < revMinVal {
 				continue
 			}
 			flip := e
@@ -5865,7 +6062,7 @@ func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asi
 	return c.Conf >= asiaStrongConfMin
 }
 
-func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64) []candidate {
+func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64, sortCfg rankSortConfig, rel reliability.Store) []candidate {
 	if len(in) == 0 {
 		return in
 	}
@@ -5883,11 +6080,40 @@ func rankWithStrategy(c *aster.Client, in []candidate, topN int, stopMode, targe
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		ri := out[i].Entry.Rank * (1 + out[i].Conf)
-		rj := out[j].Entry.Rank * (1 + out[j].Conf)
+		ri := finalSortRank(out[i], sortCfg, rel)
+		rj := finalSortRank(out[j], sortCfg, rel)
 		return ri > rj
 	})
 	return out
+}
+
+func finalSortRank(c candidate, cfg rankSortConfig, rel reliability.Store) float64 {
+	r := c.Entry.Rank
+	if cfg.UseConfidence {
+		w := cfg.ConfidenceWeight
+		if w <= 0 {
+			w = 1.0
+		}
+		r *= 1 + clamp(c.Conf, 0, 1)*w
+	}
+	if cfg.UseCompleteness {
+		w := cfg.CompletenessWeight
+		if w < 0 {
+			w = 0
+		}
+		compBoost := 0.80 + 0.20*clamp(c.Entry.Completeness, 0, 1)
+		r *= 1 + ((compBoost - 1.0) * w)
+	}
+	if cfg.UseReliability && rel != nil {
+		adj := rel.Adjustment(strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)))
+		c.ReliabilityAdj = adj
+		w := cfg.ReliabilityWeight
+		if w <= 0 {
+			w = 1.0
+		}
+		r += adj * w
+	}
+	return r
 }
 
 func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64) candidate {
@@ -6132,17 +6358,7 @@ func estimateATRPct(symbol string, candlesN, atrN int) float64 {
 }
 
 func printInPlay(tag string, entries []inplay.Entry) {
-	fmt.Printf("🔥 IN-PLAY (%s)\n", tag)
-	fmt.Println("sym          grade score   slope   state")
-	fmt.Println("---------------------------------------------")
-	for i := 0; i < len(entries) && i < 5; i++ {
-		e := entries[i]
-		fmt.Printf("%-12s %-5s %6.2f %7.3f %-8s\n",
-			e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State)
-	}
-	if len(entries) == 0 {
-		fmt.Println("(none)")
-	}
+	fmt.Println(formatInPlaySummary(tag, entries))
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
@@ -6365,35 +6581,64 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapsho
 	return snap, nil
 }
 
-func printAccountSnapshot(snap accountSnapshot, assets []string, realizedToday float64) {
-	fmt.Printf("💼 ACCOUNT availableUSDT=%.4f\n", snap.AvailableUSDT)
-	if len(snap.Balances) == 0 {
-		fmt.Println("balances: (none matching filter)")
-	} else {
-		fmt.Println("balances:")
-		for _, b := range snap.Balances {
-			fmt.Printf("- %-6s bal=%-12.6f avail=%-12.6f upnl=%-10.6f\n",
-				strings.ToUpper(b.Asset), b.Balance, b.AvailableBalance, b.CrossUnPnl)
-		}
-	}
-	fmt.Println("active positions:")
-	fmt.Println("symbol      side   margin    size      entry      mark       uPnL      lev")
-	fmt.Println("----------------------------------------------------------------------------")
-	if len(snap.Positions) == 0 {
-		fmt.Println("(none)")
-		fmt.Printf("totals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f\n", 0.0, realizedToday, realizedToday)
-		return
-	}
+func printAccountSnapshot(snap accountSnapshot, realizedToday float64) {
 	openPnL := 0.0
-	totalMargin := 0.0
 	for _, p := range snap.Positions {
 		openPnL += p.Unreal
-		totalMargin += p.Margin
-		fmt.Printf("%-10s %-6s $%-8.2f %-9.4f %-10s %-10s %+.2f    %.0fx\n",
-			p.Symbol, p.Side, p.Margin, p.SizeAbs, fmtPrice(p.Entry), fmtPrice(p.Mark), p.Unreal, p.Leverage)
 	}
-	fmt.Printf("totals: margin=$%.2f openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f\n",
-		totalMargin, openPnL, realizedToday, realizedToday+openPnL)
+	fmt.Printf("ACCOUNT avail=%.2f eq=%.2f pnl=%+.2f day=%+.2f open=%d\n",
+		snap.AvailableUSDT, accountEquity(snap), openPnL, realizedToday+openPnL, len(snap.Positions))
+	if len(snap.Positions) == 0 {
+		return
+	}
+	limit := minInt(len(snap.Positions), 3)
+	for i := 0; i < limit; i++ {
+		p := snap.Positions[i]
+		fmt.Println(formatConsolePositionLine("live", p.Symbol, p.Side, p.SizeAbs, p.Entry, p.Mark, p.Unreal, int(p.Leverage)))
+	}
+	if len(snap.Positions) > limit {
+		fmt.Printf("  live +%d more\n", len(snap.Positions)-limit)
+	}
+}
+
+func printScanHeader(now time.Time) {
+	fmt.Printf("\n[%s %s]\n", now.Format("15:04:05"), sessionTag(now))
+}
+
+func formatInPlaySummary(tag string, entries []inplay.Entry) string {
+	if len(entries) == 0 {
+		return fmt.Sprintf("%-6s none", tag+":")
+	}
+	limit := minInt(len(entries), 3)
+	parts := make([]string, 0, limit+1)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, formatInPlayEntry(entries[i]))
+	}
+	if len(entries) > limit {
+		parts = append(parts, fmt.Sprintf("+%d more", len(entries)-limit))
+	}
+	return fmt.Sprintf("%-6s %s", tag+":", strings.Join(parts, " | "))
+}
+
+func formatInPlayEntry(e inplay.Entry) string {
+	sym := strings.ToUpper(aster.RawSymbol(e.Symbol))
+	if sym == "" {
+		sym = strings.ToUpper(strings.TrimSpace(e.Symbol))
+	}
+	grade := strings.ToUpper(strings.TrimSpace(e.CurrentGrade))
+	if grade != "" && grade != "N/A" {
+		return fmt.Sprintf("%s %s %.1f %s", sym, grade, e.CurrentScore, e.State)
+	}
+	return fmt.Sprintf("%s %.1f %s", sym, e.CurrentScore, e.State)
+}
+
+func formatConsolePositionLine(scope, symbol, side string, size, entry, mark, upnl float64, lev int) string {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if lev <= 0 {
+		lev = 1
+	}
+	return fmt.Sprintf("  %-5s %-10s %-5s qty=%.4f entry=%s mark=%s pnl=%+.2f %dx",
+		scope, sym, side, size, fmtPrice(entry), fmtPrice(mark), upnl, lev)
 }
 
 func filterBalances(rows []aster.Balance, assets []string) []aster.Balance {
