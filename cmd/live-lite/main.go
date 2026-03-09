@@ -1720,41 +1720,50 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 
 func buildHourlyDigest(now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
 	if p == nil || !p.enabled {
-		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
-			Title:     "HOURLY DIGEST",
-			TimeLabel: now.Format("15:04 MST"),
-			Session:   sessionTag(now),
-		})
+		return tgPre(fmt.Sprintf("Hourly Digest (%s) session=%s\npaper disabled", now.Format("15:04 MST"), sessionTag(now)))
 	}
-	pulse, cards := buildPaperPulseAndCards("HOURLY DIGEST", now, p, meta)
-	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, 2)
+	return buildClassicDigest("Hourly Digest", now, p, meta, longInPlay, shortInPlay)
+}
+
+func buildClassicDigest(label string, now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) string {
+	dayKey := now.In(p.reportLoc).Format("2006-01-02")
+	realized := 0.0
+	if ds := p.dayStats[dayKey]; ds != nil {
+		realized = ds.Net
+	}
+	openPnL := 0.0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			mark = pos.Entry
+		}
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
+		openPnL += upnl
+	}
+	eq := p.balance + openPnL
 	var b strings.Builder
-	b.WriteString(notify.BuildSessionPulseHTML(pulse))
-	for _, c := range cards {
-		b.WriteString("\n\n")
-		b.WriteString(notify.BuildPositionCard(c))
-	}
-	b.WriteString("\n\n")
-	b.WriteString(notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
-	return strings.TrimSpace(b.String())
+	fmt.Fprintf(&b, "%s (%s) session=%s\n", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now))
+	fmt.Fprintf(&b, "realized=%+.2f openPnL=%+.2f netDay=%+.2f bal=%.2f eq=%.2f\n\n",
+		realized, openPnL, realized+openPnL, p.balance, eq)
+	fmt.Fprintf(&b, "Paper Update (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
+	b.WriteString(p.TradeUpdateMessage(meta, 10_000))
+	b.WriteString("\n\nIn-Play Scanner\n")
+	appendInPlayRows(&b, "LONG", longInPlay, meta, 10_000)
+	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 10_000)
+	return tgPre(strings.TrimSpace(b.String()))
 }
 
 func buildSODReport(now time.Time, p *paperTrader, meta map[string]symbolMeta) string {
 	if p == nil || !p.enabled {
-		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
-			Title:     "SOD REPORT",
-			TimeLabel: now.Format("15:04 MST"),
-			Session:   sessionTag(now),
-		})
+		return tgPre(fmt.Sprintf("SOD Report (%s) session=%s\npaper disabled", now.Format("15:04 MST"), sessionTag(now)))
 	}
-	pulse, cards := buildPaperPulseAndCards("SOD REPORT", now, p, meta)
-	var b strings.Builder
-	b.WriteString(notify.BuildSessionPulseHTML(pulse))
-	for _, c := range cards {
-		b.WriteString("\n\n")
-		b.WriteString(notify.BuildPositionCard(c))
-	}
-	return strings.TrimSpace(b.String())
+	return buildClassicDigest("SOD Report", now, p, meta, nil, nil)
 }
 
 func buildPaperPulseAndCards(title string, now time.Time, p *paperTrader, meta map[string]symbolMeta) (notify.PulseSnapshot, []notify.PositionCard) {
@@ -1928,7 +1937,7 @@ func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta 
 		e := rows[i]
 		raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
 		m := meta[raw]
-		status := string(e.State)
+		status := colorStateTag(e.State)
 		switch e.State {
 		case inplay.StateInPlay:
 			status = "IN_PLAY"
@@ -1940,6 +1949,8 @@ func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta 
 			status = "PUMPING"
 		case inplay.StateDumping:
 			status = "DUMPING"
+		case inplay.StateExhausted:
+			status = "EXHAUSTED"
 		}
 		slopeArrow := "→"
 		if e.ScoreSlope > 0 {
@@ -1952,7 +1963,63 @@ func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta 
 			price = fmtPrice(m.LastPrice)
 		}
 		fmt.Fprintf(b, "%d) %s %s g=%s s=%.2f %s%.3f px=%s 24h=%+.2f%%\n",
-			i+1, raw, status, e.CurrentGrade, e.CurrentScore, slopeArrow, abs(e.ScoreSlope), price, m.Move24h)
+			i+1, raw, status, colorGradeTag(e.CurrentGrade), e.CurrentScore, slopeArrow, abs(e.ScoreSlope), price, m.Move24h)
+	}
+}
+
+func colorGradeTag(g string) string {
+	switch strings.ToUpper(strings.TrimSpace(g)) {
+	case "A+":
+		return "A+"
+	case "A":
+		return "A"
+	case "B":
+		return "B"
+	case "C":
+		return "C"
+	case "D":
+		return "D"
+	default:
+		return "N/A"
+	}
+}
+
+func colorStateTag(s inplay.State) string {
+	switch s {
+	case inplay.StatePumping:
+		return "PUMPING"
+	case inplay.StateInPlay:
+		return "IN_PLAY"
+	case inplay.StateHeating:
+		return "HEATING"
+	case inplay.StateCooling:
+		return "COOLING"
+	case inplay.StateDumping:
+		return "DUMPING"
+	case inplay.StateExhausted:
+		return "EXHAUSTED"
+	default:
+		return strings.ToUpper(strings.TrimSpace(string(s)))
+	}
+}
+
+func colorReasonTag(reason string) string {
+	r := strings.ToUpper(strings.TrimSpace(reason))
+	switch r {
+	case "FA", "FAILED_AUCTION_MAGNET":
+		return r
+	case "VP_TREND", "VWAP_CONFLUENCE", "PD_LEVELS_RETEST":
+		return r
+	case "BOS_PB", "LSR", "OB_R", "FVG_C":
+		return r
+	case "MOMENTUM_FADE", "PRE_EOD_MOMENTUM_FADE":
+		return r
+	case "SL", "STOP", "TRAIL_STOP", "EOD_FORCE_FLAT", "TG_FORCE_FLAT":
+		return r
+	case "", "-", "NONE":
+		return "none"
+	default:
+		return r
 	}
 }
 
@@ -4514,14 +4581,10 @@ func (p *paperTrader) ConsolePositions(meta map[string]symbolMeta) []string {
 	if len(rows) == 0 {
 		return nil
 	}
-	lines := make([]string, 0, minInt(len(rows), 3)+1)
-	limit := minInt(len(rows), 3)
-	for i := 0; i < limit; i++ {
+	lines := make([]string, 0, len(rows))
+	for i := 0; i < len(rows); i++ {
 		r := rows[i]
 		lines = append(lines, formatConsolePositionLine("paper", r.sym, r.side, r.size, r.entry, r.mark, r.upnl, r.lev))
-	}
-	if len(rows) > limit {
-		lines = append(lines, fmt.Sprintf("  paper +%d more", len(rows)-limit))
 	}
 	return lines
 }
@@ -4597,23 +4660,9 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 
 func buildWindowReport(label string, now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
 	if p == nil || !p.enabled {
-		return notify.BuildSessionPulseHTML(notify.PulseSnapshot{
-			Title:     strings.TrimSpace(label),
-			TimeLabel: now.Format("15:04 MST"),
-			Session:   sessionTag(now),
-		})
+		return tgPre(fmt.Sprintf("%s (%s) session=%s\npaper disabled", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now)))
 	}
-	pulse, cards := buildPaperPulseAndCards(strings.TrimSpace(label), now, p, meta)
-	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, 2)
-	var b strings.Builder
-	b.WriteString(notify.BuildSessionPulseHTML(pulse))
-	for _, c := range cards {
-		b.WriteString("\n\n")
-		b.WriteString(notify.BuildPositionCard(c))
-	}
-	b.WriteString("\n\n")
-	b.WriteString(notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
-	return strings.TrimSpace(b.String())
+	return buildClassicDigest(strings.TrimSpace(label), now, p, meta, longInPlay, shortInPlay)
 }
 
 func (p *paperTrader) Equity(meta map[string]symbolMeta) float64 {
@@ -5390,7 +5439,7 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
 	for _, r := range rows {
 		fmt.Fprintf(&b, "| %s | %s | $%.2f | %.4f | %s | %s | %dx | %+.2f | %+.2f%% | %d | %s |\n",
-			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.upct, r.ageMin, r.reason)
+			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.upct, r.ageMin, colorReasonTag(r.reason))
 	}
 	fmt.Fprintf(&b, "\nTotals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f", totalUPnL, realizedToday, realizedToday+totalUPnL)
 	return strings.TrimSpace(b.String())
@@ -6591,13 +6640,9 @@ func printAccountSnapshot(snap accountSnapshot, realizedToday float64) {
 	if len(snap.Positions) == 0 {
 		return
 	}
-	limit := minInt(len(snap.Positions), 3)
-	for i := 0; i < limit; i++ {
+	for i := 0; i < len(snap.Positions); i++ {
 		p := snap.Positions[i]
 		fmt.Println(formatConsolePositionLine("live", p.Symbol, p.Side, p.SizeAbs, p.Entry, p.Mark, p.Unreal, int(p.Leverage)))
-	}
-	if len(snap.Positions) > limit {
-		fmt.Printf("  live +%d more\n", len(snap.Positions)-limit)
 	}
 }
 
@@ -6609,13 +6654,9 @@ func formatInPlaySummary(tag string, entries []inplay.Entry) string {
 	if len(entries) == 0 {
 		return fmt.Sprintf("%-6s none", tag+":")
 	}
-	limit := minInt(len(entries), 3)
-	parts := make([]string, 0, limit+1)
-	for i := 0; i < limit; i++ {
+	parts := make([]string, 0, len(entries))
+	for i := 0; i < len(entries); i++ {
 		parts = append(parts, formatInPlayEntry(entries[i]))
-	}
-	if len(entries) > limit {
-		parts = append(parts, fmt.Sprintf("+%d more", len(entries)-limit))
 	}
 	return fmt.Sprintf("%-6s %s", tag+":", strings.Join(parts, " | "))
 }
@@ -6625,11 +6666,37 @@ func formatInPlayEntry(e inplay.Entry) string {
 	if sym == "" {
 		sym = strings.ToUpper(strings.TrimSpace(e.Symbol))
 	}
+	state := strings.ToUpper(strings.TrimSpace(string(e.State)))
+	stateClr := inPlayStateColor(e.State)
 	grade := strings.ToUpper(strings.TrimSpace(e.CurrentGrade))
 	if grade != "" && grade != "N/A" {
-		return fmt.Sprintf("%s %s %.1f %s", sym, grade, e.CurrentScore, e.State)
+		return fmt.Sprintf("%s %s%s%s %.1f %s%s%s",
+			sym,
+			market.GradeColor(grade), grade, market.ResetColor(),
+			e.CurrentScore,
+			stateClr, state, market.ResetColor(),
+		)
 	}
-	return fmt.Sprintf("%s %.1f %s", sym, e.CurrentScore, e.State)
+	return fmt.Sprintf("%s %.1f %s%s%s", sym, e.CurrentScore, stateClr, state, market.ResetColor())
+}
+
+func inPlayStateColor(s inplay.State) string {
+	switch s {
+	case inplay.StatePumping:
+		return "\033[31m" // red
+	case inplay.StateInPlay:
+		return "\033[32m" // green
+	case inplay.StateHeating:
+		return "\033[38;5;214m" // amber
+	case inplay.StateCooling:
+		return "\033[37m" // gray
+	case inplay.StateDumping:
+		return "\033[35m" // magenta
+	case inplay.StateExhausted:
+		return "\033[90m" // dark gray
+	default:
+		return "\033[37m"
+	}
 }
 
 func formatConsolePositionLine(scope, symbol, side string, size, entry, mark, upnl float64, lev int) string {
