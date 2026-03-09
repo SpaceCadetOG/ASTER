@@ -6407,7 +6407,25 @@ func estimateATRPct(symbol string, candlesN, atrN int) float64 {
 }
 
 func printInPlay(tag string, entries []inplay.Entry) {
-	fmt.Println(formatInPlaySummary(tag, entries))
+	fmt.Printf("IN-PLAY (%s)\n", strings.ToUpper(strings.TrimSpace(tag)))
+	fmt.Println("sym          grade score   slope   state")
+	fmt.Println("---------------------------------------------")
+	if len(entries) == 0 {
+		fmt.Println("(none)")
+		return
+	}
+	for _, e := range entries {
+		sym := strings.ToUpper(aster.RawSymbol(e.Symbol))
+		if sym == "" {
+			sym = strings.ToUpper(strings.TrimSpace(e.Symbol))
+		}
+		grade := strings.ToUpper(strings.TrimSpace(e.CurrentGrade))
+		if grade == "" {
+			grade = "N/A"
+		}
+		state := strings.ToLower(strings.TrimSpace(string(e.State)))
+		fmt.Printf("%-12s %-5s %-7.2f %-7.3f %s\n", sym, grade, e.CurrentScore, e.ScoreSlope, state)
+	}
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
