@@ -436,10 +436,10 @@ func main() {
 	dryRun := envBool("LIVE_DRY_RUN", true)
 	minGrade := envStr("LIVE_MIN_GRADE", "B")
 	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 5)
-	reserveMode := strings.ToLower(envStr("LIVE_RESERVE_MODE", "fixed")) // fixed|percent
+	reserveMode := strings.ToLower(envStr("LIVE_RESERVE_MODE", "fixed")) // fixed|percent|dynamic
 	reservePct := envFloat("LIVE_RESERVE_PCT", 50.0)
 	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 100)
-	tradeMarginMode := strings.ToLower(envStr("LIVE_TRADE_MARGIN_MODE", "fixed")) // fixed|percent|slots
+	tradeMarginMode := strings.ToLower(envStr("LIVE_TRADE_MARGIN_MODE", "fixed")) // fixed|percent|slots|dynamic
 	tradeMarginPct := envFloat("LIVE_TRADE_MARGIN_PCT", 10.0)
 	tradeSlots := envInt("LIVE_TRADE_SLOTS", 5)
 	if tradeSlots <= 0 {
@@ -7675,6 +7675,7 @@ func computeTradeMargin(mode string, fixed, pct float64, slots int, minV, maxV, 
 		return fixed
 	}
 	m := fixed
+	tradeable := base - reserve
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "percent":
 		if pct <= 0 {
@@ -7685,11 +7686,29 @@ func computeTradeMargin(mode string, fixed, pct float64, slots int, minV, maxV, 
 		if slots <= 0 {
 			slots = 5
 		}
-		tradeable := base - reserve
 		if tradeable <= 0 {
 			return minV
 		}
 		m = tradeable / float64(slots)
+	case "dynamic", "auto":
+		// Dynamic mode is account-aware:
+		// - byPct: scales with account (trade size % of base)
+		// - bySlots: prevents oversizing against reserved capital/open-slot model
+		if pct <= 0 {
+			pct = 12
+		}
+		if slots <= 0 {
+			slots = 5
+		}
+		if tradeable <= 0 {
+			return minV
+		}
+		byPct := base * (pct / 100.0)
+		bySlots := tradeable / float64(slots)
+		if byPct <= 0 {
+			byPct = bySlots
+		}
+		m = math.Min(byPct, bySlots)
 	default:
 		m = fixed
 	}
@@ -7716,7 +7735,32 @@ func computeReserveUSDT(mode string, fixed, pct, avail float64, p *paperTrader) 
 		fixed = 0
 	}
 	base := sizingBaseBalance(avail, p)
-	if strings.ToLower(strings.TrimSpace(mode)) != "percent" {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "percent":
+		// handled below
+	case "dynamic", "auto":
+		// Dynamic reserve defaults to 50% of sizing base unless pct override is provided.
+		if base <= 0 {
+			return fixed
+		}
+		if pct <= 0 {
+			pct = 50
+		}
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 95 {
+			pct = 95
+		}
+		r := base * (pct / 100.0)
+		if r < fixed {
+			r = fixed
+		}
+		if r > base {
+			r = base
+		}
+		return r
+	default:
 		return fixed
 	}
 	if base <= 0 {
