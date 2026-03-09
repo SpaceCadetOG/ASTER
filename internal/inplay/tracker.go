@@ -190,6 +190,10 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 			nextState = StatePumping
 		case gradeOK && volOK && rising:
 			nextState = StateInPlay
+		case gradeOK && volOK && priceFav && volRise:
+			// Continuation support: keep a symbol "alive" when price+volume
+			// are still rising even if score slope is temporarily flat/noisy.
+			nextState = StateHeating
 		case exhausted:
 			nextState = StateExhausted
 		case momentumLoss:
@@ -232,6 +236,7 @@ func (t *Tracker) Entries() []Entry {
 		}
 		last := ss.history[len(ss.history)-1]
 		slope := calcSlope(ss.history)
+		continuation := favorablePriceMove(t.side, ss.history) && volumeRising(ss.history)
 		e := Entry{
 			Symbol:           sym,
 			SideBias:         t.side,
@@ -242,7 +247,7 @@ func (t *Tracker) Entries() []Entry {
 			LastSeen:         ss.lastSeen,
 			StateSince:       ss.stateSince,
 			State:            ss.state,
-			Momentum:         (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping,
+			Momentum:         (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping || continuation,
 			MarketConfidence: clamp(last.confidence, 0, 1),
 			Completeness:     clamp(last.completeness, 0, 1),
 			Uncertainty:      clamp(last.uncertainty, 0, 1),

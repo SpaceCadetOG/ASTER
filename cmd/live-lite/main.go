@@ -6018,7 +6018,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if e.State == inplay.StateExhausted {
 			continue
 		}
-		longContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && e.ScoreSlope > 0
+		longContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && (e.ScoreSlope > 0 || e.Momentum)
 		if cfg.UseContinuous {
 			longContinuationOK = longContinuationOK && allowByQuality(e, false)
 		} else {
@@ -6052,7 +6052,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if e.State == inplay.StateExhausted {
 			continue
 		}
-		shortContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && e.ScoreSlope > 0
+		shortContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && (e.ScoreSlope > 0 || e.Momentum)
 		if cfg.UseContinuous {
 			shortContinuationOK = shortContinuationOK && allowByQuality(e, false)
 		} else {
