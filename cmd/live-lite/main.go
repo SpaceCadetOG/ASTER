@@ -1937,21 +1937,7 @@ func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta 
 		e := rows[i]
 		raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
 		m := meta[raw]
-		status := colorStateTag(e.State)
-		switch e.State {
-		case inplay.StateInPlay:
-			status = "IN_PLAY"
-		case inplay.StateHeating:
-			status = "HEATING"
-		case inplay.StateCooling:
-			status = "COOLING"
-		case inplay.StatePumping:
-			status = "PUMPING"
-		case inplay.StateDumping:
-			status = "DUMPING"
-		case inplay.StateExhausted:
-			status = "EXHAUSTED"
-		}
+		status := colorStateTag(e.SideBias, e.State)
 		slopeArrow := "→"
 		if e.ScoreSlope > 0 {
 			slopeArrow = "↑"
@@ -1984,14 +1970,30 @@ func colorGradeTag(g string) string {
 	}
 }
 
-func colorStateTag(s inplay.State) string {
-	switch s {
+func displayState(side string, s inplay.State) string {
+	// Side-aware naming: short scanner uses DUMPING as strong impulse.
+	if strings.EqualFold(strings.TrimSpace(side), "short") {
+		switch s {
+		case inplay.StatePumping:
+			return string(inplay.StateDumping)
+		case inplay.StateDumping:
+			return string(inplay.StatePumping)
+		}
+	}
+	return string(s)
+}
+
+func colorStateTag(side string, s inplay.State) string {
+	ds := inplay.State(displayState(side, s))
+	switch ds {
 	case inplay.StatePumping:
 		return "PUMPING"
 	case inplay.StateInPlay:
 		return "IN_PLAY"
 	case inplay.StateHeating:
 		return "HEATING"
+	case inplay.StateBalanced:
+		return "BALANCED"
 	case inplay.StateCooling:
 		return "COOLING"
 	case inplay.StateDumping:
@@ -1999,7 +2001,7 @@ func colorStateTag(s inplay.State) string {
 	case inplay.StateExhausted:
 		return "EXHAUSTED"
 	default:
-		return strings.ToUpper(strings.TrimSpace(string(s)))
+		return strings.ToUpper(strings.TrimSpace(string(ds)))
 	}
 }
 
@@ -6423,8 +6425,15 @@ func printInPlay(tag string, entries []inplay.Entry) {
 		if grade == "" {
 			grade = "N/A"
 		}
-		state := strings.ToLower(strings.TrimSpace(string(e.State)))
-		fmt.Printf("%-12s %-5s %-7.2f %-7.3f %s\n", sym, grade, e.CurrentScore, e.ScoreSlope, state)
+		state := strings.ToUpper(strings.TrimSpace(displayState(e.SideBias, e.State)))
+		gColor := market.GradeColor(grade)
+		sColor := inPlayStateColor(inplay.State(strings.ToLower(state)))
+		fmt.Printf("%-12s %s%-5s%s %-7.2f %-7.3f %s%s%s\n",
+			sym,
+			gColor, grade, market.ResetColor(),
+			e.CurrentScore, e.ScoreSlope,
+			sColor, strings.ToLower(state), market.ResetColor(),
+		)
 	}
 }
 
@@ -6684,8 +6693,8 @@ func formatInPlayEntry(e inplay.Entry) string {
 	if sym == "" {
 		sym = strings.ToUpper(strings.TrimSpace(e.Symbol))
 	}
-	state := strings.ToUpper(strings.TrimSpace(string(e.State)))
-	stateClr := inPlayStateColor(e.State)
+	state := strings.ToUpper(strings.TrimSpace(displayState(e.SideBias, e.State)))
+	stateClr := inPlayStateColor(inplay.State(displayState(e.SideBias, e.State)))
 	grade := strings.ToUpper(strings.TrimSpace(e.CurrentGrade))
 	if grade != "" && grade != "N/A" {
 		return fmt.Sprintf("%s %s%s%s %.1f %s%s%s",
@@ -6706,6 +6715,8 @@ func inPlayStateColor(s inplay.State) string {
 		return "\033[32m" // green
 	case inplay.StateHeating:
 		return "\033[38;5;214m" // amber
+	case inplay.StateBalanced:
+		return "\033[36m" // cyan
 	case inplay.StateCooling:
 		return "\033[37m" // gray
 	case inplay.StateDumping:

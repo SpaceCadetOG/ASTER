@@ -15,6 +15,7 @@ type State string
 const (
 	StateHeating   State = "heating"
 	StateInPlay    State = "in-play"
+	StateBalanced  State = "balanced"
 	StateCooling   State = "cooling"
 	StatePumping   State = "pumping"
 	StateDumping   State = "dumping"
@@ -22,34 +23,34 @@ const (
 )
 
 type Entry struct {
-	Symbol       string    `json:"symbol"`
-	SideBias     string    `json:"sideBias"`
-	CurrentGrade string    `json:"currentGrade"`
-	CurrentScore float64   `json:"currentScore"`
-	ScoreSlope   float64   `json:"scoreSlope"`
-	FirstSeen    time.Time `json:"firstSeen"`
-	LastSeen     time.Time `json:"lastSeen"`
-	StateSince   time.Time `json:"stateSince"`
-	State        State     `json:"state"`
-	Momentum     bool      `json:"momentum"`
-	Rank         float64   `json:"rank"`
-	MarketConfidence float64 `json:"marketConfidence"`
-	Completeness     float64 `json:"completeness"`
-	Uncertainty      float64 `json:"uncertainty"`
-	TimeInStateMin   float64 `json:"timeInStateMin"`
-	StateBoostRaw    float64 `json:"stateBoostRaw"`
-	StateBoostDecayed float64 `json:"stateBoostDecayed"`
-	StalenessPenalty float64 `json:"stalenessPenalty"`
+	Symbol            string    `json:"symbol"`
+	SideBias          string    `json:"sideBias"`
+	CurrentGrade      string    `json:"currentGrade"`
+	CurrentScore      float64   `json:"currentScore"`
+	ScoreSlope        float64   `json:"scoreSlope"`
+	FirstSeen         time.Time `json:"firstSeen"`
+	LastSeen          time.Time `json:"lastSeen"`
+	StateSince        time.Time `json:"stateSince"`
+	State             State     `json:"state"`
+	Momentum          bool      `json:"momentum"`
+	Rank              float64   `json:"rank"`
+	MarketConfidence  float64   `json:"marketConfidence"`
+	Completeness      float64   `json:"completeness"`
+	Uncertainty       float64   `json:"uncertainty"`
+	TimeInStateMin    float64   `json:"timeInStateMin"`
+	StateBoostRaw     float64   `json:"stateBoostRaw"`
+	StateBoostDecayed float64   `json:"stateBoostDecayed"`
+	StalenessPenalty  float64   `json:"stalenessPenalty"`
 }
 
 type Config struct {
-	MinGrade       string
-	MinVolumeUSD   float64
-	HistoryN       int
-	RiseN          int
-	DropGradeScans int
-	FallScans      int
-	TTL            time.Duration
+	MinGrade               string
+	MinVolumeUSD           float64
+	HistoryN               int
+	RiseN                  int
+	DropGradeScans         int
+	FallScans              int
+	TTL                    time.Duration
 	EnableStateDecay       bool
 	StateDecayMin          float64
 	EnableStalenessPenalty bool
@@ -57,12 +58,12 @@ type Config struct {
 }
 
 type scorePoint struct {
-	ts     time.Time
-	score  float64
-	grade  string
-	vol    float64
-	price  float64
-	change float64
+	ts           time.Time
+	score        float64
+	grade        string
+	vol          float64
+	price        float64
+	change       float64
 	completeness float64
 	confidence   float64
 	uncertainty  float64
@@ -142,12 +143,12 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 		}
 		ss.lastSeen = now
 		ss.history = append(ss.history, scorePoint{
-			ts:     now,
-			score:  r.Score,
-			grade:  g,
-			vol:    r.VolumeUSD,
-			price:  r.LastPrice,
-			change: r.Change24h,
+			ts:           now,
+			score:        r.Score,
+			grade:        g,
+			vol:          r.VolumeUSD,
+			price:        r.LastPrice,
+			change:       r.Change24h,
 			completeness: r.Completeness,
 			confidence:   r.Confidence,
 			uncertainty:  r.Uncertainty,
@@ -195,8 +196,12 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 			nextState = StateDumping
 		case rising || (slope > 0 && (priceFav || !volFall)):
 			nextState = StateHeating
-		default:
+		case math.Abs(slope) < 0.10 || (!volRise && !volFall):
+			nextState = StateBalanced
+		case slope <= 0 || volFall || !priceFav:
 			nextState = StateCooling
+		default:
+			nextState = StateBalanced
 		}
 		if nextState != ss.state {
 			ss.state = nextState
@@ -228,16 +233,16 @@ func (t *Tracker) Entries() []Entry {
 		last := ss.history[len(ss.history)-1]
 		slope := calcSlope(ss.history)
 		e := Entry{
-			Symbol:       sym,
-			SideBias:     t.side,
-			CurrentGrade: last.grade,
-			CurrentScore: last.score,
-			ScoreSlope:   slope,
-			FirstSeen:    ss.firstSeen,
-			LastSeen:     ss.lastSeen,
-			StateSince:   ss.stateSince,
-			State:        ss.state,
-			Momentum:     (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping,
+			Symbol:           sym,
+			SideBias:         t.side,
+			CurrentGrade:     last.grade,
+			CurrentScore:     last.score,
+			ScoreSlope:       slope,
+			FirstSeen:        ss.firstSeen,
+			LastSeen:         ss.lastSeen,
+			StateSince:       ss.stateSince,
+			State:            ss.state,
+			Momentum:         (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping,
 			MarketConfidence: clamp(last.confidence, 0, 1),
 			Completeness:     clamp(last.completeness, 0, 1),
 			Uncertainty:      clamp(last.uncertainty, 0, 1),
@@ -259,6 +264,8 @@ func rankFor(e Entry, cfg Config) (float64, float64, float64, float64) {
 		stateBoost = 25
 	case StateHeating:
 		stateBoost = 10
+	case StateBalanced:
+		stateBoost = 2
 	case StateCooling:
 		stateBoost = -5
 	case StateDumping:
