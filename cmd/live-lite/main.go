@@ -4583,11 +4583,14 @@ func (p *paperTrader) ConsolePositions(meta map[string]symbolMeta) []string {
 	if len(rows) == 0 {
 		return nil
 	}
-	lines := make([]string, 0, len(rows))
+	lines := make([]string, 0, len(rows)+2)
+	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+-----+")
+	lines = append(lines, "  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | lev |")
 	for i := 0; i < len(rows); i++ {
 		r := rows[i]
 		lines = append(lines, formatConsolePositionLine("paper", r.sym, r.side, r.size, r.entry, r.mark, r.upnl, r.lev))
 	}
+	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+-----+")
 	return lines
 }
 
@@ -6410,10 +6413,12 @@ func estimateATRPct(symbol string, candlesN, atrN int) float64 {
 
 func printInPlay(tag string, entries []inplay.Entry) {
 	fmt.Printf("IN-PLAY (%s)\n", strings.ToUpper(strings.TrimSpace(tag)))
-	fmt.Println("sym          grade score   slope   state")
-	fmt.Println("---------------------------------------------")
+	fmt.Println("+------------+-------+---------+---------+-----------+")
+	fmt.Println("| sym        | grade | score   | slope   | state     |")
+	fmt.Println("+------------+-------+---------+---------+-----------+")
 	if len(entries) == 0 {
-		fmt.Println("(none)")
+		fmt.Println("| (none)                                         |")
+		fmt.Println("+------------+-------+---------+---------+-----------+")
 		return
 	}
 	for _, e := range entries {
@@ -6428,13 +6433,14 @@ func printInPlay(tag string, entries []inplay.Entry) {
 		state := strings.ToUpper(strings.TrimSpace(displayState(e.SideBias, e.State)))
 		gColor := market.GradeColor(grade)
 		sColor := inPlayStateColor(inplay.State(strings.ToLower(state)))
-		fmt.Printf("%-12s %s%-5s%s %-7.2f %-7.3f %s%s%s\n",
+		fmt.Printf("| %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s |\n",
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
 		)
 	}
+	fmt.Println("+------------+-------+---------+---------+-----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
@@ -6667,10 +6673,13 @@ func printAccountSnapshot(snap accountSnapshot, realizedToday float64) {
 	if len(snap.Positions) == 0 {
 		return
 	}
+	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+-----+")
+	fmt.Println("  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | lev |")
 	for i := 0; i < len(snap.Positions); i++ {
 		p := snap.Positions[i]
 		fmt.Println(formatConsolePositionLine("live", p.Symbol, p.Side, p.SizeAbs, p.Entry, p.Mark, p.Unreal, int(p.Leverage)))
 	}
+	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+-----+")
 }
 
 func printScanHeader(now time.Time) {
@@ -6733,8 +6742,14 @@ func formatConsolePositionLine(scope, symbol, side string, size, entry, mark, up
 	if lev <= 0 {
 		lev = 1
 	}
-	return fmt.Sprintf("  %-5s %-10s %-5s qty=%.4f entry=%s mark=%s pnl=%+.2f %dx",
-		scope, sym, side, size, fmtPrice(entry), fmtPrice(mark), upnl, lev)
+	pnlColor := "\033[37m"
+	if upnl > 0 {
+		pnlColor = "\033[32m"
+	} else if upnl < 0 {
+		pnlColor = "\033[31m"
+	}
+	return fmt.Sprintf("  | %-4s | %-10s | %-5s | %9.4f | %10s | %10s | %s%+8.2f%s | %3dx |",
+		scope, sym, strings.ToUpper(strings.TrimSpace(side)), size, fmtPrice(entry), fmtPrice(mark), pnlColor, upnl, market.ResetColor(), lev)
 }
 
 func filterBalances(rows []aster.Balance, assets []string) []aster.Balance {
