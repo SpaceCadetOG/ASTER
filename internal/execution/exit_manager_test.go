@@ -17,7 +17,7 @@ func TestFrontRunTarget(t *testing.T) {
 func TestEvaluateProtectWeakFlowBE(t *testing.T) {
 	m := NewManager(Config{})
 	dec := m.EvaluateProtect(ProtectInput{
-		Side: "BUY", Entry: 100, Stop: 98, Mark: 101, MFER: 0.6, MAER: 0.2, WeakFlow: true,
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 101, MFER: 0.6, MAER: 0.2, WeakFlow: true, UnrealizedPct: 0.6,
 	})
 	if !dec.MoveStopToBE {
 		t.Fatalf("expected BE arm on weak flow")
@@ -41,5 +41,22 @@ func TestEvaluateProtectNoFollowThrough(t *testing.T) {
 	})
 	if !dec.FullExit || dec.Reason != "NO_FOLLOW_THROUGH" {
 		t.Fatalf("expected full pre-stop invalidation exit, got %+v", dec)
+	}
+}
+
+func TestEvaluateProtectProfitGiveback(t *testing.T) {
+	m := NewManager(Config{ProfitLockArmR: 0.6, ProfitGivebackPct: 0.25})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:          "BUY",
+		Entry:         100,
+		Stop:          98,
+		Mark:          100.1,
+		MFER:          0.8,
+		MAER:          0.4,
+		WeakFlow:      true,
+		UnrealizedPct: 0.10,
+	})
+	if !dec.FullExit || dec.Reason != "PROFIT_GIVEBACK" {
+		t.Fatalf("expected profit giveback exit, got %+v", dec)
 	}
 }
