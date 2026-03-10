@@ -45,6 +45,7 @@ type candidate struct {
 	Strat          string
 	Conf           float64
 	VolumeUSD      float64
+	VolumeRatio    float64
 	Sig            strategies.Signal
 	RejectReason   string
 	LastClose      float64
@@ -53,6 +54,32 @@ type candidate struct {
 	FastSlope      float64
 	SlowSlope      float64
 	ReliabilityAdj float64
+	TradeQuality   float64
+	QualityReasons []string
+	LifecycleStage string
+	LifecycleScans int
+}
+
+type entryQualityConfig struct {
+	EnableMetaGate       bool
+	MinQuality           float64
+	RequireStrategyMatch bool
+	MinEntryConf         float64
+}
+
+type candidateLifecycleConfig struct {
+	Enable        bool
+	ArmScans      int
+	ReadyScans    int
+	ExpireAfter   time.Duration
+	ReadyMinScore float64
+	ReadyMinSlope float64
+}
+
+type candidateMemory struct {
+	SeenScans int
+	Stage     string
+	LastSeen  time.Time
 }
 
 type positionView struct {
@@ -518,6 +545,41 @@ func main() {
 		ReversalMinConfidence: envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
 		ReversalMinComplete:   envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
 	}
+	entryQualityCfg := entryQualityConfig{
+		EnableMetaGate:       envBool("LIVE_META_GATE_ENABLE", true),
+		MinQuality:           envFloat("LIVE_META_MIN_QUALITY", 0.58),
+		RequireStrategyMatch: envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
+		MinEntryConf:         envFloat("LIVE_MIN_ENTRY_CONF", 0.55),
+	}
+	lifecycleCfg := candidateLifecycleConfig{
+		Enable:        envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
+		ArmScans:      envInt("LIVE_CANDIDATE_ARM_SCANS", 2),
+		ReadyScans:    envInt("LIVE_CANDIDATE_READY_SCANS", 3),
+		ExpireAfter:   time.Duration(envInt("LIVE_CANDIDATE_EXPIRE_MIN", 20)) * time.Minute,
+		ReadyMinScore: envFloat("LIVE_CANDIDATE_READY_MIN_SCORE", 65),
+		ReadyMinSlope: envFloat("LIVE_CANDIDATE_READY_MIN_SLOPE", 0.01),
+	}
+	if lifecycleCfg.ArmScans < 1 {
+		lifecycleCfg.ArmScans = 1
+	}
+	if lifecycleCfg.ReadyScans < lifecycleCfg.ArmScans {
+		lifecycleCfg.ReadyScans = lifecycleCfg.ArmScans
+	}
+	if lifecycleCfg.ExpireAfter <= 0 {
+		lifecycleCfg.ExpireAfter = 20 * time.Minute
+	}
+	if entryQualityCfg.MinEntryConf < 0 {
+		entryQualityCfg.MinEntryConf = 0
+	}
+	if entryQualityCfg.MinEntryConf > 1 {
+		entryQualityCfg.MinEntryConf = 1
+	}
+	if entryQualityCfg.MinQuality < 0 {
+		entryQualityCfg.MinQuality = 0
+	}
+	if entryQualityCfg.MinQuality > 1 {
+		entryQualityCfg.MinQuality = 1
+	}
 	rankSortCfg := rankSortConfig{
 		UseConfidence:      envBool("LIVE_RANK_SORT_USE_CONFIDENCE", true),
 		ConfidenceWeight:   envFloat("LIVE_RANK_SORT_CONF_WEIGHT", 1.0),
@@ -701,8 +763,9 @@ func main() {
 		FlatDoneDay:  map[string]string{},
 		HookDoneDay:  map[string]string{},
 	}
-	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "A")
-	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.72)
+	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "B")
+	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.60)
+	asiaMinSlope := envFloat("LIVE_ASIA_MIN_SLOPE", 0.01)
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
 	if paper != nil && tg != nil && tg.Enabled() {
 		paper.onExit = func(msg string) {
@@ -782,6 +845,7 @@ func main() {
 	orderCountByDay := map[string]int{}
 	orderCountByHour := map[string]int{}
 	symbolStopoutLockUntil := map[string]time.Time{}
+	candidateMem := map[string]candidateMemory{}
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
 	reserveGate := newReserveLockGate()
@@ -1110,6 +1174,7 @@ func main() {
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(client, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore)
+		cands = applyCandidateLifecycle(cands, now, candidateMem, lifecycleCfg)
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
 			eventLog.Emit(stats.Event{
@@ -1122,6 +1187,7 @@ func main() {
 				Score:     c.Entry.CurrentScore,
 				Slope:     c.Entry.ScoreSlope,
 			})
+			c.TradeQuality, c.QualityReasons = computeTradeQuality(c, entryQualityCfg)
 			if c.RejectReason == "STATE_INERTIA_KILL" || c.RejectReason == "VWAP_EMA_LONG_INVALIDATION" {
 				f := false
 				eventLog.Emit(stats.Event{
@@ -1137,7 +1203,7 @@ func main() {
 				})
 				continue
 			}
-			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin) {
+			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin, asiaMinSlope) {
 				deny := []string{"asia_quality_gate"}
 				f := false
 				eventLog.Emit(stats.Event{
@@ -1150,6 +1216,68 @@ func main() {
 					Slope:       c.Entry.ScoreSlope,
 					GateAllow:   &f,
 					GateReasons: deny,
+				})
+				continue
+			}
+			if entryQualityCfg.EnableMetaGate {
+				if c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired" {
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						GateAllow:   &f,
+						GateReasons: []string{c.RejectReason},
+					})
+					continue
+				}
+				if c.TradeQuality < entryQualityCfg.MinQuality {
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						GateAllow:   &f,
+						GateReasons: append([]string{fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, entryQualityCfg.MinQuality)}, c.QualityReasons...),
+					})
+					continue
+				}
+				if c.Conf < entryQualityCfg.MinEntryConf {
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						GateAllow:   &f,
+						GateReasons: []string{fmt.Sprintf("conf:%.2f<%.2f", c.Conf, entryQualityCfg.MinEntryConf)},
+					})
+					continue
+				}
+			}
+			if entryQualityCfg.RequireStrategyMatch && (strings.TrimSpace(c.Strat) == "" || strings.EqualFold(c.Strat, "none")) {
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					GateAllow:   &f,
+					GateReasons: []string{"strategy_none_reject"},
 				})
 				continue
 			}
@@ -6106,11 +6234,106 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	return out
 }
 
-func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64) bool {
+func applyCandidateLifecycle(in []candidate, now time.Time, mem map[string]candidateMemory, cfg candidateLifecycleConfig) []candidate {
+	if !cfg.Enable {
+		return in
+	}
+	seenKeys := make(map[string]struct{}, len(in))
+	out := make([]candidate, 0, len(in))
+	for _, c := range in {
+		key := candidateKey(c)
+		seenKeys[key] = struct{}{}
+		m := mem[key]
+		if now.Sub(m.LastSeen) > cfg.ExpireAfter {
+			m = candidateMemory{}
+		}
+		m.SeenScans++
+		m.LastSeen = now
+		stage := "WATCH"
+		if m.SeenScans >= cfg.ArmScans {
+			stage = "ARMED"
+		}
+		if m.SeenScans >= cfg.ReadyScans &&
+			c.Entry.CurrentScore >= cfg.ReadyMinScore &&
+			(c.Entry.ScoreSlope >= cfg.ReadyMinSlope || c.Entry.Momentum) {
+			stage = "READY"
+		}
+		if c.Entry.State == inplay.StateBalanced && c.Entry.TimeInStateMin > cfg.ExpireAfter.Minutes() {
+			stage = "EXPIRED"
+		}
+		m.Stage = stage
+		mem[key] = m
+		c.LifecycleStage = stage
+		c.LifecycleScans = m.SeenScans
+		if stage == "EXPIRED" {
+			if c.RejectReason == "" {
+				c.RejectReason = "candidate_expired"
+			}
+		} else if stage != "READY" {
+			// Let explicit reversal fallbacks pass quickly.
+			if !strings.EqualFold(c.Strat, "mom_reversal") && !strings.EqualFold(c.Strat, "mom_reversal_short") {
+				if c.RejectReason == "" {
+					c.RejectReason = "candidate_not_ready"
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	for k, v := range mem {
+		if _, ok := seenKeys[k]; ok {
+			continue
+		}
+		if now.Sub(v.LastSeen) > cfg.ExpireAfter {
+			delete(mem, k)
+		}
+	}
+	return out
+}
+
+func candidateKey(c candidate) string {
+	return strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)) + "|" + strings.ToUpper(strings.TrimSpace(c.Side))
+}
+
+func computeTradeQuality(c candidate, cfg entryQualityConfig) (float64, []string) {
+	reasons := make([]string, 0, 4)
+	scoreN := clamp(c.Entry.CurrentScore/100.0, 0, 1)
+	slopeN := clamp((c.Entry.ScoreSlope+0.20)/0.45, 0, 1)
+	confN := clamp(c.Conf, 0, 1)
+	freshnessN := clamp(1.0-c.Entry.TimeInStateMin/35.0, 0, 1)
+	volN := clamp(c.VolumeRatio/1.5, 0, 1)
+	stageN := 0.20
+	switch c.LifecycleStage {
+	case "READY":
+		stageN = 1.0
+	case "ARMED":
+		stageN = 0.70
+	case "WATCH":
+		stageN = 0.45
+	case "EXPIRED":
+		stageN = 0.0
+	}
+	if cfg.RequireStrategyMatch && (strings.TrimSpace(c.Strat) == "" || strings.EqualFold(c.Strat, "none")) {
+		reasons = append(reasons, "strategy_none")
+	}
+	if confN < cfg.MinEntryConf {
+		reasons = append(reasons, "low_conf")
+	}
+	if c.LifecycleStage != "" && c.LifecycleStage != "READY" {
+		reasons = append(reasons, "candidate_not_ready")
+	}
+	total := 0.30*scoreN + 0.20*slopeN + 0.20*confN + 0.10*freshnessN + 0.10*volN + 0.10*stageN
+	return clamp(total, 0, 1), reasons
+}
+
+func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64, asiaMinSlope float64) bool {
 	if data.CurrentRegimeCT(now) != data.RegimeAsia {
 		return true
 	}
 	if gradeValue(c.Entry.CurrentGrade) >= gradeValue(asiaMinGrade) {
+		return true
+	}
+	if (c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping) &&
+		(c.Entry.ScoreSlope >= asiaMinSlope || c.Entry.Momentum) {
 		return true
 	}
 	return c.Conf >= asiaStrongConfMin
@@ -6188,6 +6411,10 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 	cand.SessionVWAP = sessionVWAP(fc)
 	cand.SlowSlope = closeSlopePct(fc, inertiaSlowN)
 	cand.FastSlope = closeSlopePct(fc, inertiaFastN)
+	cand.VolumeRatio = 0
+	if avgVol := smaVolume(fc, 20); avgVol > 0 {
+		cand.VolumeRatio = fc[len(fc)-1].V / avgVol
+	}
 	if inertiaEnable &&
 		strings.EqualFold(cand.Side, "BUY") &&
 		strings.EqualFold(cand.Strat, "") &&
@@ -6265,6 +6492,34 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 			}
 			cand.RejectReason = ""
 			return cand
+		}
+		if envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
+			fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
+			fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+			fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
+			fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
+			stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
+			vwapEMAOK := false
+			if strings.EqualFold(cand.Side, "BUY") {
+				vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
+			} else {
+				vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
+			}
+			if stateOK &&
+				cand.Entry.CurrentScore >= fastMinScore &&
+				cand.Entry.ScoreSlope >= fastMinSlope &&
+				cand.VolumeRatio >= fastMinVolRatio &&
+				vwapEMAOK {
+				cand.Strat = "continuation_fast"
+				cand.Conf = clamp(fastBaseConf+min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
+				cand.Sig = strategies.Signal{
+					Active: true,
+					Name:   "continuation_fast",
+					Side:   toFeatureSide(cand.Side),
+				}
+				cand.RejectReason = ""
+				return cand
+			}
 		}
 		cand.Strat = "none"
 		cand.Conf = 0
