@@ -2,9 +2,11 @@ package strategies
 
 import (
 	"strings"
+	"sync"
 
 	"go-machine/internal/data"
 	"go-machine/internal/features"
+	"go-machine/internal/risk"
 )
 
 type RouterConfig struct {
@@ -24,6 +26,10 @@ type RouterConfig struct {
 	MinConfluenceScore        float64
 	UseSessionRegimeRisk      bool
 	AllowDeadZoneOnlyAPlus    bool
+	RequireOrderFlowHandshake bool
+	RequireLocationHandshake  bool
+	RiskShell                 *risk.RiskShell
+	LocationTolerancePct      float64
 	StrategyWeight            float64
 	FlowWeight                float64
 	StructureWeight           float64
@@ -39,6 +45,11 @@ type Router struct {
 	cfg   RouterConfig
 	strat []Strategy
 }
+
+var (
+	defaultShellOnce sync.Once
+	defaultShell     *risk.RiskShell
+)
 
 func NewRouter(cfg RouterConfig) *Router {
 	if cfg.MinGrade == "" {
@@ -62,8 +73,17 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.StructureWeight <= 0 {
 		cfg.StructureWeight = 0.20
 	}
+	if cfg.LocationTolerancePct <= 0 {
+		cfg.LocationTolerancePct = 0.006 // 60 bps
+	}
 	if cfg.RiskPolicy.StopMode == "" {
 		cfg.RiskPolicy = DefaultRiskPolicy()
+	}
+	if cfg.RiskShell == nil {
+		defaultShellOnce.Do(func() {
+			defaultShell = risk.NewRiskShell(risk.DefaultConfig())
+		})
+		cfg.RiskShell = defaultShell
 	}
 	base := []Strategy{LSR{}, BOSPB{}, OBR{}, FVGC{}, FailedAuction{}, OpenDrive{}}
 	if cfg.EnableVPSetups {
@@ -105,6 +125,45 @@ func (r *Router) Eval(ctx Context) []Candidate {
 			continue
 		}
 		sig = ApplyRiskPolicy(sig, ctx.Snapshot, r.cfg.RiskPolicy)
+		if r.cfg.RequireLocationHandshake && !r.locationHandshake(ctx, &sig) {
+			continue
+		}
+		if r.cfg.AllowDeadZoneOnlyAPlus && data.CurrentRegimeCT(sig.Ts) == data.RegimeDead && gradeValue(ctx.ScannerGrade) < gradeValue("A+") {
+			sig.RejectReason = "dead_zone_non_aplus_grade"
+			continue
+		}
+		if r.cfg.RequireOrderFlowHandshake && !r.orderFlowHandshake(ctx, &sig) {
+			continue
+		}
+		if r.cfg.RiskShell != nil {
+			side := "BUY"
+			if sig.Side == features.SideShort {
+				side = "SELL"
+			}
+			dec := r.cfg.RiskShell.Approve(risk.Input{
+				Symbol:            ctx.Symbol,
+				Session:           string(data.CurrentRegimeCT(sig.Ts)),
+				Side:              side,
+				Entry:             sig.Entry,
+				Stop:              sig.Stop,
+				NotionalUSD:       ctx.NotionalUSD,
+				FundingRate:       ctx.FundingRate,
+				HoldHours:         2,
+				SpreadBps:         ctx.SpreadBps,
+				TopBookUSD:        ctx.TopBookUSD,
+				EstSlippageBps:    ctx.EstSlippageBps,
+				RecentSlippageBps: ctx.RecentSlippageBps,
+				VenueHealthy:      ctx.VenueHealthy || !ctx.VenueHealthKnown,
+				RecordEntry:       false,
+				EntriesLastHour:   ctx.EntriesLastHour,
+				SymbolStopouts90m: ctx.SymbolStopouts90m,
+			})
+			if !dec.Approved {
+				sig.RejectReason = dec.RejectReason
+				sig.Reasons = append(sig.Reasons, "risk_"+dec.RejectReason)
+				continue
+			}
+		}
 		if sig.VPSetup != "" && sig.Confidence < r.cfg.MinVPConfidence {
 			continue
 		}
@@ -137,10 +196,6 @@ func (r *Router) Eval(ctx Context) []Candidate {
 			sig.RejectReason = "below_min_confluence"
 			continue
 		}
-		if r.cfg.AllowDeadZoneOnlyAPlus && data.CurrentRegimeCT(sig.Ts) == data.RegimeDead && gradeValue(ctx.ScannerGrade) < gradeValue("A") {
-			sig.RejectReason = "dead_zone_non_a_grade"
-			continue
-		}
 		scoreNorm := ctx.ScannerScore / r.cfg.ScannerScoreScale
 		if scoreNorm < 0 {
 			scoreNorm = 0
@@ -171,6 +226,66 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		}
 	}
 	return []Candidate{best}
+}
+
+func (r *Router) locationHandshake(ctx Context, sig *Signal) bool {
+	if sig == nil {
+		return false
+	}
+	entry := sig.Entry
+	if entry <= 0 {
+		entry = ctx.Snapshot.Candle.C
+	}
+	if entry <= 0 {
+		sig.RejectReason = "location_missing_entry"
+		return false
+	}
+	if strings.Contains(strings.ToLower(sig.Name), "vwap") {
+		sig.Reasons = append(sig.Reasons, "location_vwap_context")
+		return true
+	}
+	if sig.VPSetup != "" || sig.VPLevel > 0 || sig.VPTargetLevel > 0 {
+		sig.Reasons = append(sig.Reasons, "location_vp_setup")
+		return true
+	}
+	vp := ctx.Snapshot.VP
+	tol := r.cfg.LocationTolerancePct
+	if tol <= 0 {
+		tol = 0.006
+	}
+	levels := []float64{
+		vp.POCPrice, vp.VAH, vp.VAL, vp.NearestHVNAbove, vp.NearestHVNBelow, vp.NearestLVNAbove, vp.NearestLVNBelow,
+	}
+	for _, lvl := range levels {
+		if lvl <= 0 {
+			continue
+		}
+		if abs((entry-lvl)/entry) <= tol {
+			sig.Reasons = append(sig.Reasons, "location_vp_node")
+			return true
+		}
+	}
+	sig.RejectReason = "location_not_significant"
+	return false
+}
+
+func (r *Router) orderFlowHandshake(ctx Context, sig *Signal) bool {
+	if sig == nil {
+		return false
+	}
+	f := ctx.Snapshot.Flow
+	aligned := (sig.Side == features.SideLong && f.WhaleDelta1m > 0) ||
+		(sig.Side == features.SideShort && f.WhaleDelta1m < 0)
+	absorption := f.VolumeSpike && abs(f.WhaleDelta1m) <= maxFloat(50, abs(f.WhaleDeltaCum)*0.15)
+	aggressionFlip := (sig.Side == features.SideLong && f.WhaleDeltaCum < 0 && f.WhaleDelta1m > 0) ||
+		(sig.Side == features.SideShort && f.WhaleDeltaCum > 0 && f.WhaleDelta1m < 0)
+	confirmed := (absorption && aggressionFlip) || (aligned && f.VolumeSpike && f.LargeTradeCount1m >= 2)
+	if !confirmed {
+		sig.RejectReason = "flow_handshake_missing"
+		return false
+	}
+	sig.Reasons = append(sig.Reasons, "flow_absorption_flip")
+	return true
 }
 
 func (r *Router) scoreConfluence(ctx Context, sig Signal) ConfluenceScore {
@@ -242,6 +357,13 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func gradeValue(g string) int {

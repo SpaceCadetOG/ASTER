@@ -41,14 +41,24 @@ type ConfluenceScore struct {
 }
 
 type Context struct {
-	Symbol       string
-	TF           string
-	ScannerScore float64
-	ScannerGrade string
-	ScoreSlope   float64
-	ScanAccel    float64
-	Snapshot     features.Snapshot
-	Candles      []features.Candle
+	Symbol            string
+	TF                string
+	ScannerScore      float64
+	ScannerGrade      string
+	ScoreSlope        float64
+	ScanAccel         float64
+	NotionalUSD       float64
+	FundingRate       float64
+	SpreadBps         float64
+	TopBookUSD        float64
+	EstSlippageBps    float64
+	RecentSlippageBps float64
+	VenueHealthy      bool
+	VenueHealthKnown  bool
+	EntriesLastHour   int
+	SymbolStopouts90m int
+	Snapshot          features.Snapshot
+	Candles           []features.Candle
 }
 
 type Strategy interface {

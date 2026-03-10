@@ -6520,6 +6520,8 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		EnableInstitutionalPA:     true,
 		UseSessionRegimeRisk:      true,
 		AllowDeadZoneOnlyAPlus:    true,
+		RequireOrderFlowHandshake: true,
+		RequireLocationHandshake:  true,
 		MinConfluenceScore:        0.58,
 		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
 		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
