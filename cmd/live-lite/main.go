@@ -2340,6 +2340,59 @@ func enforceTPProgression(side string, tp1, tp2, tp3 float64) (float64, float64,
 	return tp1, tp2, tp3
 }
 
+func sanitizeBracketGeometry(entry float64, side string, stop, tp1, tp2, tp3 float64) (float64, float64, float64, float64) {
+	if entry <= 0 {
+		return stop, tp1, tp2, tp3
+	}
+	minSep := math.Max(entry*0.0008, abs(entry-stop)*0.15) // 8 bps or 15% of risk
+	minSep = math.Min(minSep, entry*0.10)                  // avoid excessive widening on tiny prices
+	if minSep <= 0 {
+		minSep = entry * 0.001
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		if stop >= entry {
+			stop = entry - minSep
+		}
+		if tp1 <= entry {
+			tp1 = entry + minSep
+		}
+		if tp2 <= tp1 {
+			tp2 = tp1 + minSep
+		}
+		if tp3 <= tp2 {
+			tp3 = tp2 + minSep
+		}
+	} else {
+		if stop <= entry {
+			stop = entry + minSep
+		}
+		if tp1 >= entry {
+			tp1 = entry - minSep
+		}
+		if tp2 >= tp1 {
+			tp2 = tp1 - minSep
+		}
+		if tp3 >= tp2 {
+			tp3 = tp2 - minSep
+		}
+	}
+	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
+		// Hard safety fallback to preserve side geometry.
+		if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+			stop = entry * (1 - 0.003)
+			tp1 = entry * (1 + 0.003)
+			tp2 = entry * (1 + 0.006)
+			tp3 = entry * (1 + 0.009)
+		} else {
+			stop = entry * (1 + 0.003)
+			tp1 = entry * (1 - 0.003)
+			tp2 = entry * (1 - 0.006)
+			tp3 = entry * (1 - 0.009)
+		}
+	}
+	return stop, tp1, tp2, tp3
+}
+
 func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64) {
 	if entry <= 0 || fillPx <= 0 || qty <= 0 {
 		return 0, 0
@@ -4034,6 +4087,7 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		p.TP3Price = m.exitManager.FrontRunTarget(p.Side, p.TP3Price, p.VPTargetLevel)
 	}
 	p.TP1Price, p.TP2Price, p.TP3Price = enforceTPProgression(p.Side, p.TP1Price, p.TP2Price, p.TP3Price)
+	p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price = sanitizeBracketGeometry(p.EntryPrice, p.Side, p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
 	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
 		return fmt.Errorf("invalid bracket levels stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f",
 			p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
@@ -5053,6 +5107,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		tp3 = p.exitManager.FrontRunTarget(c.Side, tp3, c.Sig.VPTargetLevel)
 	}
 	tp1, tp2, tp3 = enforceTPProgression(c.Side, tp1, tp2, tp3)
+	stop, tp1, tp2, tp3 = sanitizeBracketGeometry(entry, c.Side, stop, tp1, tp2, tp3)
 	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
 		return nil, fmt.Errorf("invalid paper bracket levels")
 	}
