@@ -49,13 +49,13 @@ func NewManager(cfg Config) *Manager {
 		cfg.FrontRunPct = 0.001
 	}
 	if cfg.NoFollowThroughBars <= 0 {
-		cfg.NoFollowThroughBars = 8
+		cfg.NoFollowThroughBars = 10
 	}
 	if cfg.NoFollowThroughMinMFER <= 0 {
-		cfg.NoFollowThroughMinMFER = 0.25
+		cfg.NoFollowThroughMinMFER = 0.20
 	}
 	if cfg.NoFollowThroughMinMAER <= 0 {
-		cfg.NoFollowThroughMinMAER = 0.70
+		cfg.NoFollowThroughMinMAER = 0.80
 	}
 	if cfg.WeakFlowArmBER <= 0 {
 		cfg.WeakFlowArmBER = 0.45
