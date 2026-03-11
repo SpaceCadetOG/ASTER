@@ -56,6 +56,8 @@ func TestCurrentRegimeCT(t *testing.T) {
 		{"2026-03-04T08:15:00Z", OverlapAE},   // 02:15 CST
 		{"2026-03-04T14:30:00Z", OverlapEUUS}, // 08:30 CST
 		{"2026-03-04T17:30:00Z", RegimeUS},    // 11:30 CST
+		{"2026-03-04T22:15:00Z", RegimeUS},    // 16:15 CST
+		{"2026-03-04T22:35:00Z", RegimeDead},  // 16:35 CST
 		{"2026-03-04T23:30:00Z", RegimeDead},  // 17:30 CST
 		{"2026-03-05T02:30:00Z", RegimeAsia},  // 20:30 CST
 	}

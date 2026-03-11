@@ -67,7 +67,7 @@ func CurrentRegimeCT(ts time.Time) Regime {
 	if inMinuteRange(cur, 2*60, 10*60) {
 		return RegimeEU
 	}
-	if inMinuteRange(cur, 7*60, 16*60) {
+	if inMinuteRange(cur, 7*60, 16*60+30) {
 		return RegimeUS
 	}
 	return RegimeDead
