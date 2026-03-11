@@ -137,6 +137,34 @@ type telegramCommandCtx struct {
 
 	metaMu sync.RWMutex
 	meta   map[string]symbolMeta
+
+	decisionMu sync.RWMutex
+	decisions  map[string]operatorDecision
+
+	suggestMu  sync.RWMutex
+	suggestions map[string]operatorSuggestion
+	suggestTTL time.Duration
+}
+
+type operatorDecision struct {
+	Symbol       string
+	Side         string
+	Grade        string
+	Score        float64
+	Slope        float64
+	Strategy     string
+	Confidence   float64
+	RejectReason string
+	State        string
+	UpdatedAt    time.Time
+}
+
+type operatorSuggestion struct {
+	Symbol    string
+	Side      string
+	Source    string
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 type symbolMeta struct {
@@ -777,13 +805,16 @@ func main() {
 		}
 	}
 	cmdCtx = &telegramCommandCtx{
-		tg:      tg,
-		rest:    rest,
-		execMgr: execMgr,
-		paper:   paper,
-		safety:  safety,
-		status:  statusStore,
-		meta:    map[string]symbolMeta{},
+		tg:          tg,
+		rest:        rest,
+		execMgr:     execMgr,
+		paper:       paper,
+		safety:      safety,
+		status:      statusStore,
+		meta:        map[string]symbolMeta{},
+		decisions:   map[string]operatorDecision{},
+		suggestions: map[string]operatorSuggestion{},
+		suggestTTL:  time.Duration(envInt("LIVE_TG_SUGGEST_TTL_MIN", 15)) * time.Minute,
 	}
 	if envBool("LIVE_TG_COMMANDS_ENABLE", true) {
 		go cmdCtx.run()
@@ -1181,6 +1212,12 @@ func main() {
 		cands = applyCandidateLifecycle(cands, now, candidateMem, lifecycleCfg)
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
+			operatorSuggested := false
+			if cmdCtx != nil {
+				if s, ok := cmdCtx.getSuggestion(c.Entry.Symbol); ok && strings.EqualFold(s.Side, c.Side) {
+					operatorSuggested = true
+				}
+			}
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
 				Type:      "SIGNAL",
@@ -1193,6 +1230,7 @@ func main() {
 			})
 			c.TradeQuality, c.QualityReasons = computeTradeQuality(c, entryQualityCfg)
 			if c.RejectReason == "STATE_INERTIA_KILL" || c.RejectReason == "VWAP_EMA_LONG_INVALIDATION" {
+				recordCandidateDecision(cmdCtx, c, c.RejectReason)
 				f := false
 				eventLog.Emit(stats.Event{
 					Timestamp:   now,
@@ -1208,6 +1246,7 @@ func main() {
 				continue
 			}
 			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin, asiaMinSlope) {
+				recordCandidateDecision(cmdCtx, c, "asia_quality_gate")
 				deny := []string{"asia_quality_gate"}
 				f := false
 				eventLog.Emit(stats.Event{
@@ -1224,7 +1263,8 @@ func main() {
 				continue
 			}
 			if entryQualityCfg.EnableMetaGate {
-				if c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired" {
+				if !operatorSuggested && (c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") {
+					recordCandidateDecision(cmdCtx, c, c.RejectReason)
 					f := false
 					eventLog.Emit(stats.Event{
 						Timestamp:   now,
@@ -1240,6 +1280,7 @@ func main() {
 					continue
 				}
 				if c.TradeQuality < entryQualityCfg.MinQuality {
+					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, entryQualityCfg.MinQuality))
 					f := false
 					eventLog.Emit(stats.Event{
 						Timestamp:   now,
@@ -1255,6 +1296,7 @@ func main() {
 					continue
 				}
 				if c.Conf < entryQualityCfg.MinEntryConf {
+					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("conf:%.2f<%.2f", c.Conf, entryQualityCfg.MinEntryConf))
 					f := false
 					eventLog.Emit(stats.Event{
 						Timestamp:   now,
@@ -1271,6 +1313,7 @@ func main() {
 				}
 			}
 			if entryQualityCfg.RequireStrategyMatch && (strings.TrimSpace(c.Strat) == "" || strings.EqualFold(c.Strat, "none")) {
+				recordCandidateDecision(cmdCtx, c, "strategy_none_reject")
 				f := false
 				eventLog.Emit(stats.Event{
 					Timestamp:   now,
@@ -1301,12 +1344,26 @@ func main() {
 					GateReasons: dec.Reasons,
 				})
 				if !dec.Allow {
+					recordCandidateDecision(cmdCtx, c, firstNonEmpty(strings.Join(dec.Reasons, ","), "gate_reject"))
 					continue
 				}
 			}
+			recordCandidateDecision(cmdCtx, c, "")
 			filtered = append(filtered, c)
 		}
 		cands = filtered
+		if cmdCtx != nil && len(cands) > 1 {
+			sort.SliceStable(cands, func(i, j int) bool {
+				si, oki := cmdCtx.getSuggestion(cands[i].Entry.Symbol)
+				sj, okj := cmdCtx.getSuggestion(cands[j].Entry.Symbol)
+				matchI := oki && strings.EqualFold(si.Side, cands[i].Side)
+				matchJ := okj && strings.EqualFold(sj.Side, cands[j].Side)
+				if matchI != matchJ {
+					return matchI
+				}
+				return false
+			})
+		}
 		st := liveLiteStatus{
 			Generated:     now,
 			DryRun:        dryRun,
@@ -1374,6 +1431,7 @@ func main() {
 		if sig, ok := externalFlow[rawBest]; ok {
 			if sig.LiqSpike {
 				if (strings.EqualFold(best.Side, "BUY") && sig.FlowDelta < 0) || (strings.EqualFold(best.Side, "SELL") && sig.FlowDelta > 0) {
+					recordCandidateDecision(cmdCtx, best, "external_liq_flow_against")
 					st.TopRejectReason = "external_liq_flow_against"
 					statusStore.Set(st)
 					eventLog.Emit(stats.Event{
@@ -1395,6 +1453,7 @@ func main() {
 			}
 		}
 		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
+			recordCandidateDecision(cmdCtx, best, "POST_SL_COOLDOWN")
 			st.TopRejectReason = "POST_SL_COOLDOWN"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1414,6 +1473,7 @@ func main() {
 			continue
 		}
 		if !allowDeadSessionTrading && data.CurrentRegimeCT(now) == data.RegimeDead {
+			recordCandidateDecision(cmdCtx, best, "DEAD_SESSION_BLOCK")
 			st.TopRejectReason = "DEAD_SESSION_BLOCK"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1433,6 +1493,7 @@ func main() {
 			continue
 		}
 		if preEODEntryBlockMin > 0 && inPreEODEntryBlock(localMaintNow, maintEOD, preEODEntryBlockMin) {
+			recordCandidateDecision(cmdCtx, best, "PRE_EOD_ENTRY_BLOCK")
 			st.TopRejectReason = "PRE_EOD_ENTRY_BLOCK"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1452,6 +1513,7 @@ func main() {
 			continue
 		}
 		if !pureMode && !symbolCooldown.Allow(rawBest, now) {
+			recordCandidateDecision(cmdCtx, best, "symbol_cooldown")
 			st.TopRejectReason = "symbol_cooldown"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1471,6 +1533,7 @@ func main() {
 			continue
 		}
 		if !pureMode && !intentDedupe.Allow(rawBest, best.Side, now) {
+			recordCandidateDecision(cmdCtx, best, "intent_dedupe")
 			st.TopRejectReason = "intent_dedupe"
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
@@ -1495,6 +1558,7 @@ func main() {
 			ob := entryDepth[rawBest]
 			okOB, obReason, obSpreadBps, obImb := orderbookEntryDecision(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps)
 			if !okOB {
+				recordCandidateDecision(cmdCtx, best, obReason)
 				st.TopRejectReason = obReason
 				statusStore.Set(st)
 				eventLog.Emit(stats.Event{
@@ -1546,6 +1610,7 @@ func main() {
 				VenueHealthy:      metaBySymbol[rawBest].LastPrice > 0,
 			})
 			if !riskDec.Approved {
+				recordCandidateDecision(cmdCtx, best, riskDec.RejectReason)
 				st.TopRejectReason = riskDec.RejectReason
 				statusStore.Set(st)
 				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
@@ -1555,6 +1620,7 @@ func main() {
 		}
 
 		if inMaint {
+			recordCandidateDecision(cmdCtx, best, "maintenance_window")
 			st.TopRejectReason = "maintenance_window"
 			statusStore.Set(st)
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
@@ -1562,6 +1628,7 @@ func main() {
 		}
 		if maintWarmup > 0 {
 			if until, ok := maintenanceWarmupUntil(localMaintNow, maintWarmup, &maintState); ok {
+				recordCandidateDecision(cmdCtx, best, "post_maint_warmup")
 				st.TopRejectReason = "post_maint_warmup"
 				statusStore.Set(st)
 				fmt.Printf("live-lite: skip (reason=post_maint_warmup until %s)\n", until.Format("15:04 MST"))
@@ -1634,6 +1701,7 @@ func main() {
 		}
 		if !pureMode {
 			if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
+				recordCandidateDecision(cmdCtx, best, reason)
 				st.TopRejectReason = reason
 				statusStore.Set(st)
 				fmt.Println("live-lite: safety skip:", reason)
@@ -1648,6 +1716,7 @@ func main() {
 			}
 		}
 		if !pureMode && inEventLockout(time.Now(), eventLockoutMin) {
+			recordCandidateDecision(cmdCtx, best, "event_lockout")
 			st.TopRejectReason = "event_lockout"
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=event_lockout")
@@ -1655,6 +1724,7 @@ func main() {
 			continue
 		}
 		if !pureMode && isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
+			recordCandidateDecision(cmdCtx, best, "correlated_exposure_gate")
 			st.TopRejectReason = "correlated_exposure_gate"
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=correlated_exposure_gate")
@@ -1662,6 +1732,7 @@ func main() {
 			continue
 		}
 		if !pureMode && requireShadowDays > 0 && !shadowReady(requireShadowDays, shadowEquityFile, now) {
+			recordCandidateDecision(cmdCtx, best, "shadow_gate_active")
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
 				fmt.Println("live-lite:", msg)
@@ -1672,6 +1743,7 @@ func main() {
 			continue
 		}
 		if execMgr != nil && execMgr.HasActiveSymbol(best.Entry.Symbol) {
+			recordCandidateDecision(cmdCtx, best, "already_active_in_exec_state")
 			fmt.Printf("live-lite: skip (%s already active in exec state)\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)))
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1688,6 +1760,7 @@ func main() {
 			}
 		}
 		if avail < safety.minAvailUSDT {
+			recordCandidateDecision(cmdCtx, best, "min_available_usdt")
 			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
@@ -1706,6 +1779,7 @@ func main() {
 			reserveGate.ensureTarget(baseBal, effectiveReserve)
 		}
 		if usable < effectiveMargin {
+			recordCandidateDecision(cmdCtx, best, "insufficient_usable")
 			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
@@ -1717,6 +1791,7 @@ func main() {
 			continue
 		}
 		if !pureMode && reserveGate != nil && reserveGate.block(baseBal) {
+			recordCandidateDecision(cmdCtx, best, "reserve_lock_active")
 			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🔒", "RESERVE LOCK ACTIVE",
@@ -1739,6 +1814,7 @@ func main() {
 			}
 		}
 		if openCount >= maxOpenPos {
+			recordCandidateDecision(cmdCtx, best, "max_open_positions")
 			fmt.Printf("live-lite: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
@@ -1750,12 +1826,14 @@ func main() {
 			continue
 		}
 		if execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
+			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
 			fmt.Printf("live-lite: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
 		}
 
 		if execMgr == nil {
+			recordCandidateDecision(cmdCtx, best, "exec_manager_unavailable")
 			fmt.Println("live-lite: execution manager unavailable")
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
@@ -1784,6 +1862,7 @@ func main() {
 			EntryPx:   best.Sig.Entry,
 		})
 		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev); err != nil {
+			recordCandidateDecision(cmdCtx, best, "order_error")
 			fmt.Println("live-lite: place error:", err)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
@@ -1804,6 +1883,7 @@ func main() {
 				))
 			}
 		} else {
+			recordCandidateDecision(cmdCtx, best, "")
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
 				Type:      "ORDER_FILL",
@@ -8501,6 +8581,96 @@ func (c *telegramCommandCtx) getMeta() map[string]symbolMeta {
 	return cp
 }
 
+func (c *telegramCommandCtx) setDecision(d operatorDecision) {
+	if c == nil || strings.TrimSpace(d.Symbol) == "" {
+		return
+	}
+	d.Symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(d.Symbol)))
+	d.UpdatedAt = time.Now().UTC()
+	c.decisionMu.Lock()
+	if c.decisions == nil {
+		c.decisions = map[string]operatorDecision{}
+	}
+	c.decisions[d.Symbol] = d
+	c.decisionMu.Unlock()
+}
+
+func (c *telegramCommandCtx) getDecision(symbol string) (operatorDecision, bool) {
+	if c == nil {
+		return operatorDecision{}, false
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	c.decisionMu.RLock()
+	defer c.decisionMu.RUnlock()
+	d, ok := c.decisions[symbol]
+	return d, ok
+}
+
+func (c *telegramCommandCtx) addSuggestion(symbol, side, source string) operatorSuggestion {
+	s := operatorSuggestion{
+		Symbol:    strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
+		Side:      strings.ToUpper(strings.TrimSpace(side)),
+		Source:    source,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(c.suggestTTL),
+	}
+	c.suggestMu.Lock()
+	if c.suggestions == nil {
+		c.suggestions = map[string]operatorSuggestion{}
+	}
+	c.suggestions[s.Symbol] = s
+	c.suggestMu.Unlock()
+	return s
+}
+
+func (c *telegramCommandCtx) getSuggestion(symbol string) (operatorSuggestion, bool) {
+	if c == nil {
+		return operatorSuggestion{}, false
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	now := time.Now().UTC()
+	c.suggestMu.Lock()
+	defer c.suggestMu.Unlock()
+	if c.suggestions == nil {
+		return operatorSuggestion{}, false
+	}
+	s, ok := c.suggestions[symbol]
+	if !ok {
+		return operatorSuggestion{}, false
+	}
+	if !s.ExpiresAt.IsZero() && now.After(s.ExpiresAt) {
+		delete(c.suggestions, symbol)
+		return operatorSuggestion{}, false
+	}
+	return s, true
+}
+
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string) {
+	if ctx == nil {
+		return
+	}
+	ctx.setDecision(operatorDecision{
+		Symbol:       c.Entry.Symbol,
+		Side:         c.Side,
+		Grade:        c.Entry.CurrentGrade,
+		Score:        c.Entry.CurrentScore,
+		Slope:        c.Entry.ScoreSlope,
+		Strategy:     c.Strat,
+		Confidence:   c.Conf,
+		RejectReason: reject,
+		State:        string(c.Entry.State),
+	})
+}
+
 func (c *telegramCommandCtx) run() {
 	if c == nil || c.tg == nil || !c.tg.Enabled() {
 		return
@@ -8518,6 +8688,8 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/status</code> runtime snapshot",
 			"<code>/balance</code> account holdings",
 			"<code>/positions</code> open trades",
+			"<code>/why SYMBOL</code> latest decision for a symbol",
+			"<code>/suggest SYMBOL SIDE</code> operator watch + re-evaluate",
 			"<code>/pause</code> pause new entries",
 			"<code>/resume</code> resume entries",
 			"<code>/close SYMBOL</code> close one symbol",
@@ -8603,6 +8775,57 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return strings.TrimSpace(b.String())
 		}
 		return notify.BuildEventHTML("📦", "POSITIONS", "unavailable")
+	case strings.HasPrefix(cmd, "/why "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/why SYMBOL</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/why SYMBOL</code>")
+		}
+		if d, ok := c.getDecision(sym); ok {
+			lines := []string{
+				fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
+				fmt.Sprintf("<b>Decision:</b> %s", firstNonEmpty(d.RejectReason, "eligible")),
+				fmt.Sprintf("<b>Side:</b> %s | <b>Grade:</b> %s | <b>Score:</b> %.2f", d.Side, d.Grade, d.Score),
+				fmt.Sprintf("<b>Slope:</b> %+.3f | <b>Setup:</b> <code>%s</code>", d.Slope, d.Strategy),
+				fmt.Sprintf("<b>Conf:</b> %.2f | <b>State:</b> %s", d.Confidence, d.State),
+				fmt.Sprintf("<b>Updated:</b> %s", d.UpdatedAt.In(time.Local).Format("15:04:05 MST")),
+			}
+			if s, ok := c.getSuggestion(sym); ok {
+				lines = append(lines, fmt.Sprintf("<b>Operator watch:</b> %s until %s", s.Side, s.ExpiresAt.In(time.Local).Format("15:04 MST")))
+			}
+			return notify.BuildEventHTML("🔎", "WHY", lines...)
+		}
+		meta := c.getMeta()
+		if m, ok := meta[sym]; ok {
+			return notify.BuildEventHTML("🔎", "WHY",
+				fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
+				"Symbol is visible in market data but has no current candidate decision",
+				fmt.Sprintf("<b>Price:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(m.LastPrice), m.Move24h, m.VolumeUSD/1_000_000.0),
+			)
+		}
+		return notify.BuildEventHTML("🔎", "WHY", fmt.Sprintf("%s is not in the current market snapshot", cleanSymbol(sym)))
+	case strings.HasPrefix(cmd, "/suggest "):
+		if len(fields) < 3 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL SIDE</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		side := strings.ToUpper(strings.TrimSpace(fields[2]))
+		if sym == "" || (side != "BUY" && side != "SELL") {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL SIDE</code>")
+		}
+		s := c.addSuggestion(sym, side, "telegram")
+		lines := []string{
+			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), side),
+			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
+			"Candidate aging/freshness will be relaxed for this symbol only",
+			"Risk, liquidity, session, and sizing gates still apply",
+		}
+		if d, ok := c.getDecision(sym); ok {
+			lines = append(lines, fmt.Sprintf("<b>Latest:</b> %s | g=%s s=%.2f slope=%+.3f", firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
+		}
+		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
 	case strings.HasPrefix(cmd, "/pause"):
 		if c.safety.pauseFile == "" {
 			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")
