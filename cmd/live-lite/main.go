@@ -219,6 +219,8 @@ type paperTrader struct {
 	eventLog           *stats.EventLogger
 	stressRoundtripBps float64
 	exitManager        *exitmgr.Manager
+	riskOnMargin       bool
+	riskMarginPct      float64
 }
 
 type paperDayStats struct {
@@ -343,6 +345,8 @@ type liveExecManager struct {
 	recoverATRMult       float64
 	recoverForceFlatFail bool
 	exitManager          *exitmgr.Manager
+	riskOnMargin         bool
+	riskMarginPct        float64
 }
 
 type liveExecSnapshot struct {
@@ -2393,6 +2397,21 @@ func sanitizeBracketGeometry(entry float64, side string, stop, tp1, tp2, tp3 flo
 	return stop, tp1, tp2, tp3
 }
 
+func marginRiskStopPct(margin float64, leverage int, riskMarginPct float64) float64 {
+	if margin <= 0 || leverage <= 0 || riskMarginPct <= 0 {
+		return 0
+	}
+	notional := margin * float64(leverage)
+	if notional <= 0 {
+		return 0
+	}
+	riskUSD := margin * (riskMarginPct / 100.0)
+	if riskUSD <= 0 {
+		return 0
+	}
+	return riskUSD / notional
+}
+
 func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64) {
 	if entry <= 0 || fillPx <= 0 || qty <= 0 {
 		return 0, 0
@@ -2843,6 +2862,11 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if stressRoundtripBps < 0 {
 		stressRoundtripBps = 0
 	}
+	riskOnMargin := envBool("LIVE_RISK_ON_MARGIN_ENABLE", true)
+	riskMarginPct := envFloat("LIVE_RISK_MARGIN_PCT", 5.0)
+	if riskMarginPct < 0 {
+		riskMarginPct = 0
+	}
 	p := &paperTrader{
 		enabled:            enabled,
 		startBal:           start,
@@ -2895,6 +2919,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
 		}),
+		riskOnMargin:  riskOnMargin,
+		riskMarginPct: riskMarginPct,
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -3045,6 +3071,11 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
+	riskOnMargin := envBool("LIVE_RISK_ON_MARGIN_ENABLE", true)
+	riskMarginPct := envFloat("LIVE_RISK_MARGIN_PCT", 5.0)
+	if riskMarginPct < 0 {
+		riskMarginPct = 0
+	}
 	marginType := strings.ToUpper(envStr("LIVE_MARGIN_TYPE", "ISOLATED"))
 	enforceIsolated := envBool("LIVE_ENFORCE_MARGIN_TYPE", true)
 	multiAssetMode := envBool("LIVE_MULTI_ASSET_MODE", false)
@@ -3089,6 +3120,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		recoverStopBackoff:   time.Duration(envInt("LIVE_RECOVERY_STOP_RETRY_SEC", 1)) * time.Second,
 		recoverATRMult:       envFloat("LIVE_RECOVERY_ATR_MULT", 1.5),
 		recoverForceFlatFail: envBool("LIVE_RECOVERY_FORCE_FLAT_ON_STOP_FAIL", true),
+		riskOnMargin:         riskOnMargin,
+		riskMarginPct:        riskMarginPct,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 10),
@@ -4049,6 +4082,11 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	stopPct := m.stopPct / 100.0
 	if stopPct <= 0 {
 		stopPct = 0.02
+	}
+	if m.riskOnMargin {
+		if riskPct := marginRiskStopPct(p.Margin, p.Leverage, m.riskMarginPct); riskPct > 0 {
+			stopPct = riskPct
+		}
 	}
 	stopPct = clamp(stopPct, m.minStopPct/100.0, m.maxStopPct/100.0)
 	if p.CustomRiskPct > 0 {
@@ -5063,6 +5101,11 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, fmt.Errorf("paper margin+fee exceeds free balance")
 	}
 	stopPct := p.stopPct / 100.0
+	if p.riskOnMargin {
+		if riskPct := marginRiskStopPct(margin, lev, p.riskMarginPct); riskPct > 0 {
+			stopPct = riskPct
+		}
+	}
 	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
 	tp1R := p.tp1R
 	tp2R := p.tp2R
