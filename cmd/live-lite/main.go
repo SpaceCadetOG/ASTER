@@ -2751,9 +2751,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.4)
-	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.3)
-	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.3)
+	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.35)
+	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.25)
+	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.20)
 	if tp1Frac < 0 {
 		tp1Frac = 0
 	}
@@ -2765,12 +2765,12 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	}
 	sumFrac := tp1Frac + tp2Frac + tp3Frac
 	if sumFrac <= 0 {
-		tp1Frac, tp2Frac, tp3Frac = 0.4, 0.3, 0.3
-		sumFrac = 1.0
+		tp1Frac, tp2Frac, tp3Frac = 0.35, 0.25, 0.20
+	} else if sumFrac > 1.0 {
+		tp1Frac /= sumFrac
+		tp2Frac /= sumFrac
+		tp3Frac /= sumFrac
 	}
-	tp1Frac /= sumFrac
-	tp2Frac /= sumFrac
-	tp3Frac /= sumFrac
 	trailAfterTP := envInt("LIVE_PAPER_TRAIL_AFTER_TP", 2)
 	if trailAfterTP < 1 {
 		trailAfterTP = 1
@@ -3000,9 +3000,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.4)
-	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.3)
-	tp3Frac := envFloat("LIVE_TP3_FRAC", 0.3)
+	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.35)
+	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.25)
+	tp3Frac := envFloat("LIVE_TP3_FRAC", 0.20)
 	if tp1Frac < 0 {
 		tp1Frac = 0
 	}
@@ -3014,12 +3014,12 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	}
 	sumFrac := tp1Frac + tp2Frac + tp3Frac
 	if sumFrac <= 0 {
-		tp1Frac, tp2Frac, tp3Frac = 0.4, 0.3, 0.3
-		sumFrac = 1
+		tp1Frac, tp2Frac, tp3Frac = 0.35, 0.25, 0.20
+	} else if sumFrac > 1.0 {
+		tp1Frac /= sumFrac
+		tp2Frac /= sumFrac
+		tp3Frac /= sumFrac
 	}
-	tp1Frac /= sumFrac
-	tp2Frac /= sumFrac
-	tp3Frac /= sumFrac
 	trailAfterTP := envInt("LIVE_TRAIL_AFTER_TP", 2)
 	if trailAfterTP < 1 {
 		trailAfterTP = 1
@@ -4115,8 +4115,12 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	if err != nil {
 		return err
 	}
-	remForTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
-	p.TP3Qty, err = m.roundQty(p.Symbol, remForTP3)
+	q3 := p.FilledQty * m.tp3Frac
+	maxTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
+	if q3 <= 0 || q3 > maxTP3 {
+		q3 = maxTP3
+	}
+	p.TP3Qty, err = m.roundQty(p.Symbol, q3)
 	if err != nil {
 		return err
 	}
