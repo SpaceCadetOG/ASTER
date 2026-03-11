@@ -12,10 +12,12 @@ type Config struct {
 	NoFollowThroughMinMAER float64
 	ProfitLockArmR         float64
 	ProfitGivebackPct      float64
+	SponsoredGivebackPct   float64
 	WeakFlowArmBER         float64
 	LiqSpikePartialPct     float64
 	StallBarsForTighten    int
 	StallTightenToR        float64
+	SponsorshipGraceMin    int
 }
 
 type Manager struct {
@@ -35,6 +37,8 @@ type ProtectInput struct {
 	NearFriction  bool
 	LiqSpike      bool
 	UnrealizedPct float64
+	Sponsored     bool
+	HitTP3        bool
 }
 
 type ProtectDecision struct {
@@ -65,6 +69,9 @@ func NewManager(cfg Config) *Manager {
 	if cfg.ProfitGivebackPct <= 0 {
 		cfg.ProfitGivebackPct = 0.25
 	}
+	if cfg.SponsoredGivebackPct <= 0 {
+		cfg.SponsoredGivebackPct = 0.10
+	}
 	if cfg.WeakFlowArmBER <= 0 {
 		cfg.WeakFlowArmBER = 0.45
 	}
@@ -76,6 +83,9 @@ func NewManager(cfg Config) *Manager {
 	}
 	if cfg.StallTightenToR <= 0 {
 		cfg.StallTightenToR = 0.20
+	}
+	if cfg.SponsorshipGraceMin <= 0 {
+		cfg.SponsorshipGraceMin = 45
 	}
 	return &Manager{cfg: cfg}
 }
@@ -112,16 +122,22 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.Reason = "LIQ_SPIKE_PARTIAL"
 	}
 	// Lock gains when a trade was clearly profitable but gives back too much while weak.
+	profitGivebackPct := m.cfg.ProfitGivebackPct
+	if in.Sponsored {
+		profitGivebackPct = m.cfg.SponsoredGivebackPct
+	}
 	if in.MFER >= m.cfg.ProfitLockArmR &&
 		in.WeakFlow &&
-		in.UnrealizedPct <= m.cfg.ProfitGivebackPct {
+		in.UnrealizedPct <= profitGivebackPct &&
+		!(in.Sponsored && !in.HitTP3) {
 		dec.FullExit = true
 		dec.Reason = "PROFIT_GIVEBACK"
 		return dec
 	}
 	if in.BarsHeld >= m.cfg.NoFollowThroughBars &&
 		in.MFER < m.cfg.NoFollowThroughMinMFER &&
-		in.MAER >= m.cfg.NoFollowThroughMinMAER {
+		in.MAER >= m.cfg.NoFollowThroughMinMAER &&
+		!(in.Sponsored && in.BarsHeld <= m.cfg.SponsorshipGraceMin) {
 		dec.FullExit = true
 		dec.Reason = "NO_FOLLOW_THROUGH"
 		return dec

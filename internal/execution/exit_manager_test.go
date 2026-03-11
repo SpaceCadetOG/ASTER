@@ -60,3 +60,19 @@ func TestEvaluateProtectProfitGiveback(t *testing.T) {
 		t.Fatalf("expected profit giveback exit, got %+v", dec)
 	}
 }
+
+func TestEvaluateProtectSponsoredSkipsEarlyNoFollowThrough(t *testing.T) {
+	m := NewManager(Config{
+		NoFollowThroughBars:    6,
+		NoFollowThroughMinMFER: 0.3,
+		NoFollowThroughMinMAER: 0.8,
+		SponsorshipGraceMin:    45,
+	})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.6,
+		BarsHeld: 20, MFER: 0.1, MAER: 1.0, Sponsored: true,
+	})
+	if dec.FullExit {
+		t.Fatalf("expected sponsored trade to survive no-follow-through grace, got %+v", dec)
+	}
+}

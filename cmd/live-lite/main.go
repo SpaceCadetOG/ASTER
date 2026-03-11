@@ -221,6 +221,7 @@ type paperTrader struct {
 	tp3Frac            float64
 	trailAfterTP       int
 	trailStopPct       float64
+	trailStopPctTP3    float64
 	stateFile          string
 	tradesCSV          string
 	equityCSV          string
@@ -307,6 +308,7 @@ type livePosition struct {
 	TP1Qty         float64   `json:"tp1Qty"`
 	TP2Qty         float64   `json:"tp2Qty"`
 	TP3Qty         float64   `json:"tp3Qty"`
+	HitTP3         bool      `json:"hitTp3,omitempty"`
 	StopOrderID    int64     `json:"stopOrderId"`
 	TP1OrderID     int64     `json:"tp1OrderId"`
 	TP2OrderID     int64     `json:"tp2OrderId"`
@@ -356,6 +358,7 @@ type liveExecManager struct {
 	tp3Frac              float64
 	trailAfterTP         int
 	trailStopPct         float64
+	trailStopPctTP3      float64
 	trailStepBps         float64
 	minStopPct           float64
 	maxStopPct           float64
@@ -2881,6 +2884,10 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if trailStopPct <= 0 {
 		trailStopPct = 1.0
 	}
+	trailStopPctTP3 := envFloat("LIVE_PAPER_TRAIL_STOP_PCT_TP3", 1.75)
+	if trailStopPctTP3 <= 0 {
+		trailStopPctTP3 = trailStopPct
+	}
 	feeProfile := envStr("LIVE_FEE_PROFILE", "pro")
 	discPct := envFloat("LIVE_FEE_DISCOUNT_PCT", 0)
 	profileMaker, profileTaker := resolvePaperFeeProfile(feeProfile)
@@ -2964,6 +2971,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		tp3Frac:            tp3Frac,
 		trailAfterTP:       trailAfterTP,
 		trailStopPct:       trailStopPct,
+		trailStopPctTP3:    trailStopPctTP3,
 		stateFile:          envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
 		tradesCSV:          resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
 		equityCSV:          resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
@@ -2994,10 +3002,12 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 0.60),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.25),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.10),
 			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45),
 		}),
 		riskOnMargin:  riskOnMargin,
 		riskMarginPct: riskMarginPct,
@@ -3137,6 +3147,10 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if trailStopPct <= 0 {
 		trailStopPct = 1.0
 	}
+	trailStopPctTP3 := envFloat("LIVE_TRAIL_STOP_PCT_TP3", 1.75)
+	if trailStopPctTP3 <= 0 {
+		trailStopPctTP3 = trailStopPct
+	}
 	trailStepBps := envFloat("LIVE_TRAIL_STEP_BPS", 10.0)
 	if trailStepBps < 0 {
 		trailStepBps = 0
@@ -3185,6 +3199,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		tp3Frac:              tp3Frac,
 		trailAfterTP:         trailAfterTP,
 		trailStopPct:         trailStopPct,
+		trailStopPctTP3:      trailStopPctTP3,
 		trailStepBps:         trailStepBps,
 		minStopPct:           minStopPct,
 		maxStopPct:           maxStopPct,
@@ -3209,10 +3224,12 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 0.60),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.25),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.10),
 			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45),
 		}),
 	}
 	if m.entryTimeout <= 0 {
@@ -4100,6 +4117,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 		}
 		if filled {
 			p.TP3OrderID = 0
+			p.HitTP3 = true
 			p.RemainingQty = maxFloat(0, p.RemainingQty-execQty)
 			p.UpdatedAt = now
 			pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, execQty)
@@ -4377,6 +4395,36 @@ func (m *liveExecManager) maybeEnableTrail(p *livePosition, stage int) {
 	p.TrailOn = true
 }
 
+func isSponsoredMomentum(side string, mv momentumView, minScore, minSlope float64) bool {
+	var e *inplay.Entry
+	if strings.EqualFold(side, "BUY") {
+		e = mv.Long
+	} else {
+		e = mv.Short
+	}
+	if e == nil {
+		return false
+	}
+	if e.CurrentScore < minScore {
+		return false
+	}
+	if strings.EqualFold(side, "BUY") {
+		if e.ScoreSlope < minSlope {
+			return false
+		}
+	} else {
+		if e.ScoreSlope > -minSlope {
+			return false
+		}
+	}
+	switch e.State {
+	case inplay.StateInPlay, inplay.StateHeating, inplay.StatePumping:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (bool, error) {
 	if p == nil || !p.TrailOn || p.RemainingQty <= 0 || mark <= 0 {
 		return false, nil
@@ -4395,7 +4443,7 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 		}
 	}
 	newRef := mark
-	newStop := m.calcTrailStop(sideBuy, newRef)
+	newStop := m.calcTrailStopForPosition(sideBuy, newRef, p.HitTP3)
 	threshold := p.StopPrice * (m.trailStepBps / 10000.0)
 	if threshold < 0 {
 		threshold = 0
@@ -4425,7 +4473,14 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 }
 
 func (m *liveExecManager) calcTrailStop(sideBuy bool, ref float64) float64 {
+	return m.calcTrailStopForPosition(sideBuy, ref, false)
+}
+
+func (m *liveExecManager) calcTrailStopForPosition(sideBuy bool, ref float64, postTP3 bool) float64 {
 	pct := m.trailStopPct / 100.0
+	if postTP3 && m.trailStopPctTP3 > 0 {
+		pct = m.trailStopPctTP3 / 100.0
+	}
 	if pct <= 0 {
 		pct = 0.01
 	}
@@ -4561,6 +4616,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
 	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
+	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
+	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45)) * time.Minute
 	changed := false
 	for sym, p := range m.positions {
 		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
@@ -4568,6 +4626,10 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		}
 		mv := mom[sym]
 		if !shouldExitOnMomentumFade(p.Side, mv, slopeMax) {
+			continue
+		}
+		sponsored := isSponsoredMomentum(p.Side, mv, sponsorMinScore, sponsorMinSlope)
+		if sponsored && now.Sub(p.CreatedAt) < sponsorFadeHoldMin {
 			continue
 		}
 		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
@@ -4601,6 +4663,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				WeakFlow:      shouldExitOnMomentumFade(p.Side, mv, slopeMax),
 				LiqSpike:      ext[sym].LiqSpike,
 				UnrealizedPct: upct,
+				Sponsored:     sponsored,
+				HitTP3:        p.HitTP3,
 			})
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
@@ -5377,7 +5441,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			if p.trailAfterTP <= 2 {
 				pos.TrailOn = true
 				pos.TrailRef = mark
-				pos.TrailStop = p.calcTrailStop(sideBuy, mark)
+				pos.TrailStop = p.calcTrailStopForPosition(sideBuy, mark, false)
 			}
 		}
 		if pos == nil {
@@ -5394,7 +5458,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			if p.trailAfterTP <= 3 {
 				pos.TrailOn = true
 				pos.TrailRef = mark
-				pos.TrailStop = p.calcTrailStop(sideBuy, mark)
+				pos.TrailStop = p.calcTrailStopForPosition(sideBuy, mark, true)
 			}
 		}
 		if pos == nil {
@@ -5405,7 +5469,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		if pos.TrailOn {
 			if (sideBuy && mark > pos.TrailRef) || (!sideBuy && mark < pos.TrailRef) {
 				pos.TrailRef = mark
-				pos.TrailStop = p.calcTrailStop(sideBuy, mark)
+				pos.TrailStop = p.calcTrailStopForPosition(sideBuy, mark, pos.HitTP3)
 			}
 			if (sideBuy && mark <= pos.TrailStop) || (!sideBuy && mark >= pos.TrailStop) {
 				p.exitPortion(now, pos, "TRAIL_STOP", pos.TrailStop, pos.Qty, meta[raw], depth[raw])
@@ -5427,6 +5491,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
 	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
+	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
+	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45)) * time.Minute
 	changed := false
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
@@ -5434,6 +5501,10 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		}
 		mv := mom[raw]
 		if !shouldExitOnMomentumFade(pos.Side, mv, slopeMax) {
+			continue
+		}
+		sponsored := isSponsoredMomentum(pos.Side, mv, sponsorMinScore, sponsorMinSlope)
+		if sponsored && now.Sub(pos.OpenedAt) < sponsorFadeHoldMin {
 			continue
 		}
 		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
@@ -5467,6 +5538,8 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				WeakFlow:      shouldExitOnMomentumFade(pos.Side, mv, slopeMax),
 				LiqSpike:      ext[raw].LiqSpike,
 				UnrealizedPct: upnlPct,
+				Sponsored:     sponsored,
+				HitTP3:        pos.HitTP3,
 			})
 			if dec.MoveStopToBE {
 				be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
@@ -5902,10 +5975,17 @@ func (p *paperTrader) targetQty(initialQty, frac, rem float64) float64 {
 }
 
 func (p *paperTrader) calcTrailStop(sideBuy bool, ref float64) float64 {
+	return p.calcTrailStopForPosition(sideBuy, ref, false)
+}
+
+func (p *paperTrader) calcTrailStopForPosition(sideBuy bool, ref float64, postTP3 bool) float64 {
 	if ref <= 0 {
 		return 0
 	}
 	pct := p.trailStopPct / 100.0
+	if postTP3 && p.trailStopPctTP3 > 0 {
+		pct = p.trailStopPctTP3 / 100.0
+	}
 	if pct <= 0 {
 		pct = 0.01
 	}
