@@ -2838,9 +2838,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if stopPct <= 0 {
 		stopPct = 2.0
 	}
-	tp1R := envFloat("LIVE_PAPER_TP1_R", 0.80)
-	tp2R := envFloat("LIVE_PAPER_TP2_R", 1.40)
-	tp3R := envFloat("LIVE_PAPER_TP3_R", 2.00)
+	tp1R := envFloat("LIVE_PAPER_TP1_R", 1.00)
+	tp2R := envFloat("LIVE_PAPER_TP2_R", 2.00)
+	tp3R := envFloat("LIVE_PAPER_TP3_R", 3.00)
 	if tp1R <= 0 {
 		tp1R = 1.0
 	}
@@ -3094,9 +3094,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if stopPct <= 0 {
 		stopPct = 2.0
 	}
-	tp1R := envFloat("LIVE_TP1_R", 0.80)
-	tp2R := envFloat("LIVE_TP2_R", 1.40)
-	tp3R := envFloat("LIVE_TP3_R", 2.00)
+	tp1R := envFloat("LIVE_TP1_R", 1.00)
+	tp2R := envFloat("LIVE_TP2_R", 2.00)
+	tp3R := envFloat("LIVE_TP3_R", 3.00)
 	if tp1R <= 0 {
 		tp1R = 1.0
 	}
