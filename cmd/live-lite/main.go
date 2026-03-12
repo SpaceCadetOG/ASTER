@@ -66,6 +66,11 @@ type entryQualityConfig struct {
 	MinQuality           float64
 	RequireStrategyMatch bool
 	MinEntryConf         float64
+	PersistenceOverride  bool
+	PersistMinQuality    float64
+	PersistMinScans      int
+	PersistMinScore      float64
+	PersistMinGrade      string
 }
 
 type candidateLifecycleConfig struct {
@@ -580,12 +585,18 @@ func main() {
 		ReversalMinScore:      envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
 		ReversalMinConfidence: envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
 		ReversalMinComplete:   envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
+		ReversalMinStateMin:   envFloat("LIVE_REVERSAL_MIN_STATE_MIN", 1.0),
 	}
 	entryQualityCfg := entryQualityConfig{
 		EnableMetaGate:       envBool("LIVE_META_GATE_ENABLE", true),
 		MinQuality:           envFloat("LIVE_META_MIN_QUALITY", 0.58),
 		RequireStrategyMatch: envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
 		MinEntryConf:         envFloat("LIVE_MIN_ENTRY_CONF", 0.55),
+		PersistenceOverride:  envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", true),
+		PersistMinQuality:    envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.55),
+		PersistMinScans:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SCANS", 3),
+		PersistMinScore:      envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 85.0),
+		PersistMinGrade:      envStr("LIVE_PERSISTENCE_OVERRIDE_MIN_GRADE", "A"),
 	}
 	lifecycleCfg := candidateLifecycleConfig{
 		Enable:        envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
@@ -615,6 +626,15 @@ func main() {
 	}
 	if entryQualityCfg.MinQuality > 1 {
 		entryQualityCfg.MinQuality = 1
+	}
+	if entryQualityCfg.PersistMinQuality < 0 {
+		entryQualityCfg.PersistMinQuality = 0
+	}
+	if entryQualityCfg.PersistMinQuality > 1 {
+		entryQualityCfg.PersistMinQuality = 1
+	}
+	if entryQualityCfg.PersistMinScans < 1 {
+		entryQualityCfg.PersistMinScans = 1
 	}
 	rankSortCfg := rankSortConfig{
 		UseConfidence:      envBool("LIVE_RANK_SORT_USE_CONFIDENCE", true),
@@ -1287,7 +1307,7 @@ func main() {
 					})
 					continue
 				}
-				if c.TradeQuality < entryQualityCfg.MinQuality {
+				if c.TradeQuality < entryQualityCfg.MinQuality && !qualifiesPersistenceOverride(c, entryQualityCfg) {
 					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, entryQualityCfg.MinQuality))
 					f := false
 					eventLog.Emit(stats.Event{
@@ -1303,8 +1323,12 @@ func main() {
 					})
 					continue
 				}
+				if c.TradeQuality < entryQualityCfg.MinQuality && qualifiesPersistenceOverride(c, entryQualityCfg) {
+					c.QualityReasons = append(c.QualityReasons, "persistence_override")
+				}
 				if c.Conf < entryQualityCfg.MinEntryConf {
-					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("conf:%.2f<%.2f", c.Conf, entryQualityCfg.MinEntryConf))
+					confReject := confidenceRejectReason(c, entryQualityCfg.MinEntryConf)
+					recordCandidateDecision(cmdCtx, c, confReject)
 					f := false
 					eventLog.Emit(stats.Event{
 						Timestamp:   now,
@@ -1315,7 +1339,7 @@ func main() {
 						Score:       c.Entry.CurrentScore,
 						Slope:       c.Entry.ScoreSlope,
 						GateAllow:   &f,
-						GateReasons: []string{fmt.Sprintf("conf:%.2f<%.2f", c.Conf, entryQualityCfg.MinEntryConf)},
+						GateReasons: []string{confReject},
 					})
 					continue
 				}
@@ -6363,6 +6387,7 @@ type candidateSelectConfig struct {
 	ReversalMinScore      float64
 	ReversalMinConfidence float64
 	ReversalMinComplete   float64
+	ReversalMinStateMin   float64
 }
 
 type rankSortConfig struct {
@@ -6379,6 +6404,31 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	revMinVal := gradeValue(reversalMinGrade)
 	if reversalSlopeMin < 0 {
 		reversalSlopeMin = -reversalSlopeMin
+	}
+	reversalReady := func(e inplay.Entry) bool {
+		if e.State == inplay.StateExhausted {
+			return e.TimeInStateMin >= cfg.ReversalMinStateMin && !e.Momentum
+		}
+		if e.State != inplay.StateCooling && e.State != inplay.StateDumping {
+			return false
+		}
+		if e.TimeInStateMin < cfg.ReversalMinStateMin {
+			return false
+		}
+		if e.Momentum {
+			return false
+		}
+		return e.ScoreSlope <= -reversalSlopeMin
+	}
+	stillOpposingLeaderStrong := func(e inplay.Entry) bool {
+		if e.Momentum {
+			return true
+		}
+		switch e.State {
+		case inplay.StatePumping, inplay.StateInPlay, inplay.StateHeating:
+			return true
+		}
+		return e.ScoreSlope > 0
 	}
 	allow := func(e inplay.Entry) bool {
 		if !bNearAOnly {
@@ -6436,8 +6486,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			out = append(out, candidate{Entry: e, Side: "BUY"})
 		}
 		reversalOK := enableMomentumReversal &&
-			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay)
+			reversalReady(e)
 		if cfg.UseContinuous {
 			reversalOK = reversalOK && allowByQuality(e, true)
 		} else {
@@ -6470,8 +6519,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			out = append(out, candidate{Entry: e, Side: "SELL"})
 		}
 		reversalOK := enableMomentumReversal &&
-			e.ScoreSlope <= -reversalSlopeMin &&
-			(e.State == inplay.StateDumping || e.State == inplay.StateCooling || e.State == inplay.StateInPlay)
+			reversalReady(e)
 		if cfg.UseContinuous {
 			reversalOK = reversalOK && allowByQuality(e, true)
 		} else {
@@ -6492,6 +6540,9 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		for i := 0; i < n; i++ {
 			e := longInPlay[i]
 			if !allow(e) {
+				continue
+			}
+			if !reversalReady(e) || stillOpposingLeaderStrong(e) {
 				continue
 			}
 			if cfg.UseContinuous {
@@ -6603,6 +6654,54 @@ func computeTradeQuality(c candidate, cfg entryQualityConfig) (float64, []string
 	}
 	total := 0.30*scoreN + 0.20*slopeN + 0.20*confN + 0.10*freshnessN + 0.10*volN + 0.10*stageN
 	return clamp(total, 0, 1), reasons
+}
+
+func qualifiesPersistenceOverride(c candidate, cfg entryQualityConfig) bool {
+	if !cfg.PersistenceOverride {
+		return false
+	}
+	if strings.EqualFold(c.Strat, "mom_reversal") || strings.EqualFold(c.Strat, "mom_reversal_short") {
+		return false
+	}
+	if c.TradeQuality >= cfg.MinQuality || c.TradeQuality < cfg.PersistMinQuality {
+		return false
+	}
+	if c.LifecycleScans < cfg.PersistMinScans {
+		return false
+	}
+	if c.Entry.CurrentScore < cfg.PersistMinScore {
+		return false
+	}
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue(cfg.PersistMinGrade) {
+		return false
+	}
+	switch c.Entry.State {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		return c.Entry.ScoreSlope > 0 || c.Entry.Momentum
+	default:
+		return false
+	}
+}
+
+func confidenceRejectReason(c candidate, minConf float64) string {
+	base := fmt.Sprintf("conf:%.2f<%.2f", c.Conf, minConf)
+	if c.Conf > 0 {
+		return base
+	}
+	reasons := make([]string, 0, 3)
+	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
+		reasons = append(reasons, rr)
+	}
+	if strat := strings.TrimSpace(c.Strat); strat == "" || strings.EqualFold(strat, "none") {
+		reasons = append(reasons, "strategy_none")
+	}
+	if rr := strings.TrimSpace(c.Sig.RejectReason); rr != "" && !containsString(reasons, rr) {
+		reasons = append(reasons, rr)
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "zero_conf_root_unknown")
+	}
+	return base + " (" + strings.Join(reasons, ",") + ")"
 }
 
 func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64, asiaMinSlope float64) bool {
@@ -6844,6 +6943,15 @@ func min(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 func emaLast(c []features.Candle, n int) float64 {
