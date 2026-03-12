@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -655,7 +656,10 @@ func main() {
 	}
 	statusStore := newLiveLiteStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
-	startLiveLiteStatusServer(statusAddr, statusStore)
+	if err := startLiveLiteStatusServer(statusAddr, statusStore); err != nil {
+		fmt.Println("live-lite status server error:", err)
+		os.Exit(1)
+	}
 	var cmdCtx *telegramCommandCtx
 	tgVerbose := envBool("LIVE_TG_VERBOSE", false)
 	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 60)) * time.Minute
@@ -798,6 +802,7 @@ func main() {
 		FlatDoneDay:  map[string]string{},
 		HookDoneDay:  map[string]string{},
 	}
+	asiaQualityEnable := envBool("LIVE_ASIA_QUALITY_ENABLE", false)
 	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "B")
 	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.60)
 	asiaMinSlope := envFloat("LIVE_ASIA_MIN_SLOPE", 0.01)
@@ -1248,7 +1253,7 @@ func main() {
 				})
 				continue
 			}
-			if !pureMode && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin, asiaMinSlope) {
+			if !pureMode && asiaQualityEnable && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin, asiaMinSlope) {
 				recordCandidateDecision(cmdCtx, c, "asia_quality_gate")
 				deny := []string{"asia_quality_gate"}
 				f := false
@@ -1394,8 +1399,17 @@ func main() {
 		}
 		if len(cands) == 0 {
 			statusStore.Set(st)
-			if data.CurrentRegimeCT(now) == data.RegimeAsia {
-				fmt.Println("signal: none (asia quality gate)")
+			topReject := ""
+			if cmdCtx != nil {
+				for _, sym := range append(symbolNamesFromEntries(longInPlay), symbolNamesFromEntries(shortInPlay)...) {
+					if dec, ok := cmdCtx.getDecision(sym); ok && dec.RejectReason != "" {
+						topReject = dec.RejectReason
+						break
+					}
+				}
+			}
+			if topReject != "" {
+				fmt.Printf("signal: none (%s)\n", topReject)
 			} else {
 				fmt.Println("signal: none")
 			}
@@ -8093,10 +8107,10 @@ func (s *liveLiteStatusStore) Snapshot() liveLiteStatus {
 	return s.cur
 }
 
-func startLiveLiteStatusServer(addr string, s *liveLiteStatusStore) {
+func startLiveLiteStatusServer(addr string, s *liveLiteStatusStore) error {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
-		return
+		return nil
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -8112,12 +8126,15 @@ func startLiveLiteStatusServer(addr string, s *liveLiteStatusStore) {
 		b, _ := json.MarshalIndent(s.Snapshot(), "", "  ")
 		_, _ = w.Write(b)
 	})
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	fmt.Println("live-lite status server:", addr)
 	go func() {
-		fmt.Println("live-lite status server:", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			fmt.Println("live-lite status server error:", err)
-		}
+		_ = http.Serve(ln, mux)
 	}()
+	return nil
 }
 
 func mapFloat(v any) float64 {
@@ -8471,25 +8488,52 @@ func resolveStatePath(p string) string {
 	}
 	base := strings.TrimSpace(os.Getenv("LIVE_STATE_DIR"))
 	if base == "" {
+		if wd, err := os.Getwd(); err == nil {
+			if repo := findRepoRoot(wd); repo != "" {
+				base = repo
+			} else {
+				base = wd
+			}
+		}
+	}
+	if base == "" {
 		if exe, err := os.Executable(); err == nil {
 			exeDir := filepath.Dir(exe)
 			if filepath.Base(exeDir) == "bin" {
 				exeDir = filepath.Dir(exeDir)
 			}
-			if !strings.HasPrefix(exeDir, os.TempDir()) {
+			if !strings.HasPrefix(exeDir, os.TempDir()) && !strings.Contains(exeDir, "go-build") {
 				base = exeDir
 			}
-		}
-	}
-	if base == "" {
-		if wd, err := os.Getwd(); err == nil {
-			base = wd
 		}
 	}
 	if base == "" {
 		return filepath.Clean(s)
 	}
 	return filepath.Clean(filepath.Join(base, s))
+}
+
+func findRepoRoot(start string) string {
+	dir := strings.TrimSpace(start)
+	for dir != "" && dir != string(filepath.Separator) {
+		if fileExists(filepath.Join(dir, "go.mod")) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func symbolNamesFromEntries(entries []inplay.Entry) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Symbol)
+	}
+	return out
 }
 
 func fileExists(path string) bool {

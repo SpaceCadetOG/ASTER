@@ -9,6 +9,9 @@ STAMP="$(date +%F_%H%M%S)"
 LOG_FILE="logs/short-${STAMP}.log"
 LATEST_LINK="logs/short-latest.log"
 
+pkill -9 -x short 2>/dev/null || true
+pkill -9 -f 'cmd/short' 2>/dev/null || true
+
 echo "writing short scanner output to ${LOG_FILE}"
 ln -sfn "$(basename "$LOG_FILE")" "$LATEST_LINK"
 go run ./cmd/short 2>&1 | tee "$LOG_FILE"
