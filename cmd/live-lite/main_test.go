@@ -29,11 +29,10 @@ func TestInHourWindow(t *testing.T) {
 func TestActiveMaintenanceWindow(t *testing.T) {
 	loc, _ := time.LoadLocation("America/Chicago")
 	now := time.Date(2026, 3, 3, 16, 10, 0, 0, loc)
-	w1 := maintenanceWindow{Name: "M1", StartHour: 0, EndHour: 1}
-	w2 := maintenanceWindow{Name: "M2", StartHour: 16, EndHour: 18, ForceFlat: true}
-	w, ok := activeMaintenanceWindow(now, true, w1, w2)
-	if !ok || w.Name != "M2" || !w.ForceFlat {
-		t.Fatalf("expected M2 active at 16:10")
+	w := maintenanceWindow{Name: "EOD", Enabled: true, StartHour: 16, EndHour: 18, ForceFlat: true}
+	active, ok := activeMaintenanceWindow(now, true, w)
+	if !ok || active.Name != "EOD" || !active.ForceFlat {
+		t.Fatalf("expected EOD maintenance active at 16:10")
 	}
 }
 
@@ -54,17 +53,16 @@ func TestInMinuteWindow(t *testing.T) {
 
 func TestActiveMaintenanceWindowMinutePrecision(t *testing.T) {
 	loc, _ := time.LoadLocation("America/Chicago")
-	now := time.Date(2026, 3, 3, 23, 20, 0, 0, loc)
-	w1 := maintenanceWindow{Name: "M1", StartHour: 22, StartMin: 0, EndHour: 23, EndMin: 30}
-	w2 := maintenanceWindow{Name: "M2", StartHour: 16, StartMin: 0, EndHour: 18, EndMin: 0, ForceFlat: true}
-	w, ok := activeMaintenanceWindow(now, true, w1, w2)
-	if !ok || w.Name != "M1" {
-		t.Fatalf("expected M1 active at 23:20")
+	now := time.Date(2026, 3, 3, 16, 20, 0, 0, loc)
+	w := maintenanceWindow{Name: "EOD", Enabled: true, StartHour: 16, StartMin: 0, EndHour: 18, EndMin: 0, ForceFlat: true}
+	active, ok := activeMaintenanceWindow(now, true, w)
+	if !ok || active.Name != "EOD" {
+		t.Fatalf("expected EOD maintenance active at 16:20")
 	}
-	after := time.Date(2026, 3, 3, 23, 35, 0, 0, loc)
-	_, ok = activeMaintenanceWindow(after, true, w1, w2)
+	after := time.Date(2026, 3, 3, 18, 5, 0, 0, loc)
+	_, ok = activeMaintenanceWindow(after, true, w)
 	if ok {
-		t.Fatalf("expected no maintenance at 23:35")
+		t.Fatalf("expected no maintenance at 18:05")
 	}
 }
 

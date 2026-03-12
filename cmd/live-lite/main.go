@@ -437,6 +437,7 @@ type liveLiteStatusStore struct {
 
 type maintenanceWindow struct {
 	Name      string
+	Enabled   bool
 	StartHour int
 	StartMin  int
 	EndHour   int
@@ -789,18 +790,9 @@ func main() {
 	if reversalVolSpike <= 0 {
 		reversalVolSpike = 3.0
 	}
-	maintMidnight := maintenanceWindow{
-		Name:      "M1",
-		StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
-		StartMin:  envInt("LIVE_MAINT1_START_MIN", 0),
-		EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
-		EndMin:    envInt("LIVE_MAINT1_END_MIN", 30),
-		ForceFlat: envBool("LIVE_MAINT1_FORCE_FLAT", false),
-		HookPath:  envStr("LIVE_MAINT1_HOOK", ""),
-		HookTO:    time.Duration(envInt("LIVE_MAINT1_HOOK_TIMEOUT_SEC", 900)) * time.Second,
-	}
 	maintEOD := maintenanceWindow{
-		Name:      "M2",
+		Name:      "EOD",
+		Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", true),
 		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
 		StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
 		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
@@ -809,7 +801,6 @@ func main() {
 		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
 	}
-	maintMidnight = normalizeMaintenanceWindow(maintMidnight)
 	maintEOD = normalizeMaintenanceWindow(maintEOD)
 	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
@@ -817,7 +808,6 @@ func main() {
 	lastDailyLiveReceiptDay := ""
 	lastSODReportDay := ""
 	lastPreUSReportDay := ""
-	lastM1ReportDay := ""
 	lastM2ReportDay := ""
 	lastPreEODDecisionDay := ""
 	lastHourlyKey := ""
@@ -898,8 +888,7 @@ func main() {
 		fmt.Sprintf("<b>Dry Run:</b> %v", dryRun),
 		fmt.Sprintf("<b>Min Grade:</b> %s", strings.ToUpper(minGrade)),
 		fmt.Sprintf("<b>Digest:</b> %s", digestEvery),
-		fmt.Sprintf("<b>Maint M1:</b> %02d:%02d-%02d:%02d", maintMidnight.StartHour, maintMidnight.StartMin, maintMidnight.EndHour, maintMidnight.EndMin),
-		fmt.Sprintf("<b>Maint M2:</b> %02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin),
+		fmt.Sprintf("<b>Maint:</b> %02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin),
 	))
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
@@ -943,7 +932,7 @@ func main() {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
 		localMaintNow := now.In(maintLoc)
-		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, maintEnabled, maintMidnight, maintEOD)
+		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, maintEnabled, maintEOD)
 		mkts := client.FetchAllMarkets()
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
@@ -1157,14 +1146,9 @@ func main() {
 				))
 				if paper.enabled && tg != nil && tg.Enabled() {
 					switch maintWindow.Name {
-					case "M1":
-						if lastM1ReportDay != dayKey {
-							tg.Sendf("%s", buildWindowReport("M1 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
-							lastM1ReportDay = dayKey
-						}
-					case "M2":
+					case "EOD":
 						if lastM2ReportDay != dayKey {
-							tg.Sendf("%s", buildWindowReport("EOD/M2 Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+							tg.Sendf("%s", buildWindowReport("EOD Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
 							lastM2ReportDay = dayKey
 						}
 					}
@@ -1200,7 +1184,10 @@ func main() {
 				}
 			}
 		} else {
-			for _, w := range []maintenanceWindow{maintMidnight, maintEOD} {
+			for _, w := range []maintenanceWindow{maintEOD} {
+				if !w.Enabled {
+					continue
+				}
 				dayKey := localMaintNow.Format("2006-01-02")
 				if maintState.LastStartDay[w.Name] == dayKey && maintState.LastEndDay[w.Name] != dayKey {
 					maintState.LastEndDay[w.Name] = dayKey
@@ -2292,15 +2279,17 @@ func colorReasonTag(reason string) string {
 	}
 }
 
-func activeMaintenanceWindow(now time.Time, enabled bool, w1, w2 maintenanceWindow) (maintenanceWindow, bool) {
+func activeMaintenanceWindow(now time.Time, enabled bool, windows ...maintenanceWindow) (maintenanceWindow, bool) {
 	if !enabled {
 		return maintenanceWindow{}, false
 	}
-	if inMinuteWindow(now.Hour(), now.Minute(), w1.StartHour, w1.StartMin, w1.EndHour, w1.EndMin) {
-		return w1, true
-	}
-	if inMinuteWindow(now.Hour(), now.Minute(), w2.StartHour, w2.StartMin, w2.EndHour, w2.EndMin) {
-		return w2, true
+	for _, w := range windows {
+		if !w.Enabled {
+			continue
+		}
+		if inMinuteWindow(now.Hour(), now.Minute(), w.StartHour, w.StartMin, w.EndHour, w.EndMin) {
+			return w, true
+		}
 	}
 	return maintenanceWindow{}, false
 }
@@ -2996,7 +2985,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if lossCooldown < 0 {
 		lossCooldown = 0
 	}
-	harvestLock := time.Duration(envInt("LIVE_PAPER_HARVEST_REENTRY_LOCK_MIN", 30)) * time.Minute
+	harvestLock := time.Duration(envInt("LIVE_PAPER_HARVEST_REENTRY_LOCK_MIN", 90)) * time.Minute
 	if harvestLock < 0 {
 		harvestLock = 0
 	}
@@ -3065,17 +3054,17 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		stressRoundtripBps: stressRoundtripBps,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 10),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 18),
 			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
-			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 0.60),
-			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.25),
-			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.10),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
+			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.00),
+			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.40),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.18),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.80),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
-			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90),
 		}),
 		riskOnMargin:  riskOnMargin,
 		riskMarginPct: riskMarginPct,
@@ -3291,17 +3280,17 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		riskMarginPct:        riskMarginPct,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 10),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 18),
 			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
-			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 0.60),
-			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.25),
-			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.10),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.45),
+			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.00),
+			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.40),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.18),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.80),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
-			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90),
 		}),
 	}
 	if m.entryTimeout <= 0 {
@@ -4685,12 +4674,12 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 20)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
-	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.20)
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
-	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45)) * time.Minute
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90)) * time.Minute
 	changed := false
 	for sym, p := range m.positions {
 		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
@@ -5587,12 +5576,12 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 10)) * time.Minute
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 20)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
-	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 0.80)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.20)
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
-	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 45)) * time.Minute
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90)) * time.Minute
 	changed := false
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
