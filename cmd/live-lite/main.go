@@ -206,6 +206,10 @@ type paperPosition struct {
 	MaxAdverseR      float64
 	LastMark         float64
 	EntryReason      string
+	EntryGrade       string
+	EntryState       inplay.State
+	EntryConf        float64
+	EntryVolumeUSD   float64
 	OpposingFriction float64
 	StallBars        int
 }
@@ -337,6 +341,8 @@ type livePosition struct {
 	CustomTP1R     float64   `json:"customTp1R,omitempty"`
 	CustomTP2R     float64   `json:"customTp2R,omitempty"`
 	EntryReason    string    `json:"entryReason,omitempty"`
+	EntryGrade     string    `json:"entryGrade,omitempty"`
+	EntryState     string    `json:"entryState,omitempty"`
 	EntryConf      float64   `json:"entryConf,omitempty"`
 	EntryTags      []string  `json:"entryTags,omitempty"`
 	EntryReasons   []string  `json:"entryReasons,omitempty"`
@@ -547,7 +553,7 @@ func main() {
 	riskShell.MinBookImbalance = envFloat("LIVE_MIN_BOOK_IMBALANCE", obImbMin)
 	riskShell.MaxRecentSlippageBps = envFloat("LIVE_MAX_RECENT_SLIPPAGE_BPS", 15)
 	riskHoldHours := envFloat("LIVE_EXPECTED_HOLD_HOURS", 8.0)
-	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 2.0)
+	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 3.0)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
@@ -2552,7 +2558,48 @@ func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64
 	return pnl, pct
 }
 
-func adjustBracketParams(reason string, conf, volumeUSD, stopPct, tp1R, tp2R, tp3R, minStopPct, maxStopPct float64) (float64, float64, float64, float64) {
+func stateAwareStopMultiplier(reason, grade string, state inplay.State, conf, volumeUSD float64) float64 {
+	mult := 1.0
+	switch strings.ToUpper(strings.TrimSpace(grade)) {
+	case "A+":
+		mult *= 1.18
+	case "A":
+		mult *= 1.10
+	case "B":
+		mult *= 1.03
+	case "C", "D":
+		mult *= 0.96
+	}
+	switch state {
+	case inplay.StatePumping:
+		mult *= 1.22
+	case inplay.StateInPlay:
+		mult *= 1.14
+	case inplay.StateHeating:
+		mult *= 1.08
+	case inplay.StateBalanced:
+		mult *= 1.00
+	case inplay.StateCooling:
+		mult *= 0.94
+	case inplay.StateDumping, inplay.StateExhausted:
+		mult *= 0.90
+	}
+	r := strings.ToLower(strings.TrimSpace(reason))
+	if strings.Contains(r, "continuation") {
+		mult *= 1.06
+	}
+	if conf >= 0.75 {
+		mult *= 1.04
+	} else if conf > 0 && conf < 0.60 {
+		mult *= 0.95
+	}
+	if volumeUSD >= envFloat("LIVE_STOP_SWING_VOL_USD", 100_000_000) {
+		mult *= 1.05
+	}
+	return clamp(mult, envFloat("LIVE_STOP_STATE_MULT_MIN", 0.88), envFloat("LIVE_STOP_STATE_MULT_MAX", 1.55))
+}
+
+func adjustBracketParams(reason, grade string, state inplay.State, conf, volumeUSD, stopPct, tp1R, tp2R, tp3R, minStopPct, maxStopPct float64) (float64, float64, float64, float64) {
 	tp1Max := envFloat("LIVE_TP1_MAX_R", 2.5)
 	tp2Max := envFloat("LIVE_TP2_MAX_R", 4.0)
 	tp3Max := envFloat("LIVE_TP3_MAX_R", 6.0)
@@ -2564,6 +2611,7 @@ func adjustBracketParams(reason string, conf, volumeUSD, stopPct, tp1R, tp2R, tp
 	if soften && stopWiden > 0 {
 		stopPct *= stopWiden
 	}
+	stopPct *= stateAwareStopMultiplier(reason, grade, state, conf, volumeUSD)
 	stopPct *= volumeStopWiden(volumeUSD)
 	stopPct = clamp(stopPct, minStopPct, maxStopPct)
 
@@ -2878,13 +2926,13 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if start <= 0 {
 		start = 1000
 	}
-	stopPct := envFloat("LIVE_PAPER_STOP_PCT", 2.0)
+	stopPct := envFloat("LIVE_PAPER_STOP_PCT", 3.0)
 	if stopPct <= 0 {
-		stopPct = 2.0
+		stopPct = 3.0
 	}
-	tp1R := envFloat("LIVE_PAPER_TP1_R", 1.00)
-	tp2R := envFloat("LIVE_PAPER_TP2_R", 2.00)
-	tp3R := envFloat("LIVE_PAPER_TP3_R", 3.00)
+	tp1R := envFloat("LIVE_PAPER_TP1_R", 1.20)
+	tp2R := envFloat("LIVE_PAPER_TP2_R", 2.50)
+	tp3R := envFloat("LIVE_PAPER_TP3_R", 4.00)
 	if tp1R <= 0 {
 		tp1R = 1.0
 	}
@@ -2894,9 +2942,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.35)
-	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.25)
-	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.20)
+	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.25)
+	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.20)
+	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.15)
 	if tp1Frac < 0 {
 		tp1Frac = 0
 	}
@@ -2914,18 +2962,18 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		tp2Frac /= sumFrac
 		tp3Frac /= sumFrac
 	}
-	trailAfterTP := envInt("LIVE_PAPER_TRAIL_AFTER_TP", 2)
+	trailAfterTP := envInt("LIVE_PAPER_TRAIL_AFTER_TP", 3)
 	if trailAfterTP < 1 {
 		trailAfterTP = 1
 	}
 	if trailAfterTP > 3 {
 		trailAfterTP = 3
 	}
-	trailStopPct := envFloat("LIVE_PAPER_TRAIL_STOP_PCT", 1.0)
+	trailStopPct := envFloat("LIVE_PAPER_TRAIL_STOP_PCT", 1.50)
 	if trailStopPct <= 0 {
-		trailStopPct = 1.0
+		trailStopPct = 1.50
 	}
-	trailStopPctTP3 := envFloat("LIVE_PAPER_TRAIL_STOP_PCT_TP3", 1.75)
+	trailStopPctTP3 := envFloat("LIVE_PAPER_TRAIL_STOP_PCT_TP3", 3.25)
 	if trailStopPctTP3 <= 0 {
 		trailStopPctTP3 = trailStopPct
 	}
@@ -2985,11 +3033,11 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if lossCooldown < 0 {
 		lossCooldown = 0
 	}
-	harvestLock := time.Duration(envInt("LIVE_PAPER_HARVEST_REENTRY_LOCK_MIN", 90)) * time.Minute
+	harvestLock := time.Duration(envInt("LIVE_PAPER_HARVEST_REENTRY_LOCK_MIN", 120)) * time.Minute
 	if harvestLock < 0 {
 		harvestLock = 0
 	}
-	harvestMinSlope := envFloat("LIVE_PAPER_HARVEST_REENTRY_MIN_SLOPE", 0.30)
+	harvestMinSlope := envFloat("LIVE_PAPER_HARVEST_REENTRY_MIN_SLOPE", 0.45)
 	if harvestMinSlope < 0 {
 		harvestMinSlope = 0
 	}
@@ -3054,17 +3102,17 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		stressRoundtripBps: stressRoundtripBps,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 18),
+		NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 24),
 			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
-			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.00),
-			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.40),
-			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.18),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.80),
+			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
+			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.28),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.20),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
-			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 		}),
 		riskOnMargin:  riskOnMargin,
 		riskMarginPct: riskMarginPct,
@@ -3161,13 +3209,13 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if rest == nil {
 		return nil
 	}
-	stopPct := envFloat("LIVE_STOP_PCT", 2.0)
+	stopPct := envFloat("LIVE_STOP_PCT", 3.0)
 	if stopPct <= 0 {
-		stopPct = 2.0
+		stopPct = 3.0
 	}
-	tp1R := envFloat("LIVE_TP1_R", 1.00)
-	tp2R := envFloat("LIVE_TP2_R", 2.00)
-	tp3R := envFloat("LIVE_TP3_R", 3.00)
+	tp1R := envFloat("LIVE_TP1_R", 1.20)
+	tp2R := envFloat("LIVE_TP2_R", 2.50)
+	tp3R := envFloat("LIVE_TP3_R", 4.00)
 	if tp1R <= 0 {
 		tp1R = 1.0
 	}
@@ -3177,9 +3225,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.35)
-	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.25)
-	tp3Frac := envFloat("LIVE_TP3_FRAC", 0.20)
+	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.25)
+	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.20)
+	tp3Frac := envFloat("LIVE_TP3_FRAC", 0.15)
 	if tp1Frac < 0 {
 		tp1Frac = 0
 	}
@@ -3197,18 +3245,18 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		tp2Frac /= sumFrac
 		tp3Frac /= sumFrac
 	}
-	trailAfterTP := envInt("LIVE_TRAIL_AFTER_TP", 2)
+	trailAfterTP := envInt("LIVE_TRAIL_AFTER_TP", 3)
 	if trailAfterTP < 1 {
 		trailAfterTP = 1
 	}
 	if trailAfterTP > 3 {
 		trailAfterTP = 3
 	}
-	trailStopPct := envFloat("LIVE_TRAIL_STOP_PCT", 1.0)
+	trailStopPct := envFloat("LIVE_TRAIL_STOP_PCT", 1.50)
 	if trailStopPct <= 0 {
-		trailStopPct = 1.0
+		trailStopPct = 1.50
 	}
-	trailStopPctTP3 := envFloat("LIVE_TRAIL_STOP_PCT_TP3", 1.75)
+	trailStopPctTP3 := envFloat("LIVE_TRAIL_STOP_PCT_TP3", 3.25)
 	if trailStopPctTP3 <= 0 {
 		trailStopPctTP3 = trailStopPct
 	}
@@ -3280,17 +3328,17 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		riskMarginPct:        riskMarginPct,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 18),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 24),
 			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
-			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.00),
-			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.40),
-			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.18),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 0.80),
+			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
+			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
+			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.28),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.20),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
 			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
-			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90),
+			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 		}),
 	}
 	if m.entryTimeout <= 0 {
@@ -3869,6 +3917,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		VPTargetMode:   c.Sig.TargetMode,
 		RejectReason:   c.RejectReason,
 		EntryReason:    c.Strat,
+		EntryGrade:     c.Entry.CurrentGrade,
+		EntryState:     string(c.Entry.State),
 		EntryConf:      c.Conf,
 		EntryTags:      append([]string{}, c.Sig.Tags...),
 		EntryReasons:   append([]string{}, c.Sig.Reasons...),
@@ -4262,6 +4312,8 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	}
 	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
 		p.EntryReason,
+		p.EntryGrade,
+		inplay.State(p.EntryState),
 		p.EntryConf,
 		p.EntryVolumeUSD,
 		stopPct,
@@ -4674,12 +4726,12 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 20)) * time.Minute
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 35)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
-	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.20)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.75)
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
-	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90)) * time.Minute
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120)) * time.Minute
 	changed := false
 	for sym, p := range m.positions {
 		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
@@ -5357,6 +5409,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
 		c.Strat,
+		c.Entry.CurrentGrade,
+		c.Entry.State,
 		c.Conf,
 		m.VolumeUSD,
 		stopPct,
@@ -5415,6 +5469,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		TrailRef:         entry,
 		OpenedAt:         now,
 		EntryReason:      c.Strat,
+		EntryGrade:       c.Entry.CurrentGrade,
+		EntryState:       c.Entry.State,
+		EntryConf:        c.Conf,
+		EntryVolumeUSD:   c.VolumeUSD,
 		OpposingFriction: c.Sig.VPTargetLevel,
 	}
 	p.positions[raw] = pos
@@ -5576,12 +5634,12 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
-	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 20)) * time.Minute
+	minHold := time.Duration(envInt("LIVE_MOMENTUM_EXIT_MIN_HOLD_MIN", 35)) * time.Minute
 	minUpnlPct := envFloat("LIVE_MOMENTUM_EXIT_MIN_UPNL_PCT", 0.25)
-	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.20)
+	minMFER := envFloat("LIVE_MOMENTUM_EXIT_MIN_MFE_R", 1.75)
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
-	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 90)) * time.Minute
+	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120)) * time.Minute
 	changed := false
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {

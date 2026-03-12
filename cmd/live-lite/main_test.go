@@ -166,6 +166,8 @@ func TestAdjustBracketParamsCapsAndSoften(t *testing.T) {
 
 	stop, tp1, tp2, tp3 := adjustBracketParams(
 		"failed_auction_magnet",
+		"A+",
+		inplay.StateInPlay,
 		0.62,
 		0.0,
 		0.01, // 1%
