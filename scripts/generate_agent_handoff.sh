@@ -4,8 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SINCE_DATE="${1:-$(date +%F)}"
-UNTIL_DATE="${2:-$(date +%F)}"
+LOG_TZ="${ASTER_LOG_TZ:-America/Chicago}"
+today_in_tz() {
+  TZ="$LOG_TZ" date +%F
+}
+
+SINCE_DATE="${1:-$(today_in_tz)}"
+UNTIL_DATE="${2:-$(today_in_tz)}"
 OUT_DIR="out/agent_handoff"
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 mkdir -p "$OUT_DIR"
