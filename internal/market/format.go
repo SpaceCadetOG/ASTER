@@ -38,7 +38,7 @@ func FormatHeader(exchange string, activeLabels []string) string {
 	return fmt.Sprintf("%s • [%s]", exchange, strings.Join(activeLabels, ","))
 }
 
-// Symbol | Score | Δ%(24h) | DayUTC% | Vol($) | OI($) | Funding(%) | Open24h | Last
+// Symbol | Score | Δ%(24h) | DayUTC% | Vol($) | OI($) | Funding(%) | OpenUTC | Last
 func FormatRow(s Scored) string {
 	funding := pctFromFractionPtr(s.FundingRate)
 	oi := usdFromFloatPtr(s.OIUSD)

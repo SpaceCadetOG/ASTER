@@ -147,9 +147,9 @@ type telegramCommandCtx struct {
 	decisionMu sync.RWMutex
 	decisions  map[string]operatorDecision
 
-	suggestMu  sync.RWMutex
+	suggestMu   sync.RWMutex
 	suggestions map[string]operatorSuggestion
-	suggestTTL time.Duration
+	suggestTTL  time.Duration
 }
 
 type operatorDecision struct {
@@ -247,10 +247,14 @@ type paperTrader struct {
 	lossCooldown       time.Duration
 	lastExitAt         map[string]time.Time
 	lastExitLoss       map[string]bool
+	lastHarvestAt      map[string]time.Time
 	lossStreak         map[string]int
 	lockUntil          map[string]time.Time
 	maxLossStreak      int
 	lossLock           time.Duration
+	harvestLock        time.Duration
+	harvestMinSlope    float64
+	harvestMaxStateMin float64
 	eventLog           *stats.EventLogger
 	stressRoundtripBps float64
 	exitManager        *exitmgr.Manager
@@ -277,6 +281,7 @@ type paperState struct {
 	LastFund     map[string]string         `json:"lastFund,omitempty"`
 	LastExitAt   map[string]time.Time      `json:"lastExitAt,omitempty"`
 	LastExitLoss map[string]bool           `json:"lastExitLoss,omitempty"`
+	LastHarvest  map[string]time.Time      `json:"lastHarvest,omitempty"`
 	LossStreak   map[string]int            `json:"lossStreak,omitempty"`
 	LockUntil    map[string]time.Time      `json:"lockUntil,omitempty"`
 	UpdatedAt    time.Time                 `json:"updatedAt"`
@@ -578,14 +583,16 @@ func main() {
 	shortTrk := inplay.NewTracker("short", inplayCfg)
 
 	candCfg := candidateSelectConfig{
-		UseContinuous:         envBool("LIVE_RANK_USE_CONTINUOUS", false),
-		MinNormalizedScore:    envFloat("LIVE_RANK_MIN_SCORE", 75.0),
-		MinCompleteness:       envFloat("LIVE_RANK_MIN_COMPLETENESS", 0.0),
-		MinConfidence:         envFloat("LIVE_RANK_MIN_CONFIDENCE", 0.0),
-		ReversalMinScore:      envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
-		ReversalMinConfidence: envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
-		ReversalMinComplete:   envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
-		ReversalMinStateMin:   envFloat("LIVE_REVERSAL_MIN_STATE_MIN", 1.0),
+		UseContinuous:           envBool("LIVE_RANK_USE_CONTINUOUS", false),
+		MinNormalizedScore:      envFloat("LIVE_RANK_MIN_SCORE", 75.0),
+		MinCompleteness:         envFloat("LIVE_RANK_MIN_COMPLETENESS", 0.0),
+		MinConfidence:           envFloat("LIVE_RANK_MIN_CONFIDENCE", 0.0),
+		ReversalMinScore:        envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
+		ReversalMinConfidence:   envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
+		ReversalMinComplete:     envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
+		ReversalMinStateMin:     envFloat("LIVE_REVERSAL_MIN_STATE_MIN", 1.0),
+		ReversalShortCoolingMin: envFloat("LIVE_REVERSAL_SHORT_COOLING_MIN", 3.0),
+		ReversalShortMinSlope:   envFloat("LIVE_REVERSAL_SHORT_MIN_SLOPE", 0.25),
 	}
 	entryQualityCfg := entryQualityConfig{
 		EnableMetaGate:       envBool("LIVE_META_GATE_ENABLE", true),
@@ -1291,7 +1298,8 @@ func main() {
 				continue
 			}
 			if entryQualityCfg.EnableMetaGate {
-				if !operatorSuggested && (c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") {
+				persistOverride := qualifiesPersistenceOverride(c, entryQualityCfg)
+				if !operatorSuggested && (c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && !persistOverride {
 					recordCandidateDecision(cmdCtx, c, c.RejectReason)
 					f := false
 					eventLog.Emit(stats.Event{
@@ -1307,7 +1315,7 @@ func main() {
 					})
 					continue
 				}
-				if c.TradeQuality < entryQualityCfg.MinQuality && !qualifiesPersistenceOverride(c, entryQualityCfg) {
+				if c.TradeQuality < entryQualityCfg.MinQuality && !persistOverride {
 					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, entryQualityCfg.MinQuality))
 					f := false
 					eventLog.Emit(stats.Event{
@@ -1323,10 +1331,10 @@ func main() {
 					})
 					continue
 				}
-				if c.TradeQuality < entryQualityCfg.MinQuality && qualifiesPersistenceOverride(c, entryQualityCfg) {
+				if (c.TradeQuality < entryQualityCfg.MinQuality || c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && persistOverride {
 					c.QualityReasons = append(c.QualityReasons, "persistence_override")
 				}
-				if c.Conf < entryQualityCfg.MinEntryConf {
+				if c.Conf < entryQualityCfg.MinEntryConf && !qualifiesConfOverride(c, entryQualityCfg) {
 					confReject := confidenceRejectReason(c, entryQualityCfg.MinEntryConf)
 					recordCandidateDecision(cmdCtx, c, confReject)
 					f := false
@@ -1342,6 +1350,12 @@ func main() {
 						GateReasons: []string{confReject},
 					})
 					continue
+				}
+				if c.Conf < entryQualityCfg.MinEntryConf && qualifiesConfOverride(c, entryQualityCfg) {
+					confReject := confidenceRejectReason(c, entryQualityCfg.MinEntryConf)
+					c.QualityReasons = append(c.QualityReasons, "conf_persistence_override")
+					fmt.Printf("live-lite: conf override %s %s strat=%s reason=%s\n",
+						strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), c.Side, c.Strat, confReject)
 				}
 			}
 			if entryQualityCfg.RequireStrategyMatch && (strings.TrimSpace(c.Strat) == "" || strings.EqualFold(c.Strat, "none")) {
@@ -2982,6 +2996,18 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if lossCooldown < 0 {
 		lossCooldown = 0
 	}
+	harvestLock := time.Duration(envInt("LIVE_PAPER_HARVEST_REENTRY_LOCK_MIN", 30)) * time.Minute
+	if harvestLock < 0 {
+		harvestLock = 0
+	}
+	harvestMinSlope := envFloat("LIVE_PAPER_HARVEST_REENTRY_MIN_SLOPE", 0.30)
+	if harvestMinSlope < 0 {
+		harvestMinSlope = 0
+	}
+	harvestMaxStateMin := envFloat("LIVE_PAPER_HARVEST_REENTRY_MAX_STATE_MIN", 12.0)
+	if harvestMaxStateMin < 0 {
+		harvestMaxStateMin = 0
+	}
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	stressRoundtripBps := envFloat("PAPER_STRESS_BPS_ROUNDTRIP", 0)
 	if stressRoundtripBps < 0 {
@@ -3028,10 +3054,14 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		lossCooldown:       lossCooldown,
 		lastExitAt:         map[string]time.Time{},
 		lastExitLoss:       map[string]bool{},
+		lastHarvestAt:      map[string]time.Time{},
 		lossStreak:         map[string]int{},
 		lockUntil:          map[string]time.Time{},
 		maxLossStreak:      maxLossStreak,
 		lossLock:           lossLock,
+		harvestLock:        harvestLock,
+		harvestMinSlope:    harvestMinSlope,
+		harvestMaxStateMin: harvestMaxStateMin,
 		stressRoundtripBps: stressRoundtripBps,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
@@ -3098,6 +3128,9 @@ func (p *paperTrader) load() error {
 	if st.LastExitLoss != nil {
 		p.lastExitLoss = st.LastExitLoss
 	}
+	if st.LastHarvest != nil {
+		p.lastHarvestAt = st.LastHarvest
+	}
 	if st.LossStreak != nil {
 		p.lossStreak = st.LossStreak
 	}
@@ -3123,6 +3156,7 @@ func (p *paperTrader) save() error {
 		LastFund:     p.lastFundKey,
 		LastExitAt:   p.lastExitAt,
 		LastExitLoss: p.lastExitLoss,
+		LastHarvest:  p.lastHarvestAt,
 		LossStreak:   p.lossStreak,
 		LockUntil:    p.lockUntil,
 		UpdatedAt:    time.Now().UTC(),
@@ -5209,6 +5243,30 @@ func (p *paperTrader) hadRecentStopLoss(symbol string, now time.Time, cooldown t
 	return now.Sub(t) < cooldown
 }
 
+func (p *paperTrader) blocksHarvestReentry(symbol string, now time.Time, c candidate) (bool, string) {
+	if p == nil || p.harvestLock <= 0 || p.lastHarvestAt == nil {
+		return false, ""
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	last := p.lastHarvestAt[raw]
+	if last.IsZero() || now.Sub(last) >= p.harvestLock {
+		return false, ""
+	}
+	if strings.EqualFold(c.Strat, "mom_reversal") || strings.EqualFold(c.Strat, "mom_reversal_short") {
+		return true, "recent_harvest_reentry_reversal"
+	}
+	if c.Entry.State != inplay.StateInPlay && c.Entry.State != inplay.StatePumping {
+		return true, fmt.Sprintf("recent_harvest_reentry_state:%s", c.Entry.State)
+	}
+	if c.Entry.ScoreSlope < p.harvestMinSlope && !c.Entry.Momentum {
+		return true, fmt.Sprintf("recent_harvest_reentry_slope:%.3f<%.3f", c.Entry.ScoreSlope, p.harvestMinSlope)
+	}
+	if p.harvestMaxStateMin > 0 && c.Entry.TimeInStateMin > p.harvestMaxStateMin {
+		return true, fmt.Sprintf("recent_harvest_reentry_stale:%.1f>%.1f", c.Entry.TimeInStateMin, p.harvestMaxStateMin)
+	}
+	return false, ""
+}
+
 func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook) (*paperPosition, error) {
 	if p == nil || !p.enabled {
 		return nil, nil
@@ -5226,6 +5284,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	if t := p.lockUntil[raw]; !t.IsZero() && now.Before(t) {
 		return nil, fmt.Errorf("symbol loss lock active")
+	}
+	if blocked, reason := p.blocksHarvestReentry(raw, now, c); blocked {
+		return nil, fmt.Errorf("%s", reason)
 	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
@@ -5676,6 +5737,20 @@ func (p *paperTrader) ForceCloseSymbol(now time.Time, symbol string, meta map[st
 	return true
 }
 
+func (p *paperTrader) shouldMarkHarvest(pos *paperPosition, reason string, net float64) bool {
+	if p == nil || pos == nil || net <= 0 {
+		return false
+	}
+	reason = strings.ToUpper(strings.TrimSpace(reason))
+	if reason == "TP3" {
+		return true
+	}
+	if reason == "TRAIL_STOP" && pos.HitTP3 {
+		return true
+	}
+	return false
+}
+
 func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason string, exitPrice, qty float64, m symbolMeta, ob aster.OrderBook) {
 	if p == nil || !p.enabled || pos == nil {
 		return
@@ -5717,6 +5792,9 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	}
 	if p.lastExitLoss != nil {
 		p.lastExitLoss[symbol] = net < 0
+	}
+	if p.lastHarvestAt != nil && p.shouldMarkHarvest(pos, reason, net) {
+		p.lastHarvestAt[symbol] = now
 	}
 	if net < 0 {
 		if p.lossStreak != nil {
@@ -6380,14 +6458,16 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 }
 
 type candidateSelectConfig struct {
-	UseContinuous         bool
-	MinNormalizedScore    float64
-	MinCompleteness       float64
-	MinConfidence         float64
-	ReversalMinScore      float64
-	ReversalMinConfidence float64
-	ReversalMinComplete   float64
-	ReversalMinStateMin   float64
+	UseContinuous           bool
+	MinNormalizedScore      float64
+	MinCompleteness         float64
+	MinConfidence           float64
+	ReversalMinScore        float64
+	ReversalMinConfidence   float64
+	ReversalMinComplete     float64
+	ReversalMinStateMin     float64
+	ReversalShortCoolingMin float64
+	ReversalShortMinSlope   float64
 }
 
 type rankSortConfig struct {
@@ -6405,6 +6485,12 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 	if reversalSlopeMin < 0 {
 		reversalSlopeMin = -reversalSlopeMin
 	}
+	if cfg.ReversalShortCoolingMin < cfg.ReversalMinStateMin {
+		cfg.ReversalShortCoolingMin = cfg.ReversalMinStateMin
+	}
+	if cfg.ReversalShortMinSlope < reversalSlopeMin {
+		cfg.ReversalShortMinSlope = reversalSlopeMin
+	}
 	reversalReady := func(e inplay.Entry) bool {
 		if e.State == inplay.StateExhausted {
 			return e.TimeInStateMin >= cfg.ReversalMinStateMin && !e.Momentum
@@ -6419,6 +6505,21 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			return false
 		}
 		return e.ScoreSlope <= -reversalSlopeMin
+	}
+	reversalShortReady := func(e inplay.Entry) bool {
+		if e.Momentum {
+			return false
+		}
+		switch e.State {
+		case inplay.StateDumping:
+			return e.TimeInStateMin >= cfg.ReversalMinStateMin && e.ScoreSlope <= -cfg.ReversalShortMinSlope
+		case inplay.StateExhausted:
+			return e.TimeInStateMin >= cfg.ReversalMinStateMin && e.ScoreSlope <= -reversalSlopeMin
+		case inplay.StateCooling:
+			return e.TimeInStateMin >= cfg.ReversalShortCoolingMin && e.ScoreSlope <= -cfg.ReversalShortMinSlope
+		default:
+			return false
+		}
 	}
 	stillOpposingLeaderStrong := func(e inplay.Entry) bool {
 		if e.Momentum {
@@ -6542,7 +6643,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			if !allow(e) {
 				continue
 			}
-			if !reversalReady(e) || stillOpposingLeaderStrong(e) {
+			if !reversalShortReady(e) || stillOpposingLeaderStrong(e) {
 				continue
 			}
 			if cfg.UseContinuous {
@@ -6678,6 +6779,21 @@ func qualifiesPersistenceOverride(c candidate, cfg entryQualityConfig) bool {
 	switch c.Entry.State {
 	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
 		return c.Entry.ScoreSlope > 0 || c.Entry.Momentum
+	default:
+		return false
+	}
+}
+
+func qualifiesConfOverride(c candidate, cfg entryQualityConfig) bool {
+	if c.Conf > 0 || !qualifiesPersistenceOverride(c, cfg) {
+		return false
+	}
+	if strings.EqualFold(c.Strat, "mom_reversal") || strings.EqualFold(c.Strat, "mom_reversal_short") {
+		return false
+	}
+	switch c.Entry.State {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		return true
 	default:
 		return false
 	}

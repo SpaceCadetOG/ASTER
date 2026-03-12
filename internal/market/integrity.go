@@ -24,7 +24,13 @@ func evalIntegrity(m Market, cfg RankConfig, now time.Time) IntegrityResult {
 		}
 	}
 
-	addMiss("missing_oi", m.OIUSD == nil || (m.OIUSD != nil && *m.OIUSD <= 0), 0.20)
+	oiWeight := 0.20
+	// ASTER does not currently populate OI in the adapter, so penalizing every row
+	// makes completeness less informative until the feed is wired in.
+	if m.Exchange == "asterdex" {
+		oiWeight = 0
+	}
+	addMiss("missing_oi", m.OIUSD == nil || (m.OIUSD != nil && *m.OIUSD <= 0), oiWeight)
 	addMiss("missing_funding", m.FundingRate == nil, 0.18)
 	addMiss("missing_spread", m.SpreadBps == nil, 0.14)
 	addMiss("missing_topbook", m.TopBookUSD == nil, 0.14)

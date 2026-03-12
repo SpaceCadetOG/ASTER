@@ -23,3 +23,9 @@ type priceTicker struct {
 	Price  json.Number `json:"price"`
 	Time   int64       `json:"time"`
 }
+
+type openInterestEntry struct {
+	Symbol       string      `json:"symbol"`
+	OpenInterest json.Number `json:"openInterest"`
+	Time         int64       `json:"time"`
+}

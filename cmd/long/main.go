@@ -104,7 +104,7 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	fmt.Println(market.FormatHeader("asterdex (LONGS)", active))
-	fmt.Println("Symbol       | Score  | Δ%(24h) | DayUTC% | Vol($)  | OI($)   | Funding(%) | Open24h |     Last")
+	fmt.Println("Symbol       | Score  | Δ%(24h) | DayUTC% | Vol($)  | OI($)   | Funding(%) | OpenUTC |     Last")
 	fmt.Println("-------------+--------+----------+---------+---------+---------+------------+---------+---------")
 
 	confMap := make(map[string]string, len(scored))

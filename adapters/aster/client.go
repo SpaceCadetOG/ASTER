@@ -111,6 +111,28 @@ func deriveOpen(last, pct float64) float64 {
 	return last / den
 }
 
+func topEnrichmentSymbols(mkts []market.Market, perSide int) []string {
+	if perSide <= 0 {
+		perSide = 12
+	}
+	longTop := market.TopN(market.ScoreAndFilter(mkts), perSide)
+	shortTop := market.TopN(market.ScoreAndFilterShort(mkts), perSide)
+	seen := make(map[string]struct{}, len(longTop)+len(shortTop))
+	out := make([]string, 0, len(longTop)+len(shortTop))
+	appendUnique := func(rows []market.Scored) {
+		for _, row := range rows {
+			if _, ok := seen[row.Symbol]; ok {
+				continue
+			}
+			seen[row.Symbol] = struct{}{}
+			out = append(out, row.Symbol)
+		}
+	}
+	appendUnique(longTop)
+	appendUnique(shortTop)
+	return out
+}
+
 func (c *Client) fetchAll24h() ([]tickerStats, error) {
 	var arr []tickerStats
 	if err := c.fetchJSON(c.buildURL("/ticker/24hr", nil), &arr); err == nil {
@@ -152,6 +174,22 @@ func (c *Client) priceTicker(symbol string) (float64, error) {
 		return 0, err
 	}
 	return numToFloat(pt.Price)
+}
+
+func (c *Client) openInterestUSD(symbol string, lastPrice float64) (*float64, error) {
+	if lastPrice <= 0 {
+		return nil, nil
+	}
+	var oi openInterestEntry
+	if err := c.fetchJSON(c.buildURL("/openInterest", map[string]string{"symbol": symbol}), &oi); err != nil {
+		return nil, err
+	}
+	v, err := numToFloat(oi.OpenInterest)
+	if err != nil || v <= 0 {
+		return nil, nil
+	}
+	usd := v * lastPrice
+	return &usd, nil
 }
 
 func utcDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
@@ -247,18 +285,13 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 		mkts = append(mkts, toMarket(c.Name(), ts, nil))
 	}
 
-	// Pre-score and pick top 12 to enrich
-	pre := market.ScoreAndFilter(mkts)
-	cand := market.TopN(pre, 12)
-
 	// Map for quick lookup
 	idx := map[string]int{}
 	for i := range mkts {
 		idx[mkts[i].Symbol] = i
 	}
 
-	for _, s := range cand {
-		dashed := s.Symbol
+	for _, dashed := range topEnrichmentSymbols(mkts, 12) {
 		raw := strings.ReplaceAll(dashed, "-USD", "USDT")
 
 		if f, err := c.fundingLatest(raw); err == nil && f != nil {
@@ -269,12 +302,15 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 		if p, err := c.priceTicker(raw); err == nil && p > 0 {
 			if i, ok := idx[dashed]; ok {
 				mkts[i].LastPrice = p
-				if mkts[i].OpenPrice == 0 {
-					mkts[i].OpenPrice = deriveOpen(p, mkts[i].Change24h)
+				if oiUSD, err := c.openInterestUSD(raw, p); err == nil && oiUSD != nil {
+					mkts[i].OIUSD = oiUSD
 				}
 				if dayOpen, err := c.dayOpenUTC(raw, time.Now().UTC()); err == nil && dayOpen > 0 {
+					mkts[i].OpenPrice = dayOpen
 					v := (p/dayOpen - 1.0) * 100.0
 					mkts[i].DayUTC24h = &v
+				} else if mkts[i].OpenPrice == 0 {
+					mkts[i].OpenPrice = deriveOpen(p, mkts[i].Change24h)
 				}
 			}
 		}
