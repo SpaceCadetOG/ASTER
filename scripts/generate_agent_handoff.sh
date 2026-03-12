@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 SINCE_DATE="${1:-$(date +%F)}"
 UNTIL_DATE="${2:-$(date +%F)}"
 OUT_DIR="out/agent_handoff"
+LOG_DIR="${ASTER_LOG_DIR:-logs}"
 mkdir -p "$OUT_DIR"
 
 OUT_FILE="${OUT_DIR}/agent-handoff-${SINCE_DATE}-to-${UNTIL_DATE}.md"
@@ -24,7 +25,7 @@ merge_logs() {
   : > "$out"
   shopt -s nullglob
   local selected=()
-  for f in logs/${pattern}; do
+  for f in "${LOG_DIR}"/${pattern}; do
     local base day
     base="$(basename "$f")"
     day="$(printf '%s' "$base" | sed -E 's/^[^-]+-([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/')"
@@ -42,8 +43,10 @@ merge_logs "live-lite-*.log" "$LIVE_MERGED"
 merge_logs "long-*.log" "$LONG_MERGED"
 merge_logs "short-*.log" "$SHORT_MERGED"
 
-if [[ -f logs/events.jsonl ]]; then
-  if ! /bin/zsh -lc "GOCACHE=$(pwd)/.gocache go run ./cmd/stats -log logs/events.jsonl -from ${SINCE_DATE} -to ${UNTIL_DATE}" > "$STATS_OUT" 2>/dev/null; then
+EVENTS_FILE="${LOG_DIR}/events.jsonl"
+
+if [[ -f "$EVENTS_FILE" ]]; then
+  if ! /bin/zsh -lc "GOCACHE=$(pwd)/.gocache go run ./cmd/stats -log ${EVENTS_FILE} -from ${SINCE_DATE} -to ${UNTIL_DATE}" > "$STATS_OUT" 2>/dev/null; then
     : > "$STATS_OUT"
   fi
 else
@@ -129,7 +132,7 @@ scanner_tail() {
   echo "## File Presence"
   echo
   for f in \
-    "logs/events.jsonl" \
+    "${EVENTS_FILE}" \
     "out/paper_trades.csv" \
     "out/live_trades.csv" \
     "out/paper_equity.csv" \
