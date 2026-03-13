@@ -215,58 +215,69 @@ type paperPosition struct {
 }
 
 type paperTrader struct {
-	enabled            bool
-	startBal           float64
-	balance            float64
-	reserve            float64
-	feeBps             float64
-	makerFeeBps        float64
-	takerFeeBps        float64
-	stopPct            float64
-	tp1R               float64
-	tp2R               float64
-	tp3R               float64
-	tp1Frac            float64
-	tp2Frac            float64
-	tp3Frac            float64
-	trailAfterTP       int
-	trailStopPct       float64
-	trailStopPctTP3    float64
-	stateFile          string
-	tradesCSV          string
-	equityCSV          string
-	maxOpen            int
-	positions          map[string]*paperPosition
-	reportLoc          *time.Location
-	dayStats           map[string]*paperDayStats
-	minStopPct         float64
-	maxStopPct         float64
-	minTP1RR           float64
-	beLockBps          float64
-	fundingEvery       time.Duration
-	fundingBySym       map[string]time.Duration
-	lastFundKey        map[string]string
-	openCostMode       string
-	onExit             func(string)
-	lossCooldown       time.Duration
-	lastExitAt         map[string]time.Time
-	lastExitLoss       map[string]bool
-	lastHarvestAt      map[string]time.Time
-	symbolTradeDay     map[string]string
-	symbolTradeCount   map[string]int
-	lossStreak         map[string]int
-	lockUntil          map[string]time.Time
-	maxLossStreak      int
-	lossLock           time.Duration
-	harvestLock        time.Duration
-	harvestMinSlope    float64
-	harvestMaxStateMin float64
-	maxTradesPerDay    int
-	eventLog           *stats.EventLogger
-	stressRoundtripBps float64
-	exitManager        *exitmgr.Manager
-	riskOnMargin       bool
-	riskMarginPct      float64
+	enabled                bool
+	startBal               float64
+	balance                float64
+	reserve                float64
+	feeBps                 float64
+	makerFeeBps            float64
+	takerFeeBps            float64
+	stopPct                float64
+	tp1R                   float64
+	tp2R                   float64
+	tp3R                   float64
+	tp1Frac                float64
+	tp2Frac                float64
+	tp3Frac                float64
+	trailAfterTP           int
+	trailStopPct           float64
+	trailStopPctTP3        float64
+	stateFile              string
+	tradesCSV              string
+	equityCSV              string
+	maxOpen                int
+	positions              map[string]*paperPosition
+	reportLoc              *time.Location
+	dayStats               map[string]*paperDayStats
+	minStopPct             float64
+	maxStopPct             float64
+	minTP1RR               float64
+	beLockBps              float64
+	fundingEvery           time.Duration
+	fundingBySym           map[string]time.Duration
+	fundingExitEnable      bool
+	fundingExitMinAge      time.Duration
+	fundingExitMaxUpnl     float64
+	fundingExitMinMFER     float64
+	lastFundKey            map[string]string
+	openCostMode           string
+	onExit                 func(string)
+	lossCooldown           time.Duration
+	lastExitAt             map[string]time.Time
+	lastExitLoss           map[string]bool
+	lastHarvestAt          map[string]time.Time
+	symbolTradeDay         map[string]string
+	symbolTradeCount       map[string]int
+	lossStreak             map[string]int
+	lockUntil              map[string]time.Time
+	maxLossStreak          int
+	lossLock               time.Duration
+	harvestLock            time.Duration
+	harvestMinSlope        float64
+	harvestMaxStateMin     float64
+	maxTradesPerDay        int
+	slotReplaceEnable      bool
+	slotReplaceMinAge      time.Duration
+	slotReplaceMinConf     float64
+	slotReplaceMinSlope    float64
+	slotReplaceMinScoreGap float64
+	slotReplaceMaxUpnl     float64
+	slotReplaceMinGrade    string
+	eventLog               *stats.EventLogger
+	stressRoundtripBps     float64
+	exitManager            *exitmgr.Manager
+	riskOnMargin           bool
+	riskMarginPct          float64
 }
 
 type paperDayStats struct {
@@ -280,20 +291,20 @@ type paperDayStats struct {
 }
 
 type paperState struct {
-	StartBal     float64                   `json:"startBal"`
-	Balance      float64                   `json:"balance"`
-	Reserve      float64                   `json:"reserve"`
-	Positions    map[string]*paperPosition `json:"positions"`
-	DayStats     map[string]*paperDayStats `json:"dayStats"`
-	LastFund     map[string]string         `json:"lastFund,omitempty"`
-	LastExitAt   map[string]time.Time      `json:"lastExitAt,omitempty"`
-	LastExitLoss map[string]bool           `json:"lastExitLoss,omitempty"`
-	LastHarvest  map[string]time.Time      `json:"lastHarvest,omitempty"`
-	SymbolTradeDay   map[string]string     `json:"symbolTradeDay,omitempty"`
-	SymbolTradeCount map[string]int        `json:"symbolTradeCount,omitempty"`
-	LossStreak   map[string]int            `json:"lossStreak,omitempty"`
-	LockUntil    map[string]time.Time      `json:"lockUntil,omitempty"`
-	UpdatedAt    time.Time                 `json:"updatedAt"`
+	StartBal         float64                   `json:"startBal"`
+	Balance          float64                   `json:"balance"`
+	Reserve          float64                   `json:"reserve"`
+	Positions        map[string]*paperPosition `json:"positions"`
+	DayStats         map[string]*paperDayStats `json:"dayStats"`
+	LastFund         map[string]string         `json:"lastFund,omitempty"`
+	LastExitAt       map[string]time.Time      `json:"lastExitAt,omitempty"`
+	LastExitLoss     map[string]bool           `json:"lastExitLoss,omitempty"`
+	LastHarvest      map[string]time.Time      `json:"lastHarvest,omitempty"`
+	SymbolTradeDay   map[string]string         `json:"symbolTradeDay,omitempty"`
+	SymbolTradeCount map[string]int            `json:"symbolTradeCount,omitempty"`
+	LossStreak       map[string]int            `json:"lossStreak,omitempty"`
+	LockUntil        map[string]time.Time      `json:"lockUntil,omitempty"`
+	UpdatedAt        time.Time                 `json:"updatedAt"`
 }
 
 type execState string
@@ -1710,7 +1721,7 @@ func main() {
 					entryDepth = fetchOrderBooks(client, []string{rawBest}, envInt("LIVE_PAPER_OB_LEVELS", 20))
 				}
 				mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
-				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth)
+				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth, currentEntryMap(longInPlay, shortInPlay))
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
@@ -2947,8 +2958,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.25)
-	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.20)
+	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.20)
+	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.15)
 	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.15)
 	if tp1Frac < 0 {
 		tp1Frac = 0
@@ -3008,6 +3019,16 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		fundingEvery = 480 * time.Minute
 	}
 	fundingBySym := parseSymbolMinutesMap(envStr("LIVE_PAPER_FUNDING_INTERVALS", ""))
+	fundingExitEnable := envBool("LIVE_PAPER_PRE_FUNDING_EXIT_ENABLE", true)
+	fundingExitMinAge := time.Duration(envInt("LIVE_PAPER_PRE_FUNDING_EXIT_MIN_AGE_MIN", 90)) * time.Minute
+	if fundingExitMinAge < 0 {
+		fundingExitMinAge = 0
+	}
+	fundingExitMaxUpnl := envFloat("LIVE_PAPER_PRE_FUNDING_EXIT_MAX_UPNL", 2.5)
+	fundingExitMinMFER := envFloat("LIVE_PAPER_PRE_FUNDING_EXIT_MIN_MFE_R", 1.2)
+	if fundingExitMinMFER < 0 {
+		fundingExitMinMFER = 0
+	}
 	if maxOpen <= 0 {
 		maxOpen = 1
 	}
@@ -3054,6 +3075,25 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if maxTradesPerDay < 0 {
 		maxTradesPerDay = 0
 	}
+	slotReplaceEnable := envBool("LIVE_PAPER_SLOT_REPLACE_ENABLE", true)
+	slotReplaceMinAge := time.Duration(envInt("LIVE_PAPER_SLOT_REPLACE_MIN_AGE_MIN", 90)) * time.Minute
+	if slotReplaceMinAge < 0 {
+		slotReplaceMinAge = 0
+	}
+	slotReplaceMinConf := envFloat("LIVE_PAPER_SLOT_REPLACE_MIN_CONF", 0.66)
+	if slotReplaceMinConf < 0 {
+		slotReplaceMinConf = 0
+	}
+	slotReplaceMinSlope := envFloat("LIVE_PAPER_SLOT_REPLACE_MIN_SLOPE", 0.10)
+	if slotReplaceMinSlope < 0 {
+		slotReplaceMinSlope = 0
+	}
+	slotReplaceMinScoreGap := envFloat("LIVE_PAPER_SLOT_REPLACE_MIN_SCORE_GAP", 8.0)
+	if slotReplaceMinScoreGap < 0 {
+		slotReplaceMinScoreGap = 0
+	}
+	slotReplaceMaxUpnl := envFloat("LIVE_PAPER_SLOT_REPLACE_MAX_UPNL", 4.0)
+	slotReplaceMinGrade := envStr("LIVE_PAPER_SLOT_REPLACE_MIN_GRADE", "A")
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	stressRoundtripBps := envFloat("PAPER_STRESS_BPS_ROUNDTRIP", 0)
 	if stressRoundtripBps < 0 {
@@ -3065,53 +3105,64 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		riskMarginPct = 0
 	}
 	p := &paperTrader{
-		enabled:            enabled,
-		startBal:           start,
-		balance:            start,
-		reserve:            reserveUSDT,
-		feeBps:             feeBps,
-		makerFeeBps:        makerFeeBps,
-		takerFeeBps:        takerFeeBps,
-		stopPct:            stopPct,
-		tp1R:               tp1R,
-		tp2R:               tp2R,
-		tp3R:               tp3R,
-		tp1Frac:            tp1Frac,
-		tp2Frac:            tp2Frac,
-		tp3Frac:            tp3Frac,
-		trailAfterTP:       trailAfterTP,
-		trailStopPct:       trailStopPct,
-		trailStopPctTP3:    trailStopPctTP3,
-		stateFile:          envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
-		tradesCSV:          resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
-		equityCSV:          resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
-		maxOpen:            maxOpen,
-		positions:          map[string]*paperPosition{},
-		reportLoc:          reportLoc,
-		dayStats:           map[string]*paperDayStats{},
-		minStopPct:         minStopPct,
-		maxStopPct:         maxStopPct,
-		minTP1RR:           minTP1RR,
-		beLockBps:          beLockBps,
-		fundingEvery:       fundingEvery,
-		fundingBySym:       fundingBySym,
-		lastFundKey:        map[string]string{},
-		openCostMode:       openCostMode,
-		lossCooldown:       lossCooldown,
-		lastExitAt:         map[string]time.Time{},
-		lastExitLoss:       map[string]bool{},
-		lastHarvestAt:      map[string]time.Time{},
-		symbolTradeDay:     map[string]string{},
-		symbolTradeCount:   map[string]int{},
-		lossStreak:         map[string]int{},
-		lockUntil:          map[string]time.Time{},
-		maxLossStreak:      maxLossStreak,
-		lossLock:           lossLock,
-		harvestLock:        harvestLock,
-		harvestMinSlope:    harvestMinSlope,
-		harvestMaxStateMin: harvestMaxStateMin,
-		maxTradesPerDay:    maxTradesPerDay,
-		stressRoundtripBps: stressRoundtripBps,
+		enabled:                enabled,
+		startBal:               start,
+		balance:                start,
+		reserve:                reserveUSDT,
+		feeBps:                 feeBps,
+		makerFeeBps:            makerFeeBps,
+		takerFeeBps:            takerFeeBps,
+		stopPct:                stopPct,
+		tp1R:                   tp1R,
+		tp2R:                   tp2R,
+		tp3R:                   tp3R,
+		tp1Frac:                tp1Frac,
+		tp2Frac:                tp2Frac,
+		tp3Frac:                tp3Frac,
+		trailAfterTP:           trailAfterTP,
+		trailStopPct:           trailStopPct,
+		trailStopPctTP3:        trailStopPctTP3,
+		stateFile:              envStr("LIVE_PAPER_STATE_FILE", "out/paper_state.json"),
+		tradesCSV:              resolveStatePath(envStr("LIVE_PAPER_TRADES_FILE", "out/paper_trades.csv")),
+		equityCSV:              resolveStatePath(envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")),
+		maxOpen:                maxOpen,
+		positions:              map[string]*paperPosition{},
+		reportLoc:              reportLoc,
+		dayStats:               map[string]*paperDayStats{},
+		minStopPct:             minStopPct,
+		maxStopPct:             maxStopPct,
+		minTP1RR:               minTP1RR,
+		beLockBps:              beLockBps,
+		fundingEvery:           fundingEvery,
+		fundingBySym:           fundingBySym,
+		fundingExitEnable:      fundingExitEnable,
+		fundingExitMinAge:      fundingExitMinAge,
+		fundingExitMaxUpnl:     fundingExitMaxUpnl,
+		fundingExitMinMFER:     fundingExitMinMFER,
+		lastFundKey:            map[string]string{},
+		openCostMode:           openCostMode,
+		lossCooldown:           lossCooldown,
+		lastExitAt:             map[string]time.Time{},
+		lastExitLoss:           map[string]bool{},
+		lastHarvestAt:          map[string]time.Time{},
+		symbolTradeDay:         map[string]string{},
+		symbolTradeCount:       map[string]int{},
+		lossStreak:             map[string]int{},
+		lockUntil:              map[string]time.Time{},
+		maxLossStreak:          maxLossStreak,
+		lossLock:               lossLock,
+		harvestLock:            harvestLock,
+		harvestMinSlope:        harvestMinSlope,
+		harvestMaxStateMin:     harvestMaxStateMin,
+		maxTradesPerDay:        maxTradesPerDay,
+		slotReplaceEnable:      slotReplaceEnable,
+		slotReplaceMinAge:      slotReplaceMinAge,
+		slotReplaceMinConf:     slotReplaceMinConf,
+		slotReplaceMinSlope:    slotReplaceMinSlope,
+		slotReplaceMinScoreGap: slotReplaceMinScoreGap,
+		slotReplaceMaxUpnl:     slotReplaceMaxUpnl,
+		slotReplaceMinGrade:    slotReplaceMinGrade,
+		stressRoundtripBps:     stressRoundtripBps,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
@@ -3203,20 +3254,20 @@ func (p *paperTrader) save() error {
 		return err
 	}
 	st := paperState{
-		StartBal:     p.startBal,
-		Balance:      p.balance,
-		Reserve:      p.reserve,
-		Positions:    p.positions,
-		DayStats:     p.dayStats,
-		LastFund:     p.lastFundKey,
-		LastExitAt:   p.lastExitAt,
-		LastExitLoss: p.lastExitLoss,
-		LastHarvest:  p.lastHarvestAt,
+		StartBal:         p.startBal,
+		Balance:          p.balance,
+		Reserve:          p.reserve,
+		Positions:        p.positions,
+		DayStats:         p.dayStats,
+		LastFund:         p.lastFundKey,
+		LastExitAt:       p.lastExitAt,
+		LastExitLoss:     p.lastExitLoss,
+		LastHarvest:      p.lastHarvestAt,
 		SymbolTradeDay:   p.symbolTradeDay,
 		SymbolTradeCount: p.symbolTradeCount,
-		LossStreak:   p.lossStreak,
-		LockUntil:    p.lockUntil,
-		UpdatedAt:    time.Now().UTC(),
+		LossStreak:       p.lossStreak,
+		LockUntil:        p.lockUntil,
+		UpdatedAt:        time.Now().UTC(),
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -3245,8 +3296,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if tp3R < tp2R {
 		tp3R = tp2R
 	}
-	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.25)
-	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.20)
+	tp1Frac := envFloat("LIVE_TP1_FRAC", 0.20)
+	tp2Frac := envFloat("LIVE_TP2_FRAC", 0.15)
 	tp3Frac := envFloat("LIVE_TP3_FRAC", 0.15)
 	if tp1Frac < 0 {
 		tp1Frac = 0
@@ -4080,8 +4131,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			}
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
-		tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
-		beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
+			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
+			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
 				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -5244,6 +5295,16 @@ func (p *paperTrader) freeForEntries() float64 {
 	return free
 }
 
+func fundingCostsPosition(side string, fundingRate float64) bool {
+	if fundingRate == 0 {
+		return false
+	}
+	if strings.EqualFold(side, "BUY") {
+		return fundingRate > 0
+	}
+	return fundingRate < 0
+}
+
 func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 	if p == nil || !p.enabled || len(p.positions) == 0 || p.fundingEvery <= 0 {
 		return
@@ -5270,6 +5331,19 @@ func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 		}
 		if m.FundingRate == 0 || mark <= 0 {
 			continue
+		}
+		if p.fundingExitEnable && fundingCostsPosition(pos.Side, m.FundingRate) {
+			age := now.Sub(pos.OpenedAt)
+			upnl := 0.0
+			if strings.EqualFold(pos.Side, "BUY") {
+				upnl = (mark - pos.Entry) * pos.Qty
+			} else {
+				upnl = (pos.Entry - mark) * pos.Qty
+			}
+			if age >= p.fundingExitMinAge && upnl <= p.fundingExitMaxUpnl && pos.MaxFavorableR < p.fundingExitMinMFER && !pos.HitTP2 {
+				p.exitPortion(now, pos, "FUNDING", mark, pos.Qty, m, aster.OrderBook{})
+				continue
+			}
 		}
 		notional := mark * pos.Qty
 		if notional <= 0 {
@@ -5360,13 +5434,102 @@ func (p *paperTrader) blocksSymbolTradeBudget(symbol string, now time.Time, c ca
 	return true, fmt.Sprintf("symbol trade budget reached (%d/day)", p.maxTradesPerDay)
 }
 
-func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook) (*paperPosition, error) {
+func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta map[string]symbolMeta, current map[string]inplay.Entry) (*paperPosition, string) {
+	if p == nil || !p.slotReplaceEnable || len(p.positions) < p.maxOpen {
+		return nil, ""
+	}
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue(p.slotReplaceMinGrade) {
+		return nil, ""
+	}
+	if c.Conf < p.slotReplaceMinConf || c.Entry.ScoreSlope < p.slotReplaceMinSlope {
+		return nil, ""
+	}
+	switch c.Entry.State {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+	default:
+		return nil, ""
+	}
+	var chosen *paperPosition
+	chosenReason := ""
+	chosenWeakness := -1.0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		if strings.EqualFold(raw, strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))) {
+			continue
+		}
+		if p.slotReplaceMinAge > 0 && now.Sub(pos.OpenedAt) < p.slotReplaceMinAge {
+			continue
+		}
+		cur, ok := current[raw]
+		if !ok {
+			cur = inplay.Entry{CurrentGrade: pos.EntryGrade, CurrentScore: 0, State: inplay.StateBalanced}
+		}
+		sideMismatch := !strings.EqualFold(pos.Side, c.Side)
+		if !sideMismatch {
+			// Preserve aligned strong winners unless they have clearly cooled.
+			switch cur.State {
+			case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+				continue
+			}
+		}
+		upnl := 0.0
+		mark := meta[raw].LastPrice
+		if mark > 0 {
+			if strings.EqualFold(pos.Side, "BUY") {
+				upnl = (mark - pos.Entry) * pos.Qty
+			} else {
+				upnl = (pos.Entry - mark) * pos.Qty
+			}
+		}
+		if upnl > p.slotReplaceMaxUpnl {
+			continue
+		}
+		scoreGap := c.Entry.CurrentScore - cur.CurrentScore
+		if scoreGap < p.slotReplaceMinScoreGap && !sideMismatch {
+			continue
+		}
+		stateWeak := 0.0
+		switch cur.State {
+		case inplay.StateBalanced:
+			stateWeak = 1.0
+		case inplay.StateCooling:
+			stateWeak = 1.25
+		case inplay.StateExhausted, inplay.StateDumping:
+			stateWeak = 1.5
+		default:
+			if sideMismatch {
+				stateWeak = 1.1
+			}
+		}
+		if stateWeak == 0 {
+			continue
+		}
+		weakness := stateWeak + maxFloat(0, scoreGap)/10.0 + maxFloat(0, c.Conf-pos.EntryConf)*0.5 + maxFloat(0, now.Sub(pos.OpenedAt).Minutes()-p.slotReplaceMinAge.Minutes())/240.0
+		if chosen == nil || weakness > chosenWeakness {
+			chosen = pos
+			chosenWeakness = weakness
+			chosenReason = fmt.Sprintf("slot_replace:%s:%s:score_gap=%.2f", raw, cur.State, scoreGap)
+		}
+	}
+	return chosen, chosenReason
+}
+
+func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry) (*paperPosition, error) {
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	if len(p.positions) >= p.maxOpen {
-		return nil, fmt.Errorf("max paper positions reached (%d)", p.maxOpen)
+		if replacePos, reason := p.slotReplacementCandidate(now, c, meta, current); replacePos != nil {
+			p.exitPortion(now, replacePos, "SLOT_REPLACE", meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))].LastPrice, replacePos.Qty, meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))], depth[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))])
+			_ = p.save()
+			fmt.Printf("paper slot replace: closed %s %s reason=%s\n", replacePos.Symbol, replacePos.Side, reason)
+		}
+		if len(p.positions) >= p.maxOpen {
+			return nil, fmt.Errorf("max paper positions reached (%d)", p.maxOpen)
+		}
 	}
 	free := p.freeForEntries()
 	if free < margin {
@@ -6844,6 +7007,17 @@ func candidateKey(c candidate) string {
 	return strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)) + "|" + strings.ToUpper(strings.TrimSpace(c.Side))
 }
 
+func currentEntryMap(longInPlay, shortInPlay []inplay.Entry) map[string]inplay.Entry {
+	out := make(map[string]inplay.Entry, len(longInPlay)+len(shortInPlay))
+	for _, e := range longInPlay {
+		out[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(e.Symbol)))] = e
+	}
+	for _, e := range shortInPlay {
+		out[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(e.Symbol)))] = e
+	}
+	return out
+}
+
 func computeTradeQuality(c candidate, cfg entryQualityConfig) (float64, []string) {
 	reasons := make([]string, 0, 4)
 	scoreN := clamp(c.Entry.CurrentScore/100.0, 0, 1)
@@ -7165,10 +7339,37 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			cand.RejectReason = ""
 			return cand
 		}
+		fails := make([]string, 0, 4)
+		if !stateOK {
+			fails = append(fails, "state_not_trending")
+		}
+		if cand.Entry.CurrentScore < fastMinScore {
+			fails = append(fails, fmt.Sprintf("score:%.2f<%.2f", cand.Entry.CurrentScore, fastMinScore))
+		}
+		if cand.Entry.ScoreSlope < fastMinSlope {
+			fails = append(fails, fmt.Sprintf("slope:%.3f<%.3f", cand.Entry.ScoreSlope, fastMinSlope))
+		}
+		if cand.VolumeRatio < fastMinVolRatio {
+			fails = append(fails, fmt.Sprintf("vol_ratio:%.2f<%.2f", cand.VolumeRatio, fastMinVolRatio))
+		}
+		if !vwapEMAOK {
+			if strings.EqualFold(cand.Side, "BUY") {
+				fails = append(fails, "below_vwap_ema")
+			} else {
+				fails = append(fails, "above_vwap_ema")
+			}
+		}
+		if len(fails) == 0 {
+			fails = append(fails, "continuation_fast_not_ready")
+		}
+		cand.Strat = "none"
+		cand.Conf = 0
+		cand.RejectReason = strings.Join(fails, ",")
+		return cand
 	}
 	cand.Strat = "none"
 	cand.Conf = 0
-	cand.RejectReason = "no_strategy_match"
+	cand.RejectReason = "continuation_fast_disabled"
 	return cand
 }
 

@@ -9,6 +9,7 @@ fi
 PREFIX="$1"
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 LOG_TZ="${ASTER_LOG_TZ:-America/Chicago}"
+LOG_ROLLOVER_TZ="${ASTER_LOG_ROLLOVER_TZ:-UTC}"
 LOG_DATE_MODE="${ASTER_LOG_DATE_MODE:-current_date}"
 LOG_CYCLE_HOUR="${ASTER_LOG_CYCLE_HOUR:-16}"
 LATEST_LINK="${LOG_DIR}/${PREFIX}-latest.log"
@@ -31,7 +32,7 @@ PY
 }
 
 current_date_key() {
-  python3 - "$LOG_TZ" <<'PY'
+  python3 - "$LOG_ROLLOVER_TZ" <<'PY'
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import sys
