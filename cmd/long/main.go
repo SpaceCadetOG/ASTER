@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -249,7 +250,23 @@ func main() {
 
 func trkEntries(trk *inplay.Tracker, now time.Time, eligible []market.Scored, conf map[string]string) []inplay.Entry {
 	trk.Update(now, eligible, conf)
-	return trk.Entries()
+	return filterDisplayInPlay(trk.Entries())
+}
+
+func filterDisplayInPlay(entries []inplay.Entry) []inplay.Entry {
+	minAbsSlope := envFloat("INPLAY_DISPLAY_MIN_ABS_SLOPE", 0.05)
+	out := make([]inplay.Entry, 0, len(entries))
+	for _, e := range entries {
+		switch e.State {
+		case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping, inplay.StateCooling, inplay.StateDumping, inplay.StateExhausted:
+		default:
+			continue
+		}
+		if e.Momentum || math.Abs(e.ScoreSlope) >= minAbsSlope {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func printInPlayTerminal(side string, st *status.Store) {

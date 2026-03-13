@@ -411,6 +411,13 @@ type liveExecManager struct {
 	exitManager          *exitmgr.Manager
 	riskOnMargin         bool
 	riskMarginPct        float64
+	fundingEvery         time.Duration
+	fundingExitEnable    bool
+	fundingExitMinAge    time.Duration
+	fundingExitMaxUpnl   float64
+	fundingExitMinMFER   float64
+	fundingExitWindow    time.Duration
+	expensiveFundingRate float64
 }
 
 type liveExecSnapshot struct {
@@ -999,6 +1006,9 @@ func main() {
 			paperDepth = fetchOrderBooks(client, paper.OpenSymbols(), envInt("LIVE_PAPER_OB_LEVELS", 20))
 			mergeTopOfBookIntoMeta(metaBySymbol, paperDepth)
 			paper.ApplyFunding(now, metaBySymbol)
+		}
+		if execMgr != nil {
+			execMgr.ApplyFundingExit(now, metaBySymbol)
 		}
 		if paper.enabled {
 			paper.CheckExit(now, metaBySymbol, paperDepth)
@@ -3362,6 +3372,18 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if err != nil {
 		reportLoc = time.Local
 	}
+	fundingEvery := time.Duration(envInt("LIVE_FUNDING_INTERVAL_MIN", 480)) * time.Minute
+	if fundingEvery <= 0 {
+		fundingEvery = 480 * time.Minute
+	}
+	fundingExitMinAge := time.Duration(envInt("LIVE_PRE_FUNDING_EXIT_MIN_AGE_MIN", 90)) * time.Minute
+	if fundingExitMinAge < 0 {
+		fundingExitMinAge = 0
+	}
+	fundingExitWindow := time.Duration(envInt("LIVE_PRE_FUNDING_EXIT_WINDOW_MIN", 30)) * time.Minute
+	if fundingExitWindow < 0 {
+		fundingExitWindow = 0
+	}
 
 	m := &liveExecManager{
 		rest:                 rest,
@@ -3397,6 +3419,13 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		recoverForceFlatFail: envBool("LIVE_RECOVERY_FORCE_FLAT_ON_STOP_FAIL", true),
 		riskOnMargin:         riskOnMargin,
 		riskMarginPct:        riskMarginPct,
+		fundingEvery:         fundingEvery,
+		fundingExitEnable:    envBool("LIVE_PRE_FUNDING_EXIT_ENABLE", true),
+		fundingExitMinAge:    fundingExitMinAge,
+		fundingExitMaxUpnl:   envFloat("LIVE_PRE_FUNDING_EXIT_MAX_UPNL", 2.5),
+		fundingExitMinMFER:   envFloat("LIVE_PRE_FUNDING_EXIT_MIN_MFE_R", 1.2),
+		fundingExitWindow:    fundingExitWindow,
+		expensiveFundingRate: envFloat("LIVE_PRE_FUNDING_EXPENSIVE_RATE", 0.0008),
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
@@ -4895,6 +4924,71 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 	}
 }
 
+func (m *liveExecManager) ApplyFundingExit(now time.Time, meta map[string]symbolMeta) {
+	if m == nil || m.rest == nil || !m.fundingExitEnable || len(m.positions) == 0 || m.fundingEvery <= 0 {
+		return
+	}
+	nextFunding := now.UTC().Truncate(m.fundingEvery).Add(m.fundingEvery)
+	if m.fundingExitWindow > 0 && nextFunding.Sub(now.UTC()) > m.fundingExitWindow {
+		return
+	}
+	changed := false
+	for sym, p := range m.positions {
+		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
+			continue
+		}
+		fr := meta[sym].FundingRate
+		if fr == 0 || !fundingCostsPosition(p.Side, fr) {
+			continue
+		}
+		age := now.Sub(p.CreatedAt)
+		if age < m.fundingExitMinAge || p.HitTP3 {
+			continue
+		}
+		mark := p.LastMark
+		if mark <= 0 {
+			px, err := m.currentMark(sym)
+			if err != nil || px <= 0 {
+				continue
+			}
+			mark = px
+		}
+		_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		hitTP2 := p.State == execPartialTP2 || p.HitTP3
+		weakHold := upct <= m.fundingExitMaxUpnl && p.MaxFavorableR < m.fundingExitMinMFER && !hitTP2
+		staleCarry := age >= maxDuration(m.fundingExitMinAge*2, m.fundingEvery*2) &&
+			upct <= m.fundingExitMaxUpnl*1.5 &&
+			p.MaxFavorableR < m.fundingExitMinMFER*1.5
+		expensiveCarry := m.expensiveFundingRate > 0 && abs(fr) >= m.expensiveFundingRate
+		if !(weakHold || (expensiveCarry && staleCarry)) {
+			continue
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		dayRealized := m.addDayRealized(now, pnl)
+		_ = m.cancelRemainingExits(p)
+		if err := m.closeSymbolMarket(sym); err != nil {
+			continue
+		}
+		if m.tg != nil {
+			m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PRE-FUNDING EXIT",
+				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+			))
+		}
+		_ = m.logFill(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
+		m.sendFillReceipt(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
+		p.State = execClosed
+		p.CloseReason = "FUNDING"
+		p.ClosedAt = now
+		p.UpdatedAt = now
+		changed = true
+	}
+	if changed {
+		_ = m.save()
+	}
+}
+
 func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentumView, minHold time.Duration, upnlPctMax float64) {
 	if m == nil || m.rest == nil || len(m.positions) == 0 {
 		return
@@ -5309,6 +5403,7 @@ func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 	if p == nil || !p.enabled || len(p.positions) == 0 || p.fundingEvery <= 0 {
 		return
 	}
+	expensiveFundingRate := envFloat("LIVE_PAPER_PRE_FUNDING_EXPENSIVE_RATE", 0.0008)
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
 			continue
@@ -5340,7 +5435,12 @@ func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta) {
 			} else {
 				upnl = (pos.Entry - mark) * pos.Qty
 			}
-			if age >= p.fundingExitMinAge && upnl <= p.fundingExitMaxUpnl && pos.MaxFavorableR < p.fundingExitMinMFER && !pos.HitTP2 {
+			weakHold := upnl <= p.fundingExitMaxUpnl && pos.MaxFavorableR < p.fundingExitMinMFER
+			staleCarry := age >= maxDuration(p.fundingExitMinAge*2, p.fundingEvery*2) &&
+				upnl <= p.fundingExitMaxUpnl*1.5 &&
+				pos.MaxFavorableR < p.fundingExitMinMFER*1.5
+			expensiveCarry := expensiveFundingRate > 0 && abs(m.FundingRate) >= expensiveFundingRate
+			if age >= p.fundingExitMinAge && !pos.HitTP2 && (weakHold || (expensiveCarry && staleCarry)) {
 				p.exitPortion(now, pos, "FUNDING", mark, pos.Qty, m, aster.OrderBook{})
 				continue
 			}
@@ -5438,6 +5538,7 @@ func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta 
 	if p == nil || !p.slotReplaceEnable || len(p.positions) < p.maxOpen {
 		return nil, ""
 	}
+	anchorKeepMFER := envFloat("LIVE_PAPER_SLOT_REPLACE_KEEP_MFE_R", 1.50)
 	if gradeValue(c.Entry.CurrentGrade) < gradeValue(p.slotReplaceMinGrade) {
 		return nil, ""
 	}
@@ -5462,9 +5563,12 @@ func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta 
 		if p.slotReplaceMinAge > 0 && now.Sub(pos.OpenedAt) < p.slotReplaceMinAge {
 			continue
 		}
+		if pos.HitTP2 || pos.MaxFavorableR >= anchorKeepMFER {
+			continue
+		}
 		cur, ok := current[raw]
 		if !ok {
-			cur = inplay.Entry{CurrentGrade: pos.EntryGrade, CurrentScore: 0, State: inplay.StateBalanced}
+			cur = inplay.Entry{CurrentGrade: pos.EntryGrade, CurrentScore: c.Entry.CurrentScore, State: pos.EntryState}
 		}
 		sideMismatch := !strings.EqualFold(pos.Side, c.Side)
 		if !sideMismatch {
@@ -5506,11 +5610,23 @@ func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta 
 		if stateWeak == 0 {
 			continue
 		}
-		weakness := stateWeak + maxFloat(0, scoreGap)/10.0 + maxFloat(0, c.Conf-pos.EntryConf)*0.5 + maxFloat(0, now.Sub(pos.OpenedAt).Minutes()-p.slotReplaceMinAge.Minutes())/240.0
+		fundingWeak := 0.0
+		if fundingCostsPosition(pos.Side, meta[raw].FundingRate) {
+			fundingWeak = 0.35
+		}
+		lossWeak := 0.0
+		if p.lossStreak != nil {
+			lossWeak = min(0.60, float64(p.lossStreak[raw])*0.20)
+		}
+		upnlWeak := 0.0
+		if upnl <= 0 {
+			upnlWeak = 0.25
+		}
+		weakness := stateWeak + maxFloat(0, scoreGap)/10.0 + maxFloat(0, c.Conf-pos.EntryConf)*0.5 + maxFloat(0, now.Sub(pos.OpenedAt).Minutes()-p.slotReplaceMinAge.Minutes())/240.0 + fundingWeak + lossWeak + upnlWeak
 		if chosen == nil || weakness > chosenWeakness {
 			chosen = pos
 			chosenWeakness = weakness
-			chosenReason = fmt.Sprintf("slot_replace:%s:%s:score_gap=%.2f", raw, cur.State, scoreGap)
+			chosenReason = fmt.Sprintf("slot_replace:%s:%s:score_gap=%.2f:loss=%0.1f:funding=%0.2f", raw, cur.State, scoreGap, lossWeak, fundingWeak)
 		}
 	}
 	return chosen, chosenReason
@@ -7317,6 +7433,11 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
 		fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
 		fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
+		lateStateMin := envFloat("LIVE_CONT_FAST_MAX_STATE_MIN", 18.0)
+		lateAPlusStateMin := envFloat("LIVE_CONT_FAST_APLUS_MAX_STATE_MIN", 28.0)
+		lateMinSlope := envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16)
+		lateMinVolRatio := envFloat("LIVE_CONT_FAST_LATE_MIN_VOL_RATIO", 1.35)
+		lateMinScore := envFloat("LIVE_CONT_FAST_LATE_MIN_SCORE", 90.0)
 		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
 		vwapEMAOK := false
 		if strings.EqualFold(cand.Side, "BUY") {
@@ -7324,10 +7445,30 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		} else {
 			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
 		}
+		lateRejects := make([]string, 0, 3)
+		stateAgeLimit := lateStateMin
+		if gradeValue(cand.Entry.CurrentGrade) >= gradeValue("A+") {
+			stateAgeLimit = lateAPlusStateMin
+		}
+		if stateAgeLimit > 0 && cand.Entry.TimeInStateMin > stateAgeLimit {
+			if !cand.Entry.Momentum {
+				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_no_momentum:%.1f>%.1f", cand.Entry.TimeInStateMin, stateAgeLimit))
+			}
+			if cand.Entry.ScoreSlope < lateMinSlope {
+				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_slope:%.3f<%.3f", cand.Entry.ScoreSlope, lateMinSlope))
+			}
+			if cand.VolumeRatio < lateMinVolRatio {
+				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_vol_ratio:%.2f<%.2f", cand.VolumeRatio, lateMinVolRatio))
+			}
+			if gradeValue(cand.Entry.CurrentGrade) < gradeValue("A") && cand.Entry.CurrentScore < lateMinScore {
+				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_score:%.2f<%.2f", cand.Entry.CurrentScore, lateMinScore))
+			}
+		}
 		if stateOK &&
 			cand.Entry.CurrentScore >= fastMinScore &&
 			cand.Entry.ScoreSlope >= fastMinSlope &&
 			cand.VolumeRatio >= fastMinVolRatio &&
+			len(lateRejects) == 0 &&
 			vwapEMAOK {
 			cand.Strat = "continuation_fast"
 			cand.Conf = clamp(fastBaseConf+min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
@@ -7359,6 +7500,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 				fails = append(fails, "above_vwap_ema")
 			}
 		}
+		fails = append(fails, lateRejects...)
 		if len(fails) == 0 {
 			fails = append(fails, "continuation_fast_not_ready")
 		}
@@ -7382,6 +7524,13 @@ func toFeatureSide(side string) features.Side {
 
 func min(a, b float64) float64 {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
 		return a
 	}
 	return b
