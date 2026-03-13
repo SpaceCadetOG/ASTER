@@ -252,6 +252,8 @@ type paperTrader struct {
 	lastExitAt         map[string]time.Time
 	lastExitLoss       map[string]bool
 	lastHarvestAt      map[string]time.Time
+	symbolTradeDay     map[string]string
+	symbolTradeCount   map[string]int
 	lossStreak         map[string]int
 	lockUntil          map[string]time.Time
 	maxLossStreak      int
@@ -259,6 +261,7 @@ type paperTrader struct {
 	harvestLock        time.Duration
 	harvestMinSlope    float64
 	harvestMaxStateMin float64
+	maxTradesPerDay    int
 	eventLog           *stats.EventLogger
 	stressRoundtripBps float64
 	exitManager        *exitmgr.Manager
@@ -286,6 +289,8 @@ type paperState struct {
 	LastExitAt   map[string]time.Time      `json:"lastExitAt,omitempty"`
 	LastExitLoss map[string]bool           `json:"lastExitLoss,omitempty"`
 	LastHarvest  map[string]time.Time      `json:"lastHarvest,omitempty"`
+	SymbolTradeDay   map[string]string     `json:"symbolTradeDay,omitempty"`
+	SymbolTradeCount map[string]int        `json:"symbolTradeCount,omitempty"`
 	LossStreak   map[string]int            `json:"lossStreak,omitempty"`
 	LockUntil    map[string]time.Time      `json:"lockUntil,omitempty"`
 	UpdatedAt    time.Time                 `json:"updatedAt"`
@@ -3045,6 +3050,10 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if harvestMaxStateMin < 0 {
 		harvestMaxStateMin = 0
 	}
+	maxTradesPerDay := envInt("LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY", 2)
+	if maxTradesPerDay < 0 {
+		maxTradesPerDay = 0
+	}
 	openCostMode := strings.ToLower(envStr("LIVE_PAPER_OPEN_COST_MODE", "aster"))
 	stressRoundtripBps := envFloat("PAPER_STRESS_BPS_ROUNDTRIP", 0)
 	if stressRoundtripBps < 0 {
@@ -3092,6 +3101,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		lastExitAt:         map[string]time.Time{},
 		lastExitLoss:       map[string]bool{},
 		lastHarvestAt:      map[string]time.Time{},
+		symbolTradeDay:     map[string]string{},
+		symbolTradeCount:   map[string]int{},
 		lossStreak:         map[string]int{},
 		lockUntil:          map[string]time.Time{},
 		maxLossStreak:      maxLossStreak,
@@ -3099,11 +3110,12 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		harvestLock:        harvestLock,
 		harvestMinSlope:    harvestMinSlope,
 		harvestMaxStateMin: harvestMaxStateMin,
+		maxTradesPerDay:    maxTradesPerDay,
 		stressRoundtripBps: stressRoundtripBps,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-		NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 24),
-			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
+			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 1.00),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
@@ -3168,6 +3180,12 @@ func (p *paperTrader) load() error {
 	if st.LastHarvest != nil {
 		p.lastHarvestAt = st.LastHarvest
 	}
+	if st.SymbolTradeDay != nil {
+		p.symbolTradeDay = st.SymbolTradeDay
+	}
+	if st.SymbolTradeCount != nil {
+		p.symbolTradeCount = st.SymbolTradeCount
+	}
 	if st.LossStreak != nil {
 		p.lossStreak = st.LossStreak
 	}
@@ -3194,6 +3212,8 @@ func (p *paperTrader) save() error {
 		LastExitAt:   p.lastExitAt,
 		LastExitLoss: p.lastExitLoss,
 		LastHarvest:  p.lastHarvestAt,
+		SymbolTradeDay:   p.symbolTradeDay,
+		SymbolTradeCount: p.symbolTradeCount,
 		LossStreak:   p.lossStreak,
 		LockUntil:    p.lockUntil,
 		UpdatedAt:    time.Now().UTC(),
@@ -3328,8 +3348,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		riskMarginPct:        riskMarginPct,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
-			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 24),
-			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 0.20),
+			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
+			NoFollowThroughMinMFER: envFloat("LIVE_EXIT_NO_FT_MIN_MFE_R", 1.00),
 			NoFollowThroughMinMAER: envFloat("LIVE_EXIT_NO_FT_MIN_MAE_R", 0.80),
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
@@ -4060,8 +4080,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition) (bool, e
 			}
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
-			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
-			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 0.5), tp1R)
+		tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
+		beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
 				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -4596,6 +4616,9 @@ func (m *liveExecManager) calcTrailStopForPosition(sideBuy bool, ref float64, po
 	}
 	if pct <= 0 {
 		pct = 0.01
+	}
+	if postTP3 {
+		pct *= envFloat("LIVE_TRAIL_SPONSORED_POST_TP3_MULT", 1.25)
 	}
 	if sideBuy {
 		return ref * (1 - pct)
@@ -5308,6 +5331,35 @@ func (p *paperTrader) blocksHarvestReentry(symbol string, now time.Time, c candi
 	return false, ""
 }
 
+func (p *paperTrader) blocksSymbolTradeBudget(symbol string, now time.Time, c candidate) (bool, string) {
+	if p == nil || p.maxTradesPerDay <= 0 {
+		return false, ""
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	dayKey := now.In(p.reportLoc).Format("2006-01-02")
+	if p.symbolTradeDay == nil {
+		p.symbolTradeDay = map[string]string{}
+	}
+	if p.symbolTradeCount == nil {
+		p.symbolTradeCount = map[string]int{}
+	}
+	if p.symbolTradeDay[raw] != dayKey {
+		p.symbolTradeDay[raw] = dayKey
+		p.symbolTradeCount[raw] = 0
+	}
+	if p.symbolTradeCount[raw] < p.maxTradesPerDay {
+		return false, ""
+	}
+	exceptional := strings.EqualFold(c.Entry.CurrentGrade, "A+") &&
+		(c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping) &&
+		c.Entry.ScoreSlope >= envFloat("LIVE_PAPER_SYMBOL_REENTRY_EXCEPTION_SLOPE", 0.85) &&
+		c.Conf >= envFloat("LIVE_PAPER_SYMBOL_REENTRY_EXCEPTION_CONF", 0.78)
+	if exceptional {
+		return false, ""
+	}
+	return true, fmt.Sprintf("symbol trade budget reached (%d/day)", p.maxTradesPerDay)
+}
+
 func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook) (*paperPosition, error) {
 	if p == nil || !p.enabled {
 		return nil, nil
@@ -5327,6 +5379,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, fmt.Errorf("symbol loss lock active")
 	}
 	if blocked, reason := p.blocksHarvestReentry(raw, now, c); blocked {
+		return nil, fmt.Errorf("%s", reason)
+	}
+	if blocked, reason := p.blocksSymbolTradeBudget(raw, now, c); blocked {
 		return nil, fmt.Errorf("%s", reason)
 	}
 	if p.lossCooldown > 0 {
@@ -5511,7 +5566,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
-		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 0.5), tp1R)
+		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.10), tp1R)
 		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR {
 			be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
 			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
@@ -5884,6 +5939,18 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	}
 	_ = p.logTrade(now, symbol, pos.Side, pos.Entry, exitPrice, qty, pos.Leverage, pos.Margin, pos.Stop, exitPrice, reason, gross, fee, net, holdMin)
 	if pos.Qty <= 1e-10 {
+		loc := p.reportLoc
+		if loc == nil {
+			loc = time.Local
+		}
+		dayKey := now.In(loc).Format("2006-01-02")
+		if p.symbolTradeDay != nil && p.symbolTradeCount != nil {
+			if p.symbolTradeDay[symbol] != dayKey {
+				p.symbolTradeDay[symbol] = dayKey
+				p.symbolTradeCount[symbol] = 0
+			}
+			p.symbolTradeCount[symbol] = p.symbolTradeCount[symbol] + 1
+		}
 		delete(p.positions, symbol)
 	}
 	_ = p.save()
@@ -6151,6 +6218,10 @@ func (p *paperTrader) calcTrailStopForPosition(sideBuy bool, ref float64, postTP
 	}
 	if pct <= 0 {
 		pct = 0.01
+	}
+	// Give sponsored leaders more room so the first clean trade can survive pullbacks.
+	if postTP3 {
+		pct *= envFloat("LIVE_TRAIL_SPONSORED_POST_TP3_MULT", 1.25)
 	}
 	if sideBuy {
 		return ref * (1 - pct)
@@ -6990,6 +7061,9 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		cand.RejectReason = "mom_reversal_short_not_ready"
 		return cand
 	}
+	if envBool("LIVE_SIMPLE_MODE", true) {
+		return applySimpleContinuationFallback(cand)
+	}
 	rt := strategies.NewRouter(strategies.RouterConfig{
 		MinGrade:                  "B",
 		MinScore:                  0,
@@ -6997,15 +7071,15 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		AllowWarmup:               true,
 		WarmupSlopeMin:            0,
 		MaxOne:                    true,
-		EnableVPSetups:            true,
-		MinVPConfidence:           0.55,
-		UseVPReversal:             true,
-		EnableInstitutionalPA:     true,
+		EnableVPSetups:            envBool("LIVE_ENABLE_VP_SETUPS", false),
+		MinVPConfidence:           envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
+		UseVPReversal:             envBool("LIVE_USE_VP_REVERSAL", false),
+		EnableInstitutionalPA:     envBool("LIVE_ENABLE_INSTITUTIONAL_PA", false),
 		UseSessionRegimeRisk:      true,
 		AllowDeadZoneOnlyAPlus:    true,
-		RequireOrderFlowHandshake: true,
-		RequireLocationHandshake:  true,
-		MinConfluenceScore:        0.58,
+		RequireOrderFlowHandshake: envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
+		RequireLocationHandshake:  envBool("LIVE_REQUIRE_LOCATION_HANDSHAKE", false),
+		MinConfluenceScore:        envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.52),
 		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
 		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
 		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
@@ -7037,38 +7111,7 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 			cand.RejectReason = ""
 			return cand
 		}
-		if envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
-			fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
-			fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
-			fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
-			fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
-			stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
-			vwapEMAOK := false
-			if strings.EqualFold(cand.Side, "BUY") {
-				vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
-			} else {
-				vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
-			}
-			if stateOK &&
-				cand.Entry.CurrentScore >= fastMinScore &&
-				cand.Entry.ScoreSlope >= fastMinSlope &&
-				cand.VolumeRatio >= fastMinVolRatio &&
-				vwapEMAOK {
-				cand.Strat = "continuation_fast"
-				cand.Conf = clamp(fastBaseConf+min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
-				cand.Sig = strategies.Signal{
-					Active: true,
-					Name:   "continuation_fast",
-					Side:   toFeatureSide(cand.Side),
-				}
-				cand.RejectReason = ""
-				return cand
-			}
-		}
-		cand.Strat = "none"
-		cand.Conf = 0
-		cand.RejectReason = "no_strategy_match"
-		return cand
+		return applySimpleContinuationFallback(cand)
 	}
 	chosen := cs[0].Signal
 	targetSide := toFeatureSide(cand.Side)
@@ -7091,6 +7134,41 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		cand.Conf = 0
 		cand.RejectReason = "VWAP_EMA_LONG_INVALIDATION"
 	}
+	return cand
+}
+
+func applySimpleContinuationFallback(cand candidate) candidate {
+	if envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
+		fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
+		fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+		fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
+		fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
+		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
+		vwapEMAOK := false
+		if strings.EqualFold(cand.Side, "BUY") {
+			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
+		} else {
+			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
+		}
+		if stateOK &&
+			cand.Entry.CurrentScore >= fastMinScore &&
+			cand.Entry.ScoreSlope >= fastMinSlope &&
+			cand.VolumeRatio >= fastMinVolRatio &&
+			vwapEMAOK {
+			cand.Strat = "continuation_fast"
+			cand.Conf = clamp(fastBaseConf+min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
+			cand.Sig = strategies.Signal{
+				Active: true,
+				Name:   "continuation_fast",
+				Side:   toFeatureSide(cand.Side),
+			}
+			cand.RejectReason = ""
+			return cand
+		}
+	}
+	cand.Strat = "none"
+	cand.Conf = 0
+	cand.RejectReason = "no_strategy_match"
 	return cand
 }
 
