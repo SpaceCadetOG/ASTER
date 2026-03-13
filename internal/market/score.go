@@ -98,6 +98,8 @@ const (
 	W_LOG_OI_SHORT  = 3.0
 	FUND_K_SHORT    = 500.0
 	CROWD_PEN_SHORT = 10.0
+	W_DAYUTC        = 0.35
+	W_DAYUTC_SHORT  = 0.35
 )
 
 func round2(x float64) float64 {
@@ -265,7 +267,13 @@ func baseLongRawScore(m Market) float64 {
 		if *m.FundingRate > 0.001 && m.LongsPct != nil && *m.LongsPct > CROWD_LONG_P {
 			score -= CROWD_PENALTY
 		}
+		score += directionalFundingAdjustment("long", *m.FundingRate)
 	}
+	if m.DayUTC24h != nil {
+		score += directionalDayAlignment("long", *m.DayUTC24h)
+	}
+	score += oiParticipationAdjustment(m)
+	score -= fragilityPenalty("long", m)
 	return score
 }
 
@@ -282,8 +290,95 @@ func baseShortRawScore(m Market) float64 {
 		if *m.FundingRate < -0.001 {
 			score -= CROWD_PEN_SHORT
 		}
+		score += directionalFundingAdjustment("short", *m.FundingRate)
 	}
+	if m.DayUTC24h != nil {
+		score += directionalDayAlignment("short", *m.DayUTC24h)
+	}
+	score += oiParticipationAdjustment(m)
+	score -= fragilityPenalty("short", m)
 	return score
+}
+
+func directionalDayAlignment(side string, dayUTC float64) float64 {
+	mover := dayUTC
+	weight := W_DAYUTC
+	if normalizeSide(side) == "short" {
+		mover = -dayUTC
+		weight = W_DAYUTC_SHORT
+	}
+	return clamp(mover*weight, -10, 12)
+}
+
+func directionalFundingAdjustment(side string, funding float64) float64 {
+	if funding == 0 {
+		return 0
+	}
+	switch normalizeSide(side) {
+	case "short":
+		if funding < 0 {
+			return -math.Min(math.Abs(funding)*90, 10)
+		}
+		return math.Min(math.Abs(funding)*30, 4)
+	default:
+		if funding > 0 {
+			return -math.Min(math.Abs(funding)*90, 10)
+		}
+		return math.Min(math.Abs(funding)*30, 4)
+	}
+}
+
+func oiParticipationAdjustment(m Market) float64 {
+	if m.OIUSD == nil || *m.OIUSD <= 0 || m.VolumeUSD <= 0 {
+		return 0
+	}
+	share := *m.OIUSD / math.Max(m.VolumeUSD, 1)
+	switch {
+	case share >= 0.25:
+		return 4.0
+	case share >= 0.10:
+		return 2.0
+	case share >= 0.05:
+		return 0.75
+	case share < 0.01:
+		return -2.0
+	default:
+		return 0
+	}
+}
+
+func fragilityPenalty(side string, m Market) float64 {
+	move := m.Change24h
+	if normalizeSide(side) == "short" {
+		move = -move
+	}
+	if move < 25 {
+		return 0
+	}
+	penalty := 0.0
+	if m.OIUSD == nil || *m.OIUSD < 100_000 {
+		penalty += 5.0
+	} else if *m.OIUSD < 250_000 {
+		penalty += 2.0
+	}
+	if m.VolumeUSD < 2_500_000 {
+		penalty += 4.0
+	} else if m.VolumeUSD < 7_500_000 {
+		penalty += 1.5
+	}
+	if m.DayUTC24h != nil {
+		aligned := *m.DayUTC24h
+		if normalizeSide(side) == "short" {
+			aligned = -*m.DayUTC24h
+		}
+		if aligned <= 0 {
+			penalty += 3.0
+		}
+	}
+	if move > 60 {
+		penalty *= 1.35
+	}
+	return penalty
 }
 
 // GradeColor returns ANSI color for terminal output (console).
