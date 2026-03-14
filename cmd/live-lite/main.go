@@ -1494,9 +1494,13 @@ func main() {
 		st.TopRegimeTag = best.Sig.RegimeTag
 		statusStore.Set(st)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
+		if strings.EqualFold(best.Strat, "exhaustion_flip_short") || strings.EqualFold(best.Strat, "exhaustion_flip_long") {
+			starterFrac := clamp(envFloat("LIVE_EXHAUSTION_STARTER_MARGIN_FRAC", 0.50), 0.10, 1.00)
+			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*starterFrac)
+		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -1509,6 +1513,19 @@ func main() {
 			fmtPrice(bestMeta.OpenPrice),
 			fmtPrice(bestMeta.LastPrice),
 			marketHumanUSD(bestMeta.VolumeUSD),
+			best.Entry.LongDemotionFlag,
+			best.Entry.ShortDemotionFlag,
+			best.Entry.ReversalWatchFlag,
+			best.Entry.IntradayReversalScore,
+			best.Entry.BullReversalScore,
+			best.Entry.DrawdownFromPeakPct,
+			best.Entry.DrawupFromTroughPct,
+			best.Entry.FailedReclaimCount,
+			best.Entry.FailedBounceCount,
+			best.Entry.FailedBreakdownCount,
+			best.Entry.FailedBreakLowCount,
+			best.Entry.EntryStyle,
+			best.Entry.MetaState,
 		)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
@@ -2670,6 +2687,22 @@ func adjustBracketParams(reason, grade string, state inplay.State, conf, volumeU
 	softenConf := envFloat("LIVE_SOFTEN_CONF_MAX", 0.65)
 
 	r := strings.ToLower(strings.TrimSpace(reason))
+	if strings.EqualFold(r, "exhaustion_flip_short") {
+		stopPct *= envFloat("LIVE_EXHAUSTION_STOP_MULT", 1.08)
+		stopPct = clamp(stopPct, minStopPct, maxStopPct)
+		tp1R = envFloat("LIVE_EXHAUSTION_TP1_R", 0.8)
+		tp2R = envFloat("LIVE_EXHAUSTION_TP2_R", 1.6)
+		tp3R = envFloat("LIVE_EXHAUSTION_TP3_R", 2.4)
+		return stopPct, tp1R, tp2R, tp3R
+	}
+	if strings.EqualFold(r, "exhaustion_flip_long") {
+		stopPct *= envFloat("LIVE_EXHAUSTION_LONG_STOP_MULT", envFloat("LIVE_EXHAUSTION_STOP_MULT", 1.08))
+		stopPct = clamp(stopPct, minStopPct, maxStopPct)
+		tp1R = envFloat("LIVE_EXHAUSTION_LONG_TP1_R", 0.8)
+		tp2R = envFloat("LIVE_EXHAUSTION_LONG_TP2_R", 1.6)
+		tp3R = envFloat("LIVE_EXHAUSTION_LONG_TP3_R", 2.4)
+		return stopPct, tp1R, tp2R, tp3R
+	}
 	soften := strings.Contains(r, "failed_auction") || strings.Contains(r, "rejection") || conf <= softenConf
 	if soften && stopWiden > 0 {
 		stopPct *= stopWiden
@@ -6978,7 +7011,46 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			return false
 		}
 	}
+	exhaustionFlipReady := func(e inplay.Entry) bool {
+		minRevScore := envFloat("LIVE_EXHAUSTION_REVERSAL_SCORE_MIN", 5.5)
+		minDrawdown := envFloat("LIVE_EXHAUSTION_MIN_DRAWDOWN_PCT", -8.0)
+		minSlope := envFloat("LIVE_EXHAUSTION_MIN_SLOPE", -0.75)
+		if !inplay.EarlyShortAdmission(e, maxFloat(5.0, minRevScore-0.5)) {
+			return false
+		}
+		if e.DrawdownFromPeakPct > minDrawdown {
+			return false
+		}
+		if e.ScoreSlope > minSlope {
+			return false
+		}
+		if e.State != inplay.StateDumping && e.State != inplay.StateExhausted {
+			return false
+		}
+		return e.EntryStyle == "reversal_watch_short" || e.MetaState == "long_exhausting" || e.BearReversalScore >= minRevScore
+	}
+	exhaustionFlipLongReady := func(e inplay.Entry) bool {
+		minBullScore := envFloat("LIVE_EXHAUSTION_LONG_BULL_SCORE_MIN", 4.5)
+		minDrawup := envFloat("LIVE_EXHAUSTION_LONG_MIN_DRAWUP_PCT", 6.0)
+		minSlope := envFloat("LIVE_EXHAUSTION_LONG_MIN_SLOPE", 0.50)
+		if !inplay.EarlyLongAdmissionFromShortLeader(e, minBullScore) {
+			return false
+		}
+		if e.DrawupFromTroughPct < minDrawup {
+			return false
+		}
+		if e.ScoreSlope < minSlope {
+			return false
+		}
+		if e.State != inplay.StateBalanced && e.State != inplay.StateHeating && e.State != inplay.StateInPlay {
+			return false
+		}
+		return e.EntryStyle == "reversal_watch_long" || e.MetaState == "short_exhausting" || e.BullReversalScore >= minBullScore
+	}
 	stillOpposingLeaderStrong := func(e inplay.Entry) bool {
+		if e.LongDemotionFlag {
+			return false
+		}
 		if e.Momentum {
 			return true
 		}
@@ -7031,7 +7103,16 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if !allow(e) {
 			continue
 		}
-		if e.State == inplay.StateExhausted {
+		if exhaustionFlipReady(e) {
+			flip := e
+			flip.Rank = e.Rank + 10 + 5*abs(e.ScoreSlope) + e.IntradayReversalScore
+			out = append(out, candidate{
+				Entry: flip,
+				Side:  "SELL",
+				Strat: "exhaustion_flip_short",
+			})
+		}
+		if e.State == inplay.StateExhausted || e.LongDemotionFlag || e.EntryStyle == "reversal_watch_short" || e.EntryStyle == "avoid_chase" {
 			continue
 		}
 		longContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && (e.ScoreSlope > 0 || e.Momentum)
@@ -7064,7 +7145,16 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if !allow(e) {
 			continue
 		}
-		if e.State == inplay.StateExhausted {
+		if exhaustionFlipLongReady(e) {
+			flip := e
+			flip.Rank = e.Rank + 10 + 5*abs(e.ScoreSlope) + e.BullReversalScore
+			out = append(out, candidate{
+				Entry: flip,
+				Side:  "BUY",
+				Strat: "exhaustion_flip_long",
+			})
+		}
+		if e.State == inplay.StateExhausted || e.ShortDemotionFlag || e.EntryStyle == "reversal_watch_long" || e.EntryStyle == "avoid_chase" {
 			continue
 		}
 		shortContinuationOK := (e.State == inplay.StatePumping || e.State == inplay.StateInPlay || e.State == inplay.StateHeating) && (e.ScoreSlope > 0 || e.Momentum)
@@ -7098,6 +7188,9 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		for i := 0; i < n; i++ {
 			e := longInPlay[i]
 			if !allow(e) {
+				continue
+			}
+			if exhaustionFlipReady(e) {
 				continue
 			}
 			if !reversalShortReady(e) || stillOpposingLeaderStrong(e) {
@@ -7389,6 +7482,155 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 		cand.RejectReason = "STATE_INERTIA_KILL"
 		return cand
 	}
+	if strings.EqualFold(cand.Strat, "exhaustion_flip_short") {
+		confirmVWAP := cand.SessionVWAP > 0 && cand.LastClose < cand.SessionVWAP && cand.FastSlope <= 0
+		confirmEMA := cand.EMA9 > 0 && cand.LastClose < cand.EMA9 && cand.FastSlope <= 0
+		lowerHighPrinted := cand.SlowSlope < 0 && cand.FastSlope < 0 && cand.Entry.FailedBounceCount >= 1
+		bounceLowBroken := cand.Entry.FailedReclaimCount >= 1 && cand.FastSlope <= -0.10
+		panicFlush := cand.Entry.BarsSincePeak <= 1 && cand.Entry.DrawdownFromPeakPct <= -6
+		if panicFlush && !confirmVWAP && !confirmEMA && !bounceLowBroken {
+			cand.Strat = "none"
+			cand.Conf = 0
+			cand.RejectReason = "panic_flush_no_bounce_confirmation"
+			return cand
+		}
+		if !(confirmVWAP || confirmEMA || bounceLowBroken || (lowerHighPrinted && cand.Entry.FailedBounceCount >= 1)) {
+			cand.Strat = "none"
+			cand.Conf = 0
+			cand.RejectReason = "short_no_failed_reclaim_yet"
+			return cand
+		}
+		entryPx := cand.LastClose
+		if entryPx <= 0 {
+			entryPx = fc[len(fc)-1].C
+		}
+		failedHigh := 0.0
+		lookback := minInt(len(fc), envInt("LIVE_EXHAUSTION_STOP_LOOKBACK_BARS", 12))
+		for i := len(fc) - lookback; i < len(fc); i++ {
+			if i < 0 {
+				continue
+			}
+			failedHigh = maxFloat(failedHigh, fc[i].H)
+		}
+		stopPx := maxFloat(failedHigh, maxFloat(cand.EMA9, cand.SessionVWAP))
+		stopPad := envFloat("LIVE_EXHAUSTION_STOP_PAD_PCT", 0.0035)
+		if stopPx > 0 {
+			stopPx *= 1 + stopPad
+		}
+		if stopPx <= entryPx {
+			stopPx = entryPx * (1 + envFloat("LIVE_EXHAUSTION_MIN_STOP_PCT", 0.02))
+		}
+		risk := stopPx - entryPx
+		tp1 := entryPx - risk*envFloat("LIVE_EXHAUSTION_TP1_R", 0.8)
+		tp2 := entryPx - risk*envFloat("LIVE_EXHAUSTION_TP2_R", 1.6)
+		baseConf := envFloat("LIVE_EXHAUSTION_BASE_CONF", 0.60)
+		confBoost := min(0.20, cand.Entry.IntradayReversalScore*0.02+float64(cand.Entry.FailedReclaimCount)*0.03)
+		cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
+		cand.Sig = strategies.Signal{
+			Active:       true,
+			Name:         "exhaustion_flip_short",
+			Side:         features.SideShort,
+			Entry:        entryPx,
+			Stop:         stopPx,
+			TP1:          tp1,
+			TP2:          tp2,
+			Confidence:   cand.Conf,
+			RejectReason: "",
+			Reasons: []string{
+				fmt.Sprintf("drawdown_from_peak_pct=%.2f", cand.Entry.DrawdownFromPeakPct),
+				fmt.Sprintf("intraday_reversal_score=%.2f", cand.Entry.IntradayReversalScore),
+				fmt.Sprintf("failed_reclaim_count=%d", cand.Entry.FailedReclaimCount),
+				fmt.Sprintf("failed_bounce_count=%d", cand.Entry.FailedBounceCount),
+				fmt.Sprintf("entry_style=%s", cand.Entry.EntryStyle),
+				fmt.Sprintf("meta_state=%s", cand.Entry.MetaState),
+			},
+			Tags: []string{"reversal_watch", "late_unwind"},
+		}
+		cand.RejectReason = ""
+		return cand
+	}
+	if strings.EqualFold(cand.Strat, "exhaustion_flip_long") {
+		confirmVWAP := cand.SessionVWAP > 0 && cand.LastClose > cand.SessionVWAP && cand.FastSlope >= 0
+		confirmEMA := cand.EMA9 > 0 && cand.LastClose > cand.EMA9 && cand.FastSlope >= 0
+		higherLowPrinted := cand.SlowSlope > 0 && cand.FastSlope > 0 && cand.Entry.FailedBreakdownCount >= 1
+		bounceHighBroken := cand.Entry.FailedBreakLowCount >= 1 && cand.FastSlope >= 0.10
+		failedBreakdownTrap := cand.Entry.FailedBreakdownCount >= 1 && (confirmVWAP || confirmEMA || cand.FastSlope >= 0.05)
+		firstGreen := cand.Entry.BarsSinceTrough <= 1 && cand.Entry.DrawupFromTroughPct >= 4
+		if firstGreen && !(failedBreakdownTrap || confirmVWAP || confirmEMA) {
+			cand.Strat = "none"
+			cand.Conf = 0
+			cand.RejectReason = "first_green_candle_no_structure"
+			return cand
+		}
+		if !(failedBreakdownTrap || confirmVWAP || confirmEMA || (higherLowPrinted && bounceHighBroken)) {
+			if cand.Entry.FailedBreakdownCount == 0 && cand.Entry.FailedBreakLowCount == 0 {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "dead_cat_bounce_no_failed_breakdown"
+				return cand
+			}
+			cand.Strat = "none"
+			cand.Conf = 0
+			cand.RejectReason = "long_no_reclaim_hold_yet"
+			return cand
+		}
+		entryPx := cand.LastClose
+		if entryPx <= 0 {
+			entryPx = fc[len(fc)-1].C
+		}
+		failedLow := 0.0
+		lookback := minInt(len(fc), envInt("LIVE_EXHAUSTION_LONG_STOP_LOOKBACK_BARS", 12))
+		for i := len(fc) - lookback; i < len(fc); i++ {
+			if i < 0 {
+				continue
+			}
+			if failedLow == 0 || fc[i].L < failedLow {
+				failedLow = fc[i].L
+			}
+		}
+		stopPx := failedLow
+		if cand.EMA9 > 0 {
+			stopPx = minPositive(stopPx, cand.EMA9)
+		}
+		if cand.SessionVWAP > 0 {
+			stopPx = minPositive(stopPx, cand.SessionVWAP)
+		}
+		stopPad := envFloat("LIVE_EXHAUSTION_LONG_STOP_PAD_PCT", 0.0035)
+		if stopPx > 0 {
+			stopPx *= 1 - stopPad
+		}
+		if stopPx <= 0 || stopPx >= entryPx {
+			stopPx = entryPx * (1 - envFloat("LIVE_EXHAUSTION_LONG_MIN_STOP_PCT", 0.02))
+		}
+		risk := entryPx - stopPx
+		tp1 := entryPx + risk*envFloat("LIVE_EXHAUSTION_LONG_TP1_R", 0.8)
+		tp2 := entryPx + risk*envFloat("LIVE_EXHAUSTION_LONG_TP2_R", 1.6)
+		baseConf := envFloat("LIVE_EXHAUSTION_LONG_BASE_CONF", 0.60)
+		confBoost := min(0.20, cand.Entry.BullReversalScore*0.025+float64(cand.Entry.FailedBreakdownCount)*0.03)
+		cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
+		cand.Sig = strategies.Signal{
+			Active:       true,
+			Name:         "exhaustion_flip_long",
+			Side:         features.SideLong,
+			Entry:        entryPx,
+			Stop:         stopPx,
+			TP1:          tp1,
+			TP2:          tp2,
+			Confidence:   cand.Conf,
+			RejectReason: "",
+			Reasons: []string{
+				fmt.Sprintf("drawup_from_trough_pct=%.2f", cand.Entry.DrawupFromTroughPct),
+				fmt.Sprintf("bull_reversal_score=%.2f", cand.Entry.BullReversalScore),
+				fmt.Sprintf("failed_breakdown_count=%d", cand.Entry.FailedBreakdownCount),
+				fmt.Sprintf("failed_break_low_count=%d", cand.Entry.FailedBreakLowCount),
+				fmt.Sprintf("entry_style=%s", cand.Entry.EntryStyle),
+				fmt.Sprintf("meta_state=%s", cand.Entry.MetaState),
+			},
+			Tags: []string{"reversal_watch_long", "short_exhausting"},
+		}
+		cand.RejectReason = ""
+		return cand
+	}
 	if strings.EqualFold(cand.Strat, "mom_reversal_short") {
 		lastVol := fc[len(fc)-1].V
 		avgVol := smaVolume(fc, 20)
@@ -7489,6 +7731,33 @@ func enrichCandidate(c *aster.Client, cand candidate, stopMode, targetMode strin
 
 func applySimpleContinuationFallback(cand candidate) candidate {
 	if envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
+		if strings.EqualFold(cand.Side, "BUY") {
+			if cand.Entry.LongDemotionFlag {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "long_demoted_reversal_watch"
+				return cand
+			}
+			if cand.Entry.EntryStyle == "avoid_chase" || cand.Entry.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "avoid_chase_exhaustion"
+				return cand
+			}
+		} else if strings.EqualFold(cand.Side, "SELL") {
+			if cand.Entry.ShortDemotionFlag {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "short_demoted_reversal_watch"
+				return cand
+			}
+			if cand.Entry.EntryStyle == "avoid_chase" || cand.Entry.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "avoid_chase_exhaustion"
+				return cand
+			}
+		}
 		fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
 		fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
 		fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
@@ -8993,6 +9262,19 @@ func maxFloat(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func minPositive(a, b float64) float64 {
+	switch {
+	case a <= 0:
+		return b
+	case b <= 0:
+		return a
+	case a < b:
+		return a
+	default:
+		return b
+	}
 }
 
 func maxInt(a, b int) int {

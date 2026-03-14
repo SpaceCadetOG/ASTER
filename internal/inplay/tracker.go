@@ -23,30 +23,59 @@ const (
 )
 
 type Entry struct {
-	Symbol            string    `json:"symbol"`
-	SideBias          string    `json:"sideBias"`
-	CurrentGrade      string    `json:"currentGrade"`
-	CurrentScore      float64   `json:"currentScore"`
-	ScoreSlope        float64   `json:"scoreSlope"`
-	FirstSeen         time.Time `json:"firstSeen"`
-	LastSeen          time.Time `json:"lastSeen"`
-	StateSince        time.Time `json:"stateSince"`
-	State             State     `json:"state"`
-	Momentum          bool      `json:"momentum"`
-	Rank              float64   `json:"rank"`
-	MarketConfidence  float64   `json:"marketConfidence"`
-	Completeness      float64   `json:"completeness"`
-	Uncertainty       float64   `json:"uncertainty"`
-	TimeInStateMin    float64   `json:"timeInStateMin"`
-	StateBoostRaw     float64   `json:"stateBoostRaw"`
-	StateBoostDecayed float64   `json:"stateBoostDecayed"`
-	StalenessPenalty  float64   `json:"stalenessPenalty"`
+	Symbol                  string    `json:"symbol"`
+	SideBias                string    `json:"sideBias"`
+	CurrentGrade            string    `json:"currentGrade"`
+	CurrentScore            float64   `json:"currentScore"`
+	ScoreSlope              float64   `json:"scoreSlope"`
+	D24Pct                  float64   `json:"d24Pct"`
+	DayUTCPct               float64   `json:"dayUtcPct"`
+	FirstSeen               time.Time `json:"firstSeen"`
+	LastSeen                time.Time `json:"lastSeen"`
+	StateSince              time.Time `json:"stateSince"`
+	State                   State     `json:"state"`
+	Momentum                bool      `json:"momentum"`
+	Rank                    float64   `json:"rank"`
+	MarketConfidence        float64   `json:"marketConfidence"`
+	Completeness            float64   `json:"completeness"`
+	Uncertainty             float64   `json:"uncertainty"`
+	TimeInStateMin          float64   `json:"timeInStateMin"`
+	StateBoostRaw           float64   `json:"stateBoostRaw"`
+	StateBoostDecayed       float64   `json:"stateBoostDecayed"`
+	StalenessPenalty        float64   `json:"stalenessPenalty"`
+	PeakPriceLookback       float64   `json:"peakPriceLookback"`
+	TroughPriceLookback     float64   `json:"troughPriceLookback"`
+	PeakScoreLookback       float64   `json:"peakScoreLookback"`
+	TroughScoreLookback     float64   `json:"troughScoreLookback"`
+	BarsSincePeak           int       `json:"barsSincePeak"`
+	BarsSinceTrough         int       `json:"barsSinceTrough"`
+	DrawdownFromPeakPct     float64   `json:"drawdownFromPeakPct"`
+	DrawupFromTroughPct     float64   `json:"drawupFromTroughPct"`
+	ScoreOffPeakPct         float64   `json:"scoreOffPeakPct"`
+	ScoreOffTroughPct       float64   `json:"scoreOffTroughPct"`
+	FailedReclaimCount      int       `json:"failedReclaimCount"`
+	FailedBounceCount       int       `json:"failedBounceCount"`
+	FailedBreakdownCount    int       `json:"failedBreakdownCount"`
+	FailedBreakLowCount     int       `json:"failedBreakLowCount"`
+	VWAPDistancePct         float64   `json:"vwapDistancePct"`
+	EMADistancePct          float64   `json:"emaDistancePct"`
+	LongDemotionFlag        bool      `json:"longDemotionFlag"`
+	ShortDemotionFlag       bool      `json:"shortDemotionFlag"`
+	ReversalWatchFlag       bool      `json:"reversalWatchFlag"`
+	ExhaustionRisk          float64   `json:"exhaustionRisk"`
+	BullReversalScore       float64   `json:"bullReversalScore"`
+	BearReversalScore       float64   `json:"bearReversalScore"`
+	IntradayReversalScore   float64   `json:"intradayReversalScore"`
+	FollowThroughDecayScore float64   `json:"followThroughDecayScore"`
+	EntryStyle              string    `json:"entryStyle"`
+	MetaState               string    `json:"metaState"`
 }
 
 type Config struct {
 	MinGrade               string
 	MinVolumeUSD           float64
 	HistoryN               int
+	PeakLookbackN          int
 	RiseN                  int
 	DropGradeScans         int
 	FallScans              int
@@ -64,6 +93,7 @@ type scorePoint struct {
 	vol          float64
 	price        float64
 	change       float64
+	dayUTC       float64
 	completeness float64
 	confidence   float64
 	uncertainty  float64
@@ -95,6 +125,12 @@ func NewTracker(side string, cfg Config) *Tracker {
 	}
 	if cfg.RiseN <= 0 {
 		cfg.RiseN = 3
+	}
+	if cfg.PeakLookbackN <= 0 {
+		cfg.PeakLookbackN = maxInt(cfg.HistoryN, 12)
+	}
+	if cfg.HistoryN < cfg.PeakLookbackN {
+		cfg.HistoryN = cfg.PeakLookbackN
 	}
 	if cfg.DropGradeScans <= 0 {
 		cfg.DropGradeScans = 2
@@ -149,6 +185,7 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 			vol:          r.VolumeUSD,
 			price:        r.LastPrice,
 			change:       r.Change24h,
+			dayUTC:       ptrFloat(r.DayUTC24h),
 			completeness: r.Completeness,
 			confidence:   r.Confidence,
 			uncertainty:  r.Uncertainty,
@@ -237,22 +274,66 @@ func (t *Tracker) Entries() []Entry {
 		last := ss.history[len(ss.history)-1]
 		slope := calcSlope(ss.history)
 		continuation := favorablePriceMove(t.side, ss.history) && volumeRising(ss.history)
+		peakPrice, peakPriceIdx := peakPriceLookback(ss.history, t.cfg.PeakLookbackN)
+		troughPrice, troughPriceIdx := troughPriceLookback(ss.history, t.cfg.PeakLookbackN)
+		peakScore, peakScoreIdx := peakScoreLookback(ss.history, t.cfg.PeakLookbackN)
+		troughScore, _ := troughScoreLookback(ss.history, t.cfg.PeakLookbackN)
+		barsSincePeak := 0
+		if peakPriceIdx >= 0 {
+			barsSincePeak = maxInt(0, len(ss.history)-1-peakPriceIdx)
+		}
+		barsSinceTrough := 0
+		if troughPriceIdx >= 0 {
+			barsSinceTrough = maxInt(0, len(ss.history)-1-troughPriceIdx)
+		}
+		failedReclaims := countFailedReclaims(ss.history, peakPriceIdx)
+		failedBounces := countFailedBounces(ss.history, peakPriceIdx)
+		failedBreakdowns := countFailedBreakdowns(ss.history, troughPriceIdx)
+		failedBreakLows := countFailedBreakLows(ss.history, troughPriceIdx)
 		e := Entry{
-			Symbol:           sym,
-			SideBias:         t.side,
-			CurrentGrade:     last.grade,
-			CurrentScore:     last.score,
-			ScoreSlope:       slope,
-			FirstSeen:        ss.firstSeen,
-			LastSeen:         ss.lastSeen,
-			StateSince:       ss.stateSince,
-			State:            ss.state,
-			Momentum:         (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping || continuation,
-			MarketConfidence: clamp(last.confidence, 0, 1),
-			Completeness:     clamp(last.completeness, 0, 1),
-			Uncertainty:      clamp(last.uncertainty, 0, 1),
+			Symbol:               sym,
+			SideBias:             t.side,
+			CurrentGrade:         last.grade,
+			CurrentScore:         last.score,
+			ScoreSlope:           slope,
+			D24Pct:               last.change,
+			DayUTCPct:            last.dayUTC,
+			FirstSeen:            ss.firstSeen,
+			LastSeen:             ss.lastSeen,
+			StateSince:           ss.stateSince,
+			State:                ss.state,
+			Momentum:             (slope > 0 && isRising(ss.history, t.cfg.RiseN)) || ss.state == StatePumping || continuation,
+			MarketConfidence:     clamp(last.confidence, 0, 1),
+			Completeness:         clamp(last.completeness, 0, 1),
+			Uncertainty:          clamp(last.uncertainty, 0, 1),
+			PeakPriceLookback:    peakPrice,
+			TroughPriceLookback:  troughPrice,
+			PeakScoreLookback:    peakScore,
+			TroughScoreLookback:  troughScore,
+			BarsSincePeak:        barsSincePeak,
+			BarsSinceTrough:      barsSinceTrough,
+			DrawdownFromPeakPct:  drawdownFromPeakPct(last.price, peakPrice),
+			DrawupFromTroughPct:  drawupFromTroughPct(last.price, troughPrice),
+			ScoreOffPeakPct:      scoreOffPeakPct(last.score, peakScore),
+			ScoreOffTroughPct:    scoreOffTroughPct(last.score, troughScore),
+			FailedReclaimCount:   failedReclaims,
+			FailedBounceCount:    failedBounces,
+			FailedBreakdownCount: failedBreakdowns,
+			FailedBreakLowCount:  failedBreakLows,
 		}
 		e.TimeInStateMin = maxF(0, ss.lastSeen.Sub(ss.stateSince).Minutes())
+		if peakScoreIdx >= 0 {
+			e.FollowThroughDecayScore = followThroughDecayScore(e)
+			e.IntradayReversalScore = intradayReversalScore(e)
+			e.BearReversalScore = e.IntradayReversalScore
+			e.BullReversalScore = bullReversalScore(e)
+			e.ExhaustionRisk = exhaustionRisk(e)
+			e.LongDemotionFlag = shouldDemoteLong(e)
+			e.ShortDemotionFlag = shouldDemoteShort(e)
+			e.ReversalWatchFlag = e.LongDemotionFlag || e.ShortDemotionFlag || e.IntradayReversalScore >= 5.5 || e.BullReversalScore >= 4.5
+			e.EntryStyle = deriveEntryStyle(e)
+			e.MetaState = deriveMetaState(e)
+		}
 		e.Rank, e.StateBoostRaw, e.StateBoostDecayed, e.StalenessPenalty = rankFor(e, t.cfg)
 		out = append(out, e)
 	}
@@ -412,6 +493,414 @@ func peakDropPct(points []scorePoint) float64 {
 	return d
 }
 
+func peakPriceLookback(points []scorePoint, lookback int) (float64, int) {
+	if len(points) == 0 {
+		return 0, -1
+	}
+	if lookback <= 0 || lookback > len(points) {
+		lookback = len(points)
+	}
+	start := len(points) - lookback
+	peak := points[start].price
+	peakIdx := start
+	for i := start + 1; i < len(points); i++ {
+		if points[i].price > peak {
+			peak = points[i].price
+			peakIdx = i
+		}
+	}
+	return peak, peakIdx
+}
+
+func troughPriceLookback(points []scorePoint, lookback int) (float64, int) {
+	if len(points) == 0 {
+		return 0, -1
+	}
+	if lookback <= 0 || lookback > len(points) {
+		lookback = len(points)
+	}
+	start := len(points) - lookback
+	trough := points[start].price
+	troughIdx := start
+	for i := start + 1; i < len(points); i++ {
+		if points[i].price < trough {
+			trough = points[i].price
+			troughIdx = i
+		}
+	}
+	return trough, troughIdx
+}
+
+func peakScoreLookback(points []scorePoint, lookback int) (float64, int) {
+	if len(points) == 0 {
+		return 0, -1
+	}
+	if lookback <= 0 || lookback > len(points) {
+		lookback = len(points)
+	}
+	start := len(points) - lookback
+	peak := points[start].score
+	peakIdx := start
+	for i := start + 1; i < len(points); i++ {
+		if points[i].score > peak {
+			peak = points[i].score
+			peakIdx = i
+		}
+	}
+	return peak, peakIdx
+}
+
+func troughScoreLookback(points []scorePoint, lookback int) (float64, int) {
+	if len(points) == 0 {
+		return 0, -1
+	}
+	if lookback <= 0 || lookback > len(points) {
+		lookback = len(points)
+	}
+	start := len(points) - lookback
+	trough := points[start].score
+	troughIdx := start
+	for i := start + 1; i < len(points); i++ {
+		if points[i].score < trough {
+			trough = points[i].score
+			troughIdx = i
+		}
+	}
+	return trough, troughIdx
+}
+
+func drawdownFromPeakPct(last, peak float64) float64 {
+	if last <= 0 || peak <= 0 {
+		return 0
+	}
+	return ((last - peak) / peak) * 100.0
+}
+
+func drawupFromTroughPct(last, trough float64) float64 {
+	if last <= 0 || trough <= 0 {
+		return 0
+	}
+	return ((last - trough) / trough) * 100.0
+}
+
+func scoreOffPeakPct(score, peakScore float64) float64 {
+	if peakScore <= 0 {
+		return 0
+	}
+	return ((score - peakScore) / peakScore) * 100.0
+}
+
+func scoreOffTroughPct(score, troughScore float64) float64 {
+	if troughScore == 0 {
+		return 0
+	}
+	denom := math.Abs(troughScore)
+	if denom < 1 {
+		denom = 1
+	}
+	return ((score - troughScore) / denom) * 100.0
+}
+
+func countFailedReclaims(points []scorePoint, peakIdx int) int {
+	if len(points) < 4 || peakIdx < 0 || peakIdx >= len(points)-2 {
+		return 0
+	}
+	peak := points[peakIdx].price
+	count := 0
+	for i := peakIdx + 1; i < len(points)-1; i++ {
+		prev := points[i-1].price
+		cur := points[i].price
+		next := points[i+1].price
+		if cur > prev && cur > next && cur < peak*0.997 {
+			count++
+		}
+	}
+	return count
+}
+
+func countFailedBounces(points []scorePoint, peakIdx int) int {
+	if len(points) < 4 || peakIdx < 0 || peakIdx >= len(points)-3 {
+		return 0
+	}
+	count := 0
+	for i := peakIdx + 1; i < len(points)-2; i++ {
+		if points[i].price < points[i-1].price &&
+			points[i+1].price > points[i].price &&
+			points[i+2].price < points[i+1].price {
+			count++
+		}
+	}
+	return count
+}
+
+func countFailedBreakdowns(points []scorePoint, troughIdx int) int {
+	if len(points) < 4 || troughIdx < 0 || troughIdx >= len(points)-2 {
+		return 0
+	}
+	trough := points[troughIdx].price
+	count := 0
+	for i := troughIdx + 1; i < len(points)-1; i++ {
+		prev := points[i-1].price
+		cur := points[i].price
+		next := points[i+1].price
+		if cur < prev && cur < next && cur > trough*1.003 {
+			count++
+		}
+	}
+	return count
+}
+
+func countFailedBreakLows(points []scorePoint, troughIdx int) int {
+	if len(points) < 4 || troughIdx < 0 || troughIdx >= len(points)-3 {
+		return 0
+	}
+	trough := points[troughIdx].price
+	count := 0
+	for i := troughIdx + 1; i < len(points)-1; i++ {
+		if points[i].price < trough &&
+			points[i+1].price > points[i].price &&
+			points[i+1].price >= trough {
+			count++
+		}
+	}
+	return count
+}
+
+func intradayReversalScore(e Entry) float64 {
+	score := 0.0
+	if e.D24Pct >= 25 {
+		score += 1.0
+	}
+	if e.D24Pct >= 40 {
+		score += 1.0
+	}
+	if e.DayUTCPct <= -3 {
+		score += 1.0
+	}
+	if e.DayUTCPct <= -7 {
+		score += 1.5
+	}
+	if e.DrawdownFromPeakPct <= -8 {
+		score += 1.5
+	}
+	if e.DrawdownFromPeakPct <= -12 {
+		score += 1.5
+	}
+	if e.ScoreSlope <= -0.75 {
+		score += 1.0
+	}
+	if e.ScoreSlope <= -1.50 {
+		score += 1.0
+	}
+	if e.State == StateDumping {
+		score += 1.5
+	}
+	if e.State == StateExhausted {
+		score += 2.0
+	}
+	if !e.Momentum {
+		score += 0.75
+	}
+	score += float64(minInt(e.FailedReclaimCount, 3)) * 0.5
+	score += float64(minInt(e.FailedBounceCount, 3)) * 0.4
+	return round2(score)
+}
+
+func exhaustionRisk(e Entry) float64 {
+	risk := 0.0
+	if e.D24Pct >= 30 {
+		risk += 1.0
+	}
+	if e.DrawdownFromPeakPct <= -10 {
+		risk += 2.0
+	}
+	if e.ScoreSlope < 0 {
+		risk += 1.0
+	}
+	if e.State == StateDumping || e.State == StateExhausted {
+		risk += 2.0
+	}
+	if !e.Momentum {
+		risk += 0.5
+	}
+	if e.FailedReclaimCount >= 2 {
+		risk += 1.0
+	}
+	return round2(risk)
+}
+
+func bullReversalScore(e Entry) float64 {
+	score := 0.0
+	if e.D24Pct <= -20 {
+		score += 1.0
+	}
+	if e.D24Pct <= -35 {
+		score += 1.0
+	}
+	if e.DayUTCPct >= 2 {
+		score += 1.0
+	}
+	if e.DayUTCPct >= 5 {
+		score += 1.5
+	}
+	if e.DrawupFromTroughPct >= 6 {
+		score += 1.5
+	}
+	if e.DrawupFromTroughPct >= 10 {
+		score += 1.5
+	}
+	if e.ScoreSlope >= 0.50 {
+		score += 1.0
+	}
+	if e.ScoreSlope >= 1.00 {
+		score += 1.0
+	}
+	if e.State == StateHeating {
+		score += 1.25
+	}
+	if e.State == StateInPlay {
+		score += 1.75
+	}
+	if e.State == StateBalanced {
+		score += 0.5
+	}
+	if e.Momentum {
+		score += 0.75
+	}
+	score += float64(minInt(e.FailedBreakdownCount, 3)) * 0.6
+	score += float64(minInt(e.FailedBreakLowCount, 3)) * 0.5
+	return round2(score)
+}
+
+func followThroughDecayScore(e Entry) float64 {
+	decay := 0.0
+	if e.BarsSincePeak >= 2 {
+		decay += minF(2.0, float64(e.BarsSincePeak-1)*0.35)
+	}
+	if e.ScoreOffPeakPct <= -8 {
+		decay += 1.0
+	}
+	if e.DrawdownFromPeakPct <= -6 {
+		decay += 1.0
+	}
+	if e.State == StateDumping || e.State == StateExhausted {
+		decay += 1.0
+	}
+	return round2(decay)
+}
+
+func shouldDemoteLong(e Entry) bool {
+	if e.D24Pct < 25 {
+		return false
+	}
+	reversal := e.DayUTCPct <= -5 || e.DrawdownFromPeakPct <= -8
+	weakState := e.State == StateDumping || e.State == StateExhausted
+	weakSlope := e.ScoreSlope <= -0.75
+	return reversal && weakState && weakSlope && !e.Momentum
+}
+
+func shouldDemoteShort(e Entry) bool {
+	if e.D24Pct > -20 {
+		return false
+	}
+	reversal := e.DayUTCPct >= 3 || e.DrawupFromTroughPct >= 6
+	improvingSlope := e.ScoreSlope >= 0.50
+	improvedState := e.State == StateBalanced || e.State == StateHeating || e.State == StateInPlay
+	reclaiming := e.Momentum || e.FailedBreakdownCount >= 1 || e.FailedBreakLowCount >= 1
+	return reversal && improvingSlope && improvedState && reclaiming
+}
+
+func EarlyShortAdmission(e Entry, threshold float64) bool {
+	if threshold <= 0 {
+		threshold = 5.0
+	}
+	if e.D24Pct < 20 {
+		return false
+	}
+	if !(e.DayUTCPct <= -5 || e.DrawdownFromPeakPct <= -8) {
+		return false
+	}
+	if e.ScoreSlope > -0.75 {
+		return false
+	}
+	if e.State != StateDumping && e.State != StateExhausted {
+		return false
+	}
+	if e.Momentum {
+		return false
+	}
+	return e.IntradayReversalScore >= threshold
+}
+
+func EarlyLongAdmissionFromShortLeader(e Entry, threshold float64) bool {
+	if threshold <= 0 {
+		threshold = 4.5
+	}
+	if e.D24Pct > -20 {
+		return false
+	}
+	if !(e.DayUTCPct >= 3 || e.DrawupFromTroughPct >= 6) {
+		return false
+	}
+	if e.ScoreSlope < 0.50 {
+		return false
+	}
+	if e.State != StateBalanced && e.State != StateHeating && e.State != StateInPlay {
+		return false
+	}
+	if e.FailedBreakdownCount < 1 && e.FailedBreakLowCount < 1 && !e.Momentum {
+		return false
+	}
+	return e.BullReversalScore >= threshold
+}
+
+func deriveMetaState(e Entry) string {
+	if shouldDemoteLong(e) && e.BearReversalScore >= 6 {
+		return "long_exhausting"
+	}
+	if shouldDemoteShort(e) && e.BullReversalScore >= 5 {
+		return "short_exhausting"
+	}
+	if e.EntryStyle == "reversal_watch_short" {
+		return "reversal_watch_short"
+	}
+	if e.EntryStyle == "reversal_watch_long" {
+		return "reversal_watch_long"
+	}
+	if e.State == StateInPlay && e.ScoreSlope > 0 {
+		return "trend_long"
+	}
+	if e.State == StateInPlay && e.ScoreSlope < 0 {
+		return "trend_short"
+	}
+	return "neutral"
+}
+
+func deriveEntryStyle(e Entry) string {
+	if shouldDemoteLong(e) && e.BearReversalScore >= 5.5 {
+		return "reversal_watch_short"
+	}
+	if shouldDemoteShort(e) && e.BullReversalScore >= 4.5 {
+		return "reversal_watch_long"
+	}
+	if e.ExhaustionRisk >= 4.5 {
+		return "avoid_chase"
+	}
+	if e.State == StateInPlay && e.Momentum && e.ScoreSlope > 0.5 {
+		if e.D24Pct >= 0 {
+			return "breakout_hold_long"
+		}
+		return "breakout_hold_short"
+	}
+	if e.State == StateHeating && e.ScoreSlope > 0 {
+		if e.D24Pct >= 0 {
+			return "pullback_long"
+		}
+		return "pullback_short"
+	}
+	return "none"
+}
+
 func gradeValue(g string) int {
 	switch strings.ToUpper(strings.TrimSpace(g)) {
 	case "A+":
@@ -451,4 +940,29 @@ func minF(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func ptrFloat(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func round2(x float64) float64 {
+	return math.Round(x*100) / 100
 }

@@ -104,24 +104,36 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 	fmt.Println("-------------+--------+----------+---------+---------+---------+------------+---------+---------")
 
 	confMap := make(map[string]string, len(scored))
+	for _, s := range scored {
+		confMap[s.Symbol] = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
+	}
+	trk.Update(now, scored, confMap)
+	entryBySymbol := entryMap(trk.Entries())
 	eligible := make([]market.Scored, 0, len(scored))
+	earlyShortMin := envFloat("SHORT_EARLY_ADMISSION_MIN_REVERSAL", 5.0)
 
 	for _, s := range scored {
-		if s.Eligible {
-			eligible = append(eligible, s)
-			lbl := confluenceLabel(asterClient, s.Symbol, "short")
-			if lbl == "" || lbl == "_" || lbl == "C" {
-				lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
-			}
-			confMap[s.Symbol] = lbl
-
-			// >>> colorized grade in terminal
-			col := market.GradeColor(lbl)
-			reset := market.ResetColor()
-			fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
-			// <<<
+		e, hasEntry := entryBySymbol[s.Symbol]
+		if !s.Eligible && !(hasEntry && inplay.EarlyShortAdmission(e, earlyShortMin)) {
+			continue
 		}
+		if hasEntry && e.ShortDemotionFlag {
+			continue
+		}
+		eligible = append(eligible, s)
+		lbl := confluenceLabel(asterClient, s.Symbol, "short")
+		if lbl == "" || lbl == "_" || lbl == "C" {
+			lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
+		}
+		confMap[s.Symbol] = lbl
+
+		col := market.GradeColor(lbl)
+		reset := market.ResetColor()
+		fmt.Printf("%s | %s%s%s\n", market.FormatRow(s), col, lbl, reset)
 	}
+
+	trk.Update(now, scored, confMap)
+	entries := filterDisplayInPlay(trk.Entries())
 
 	st.SetSnap(status.Snapshot{
 		Generated: now,
@@ -129,7 +141,7 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 		Active:    active,
 		Rows:      eligible,
 		Conf:      confMap,
-		InPlay:    trkEntries(trk, now, eligible, confMap),
+		InPlay:    entries,
 	})
 
 	printInPlayTerminal("SHORT", st)
@@ -239,11 +251,6 @@ func main() {
 	}
 }
 
-func trkEntries(trk *inplay.Tracker, now time.Time, eligible []market.Scored, conf map[string]string) []inplay.Entry {
-	trk.Update(now, eligible, conf)
-	return filterDisplayInPlay(trk.Entries())
-}
-
 func filterDisplayInPlay(entries []inplay.Entry) []inplay.Entry {
 	minAbsSlope := envFloat("INPLAY_DISPLAY_MIN_ABS_SLOPE", 0.05)
 	out := make([]inplay.Entry, 0, len(entries))
@@ -260,6 +267,14 @@ func filterDisplayInPlay(entries []inplay.Entry) []inplay.Entry {
 	return out
 }
 
+func entryMap(entries []inplay.Entry) map[string]inplay.Entry {
+	out := make(map[string]inplay.Entry, len(entries))
+	for _, e := range entries {
+		out[e.Symbol] = e
+	}
+	return out
+}
+
 func printInPlayTerminal(side string, st *status.Store) {
 	snap := st.Snapshot()
 	fmt.Printf("🔥 IN-PLAY (%s)\n", side)
@@ -268,8 +283,8 @@ func printInPlayTerminal(side string, st *status.Store) {
 		if n >= 8 {
 			break
 		}
-		fmt.Printf("%-12s grade=%-2s score=%6.2f slope=%6.3f state=%-8s momentum=%v\n",
-			e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State, e.Momentum)
+		fmt.Printf("%-12s grade=%-2s score=%6.2f slope=%6.3f state=%-8s dd=%6.1f up=%6.1f bear=%4.1f bull=%4.1f style=%s\n",
+			e.Symbol, e.CurrentGrade, e.CurrentScore, e.ScoreSlope, e.State, e.DrawdownFromPeakPct, e.DrawupFromTroughPct, e.BearReversalScore, e.BullReversalScore, e.EntryStyle)
 		n++
 	}
 	if n == 0 {
