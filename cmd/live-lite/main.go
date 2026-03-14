@@ -175,7 +175,9 @@ type operatorSuggestion struct {
 
 type symbolMeta struct {
 	LastPrice   float64
+	OpenPrice   float64
 	Move24h     float64
+	DayUTC24h   float64
 	VolumeUSD   float64
 	FundingRate float64
 	Bid         float64
@@ -594,6 +596,10 @@ func main() {
 	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 5)
 	if maxOpenPos <= 0 {
 		maxOpenPos = 1
+	}
+	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 0)
+	if maxOpenPerSide < 0 {
+		maxOpenPerSide = 0
 	}
 
 	inplayCfg := inplay.Config{
@@ -1093,8 +1099,8 @@ func main() {
 			}
 		}
 		printScanHeader(localMaintNow)
-		printInPlay("LONG", longInPlay)
-		printInPlay("SHORT", shortInPlay)
+		printInPlay("LONG", longInPlay, metaBySymbol)
+		printInPlay("SHORT", shortInPlay, metaBySymbol)
 		eventLog.Emit(stats.Event{
 			Timestamp: now,
 			Type:      "METRICS_SNAPSHOT",
@@ -1488,8 +1494,22 @@ func main() {
 		st.TopRegimeTag = best.Sig.RegimeTag
 		statusStore.Set(st)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f\n",
-			best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.Rank, best.Strat, best.Conf)
+		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+		bestMeta := metaBySymbol[rawBest]
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s\n",
+			best.Entry.Symbol,
+			best.Side,
+			best.Entry.CurrentGrade,
+			best.Entry.CurrentScore,
+			best.Entry.ScoreSlope,
+			best.Entry.Rank,
+			best.Strat,
+			best.Conf,
+			bestMeta.DayUTC24h,
+			fmtPrice(bestMeta.OpenPrice),
+			fmtPrice(bestMeta.LastPrice),
+			marketHumanUSD(bestMeta.VolumeUSD),
+		)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
 			tg.Sendf("%s", notify.BuildEventHTML("🎯", "TOP CANDIDATE",
@@ -1500,7 +1520,6 @@ func main() {
 			))
 			lastTopKey = topKey
 		}
-		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
 		if sig, ok := externalFlow[rawBest]; ok {
 			if sig.LiqSpike {
@@ -1898,6 +1917,24 @@ func main() {
 			}
 			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 			continue
+		}
+		if maxOpenPerSide > 0 {
+			openSideCount := countOpenPositionsBySide(acct, best.Side)
+			if execMgr != nil && openSideCount == 0 {
+				openSideCount = execMgr.ActiveCountBySide(best.Side)
+			}
+			if openSideCount >= maxOpenPerSide {
+				recordCandidateDecision(cmdCtx, best, "max_open_positions_side")
+				fmt.Printf("live-lite: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
+				if tgVerbose {
+					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: SIDE FULL",
+						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+						fmt.Sprintf("<b>Side Open:</b> %d | <b>Max Per Side:</b> %d", openSideCount, maxOpenPerSide),
+					))
+				}
+				waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
+				continue
+			}
 		}
 		if execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
 			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
@@ -2740,9 +2777,15 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 			if r.FundingRate != nil {
 				fr = *r.FundingRate
 			}
+			dayUTC := 0.0
+			if r.DayUTC24h != nil {
+				dayUTC = *r.DayUTC24h
+			}
 			out[raw] = symbolMeta{
 				LastPrice:   r.LastPrice,
+				OpenPrice:   r.OpenPrice,
 				Move24h:     r.Change24h,
+				DayUTC24h:   dayUTC,
 				VolumeUSD:   r.VolumeUSD,
 				FundingRate: fr,
 			}
@@ -3841,6 +3884,23 @@ func (m *liveExecManager) ActiveCount() int {
 	n := 0
 	for _, p := range m.positions {
 		if m.isActive(p) {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *liveExecManager) ActiveCountBySide(side string) int {
+	if m == nil {
+		return 0
+	}
+	want := strings.ToUpper(strings.TrimSpace(side))
+	n := 0
+	for _, p := range m.positions {
+		if !m.isActive(p) {
+			continue
+		}
+		if strings.ToUpper(strings.TrimSpace(p.Side)) == want {
 			n++
 		}
 	}
@@ -7647,14 +7707,14 @@ func estimateATRPct(symbol string, candlesN, atrN int) float64 {
 	return atr / lastClose
 }
 
-func printInPlay(tag string, entries []inplay.Entry) {
+func printInPlay(tag string, entries []inplay.Entry, meta map[string]symbolMeta) {
 	fmt.Printf("IN-PLAY (%s)\n", strings.ToUpper(strings.TrimSpace(tag)))
-	fmt.Println("+------------+-------+---------+---------+-----------+")
-	fmt.Println("| sym        | grade | score   | slope   | state     |")
-	fmt.Println("+------------+-------+---------+---------+-----------+")
+	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("| sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
+	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 	if len(entries) == 0 {
-		fmt.Println("| (none)                                         |")
-		fmt.Println("+------------+-------+---------+---------+-----------+")
+		fmt.Println("| (none)                                                                                      |")
+		fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 		return
 	}
 	for _, e := range entries {
@@ -7669,14 +7729,32 @@ func printInPlay(tag string, entries []inplay.Entry) {
 		state := strings.ToUpper(strings.TrimSpace(displayState(e.SideBias, e.State)))
 		gColor := market.GradeColor(grade)
 		sColor := inPlayStateColor(inplay.State(strings.ToLower(state)))
-		fmt.Printf("| %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s |\n",
+		m := meta[sym]
+		dayUTC := "-"
+		if m.DayUTC24h != 0 {
+			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
+		}
+		openPx := "-"
+		if m.OpenPrice > 0 {
+			openPx = fmtPrice(m.OpenPrice)
+		}
+		markPx := "-"
+		if m.LastPrice > 0 {
+			markPx = fmtPrice(m.LastPrice)
+		}
+		vol := "-"
+		if m.VolumeUSD > 0 {
+			vol = marketHumanUSD(m.VolumeUSD)
+		}
+		fmt.Printf("| %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
+			dayUTC, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------------+-------+---------+---------+-----------+")
+	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
@@ -7686,6 +7764,20 @@ func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
 	}
 	fmt.Printf("DRY_RUN intent: symbol=%s side=%s margin=$%.2f leverage=%dx entry=LIMIT(mid %+0.2fbps in direction)\n",
 		sym, c.Side, margin, lev, entryBps)
+}
+
+func marketHumanUSD(x float64) string {
+	ax := abs(x)
+	switch {
+	case ax >= 1_000_000_000:
+		return fmt.Sprintf("%.2fB", x/1_000_000_000)
+	case ax >= 1_000_000:
+		return fmt.Sprintf("%.2fM", x/1_000_000)
+	case ax >= 1_000:
+		return fmt.Sprintf("%.2fK", x/1_000)
+	default:
+		return fmt.Sprintf("%.0f", x)
+	}
 }
 
 func buildMomentumIndex(longInPlay, shortInPlay []inplay.Entry) map[string]momentumView {
@@ -8039,6 +8131,24 @@ func countOpenPositions(rest *aster.RESTAuth) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+func countOpenPositionsBySide(acct accountSnapshot, side string) int {
+	want := strings.ToUpper(strings.TrimSpace(side))
+	if want == "" {
+		return 0
+	}
+	accountSide := "LONG"
+	if want == "SELL" || want == "SHORT" {
+		accountSide = "SHORT"
+	}
+	n := 0
+	for _, p := range acct.Positions {
+		if strings.EqualFold(strings.TrimSpace(p.Side), accountSide) {
+			n++
+		}
+	}
+	return n
 }
 
 func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev int) error {
