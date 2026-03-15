@@ -34,6 +34,14 @@ func main() {
 	}
 	r := stats.Aggregate(es)
 	fmt.Println(stats.FormatReport(r))
+	fmt.Printf("summary: signals=%d entries=%d rejects=%d missed=%d leaderMiss=%d avgHold=%.1fm avgMFE=%.2fR avgMAE=%.2fR fees=%.2f slip=%.2f funding=%.2f\n",
+		r.Signals, r.Entries, r.Rejects, r.Missed, r.LeaderMiss, r.AvgHoldMin, r.AvgMFER, r.AvgMAER, r.Fees, r.Slippage, r.FundingPnL)
+	readiness := stats.EvaluateReadiness(r, stats.DefaultReadinessConfig())
+	fmt.Printf("readiness: ready=%v", readiness.Ready)
+	if len(readiness.Reasons) > 0 {
+		fmt.Printf(" reasons=%v", readiness.Reasons)
+	}
+	fmt.Println()
 	fmt.Println("by strategy:")
 	for _, x := range r.ByStrategy {
 		fmt.Printf("- %s trades=%d winRate=%.2f%% pnl=%.2f avg=%.2f\n", x.Name, x.Trades, x.WinRate, x.PnL, x.AvgPnL)
@@ -41,6 +49,24 @@ func main() {
 	fmt.Println("by symbol:")
 	for _, x := range r.BySymbol {
 		fmt.Printf("- %s trades=%d winRate=%.2f%% pnl=%.2f avg=%.2f\n", x.Name, x.Trades, x.WinRate, x.PnL, x.AvgPnL)
+	}
+	if len(r.ByReject) > 0 {
+		fmt.Println("reject reasons:")
+		for _, x := range r.ByReject {
+			fmt.Printf("- %s count=%d\n", x.Name, x.Count)
+		}
+	}
+	if len(r.ByExit) > 0 {
+		fmt.Println("exit reasons:")
+		for _, x := range r.ByExit {
+			fmt.Printf("- %s count=%d\n", x.Name, x.Count)
+		}
+	}
+	if len(r.ByMissCat) > 0 {
+		fmt.Println("miss categories:")
+		for _, x := range r.ByMissCat {
+			fmt.Printf("- %s count=%d\n", x.Name, x.Count)
+		}
 	}
 	if *csvOut != "" {
 		if err := writeCSV(*csvOut, r); err != nil {

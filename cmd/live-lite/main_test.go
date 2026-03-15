@@ -224,6 +224,61 @@ func TestOrderbookEntryDecisionReasons(t *testing.T) {
 	}
 }
 
+func TestComputeEntryScoreBreakdown(t *testing.T) {
+	c := candidate{
+		Entry: inplay.Entry{
+			Symbol:         "BTCUSDT",
+			CurrentGrade:   "A",
+			CurrentScore:   92,
+			ScoreSlope:     0.18,
+			State:          inplay.StateInPlay,
+			Rank:           88,
+			Momentum:       true,
+			TimeInStateMin: 4,
+		},
+		Side:           "BUY",
+		Strat:          "continuation_fast",
+		Conf:           0.72,
+		VolumeRatio:    1.9,
+		SpreadBps:      5,
+		DepthBid:       80000,
+		DepthAsk:       76000,
+		BookImbalance:  0.25,
+		LastClose:      100,
+		SessionVWAP:    99.4,
+		EMA9:           99.6,
+		FundingRate:    0.0001,
+		LifecycleStage: "READY",
+	}
+	cfg := entryQualityConfig{
+		ScoreWeightDiscovery: 0.35,
+		ScoreWeightTrigger:   0.40,
+		ScoreWeightExecution: 0.25,
+	}
+	d, trig, execScore, combo, reasons := computeEntryScoreBreakdown(c, cfg)
+	if d <= 0 || trig <= 0 || execScore <= 0 || combo <= 0 {
+		t.Fatalf("expected positive scores got d=%.2f trig=%.2f exec=%.2f combo=%.2f", d, trig, execScore, combo)
+	}
+	if len(reasons) != 0 {
+		t.Fatalf("expected no reject reasons, got %v", reasons)
+	}
+}
+
+func TestActiveRecentRejectSymbolsPrunesExpired(t *testing.T) {
+	now := time.Now().UTC()
+	mem := map[string]recentRejectMemory{
+		"BTCUSDT": {Symbol: "BTCUSDT", ExpiresAt: now.Add(30 * time.Second)},
+		"ETHUSDT": {Symbol: "ETHUSDT", ExpiresAt: now.Add(-time.Second)},
+	}
+	got := activeRecentRejectSymbols(now, mem)
+	if len(got) != 1 || got[0] != "BTCUSDT" {
+		t.Fatalf("unexpected active reject symbols: %v", got)
+	}
+	if _, ok := mem["ETHUSDT"]; ok {
+		t.Fatalf("expected expired symbol to be pruned")
+	}
+}
+
 func TestShouldExitOnMomentumFade(t *testing.T) {
 	mv := momentumView{
 		Long:  &inplay.Entry{State: inplay.StateCooling, ScoreSlope: -0.02},

@@ -14,6 +14,7 @@ type Signal struct {
 	Stop            float64
 	TP1             float64
 	TP2             float64
+	TP3             float64
 	Confidence      float64
 	Tags            []string
 	Invalidation    string

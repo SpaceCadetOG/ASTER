@@ -18,6 +18,8 @@ type Config struct {
 	StallBarsForTighten    int
 	StallTightenToR        float64
 	SponsorshipGraceMin    int
+	UnsponsoredTightenR    float64
+	UnsponsoredWeakStreak  int
 }
 
 type Manager struct {
@@ -25,20 +27,23 @@ type Manager struct {
 }
 
 type ProtectInput struct {
-	Side          string
-	Entry         float64
-	Stop          float64
-	Mark          float64
-	MFER          float64
-	MAER          float64
-	BarsHeld      int
-	StallBars     int
-	WeakFlow      bool
-	NearFriction  bool
-	LiqSpike      bool
-	UnrealizedPct float64
-	Sponsored     bool
-	HitTP3        bool
+	Side              string
+	Entry             float64
+	Stop              float64
+	Mark              float64
+	MFER              float64
+	MAER              float64
+	BarsHeld          int
+	StallBars         int
+	WeakFlow          bool
+	NearFriction      bool
+	LiqSpike          bool
+	UnrealizedPct     float64
+	Sponsored         bool
+	HitTP1            bool
+	HitTP2            bool
+	HitTP3            bool
+	WeakSponsorStreak int
 }
 
 type ProtectDecision struct {
@@ -87,6 +92,12 @@ func NewManager(cfg Config) *Manager {
 	if cfg.SponsorshipGraceMin <= 0 {
 		cfg.SponsorshipGraceMin = 45
 	}
+	if cfg.UnsponsoredTightenR <= 0 {
+		cfg.UnsponsoredTightenR = 0.18
+	}
+	if cfg.UnsponsoredWeakStreak <= 0 {
+		cfg.UnsponsoredWeakStreak = 2
+	}
 	return &Manager{cfg: cfg}
 }
 
@@ -120,6 +131,14 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	if in.LiqSpike && in.UnrealizedPct > 0 {
 		dec.PartialExitPct = m.cfg.LiqSpikePartialPct
 		dec.Reason = "LIQ_SPIKE_PARTIAL"
+	}
+	if in.HitTP1 && !in.Sponsored && in.WeakSponsorStreak >= m.cfg.UnsponsoredWeakStreak {
+		dec.MoveStopToBE = true
+		dec.TightenStop = true
+		dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, m.cfg.UnsponsoredTightenR)
+		if dec.Reason == "" {
+			dec.Reason = "RUNNER_UNSPONSORED_TIGHTEN"
+		}
 	}
 	// Lock gains when a trade was clearly profitable but gives back too much while weak.
 	profitGivebackPct := m.cfg.ProfitGivebackPct

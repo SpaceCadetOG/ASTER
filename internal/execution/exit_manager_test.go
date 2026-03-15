@@ -76,3 +76,17 @@ func TestEvaluateProtectSponsoredSkipsEarlyNoFollowThrough(t *testing.T) {
 		t.Fatalf("expected sponsored trade to survive no-follow-through grace, got %+v", dec)
 	}
 }
+
+func TestEvaluateProtectUnsponsoredTighten(t *testing.T) {
+	m := NewManager(Config{
+		UnsponsoredTightenR:   0.15,
+		UnsponsoredWeakStreak: 2,
+	})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 101.2,
+		HitTP1: true, WeakSponsorStreak: 2, Sponsored: false,
+	})
+	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "RUNNER_UNSPONSORED_TIGHTEN" {
+		t.Fatalf("expected unsponsored tighten decision, got %+v", dec)
+	}
+}

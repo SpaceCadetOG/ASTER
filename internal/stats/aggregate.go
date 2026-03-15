@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 type Row struct {
@@ -15,6 +16,11 @@ type Row struct {
 	PnL       float64
 	AvgPnL    float64
 	ProfitFac float64
+}
+
+type CountRow struct {
+	Name  string
+	Count int
 }
 
 type Report struct {
@@ -30,33 +36,109 @@ type Report struct {
 	MaxDrawdown float64
 	AvgR        float64
 	MedianR     float64
+	Signals     int
+	Entries     int
+	Rejects     int
+	Missed      int
+	LeaderMiss  int
+	WatchToEntry float64
+	AvgHoldMin  float64
+	AvgMFER     float64
+	AvgMAER     float64
+	Fees        float64
+	Slippage    float64
+	FundingPnL  float64
 	ByStrategy  []Row
 	BySymbol    []Row
+	ByReject    []CountRow
+	ByExit      []CountRow
+	ByMissCat   []CountRow
 }
 
 func Aggregate(events []Event) Report {
 	var r Report
 	strat := map[string]*Row{}
 	sym := map[string]*Row{}
+	rejects := map[string]int{}
+	exits := map[string]int{}
+	missCats := map[string]int{}
 	pnlSeq := make([]float64, 0, 256)
 	rs := make([]float64, 0, 256)
 	grossWin := 0.0
 	grossLoss := 0.0
 	winSum := 0.0
 	lossSum := 0.0
+	holdSum := 0.0
+	holdN := 0
+	mfeSum := 0.0
+	mfeN := 0
+	maeSum := 0.0
+	maeN := 0
 	for _, e := range events {
 		if e.Simulated {
 			r.Simulated = true
+		}
+		switch e.Type {
+		case "SIGNAL":
+			r.Signals++
+		case "POSITION_OPEN":
+			r.Entries++
+		case "ORDER_FILL":
+			if e.Reason == "entry_accepted" {
+				r.Entries++
+			}
+		case "GATE_DECISION":
+			if e.GateAllow != nil && !*e.GateAllow {
+				r.Rejects++
+				for _, gr := range e.GateReasons {
+					if gr == "" {
+						continue
+					}
+					rejects[gr]++
+				}
+			}
+		case "MISSED_OPPORTUNITY":
+			r.Missed++
+			cat := e.MissCategory
+			if cat == "" {
+				cat = "uncategorized"
+			}
+			missCats[cat]++
+			if e.Discovery >= 0.85 || e.Score >= 90 {
+				r.LeaderMiss++
+			}
 		}
 		if e.Type != "POSITION_CLOSE" {
 			continue
 		}
 		r.TotalTrades++
 		pnl := e.PnLUSD
+		r.Fees += e.Fees
+		r.Slippage += math.Abs(e.Slippage)
+		if strings.EqualFold(e.Reason, "FUNDING") {
+			r.FundingPnL += pnl
+		}
+		if e.HoldMin > 0 {
+			holdSum += e.HoldMin
+			holdN++
+		}
+		if e.MFER != 0 {
+			mfeSum += e.MFER
+			mfeN++
+		}
+		if e.MAER != 0 {
+			maeSum += e.MAER
+			maeN++
+		}
 		pnlSeq = append(pnlSeq, pnl)
 		if e.RiskR != 0 {
 			rs = append(rs, e.RiskR)
 		}
+		exitReason := e.Reason
+		if exitReason == "" {
+			exitReason = "UNKNOWN"
+		}
+		exits[exitReason]++
 		if pnl > 0 {
 			r.Wins++
 			grossWin += pnl
@@ -98,6 +180,15 @@ func Aggregate(events []Event) Report {
 	if grossLoss > 0 {
 		r.ProfitFac = grossWin / grossLoss
 	}
+	if holdN > 0 {
+		r.AvgHoldMin = holdSum / float64(holdN)
+	}
+	if mfeN > 0 {
+		r.AvgMFER = mfeSum / float64(mfeN)
+	}
+	if maeN > 0 {
+		r.AvgMAER = maeSum / float64(maeN)
+	}
 	r.MaxDrawdown = maxDrawdown(pnlSeq)
 	if len(rs) > 0 {
 		tot := 0.0
@@ -107,8 +198,14 @@ func Aggregate(events []Event) Report {
 		r.AvgR = tot / float64(len(rs))
 		r.MedianR = median(rs)
 	}
+	if r.Signals > 0 {
+		r.WatchToEntry = (100.0 * float64(r.Entries)) / float64(r.Signals)
+	}
 	r.ByStrategy = mapRows(strat)
 	r.BySymbol = mapRows(sym)
+	r.ByReject = countRows(rejects)
+	r.ByExit = countRows(exits)
+	r.ByMissCat = countRows(missCats)
 	return r
 }
 
@@ -149,6 +246,20 @@ func mapRows(m map[string]*Row) []Row {
 	return out
 }
 
+func countRows(m map[string]int) []CountRow {
+	out := make([]CountRow, 0, len(m))
+	for k, v := range m {
+		out = append(out, CountRow{Name: k, Count: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count == out[j].Count {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Count > out[j].Count
+	})
+	return out
+}
+
 func maxDrawdown(pnlSeq []float64) float64 {
 	eq := 0.0
 	peak := 0.0
@@ -184,5 +295,5 @@ func FormatReport(r Report) string {
 	if r.Simulated {
 		sim = "simulated"
 	}
-	return fmt.Sprintf("stats mode=%s trades=%d wins=%d losses=%d winRate=%.2f%% PF=%.2f expectancy=%.2f maxDD=%.2f avgR=%.2f medianR=%.2f", sim, r.TotalTrades, r.Wins, r.Losses, r.WinRate, r.ProfitFac, r.Expectancy, r.MaxDrawdown, r.AvgR, r.MedianR)
+	return fmt.Sprintf("stats mode=%s trades=%d wins=%d losses=%d winRate=%.2f%% PF=%.2f expectancy=%.2f maxDD=%.2f avgR=%.2f medianR=%.2f signals=%d entries=%d conv=%.2f%% missed=%d avgHold=%.1fm", sim, r.TotalTrades, r.Wins, r.Losses, r.WinRate, r.ProfitFac, r.Expectancy, r.MaxDrawdown, r.AvgR, r.MedianR, r.Signals, r.Entries, r.WatchToEntry, r.Missed, r.AvgHoldMin)
 }
