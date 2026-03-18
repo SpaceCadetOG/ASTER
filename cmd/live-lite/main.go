@@ -267,11 +267,12 @@ type operatorDecision struct {
 }
 
 type operatorSuggestion struct {
-	Symbol    string
-	Side      string
-	Source    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Symbol       string
+	Side         string
+	Source       string
+	PreferredLev int
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 type symbolMeta struct {
@@ -782,7 +783,7 @@ func main() {
 	tradeMarginMax := envFloat("LIVE_TRADE_MARGIN_MAX_USDT", 200.0)
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
 	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 3)
-	leverageMin := envInt("LIVE_LEVERAGE_MIN", 1)
+	leverageMin := envInt("LIVE_LEVERAGE_MIN", 3)
 	stopMode := strings.ToLower(envStr("LIVE_STOP_MODE", "hybrid"))
 	targetMode := strings.ToLower(envStr("LIVE_TARGET_MODE", "hybrid"))
 	vpMinTargetPct := envFloat("LIVE_VP_MIN_TARGET_PCT", 0.10)
@@ -2163,6 +2164,11 @@ func main() {
 		st.TopRegimeTag = best.Sig.RegimeTag
 		statusStore.Set(st)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
+		if cmdCtx != nil {
+			if s, ok := cmdCtx.getSuggestion(best.Entry.Symbol); ok && strings.EqualFold(s.Side, best.Side) && s.PreferredLev > 0 {
+				effectiveLev = clampInt(s.PreferredLev, 1, safety.maxLeverage)
+			}
+		}
 		if strings.EqualFold(best.Strat, "exhaustion_flip_short") || strings.EqualFold(best.Strat, "exhaustion_flip_long") {
 			starterFrac := clamp(envFloat("LIVE_EXHAUSTION_STARTER_MARGIN_FRAC", 0.50), 0.10, 1.00)
 			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*starterFrac)
@@ -10868,7 +10874,7 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 
 func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", reserveUSDT+tradeMargin)
-	maxLev := envInt("LIVE_MAX_LEVERAGE", 3)
+	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
 	if maxLev <= 0 {
 		maxLev = 3
 	}
@@ -11717,6 +11723,19 @@ func minInt(a, b int) int {
 	return b
 }
 
+func clampInt(v, lo, hi int) int {
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 func formatFloat(v float64, prec int) string {
 	if prec < 0 {
 		prec = 0
@@ -11931,10 +11950,10 @@ func sizingBaseBalance(avail float64, p *paperTrader) float64 {
 
 func computeLeverage(c candidate, mode string, fixed, minLev, maxLev int) int {
 	if minLev <= 0 {
-		minLev = 1
+		minLev = 3
 	}
 	if maxLev <= 0 {
-		maxLev = 3
+		maxLev = 20
 	}
 	if minLev > maxLev {
 		minLev = maxLev
@@ -12247,13 +12266,14 @@ func (c *telegramCommandCtx) getDecision(symbol string) (operatorDecision, bool)
 	return d, ok
 }
 
-func (c *telegramCommandCtx) addSuggestion(symbol, side, source string) operatorSuggestion {
+func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferredLev int) operatorSuggestion {
 	s := operatorSuggestion{
-		Symbol:    strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
-		Side:      strings.ToUpper(strings.TrimSpace(side)),
-		Source:    source,
-		CreatedAt: time.Now().UTC(),
-		ExpiresAt: time.Now().UTC().Add(c.suggestTTL),
+		Symbol:       strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
+		Side:         strings.ToUpper(strings.TrimSpace(side)),
+		Source:       source,
+		PreferredLev: preferredLev,
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    time.Now().UTC().Add(c.suggestTTL),
 	}
 	c.suggestMu.Lock()
 	if c.suggestions == nil {
@@ -12295,6 +12315,23 @@ func firstNonEmpty(v ...string) string {
 	return ""
 }
 
+func allowedOperatorLeverage(raw string) (int, bool) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	raw = strings.TrimSuffix(raw, "x")
+	switch raw {
+	case "20":
+		return 20, true
+	case "10":
+		return 10, true
+	case "5":
+		return 5, true
+	case "3":
+		return 3, true
+	default:
+		return 0, false
+	}
+}
+
 func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string) {
 	if ctx == nil {
 		return
@@ -12331,7 +12368,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/positions</code> open trades",
 			"<code>/why SYMBOL</code> latest decision for a symbol",
 			"<code>/suggest SYMBOL SIDE</code> operator watch + re-evaluate",
-			"<code>/trade SYMBOL SIDE</code> operator-priority trade request",
+			"<code>/trade SYMBOL SIDE [LEV]</code> operator-priority trade request",
 			"<code>/mode</code> show live/paper mode",
 			"<code>/mode live</code> switch new entries to live mode",
 			"<code>/mode paper</code> switch new entries to paper mode",
@@ -12507,7 +12544,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if sym == "" || (side != "BUY" && side != "SELL") {
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL SIDE</code>")
 		}
-		s := c.addSuggestion(sym, side, "telegram")
+		s := c.addSuggestion(sym, side, "telegram", 0)
 		lines := []string{
 			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), side),
 			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
@@ -12520,19 +12557,30 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
 	case strings.HasPrefix(cmd, "/trade "):
 		if len(fields) < 3 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE [LEV]</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		side := strings.ToUpper(strings.TrimSpace(fields[2]))
 		if sym == "" || (side != "BUY" && side != "SELL") {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE [LEV]</code>")
+		}
+		preferredLev := 0
+		if len(fields) >= 4 {
+			lev, ok := allowedOperatorLeverage(fields[3])
+			if !ok {
+				return notify.BuildEventHTML("❓", "LEV USAGE",
+					"<code>/trade SYMBOL SIDE [LEV]</code>",
+					"Allowed leverage values: <code>20x</code>, <code>10x</code>, <code>5x</code>, <code>3x</code>",
+				)
+			}
+			preferredLev = lev
 		}
 		if c.execMgr != nil && c.execMgr.HasActiveSymbol(sym) {
 			return notify.BuildEventHTML("ℹ️", "TRADE REQUEST SKIPPED",
 				fmt.Sprintf("%s already has an active managed position", cleanSymbol(sym)),
 			)
 		}
-		s := c.addSuggestion(sym, side, "telegram_trade")
+		s := c.addSuggestion(sym, side, "telegram_trade", preferredLev)
 		modeDryRun, modeLiveEnabled, _ := true, false, false
 		if c.mode != nil {
 			modeDryRun, modeLiveEnabled, _ = c.mode.snapshot()
@@ -12547,6 +12595,9 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Priority TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
 			"Next evaluation will try this symbol first through the normal bot entry, sizing, and risk gates.",
 			"This does not bypass liquidity, stop, funding, or session protection.",
+		}
+		if s.PreferredLev > 0 {
+			lines = append(lines, fmt.Sprintf("<b>Requested leverage:</b> %dx", s.PreferredLev))
 		}
 		if d, ok := c.getDecision(sym); ok {
 			lines = append(lines, fmt.Sprintf("<b>Latest:</b> side=%s reason=%s grade=%s score=%.2f slope=%+.3f",
