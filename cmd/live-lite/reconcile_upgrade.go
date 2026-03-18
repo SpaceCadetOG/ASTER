@@ -33,6 +33,9 @@ func (m *liveExecManager) transitionPendingToOpen(now time.Time, p *livePosition
 	p.RemainingQty = qty
 	p.State = execOpen
 	p.UpdatedAt = now
+	if strings.TrimSpace(p.EntrySource) == "" {
+		p.EntrySource = "BOT"
+	}
 	if err := m.placeInitialBrackets(p); err != nil {
 		return true, err
 	}
@@ -102,6 +105,129 @@ func (m *liveExecManager) stageRemainingQty(target, filled, rem float64) float64
 		left = rem
 	}
 	return left
+}
+
+type remotePositionView struct {
+	QtyAbs     float64
+	EntryPrice float64
+	MarkPrice  float64
+}
+
+func remotePositionForSide(rows []map[string]any, side string) remotePositionView {
+	view := remotePositionView{}
+	side = strings.ToUpper(strings.TrimSpace(side))
+	for _, row := range rows {
+		amt := mapFloat(row["positionAmt"])
+		if mathAbs(amt) <= 1e-10 {
+			continue
+		}
+		rowSide := "BUY"
+		if amt < 0 {
+			rowSide = "SELL"
+		}
+		if side != "" && !strings.EqualFold(rowSide, side) {
+			continue
+		}
+		view.QtyAbs = mathAbs(amt)
+		view.EntryPrice = mapFloat(row["entryPrice"])
+		view.MarkPrice = mapFloat(row["markPrice"])
+		return view
+	}
+	return view
+}
+
+func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition, fillPx float64, reason string) (bool, error) {
+	if p == nil {
+		return false, nil
+	}
+	_ = m.cancelRemainingExits(p)
+	p.State = execClosed
+	p.CloseReason = reason
+	p.ClosedAt = now
+	p.UpdatedAt = now
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("📪", "POSITION CLOSED",
+			fmt.Sprintf("<b>%s</b>", p.Symbol),
+			fmt.Sprintf("<b>Reason:</b> %s", p.CloseReason),
+		))
+	}
+	if fillPx <= 0 {
+		fillPx = p.LastMark
+	}
+	if fillPx <= 0 {
+		fillPx = p.EntryPrice
+	}
+	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, p.RemainingQty)
+	p.RealizedPnL += pnl
+	_ = m.addDayRealized(now, pnl)
+	_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
+	m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
+	p.RemainingQty = 0
+	return true, nil
+}
+
+func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, rows []map[string]any) (bool, bool, error) {
+	if m == nil || p == nil {
+		return false, false, nil
+	}
+	view := remotePositionForSide(rows, p.Side)
+	if view.MarkPrice > 0 {
+		p.LastMark = view.MarkPrice
+	}
+	if view.EntryPrice > 0 && p.EntryPrice <= 0 {
+		p.EntryPrice = view.EntryPrice
+	}
+	if view.QtyAbs <= 1e-10 {
+		changed, err := m.closeFromRemoteSnapshot(now, p, view.MarkPrice, "POSITION_FLAT_REMOTE")
+		return changed, true, err
+	}
+	eps := fillEpsilon(maxFloat(p.RemainingQty, view.QtyAbs))
+	if p.RemainingQty <= 0 {
+		p.RemainingQty = view.QtyAbs
+		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
+		p.UpdatedAt = now
+		p.UnknownExitChecks = 0
+		return true, false, m.ensureExitOrders(p)
+	}
+	if view.QtyAbs > p.RemainingQty+eps {
+		p.RemainingQty = view.QtyAbs
+		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
+		p.UpdatedAt = now
+		p.UnknownExitChecks = 0
+		if err := m.ensureExitOrders(p); err != nil {
+			return true, false, err
+		}
+		return true, false, nil
+	}
+	if view.QtyAbs < p.RemainingQty-eps {
+		delta := p.RemainingQty - view.QtyAbs
+		fillPx := view.MarkPrice
+		if fillPx <= 0 {
+			fillPx = p.LastMark
+		}
+		if fillPx <= 0 {
+			fillPx = p.EntryPrice
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, delta)
+		p.RealizedPnL += pnl
+		_ = m.addDayRealized(now, pnl)
+		p.RemainingQty = view.QtyAbs
+		p.UpdatedAt = now
+		p.UnknownExitChecks = 0
+		_ = m.cancelRemainingExits(p)
+		_ = m.logFill(now, p, "SYNC", "REMOTE_PARTIAL_SYNC", delta, fillPx, pnl, pct)
+		m.sendFillReceipt(now, p, "SYNC", "REMOTE_PARTIAL_SYNC", delta, fillPx, pnl, pct)
+		if p.RemainingQty <= fillEpsilon(p.Qty) {
+			changed, err := m.closeFromRemoteSnapshot(now, p, fillPx, "POSITION_FLAT_REMOTE")
+			return changed, true, err
+		}
+		if err := m.ensureExitOrders(p); err != nil {
+			return true, false, err
+		}
+		return true, false, nil
+	}
+	p.UnknownExitChecks = 0
+	return false, false, nil
 }
 
 func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage int, deltaQty, fillPx float64, final bool) error {
@@ -203,6 +329,24 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 
 func (m *liveExecManager) ensureExitOrders(p *livePosition) error {
 	if m == nil || p == nil || p.State == execClosed || p.RemainingQty <= 0 {
+		return nil
+	}
+	if m.tpRatchetOnly {
+		if p.TP1OrderID > 0 {
+			_, _ = m.rest.CancelOrder(p.Symbol, p.TP1OrderID)
+			p.TP1OrderID = 0
+		}
+		if p.TP2OrderID > 0 {
+			_, _ = m.rest.CancelOrder(p.Symbol, p.TP2OrderID)
+			p.TP2OrderID = 0
+		}
+		if p.TP3OrderID > 0 {
+			_, _ = m.rest.CancelOrder(p.Symbol, p.TP3OrderID)
+			p.TP3OrderID = 0
+		}
+		if p.StopOrderID == 0 {
+			return m.placeOrReplaceStop(p)
+		}
 		return nil
 	}
 	if p.StopOrderID == 0 {

@@ -264,6 +264,32 @@ func TestComputeEntryScoreBreakdown(t *testing.T) {
 	}
 }
 
+func TestCloseFromRemoteSnapshotClosesWithoutREST(t *testing.T) {
+	now := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	m := &liveExecManager{}
+	p := &livePosition{
+		Symbol:       "BTCUSDT",
+		Side:         "BUY",
+		State:        execOpen,
+		CreatedAt:    now.Add(-5 * time.Minute),
+		EntryPrice:   100,
+		RemainingQty: 2,
+	}
+	changed, err := m.closeFromRemoteSnapshot(now, p, 101, "POSITION_FLAT_REMOTE")
+	if err != nil {
+		t.Fatalf("closeFromRemoteSnapshot error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected closeFromRemoteSnapshot to report change")
+	}
+	if p.State != execClosed || p.CloseReason != "POSITION_FLAT_REMOTE" {
+		t.Fatalf("unexpected close state: %+v", p)
+	}
+	if p.RemainingQty != 0 {
+		t.Fatalf("expected remaining qty to be zero, got %.4f", p.RemainingQty)
+	}
+}
+
 func TestActiveRecentRejectSymbolsPrunesExpired(t *testing.T) {
 	now := time.Now().UTC()
 	mem := map[string]recentRejectMemory{

@@ -57,6 +57,15 @@ func main() {
 		MaxFundingCostR:  envFloat("BT_MAX_FUNDING_COST_R", 0.25),
 		MaxSpreadBps:     envFloat("BT_MAX_SPREAD_BPS", 20.0),
 		SpreadProxyFrac:  envFloat("BT_SPREAD_PROXY_FRAC", 0.05),
+		TP1Frac:          envFloat("BT_TP1_FRAC", 0.35),
+		TP2Frac:          envFloat("BT_TP2_FRAC", 0.25),
+		TP3Frac:          envFloat("BT_TP3_FRAC", 0.20),
+		TrailAfterTP:     envInt("BT_TRAIL_AFTER_TP", 3),
+		TrailStopPct:     envFloat("BT_TRAIL_STOP_PCT", 1.50),
+		TrailStopPctTP3:  envFloat("BT_TRAIL_STOP_PCT_TP3", 3.25),
+		TrailPctMin:      envFloat("BT_TRAIL_PCT_MIN", 1.50),
+		BELockBps:        envFloat("BT_BE_LOCK_BPS", 5.0),
+		MaxHoldBars:      envInt("BT_MAX_HOLD_BARS", 120),
 	}
 	outRoot := envStr("BT_OUT_DIR", "out/backtests")
 	from := parseDate(envStr("BT_FROM", ""))

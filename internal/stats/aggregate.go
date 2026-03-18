@@ -24,35 +24,40 @@ type CountRow struct {
 }
 
 type Report struct {
-	Simulated   bool
-	TotalTrades int
-	Wins        int
-	Losses      int
-	WinRate     float64
-	AvgWin      float64
-	AvgLoss     float64
-	Expectancy  float64
-	ProfitFac   float64
-	MaxDrawdown float64
-	AvgR        float64
-	MedianR     float64
-	Signals     int
-	Entries     int
-	Rejects     int
-	Missed      int
-	LeaderMiss  int
-	WatchToEntry float64
-	AvgHoldMin  float64
-	AvgMFER     float64
-	AvgMAER     float64
-	Fees        float64
-	Slippage    float64
-	FundingPnL  float64
-	ByStrategy  []Row
-	BySymbol    []Row
-	ByReject    []CountRow
-	ByExit      []CountRow
-	ByMissCat   []CountRow
+	Simulated      bool
+	TotalTrades    int
+	Wins           int
+	Losses         int
+	WinRate        float64
+	AvgWin         float64
+	AvgLoss        float64
+	Expectancy     float64
+	ProfitFac      float64
+	MaxDrawdown    float64
+	AvgR           float64
+	MedianR        float64
+	Signals        int
+	Entries        int
+	Rejects        int
+	Missed         int
+	LeaderMiss     int
+	WatchToEntry   float64
+	AvgHoldMin     float64
+	AvgMFER        float64
+	AvgMAER        float64
+	Fees           float64
+	Slippage       float64
+	FundingPnL     float64
+	AvgLoopMs      float64
+	CacheHits      int64
+	CacheMisses    int64
+	CacheHitRate   float64
+	CacheEvictions int64
+	ByStrategy     []Row
+	BySymbol       []Row
+	ByReject       []CountRow
+	ByExit         []CountRow
+	ByMissCat      []CountRow
 }
 
 func Aggregate(events []Event) Report {
@@ -74,6 +79,8 @@ func Aggregate(events []Event) Report {
 	mfeN := 0
 	maeSum := 0.0
 	maeN := 0
+	loopSum := 0.0
+	loopN := 0
 	for _, e := range events {
 		if e.Simulated {
 			r.Simulated = true
@@ -107,6 +114,14 @@ func Aggregate(events []Event) Report {
 			if e.Discovery >= 0.85 || e.Score >= 90 {
 				r.LeaderMiss++
 			}
+		case "METRICS_SNAPSHOT":
+			if e.LoopMs > 0 {
+				loopSum += e.LoopMs
+				loopN++
+			}
+			r.CacheHits += e.CacheHits
+			r.CacheMisses += e.CacheMisses
+			r.CacheEvictions += e.CacheEvictions
 		}
 		if e.Type != "POSITION_CLOSE" {
 			continue
@@ -188,6 +203,12 @@ func Aggregate(events []Event) Report {
 	}
 	if maeN > 0 {
 		r.AvgMAER = maeSum / float64(maeN)
+	}
+	if loopN > 0 {
+		r.AvgLoopMs = loopSum / float64(loopN)
+	}
+	if totalCache := r.CacheHits + r.CacheMisses; totalCache > 0 {
+		r.CacheHitRate = (100.0 * float64(r.CacheHits)) / float64(totalCache)
 	}
 	r.MaxDrawdown = maxDrawdown(pnlSeq)
 	if len(rs) > 0 {

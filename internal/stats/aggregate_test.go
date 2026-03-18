@@ -11,6 +11,7 @@ func TestAggregate(t *testing.T) {
 		{Timestamp: now, Type: "SIGNAL", Symbol: "BTCUSDT", Simulated: true},
 		{Timestamp: now, Type: "POSITION_OPEN", Symbol: "BTCUSDT", Simulated: true},
 		{Timestamp: now, Type: "GATE_DECISION", Symbol: "ETHUSDT", Simulated: true, GateAllow: boolPtr(false), GateReasons: []string{"meta_quality"}},
+		{Timestamp: now, Type: "METRICS_SNAPSHOT", Simulated: true, LoopMs: 42, CacheHits: 9, CacheMisses: 3, CacheEvictions: 1},
 		{Timestamp: now, Type: "MISSED_OPPORTUNITY", Symbol: "SOLUSDT", Simulated: true, MissCategory: "architecture_miss", Discovery: 0.9},
 		{Timestamp: now, Type: "POSITION_CLOSE", Symbol: "BTCUSDT", Strategy: "vwap", Reason: "TP2", PnLUSD: 10, RiskR: 1.2, HoldMin: 14, MFER: 2.1, MAER: 0.4, Simulated: true},
 		{Timestamp: now.Add(time.Minute), Type: "POSITION_CLOSE", Symbol: "BTCUSDT", Strategy: "vwap", Reason: "SL", PnLUSD: -5, RiskR: -1.0, HoldMin: 8, MFER: 0.3, MAER: 1.0, Simulated: true},
@@ -37,6 +38,9 @@ func TestAggregate(t *testing.T) {
 	}
 	if len(r.ByReject) == 0 || len(r.ByExit) == 0 || len(r.ByMissCat) == 0 {
 		t.Fatalf("expected reject/exit/miss breakdowns")
+	}
+	if r.AvgLoopMs <= 0 || r.CacheHitRate <= 0 || r.CacheEvictions != 1 {
+		t.Fatalf("expected perf/cache metrics, got %+v", r)
 	}
 }
 
