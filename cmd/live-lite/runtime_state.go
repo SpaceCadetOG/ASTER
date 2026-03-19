@@ -275,6 +275,57 @@ func classifySponsorship(side, symbol string, mom map[string]momentumView, flow 
 	return out
 }
 
+func sponsorshipStateStrong(st inplay.State) bool {
+	switch st {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRefreshConfluence(side string, snap sponsorshipSnapshot, strongStreak int, prevSponsored bool, prevScore float64) bool {
+	if !envBool("LIVE_EXIT_CONFLUENCE_REFRESH_ENABLE", true) {
+		return false
+	}
+	if !snap.Sponsored || !sponsorshipStateStrong(snap.State) {
+		return false
+	}
+	if snap.Score < envFloat("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_SCORE", 0.78) {
+		return false
+	}
+	minSlope := envFloat("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_SLOPE", 0.05)
+	if strings.EqualFold(side, "BUY") {
+		if snap.Slope < minSlope {
+			return false
+		}
+	} else {
+		if snap.Slope > -minSlope {
+			return false
+		}
+	}
+	minStreak := envInt("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_STREAK", 2)
+	minDelta := envFloat("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_SCORE_DELTA", 0.04)
+	if !prevSponsored {
+		return true
+	}
+	if strongStreak == minStreak {
+		return true
+	}
+	return snap.Score >= prevScore+minDelta
+}
+
+func confluenceRefreshActive(now, last time.Time) bool {
+	if last.IsZero() {
+		return false
+	}
+	hold := time.Duration(envInt("LIVE_EXIT_CONFLUENCE_REFRESH_HOLD_MIN", 20)) * time.Minute
+	if hold <= 0 {
+		return false
+	}
+	return now.Sub(last) <= hold
+}
+
 func updatePaperSponsorship(pos *paperPosition, snap sponsorshipSnapshot) {
 	if pos == nil {
 		return
@@ -290,6 +341,20 @@ func updatePaperSponsorship(pos *paperPosition, snap sponsorshipSnapshot) {
 	pos.StrongSponsorStreak = 0
 }
 
+func maybeRefreshPaperConfluence(now time.Time, pos *paperPosition, snap sponsorshipSnapshot, prevSponsored bool, prevScore float64) bool {
+	if pos == nil || !shouldRefreshConfluence(pos.Side, snap, pos.StrongSponsorStreak, prevSponsored, prevScore) {
+		return false
+	}
+	minGap := time.Duration(envInt("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_GAP_MIN", 5)) * time.Minute
+	if !pos.LastConfluenceRefresh.IsZero() && now.Sub(pos.LastConfluenceRefresh) < minGap {
+		return false
+	}
+	pos.LastConfluenceRefresh = now
+	pos.ConfluenceRefreshCount++
+	pos.WeakSponsorStreak = 0
+	return true
+}
+
 func updateLiveSponsorship(pos *livePosition, snap sponsorshipSnapshot) {
 	if pos == nil {
 		return
@@ -303,6 +368,20 @@ func updateLiveSponsorship(pos *livePosition, snap sponsorshipSnapshot) {
 	}
 	pos.WeakSponsorStreak++
 	pos.StrongSponsorStreak = 0
+}
+
+func maybeRefreshLiveConfluence(now time.Time, pos *livePosition, snap sponsorshipSnapshot, prevSponsored bool, prevScore float64) bool {
+	if pos == nil || !shouldRefreshConfluence(pos.Side, snap, pos.StrongSponsorStreak, prevSponsored, prevScore) {
+		return false
+	}
+	minGap := time.Duration(envInt("LIVE_EXIT_CONFLUENCE_REFRESH_MIN_GAP_MIN", 5)) * time.Minute
+	if !pos.LastConfluenceRefresh.IsZero() && now.Sub(pos.LastConfluenceRefresh) < minGap {
+		return false
+	}
+	pos.LastConfluenceRefresh = now
+	pos.ConfluenceRefreshCount++
+	pos.WeakSponsorStreak = 0
+	return true
 }
 
 func parseOrderProgress(o map[string]any) orderProgress {

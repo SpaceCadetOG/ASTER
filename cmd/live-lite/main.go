@@ -385,6 +385,8 @@ type paperPosition struct {
 	SponsorshipScore    float64
 	WeakSponsorStreak   int
 	StrongSponsorStreak int
+	LastConfluenceRefresh time.Time
+	ConfluenceRefreshCount int
 	EntryVolumeUSD      float64
 	OpposingFriction    float64
 	StopReason          string
@@ -572,6 +574,8 @@ type livePosition struct {
 	SponsorshipScore    float64   `json:"sponsorshipScore,omitempty"`
 	WeakSponsorStreak   int       `json:"weakSponsorStreak,omitempty"`
 	StrongSponsorStreak int       `json:"strongSponsorStreak,omitempty"`
+	LastConfluenceRefresh time.Time `json:"lastConfluenceRefresh,omitempty"`
+	ConfluenceRefreshCount int      `json:"confluenceRefreshCount,omitempty"`
 	EntryTags           []string  `json:"entryTags,omitempty"`
 	EntryReasons        []string  `json:"entryReasons,omitempty"`
 	EntryVolumeUSD      float64   `json:"entryVolumeUsd,omitempty"`
@@ -5803,8 +5807,15 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			} else if updated {
 				changed = true
 			}
+			prevSponsored := p.Sponsored
+			prevSponsorScore := p.SponsorshipScore
 			sponsorSnap := classifySponsorship(p.Side, p.Symbol, mom, flow)
 			updateLiveSponsorship(p, sponsorSnap)
+			if maybeRefreshLiveConfluence(now, p, sponsorSnap, prevSponsored, prevSponsorScore) {
+				fmt.Printf("live-lite: confluence refresh %s %s score=%.2f slope=%.3f state=%s count=%d\n",
+					p.Symbol, p.Side, sponsorSnap.Score, sponsorSnap.Slope, sponsorSnap.State, p.ConfluenceRefreshCount)
+				changed = true
+			}
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
@@ -6427,6 +6438,9 @@ func (m *liveExecManager) calcTrailStopForPosition(p *livePosition, sideBuy bool
 				dist *= envFloat("LIVE_TRAIL_WEAK_SPONSOR_MULT", 0.75)
 			}
 		}
+		if confluenceRefreshActive(time.Now().UTC(), p.LastConfluenceRefresh) {
+			dist *= envFloat("LIVE_TRAIL_CONFLUENCE_REFRESH_MULT", 1.30)
+		}
 	}
 	if postTP3 {
 		if p != nil && p.Sponsored {
@@ -6588,6 +6602,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		}
 		sponsored := isSponsoredMomentum(p.Side, mv, sponsorMinScore, sponsorMinSlope)
 		if sponsored && now.Sub(p.CreatedAt) < sponsorFadeHoldMin {
+			continue
+		}
+		if confluenceRefreshActive(now, p.LastConfluenceRefresh) {
 			continue
 		}
 		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
@@ -7738,8 +7755,14 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
+		prevSponsored := pos.Sponsored
+		prevSponsorScore := pos.SponsorshipScore
 		sponsorSnap := classifySponsorship(pos.Side, raw, mom, flow)
 		updatePaperSponsorship(pos, sponsorSnap)
+		if maybeRefreshPaperConfluence(now, pos, sponsorSnap, prevSponsored, prevSponsorScore) {
+			fmt.Printf("paper: confluence refresh %s %s score=%.2f slope=%.3f state=%s count=%d\n",
+				raw, pos.Side, sponsorSnap.Score, sponsorSnap.Slope, sponsorSnap.State, pos.ConfluenceRefreshCount)
+		}
 		stopCheckPx := triggerPriceForRef(p.stopTriggerRef, markPx, lastPx)
 		tpCheckPx := triggerPriceForRef(p.tpTriggerRef, markPx, lastPx)
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
@@ -7914,6 +7937,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		}
 		sponsored := isSponsoredMomentum(pos.Side, mv, sponsorMinScore, sponsorMinSlope)
 		if sponsored && now.Sub(pos.OpenedAt) < sponsorFadeHoldMin {
+			continue
+		}
+		if confluenceRefreshActive(now, pos.LastConfluenceRefresh) {
 			continue
 		}
 		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
@@ -8477,6 +8503,9 @@ func (p *paperTrader) calcTrailStopForPosition(pos *paperPosition, sideBuy bool,
 			if pos.WeakSponsorStreak >= envInt("LIVE_TRAIL_WEAK_SPONSOR_STREAK", 2) {
 				dist *= envFloat("LIVE_TRAIL_WEAK_SPONSOR_MULT", 0.75)
 			}
+		}
+		if confluenceRefreshActive(time.Now().UTC(), pos.LastConfluenceRefresh) {
+			dist *= envFloat("LIVE_TRAIL_CONFLUENCE_REFRESH_MULT", 1.30)
 		}
 	}
 	if postTP3 {
