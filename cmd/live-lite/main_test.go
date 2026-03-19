@@ -224,6 +224,71 @@ func TestOrderbookEntryDecisionReasons(t *testing.T) {
 	}
 }
 
+func TestContinuationGuardReasonBlocksExhaustion(t *testing.T) {
+	cfg := entryQualityConfig{BlockContExhaustion: true, DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		TriggerState: "OF_EXHAUSTION",
+		DayUTC24h:    31,
+		Entry:        inplay.Entry{EntryStyle: "continuation_fast"},
+	}
+	if got := continuationGuardReason(c, cfg); got != "continuation_exhausted" {
+		t.Fatalf("expected continuation_exhausted, got %q", got)
+	}
+}
+
+func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
+	mem := map[string]*sessionChurn{}
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	c := candidate{
+		Side:      "BUY",
+		Strat:     "continuation_fast",
+		DayUTC24h: 28,
+		Entry:     inplay.Entry{Symbol: "LYNUSDT", EntryStyle: "continuation_fast"},
+	}
+	markSessionStop(mem, now.Add(-20*time.Minute), "LYNUSDT", "BUY", 5, -3.1, 28)
+	markSessionStop(mem, now.Add(-10*time.Minute), "LYNUSDT", "BUY", 6, -2.8, 31)
+	if got := churnRejectReason(mem, now, c); got != "extended_reentry_lock" {
+		t.Fatalf("expected extended_reentry_lock, got %q", got)
+	}
+}
+
+func TestActiveWinnerRejectReasonPrefersOpenWinner(t *testing.T) {
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	execMgr := &liveExecManager{positions: map[string]*livePosition{
+		"DEGOUSDT": {
+			Symbol:                "DEGOUSDT",
+			Side:                  "SELL",
+			State:                 execOpen,
+			EntryPrice:            0.70,
+			RemainingQty:          10,
+			LastMark:              0.66,
+			Sponsored:             true,
+			LastConfluenceRefresh: now.Add(-2 * time.Minute),
+			EntrySource:           "BOT",
+		},
+	}}
+	longCurrent := map[string]inplay.Entry{
+		"LYNUSDT": {Symbol: "LYNUSDT", CurrentScore: 96},
+	}
+	shortCurrent := map[string]inplay.Entry{
+		"DEGOUSDT": {Symbol: "DEGOUSDT", CurrentScore: 108},
+	}
+	meta := map[string]symbolMeta{
+		"DEGOUSDT": {LastPrice: 0.66},
+		"LYNUSDT":  {LastPrice: 0.09},
+	}
+	c := candidate{
+		Side:  "BUY",
+		Conf:  0.72,
+		Entry: inplay.Entry{Symbol: "LYNUSDT", CurrentScore: 95},
+	}
+	if got := activeWinnerRejectReason(now, c, execMgr, nil, meta, longCurrent, shortCurrent); got != "active_winner_stronger" {
+		t.Fatalf("expected active_winner_stronger, got %q", got)
+	}
+}
+
 func TestComputeEntryScoreBreakdown(t *testing.T) {
 	c := candidate{
 		Entry: inplay.Entry{
@@ -480,5 +545,98 @@ func TestPayoutFallbackRunsOnceAndRollsCycle(t *testing.T) {
 	pm.maybeRun(nowLocal.UTC(), nowLocal, eod, ms, paper, map[string]symbolMeta{}, accountSnapshot{}, nil, nil)
 	if paper.balance != balAfter {
 		t.Fatalf("expected idempotent second run")
+	}
+}
+
+func TestMergeLiveAccountSnapshotTracksBotAndManual(t *testing.T) {
+	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	m := &liveExecManager{
+		reportLoc:   time.UTC,
+		dayRealized: map[string]float64{"2026-03-19": 1.25},
+		positions: map[string]*livePosition{
+			"BTCUSDT": {
+				Symbol:      "BTCUSDT",
+				Side:        "SELL",
+				State:       execOpen,
+				CreatedAt:   now.Add(-15 * time.Minute),
+				EntrySource: "BOT",
+				EntryReason: "continuation_fast",
+				StopPrice:   102,
+			},
+		},
+		marketStates: map[string]*aster.MarketState{},
+	}
+	acct := accountSnapshot{
+		AvailableUSDT: 100,
+		Positions: []positionView{
+			{Symbol: "BTCUSDT", Side: "SHORT", Margin: 20, SizeAbs: 0.01, Entry: 100, Mark: 99, Unreal: 1.0, Leverage: 5},
+			{Symbol: "ETHUSDT", Side: "LONG", Margin: 30, SizeAbs: 0.02, Entry: 2000, Mark: 2010, Unreal: 0.2, Leverage: 4},
+		},
+	}
+	got := m.mergeLiveAccountSnapshot(now, acct)
+	if got.OpenCount != 2 {
+		t.Fatalf("expected 2 open positions, got %d", got.OpenCount)
+	}
+	if got.BotCount != 1 || got.ManualCount != 1 {
+		t.Fatalf("expected bot/manual counts 1/1, got %d/%d", got.BotCount, got.ManualCount)
+	}
+	if got.Positions[0].Symbol != "ETHUSDT" && got.Positions[0].Symbol != "BTCUSDT" {
+		t.Fatalf("unexpected position ordering: %+v", got.Positions)
+	}
+	var btc, eth *liveAccountPosition
+	for i := range got.Positions {
+		switch got.Positions[i].Symbol {
+		case "BTCUSDT":
+			btc = &got.Positions[i]
+		case "ETHUSDT":
+			eth = &got.Positions[i]
+		}
+	}
+	if btc == nil || eth == nil {
+		t.Fatalf("expected both BTC and ETH positions: %+v", got.Positions)
+	}
+	if btc.Source != "BOT" {
+		t.Fatalf("expected BTC source BOT, got %s", btc.Source)
+	}
+	if btc.StopPrice != 102 {
+		t.Fatalf("expected BTC stop copied from local position, got %.4f", btc.StopPrice)
+	}
+	if eth.Source != "MANUAL" {
+		t.Fatalf("expected ETH source MANUAL, got %s", eth.Source)
+	}
+}
+
+func TestLiveAccountSnapshotRespectsLimit(t *testing.T) {
+	m := &liveExecManager{
+		liveAccount: liveAccountSnapshot{
+			Positions: []liveAccountPosition{
+				{Symbol: "A"},
+				{Symbol: "B"},
+				{Symbol: "C"},
+			},
+		},
+	}
+	got := m.LiveAccountSnapshot(2)
+	if len(got.Positions) != 2 {
+		t.Fatalf("expected 2 positions, got %d", len(got.Positions))
+	}
+	if got.Positions[0].Symbol != "A" || got.Positions[1].Symbol != "B" {
+		t.Fatalf("unexpected limited ordering: %+v", got.Positions)
+	}
+}
+
+func TestLivePositionBySymbolNormalizesRawSymbol(t *testing.T) {
+	m := &liveExecManager{
+		liveAccount: liveAccountSnapshot{
+			Positions: []liveAccountPosition{
+				{Symbol: "BTCUSDT"},
+			},
+		},
+	}
+	if _, ok := m.LivePositionBySymbol("BTC"); !ok {
+		t.Fatalf("expected BTC to resolve to BTCUSDT position")
+	}
+	if _, ok := m.LivePositionBySymbol("ETHUSDT"); ok {
+		t.Fatalf("did not expect ETHUSDT position")
 	}
 }

@@ -1,13 +1,20 @@
 package notify
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildPositionCard(t *testing.T) {
 	msg := BuildPositionCard(PositionCard{
 		Symbol:           "BTCUSDT",
 		Side:             "BUY",
+		Source:           "MANUAL",
+		Qty:              0.25,
 		EntryPrice:       100,
 		MarkPrice:        101,
+		LastPrice:        101.2,
+		SpreadBps:        3.2,
 		UnrealizedPnL:    3.2,
 		UnrealizedPnLPct: 1.2,
 		Leverage:         3,
@@ -19,6 +26,9 @@ func TestBuildPositionCard(t *testing.T) {
 	})
 	if msg == "" || msg[0] != '<' {
 		t.Fatalf("expected html-style message, got %q", msg)
+	}
+	if !strings.Contains(msg, "MANUAL") || !strings.Contains(msg, "Qty") || !strings.Contains(msg, "Last") {
+		t.Fatalf("expected richer live fields in card, got %q", msg)
 	}
 }
 

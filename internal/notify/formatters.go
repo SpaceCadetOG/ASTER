@@ -22,8 +22,12 @@ type PulseSnapshot struct {
 type PositionCard struct {
 	Symbol           string
 	Side             string
+	Source           string
+	Qty              float64
 	EntryPrice       float64
 	MarkPrice        float64
+	LastPrice        float64
+	SpreadBps        float64
 	UnrealizedPnL    float64
 	UnrealizedPnLPct float64
 	Leverage         int
@@ -72,16 +76,33 @@ func BuildPositionCard(p PositionCard) string {
 	if p.Leverage <= 0 {
 		p.Leverage = 1
 	}
+	priceLine := fmt.Sprintf("• <b>Price:</b> %.4f → %.4f (<b>%+.2f%%</b>)", p.EntryPrice, p.MarkPrice, p.UnrealizedPnLPct)
+	if p.LastPrice > 0 {
+		priceLine = fmt.Sprintf("• <b>Price:</b> %.4f → %.4f | <b>Last:</b> %.4f (<b>%+.2f%%</b>)", p.EntryPrice, p.MarkPrice, p.LastPrice, p.UnrealizedPnLPct)
+	}
+	pnlLine := fmt.Sprintf("• <b>PnL:</b> %s$%.2f | <b>Lev:</b> %dx", pnlEmoji(p.UnrealizedPnL), p.UnrealizedPnL, p.Leverage)
+	if p.Qty > 0 {
+		pnlLine = fmt.Sprintf("• <b>PnL:</b> %s$%.2f | <b>Qty:</b> %.6f | <b>Lev:</b> %dx", pnlEmoji(p.UnrealizedPnL), p.UnrealizedPnL, p.Qty, p.Leverage)
+	}
+	setupLine := fmt.Sprintf("• <b>Setup:</b> <code>%s</code> (Conf: %.0f%%) | <b>Age:</b> %dm", setup, p.Confluence*100.0, p.AgeMin)
+	if strings.TrimSpace(p.Source) != "" || p.SpreadBps > 0 {
+		parts := make([]string, 0, 2)
+		if strings.TrimSpace(p.Source) != "" {
+			parts = append(parts, fmt.Sprintf("<b>Src:</b> %s", strings.ToUpper(strings.TrimSpace(p.Source))))
+		}
+		if p.SpreadBps > 0 {
+			parts = append(parts, fmt.Sprintf("<b>Spread:</b> %.1fbps", p.SpreadBps))
+		}
+		setupLine = setupLine + " | " + strings.Join(parts, " | ")
+	}
 	return strings.TrimSpace(fmt.Sprintf(
 		"<b>📦 ACTIVE: %s (%s)</b>\n"+
-			"• <b>Price:</b> %.4f → %.4f (<b>%+.2f%%</b>)\n"+
-			"• <b>PnL:</b> %s$%.2f | <b>Lev:</b> %dx\n"+
-			"• <b>Setup:</b> <code>%s</code> (Conf: %.0f%%) | <b>Age:</b> %dm\n"+
+			"%s\n"+
+			"%s\n"+
+			"%s\n"+
 			"• <b>Safety:</b> SL: %.4f | TP: %.4f",
 		strings.ToUpper(strings.TrimSpace(p.Symbol)), direction,
-		p.EntryPrice, p.MarkPrice, p.UnrealizedPnLPct,
-		pnlEmoji(p.UnrealizedPnL), p.UnrealizedPnL, p.Leverage,
-		setup, p.Confluence*100.0, p.AgeMin, p.StopLoss, p.TakeProfit,
+		priceLine, pnlLine, setupLine, p.StopLoss, p.TakeProfit,
 	))
 }
 

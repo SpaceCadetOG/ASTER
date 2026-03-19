@@ -20,6 +20,9 @@ type Config struct {
 	SponsorshipGraceMin    int
 	UnsponsoredTightenR    float64
 	UnsponsoredWeakStreak  int
+	TightenAfterConfirm    bool
+	RequireStructureLoss   bool
+	ProfitLockTightenR     float64
 }
 
 type Manager struct {
@@ -98,6 +101,9 @@ func NewManager(cfg Config) *Manager {
 	if cfg.UnsponsoredWeakStreak <= 0 {
 		cfg.UnsponsoredWeakStreak = 2
 	}
+	if cfg.ProfitLockTightenR <= 0 {
+		cfg.ProfitLockTightenR = 0.35
+	}
 	return &Manager{cfg: cfg}
 }
 
@@ -149,6 +155,13 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.WeakFlow &&
 		in.UnrealizedPct <= profitGivebackPct &&
 		!(in.Sponsored && !in.HitTP3) {
+		if m.cfg.TightenAfterConfirm && (in.HitTP1 || in.HitTP2 || in.HitTP3) {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, m.cfg.ProfitLockTightenR)
+			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
+			return dec
+		}
 		dec.FullExit = true
 		dec.Reason = "PROFIT_GIVEBACK"
 		return dec

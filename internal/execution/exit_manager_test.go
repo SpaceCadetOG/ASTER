@@ -61,6 +61,24 @@ func TestEvaluateProtectProfitGiveback(t *testing.T) {
 	}
 }
 
+func TestEvaluateProtectProfitGivebackTightensAfterConfirm(t *testing.T) {
+	m := NewManager(Config{ProfitLockArmR: 0.6, ProfitGivebackPct: 0.25, TightenAfterConfirm: true, ProfitLockTightenR: 0.35})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:          "BUY",
+		Entry:         100,
+		Stop:          98,
+		Mark:          100.1,
+		MFER:          0.8,
+		MAER:          0.4,
+		WeakFlow:      true,
+		UnrealizedPct: 0.10,
+		HitTP1:        true,
+	})
+	if dec.FullExit || !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "PROFIT_GIVEBACK_TIGHTEN" {
+		t.Fatalf("expected tighten-after-confirm decision, got %+v", dec)
+	}
+}
+
 func TestEvaluateProtectSponsoredSkipsEarlyNoFollowThrough(t *testing.T) {
 	m := NewManager(Config{
 		NoFollowThroughBars:    6,

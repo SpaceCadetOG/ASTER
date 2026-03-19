@@ -45,6 +45,9 @@ type Report struct {
 	AvgHoldMin     float64
 	AvgMFER        float64
 	AvgMAER        float64
+	AvgCapture     float64
+	AvgGivebackR   float64
+	WinnerGiveback int
 	Fees           float64
 	Slippage       float64
 	FundingPnL     float64
@@ -79,6 +82,10 @@ func Aggregate(events []Event) Report {
 	mfeN := 0
 	maeSum := 0.0
 	maeN := 0
+	captureSum := 0.0
+	captureN := 0
+	givebackSum := 0.0
+	givebackN := 0
 	loopSum := 0.0
 	loopN := 0
 	for _, e := range events {
@@ -145,6 +152,17 @@ func Aggregate(events []Event) Report {
 			maeSum += e.MAER
 			maeN++
 		}
+		if e.CaptureRatio != 0 {
+			captureSum += e.CaptureRatio
+			captureN++
+		}
+		if e.MaxGivebackR != 0 {
+			givebackSum += e.MaxGivebackR
+			givebackN++
+			if e.PnLUSD <= 0 && e.MaxGivebackR >= 0.5 {
+				r.WinnerGiveback++
+			}
+		}
 		pnlSeq = append(pnlSeq, pnl)
 		if e.RiskR != 0 {
 			rs = append(rs, e.RiskR)
@@ -203,6 +221,12 @@ func Aggregate(events []Event) Report {
 	}
 	if maeN > 0 {
 		r.AvgMAER = maeSum / float64(maeN)
+	}
+	if captureN > 0 {
+		r.AvgCapture = captureSum / float64(captureN)
+	}
+	if givebackN > 0 {
+		r.AvgGivebackR = givebackSum / float64(givebackN)
 	}
 	if loopN > 0 {
 		r.AvgLoopMs = loopSum / float64(loopN)

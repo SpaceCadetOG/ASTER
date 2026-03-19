@@ -79,6 +79,7 @@ type candidate struct {
 	LifecycleStage string
 	LifecycleScans int
 	StopPlan       exitmgr.HybridStopResult
+	StructureFresh bool
 }
 
 type entryQualityConfig struct {
@@ -107,7 +108,30 @@ type entryQualityConfig struct {
 	DayUTCWeight         float64
 	DayUTCMinAbsPct      float64
 	DayUTCScalePct       float64
+	BlockContExhaustion  bool
+	DayUTCMaturityBrake  bool
+	DayUTCMaturityPct    float64
+	RequireFreshPullback bool
 }
+
+type sessionChurn struct {
+	DayKey         string
+	EntryCount     int
+	StopCount      int
+	QuickLossCount int
+	LastEntryAt    time.Time
+	LastStopAt     time.Time
+	LastStyle      string
+	LastDayUTCPct  float64
+}
+
+type protectionStage int
+
+const (
+	protectionStageNone protectionStage = iota
+	protectionStageArmed
+	protectionStageLocked
+)
 
 type candidateLifecycleConfig struct {
 	Enable        bool
@@ -156,6 +180,47 @@ type accountSnapshot struct {
 	AvailableUSDT float64
 	Balances      []aster.Balance
 	Positions     []positionView
+}
+
+type livePriceQuote struct {
+	Symbol    string
+	MarkPrice float64
+	LastPrice float64
+	BidPrice  float64
+	AskPrice  float64
+	SpreadBps float64
+	UpdatedAt time.Time
+}
+
+type liveAccountPosition struct {
+	Symbol           string
+	Side             string
+	Source           string
+	Qty              float64
+	EntryPrice       float64
+	MarkPrice        float64
+	LastPrice        float64
+	SpreadBps        float64
+	UnrealizedPnL    float64
+	UnrealizedPnLPct float64
+	ExchangeUnreal   float64
+	Leverage         int
+	Margin           float64
+	StopPrice        float64
+	HoldMin          float64
+	EntryReason      string
+}
+
+type liveAccountSnapshot struct {
+	Generated     time.Time
+	AvailableUSDT float64
+	Equity        float64
+	RealizedDay   float64
+	OpenPnL       float64
+	OpenCount     int
+	BotCount      int
+	ManualCount   int
+	Positions     []liveAccountPosition
 }
 
 type safetyConfig struct {
@@ -349,49 +414,54 @@ var (
 )
 
 type paperPosition struct {
-	Symbol              string
-	Side                string
-	Entry               float64
-	Qty                 float64 // remaining qty
-	InitialQty          float64
-	Margin              float64
-	Leverage            int
-	Stop                float64
-	TP1                 float64
-	TP2                 float64
-	TP3                 float64
-	HitTP1              bool
-	HitTP2              bool
-	HitTP3              bool
-	TrailOn             bool
-	TrailStop           float64
-	TrailRef            float64
-	Realized            float64
-	OpenedAt            time.Time
-	MaxFavorableR       float64
-	MaxAdverseR         float64
-	LastMark            float64
-	EntryReason         string
-	EntryGrade          string
-	EntryState          inplay.State
-	EntryTrigger        string
-	ExitProfile         string
-	EntryConf           float64
-	DiscoveryScore      float64
-	TriggerScore        float64
-	ExecutionScore      float64
-	CombinedScore       float64
-	Sponsored           bool
-	SponsorshipScore    float64
-	WeakSponsorStreak   int
-	StrongSponsorStreak int
-	LastConfluenceRefresh time.Time
+	Symbol                 string
+	Side                   string
+	Entry                  float64
+	Qty                    float64 // remaining qty
+	InitialQty             float64
+	Margin                 float64
+	Leverage               int
+	Stop                   float64
+	TP1                    float64
+	TP2                    float64
+	TP3                    float64
+	HitTP1                 bool
+	HitTP2                 bool
+	HitTP3                 bool
+	TrailOn                bool
+	TrailStop              float64
+	TrailRef               float64
+	Realized               float64
+	OpenedAt               time.Time
+	MaxFavorableR          float64
+	MaxAdverseR            float64
+	LastMark               float64
+	EntryReason            string
+	EntryGrade             string
+	EntryState             inplay.State
+	EntryTrigger           string
+	ExitProfile            string
+	EntryConf              float64
+	DiscoveryScore         float64
+	TriggerScore           float64
+	ExecutionScore         float64
+	CombinedScore          float64
+	Sponsored              bool
+	SponsorshipScore       float64
+	WeakSponsorStreak      int
+	StrongSponsorStreak    int
+	LastConfluenceRefresh  time.Time
 	ConfluenceRefreshCount int
-	EntryVolumeUSD      float64
-	OpposingFriction    float64
-	StopReason          string
-	StopDistancePct     float64
-	StallBars           int
+	EntryVolumeUSD         float64
+	OpposingFriction       float64
+	StopReason             string
+	StopDistancePct        float64
+	StallBars              int
+	ProtectionStage        protectionStage
+	FirstProtectAt         time.Time
+	ProtectedStop          float64
+	MaxGivebackR           float64
+	CaptureRatio           float64
 }
 
 type paperTrader struct {
@@ -515,80 +585,85 @@ const (
 )
 
 type livePosition struct {
-	Symbol              string    `json:"symbol"`
-	Side                string    `json:"side"`
-	State               execState `json:"state"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	ClosedAt            time.Time `json:"closedAt,omitempty"`
-	CloseReason         string    `json:"closeReason,omitempty"`
-	EntryOrderID        int64     `json:"entryOrderId"`
-	EntryPrice          float64   `json:"entryPrice"`
-	Qty                 float64   `json:"qty"`
-	FilledQty           float64   `json:"filledQty"`
-	RemainingQty        float64   `json:"remainingQty"`
-	Margin              float64   `json:"margin"`
-	Leverage            int       `json:"leverage"`
-	StopPrice           float64   `json:"stopPrice"`
-	TP1Price            float64   `json:"tp1Price"`
-	TP2Price            float64   `json:"tp2Price"`
-	TP3Price            float64   `json:"tp3Price"`
-	TP1Qty              float64   `json:"tp1Qty"`
-	TP2Qty              float64   `json:"tp2Qty"`
-	TP3Qty              float64   `json:"tp3Qty"`
-	TP1FilledQty        float64   `json:"tp1FilledQty,omitempty"`
-	TP2FilledQty        float64   `json:"tp2FilledQty,omitempty"`
-	TP3FilledQty        float64   `json:"tp3FilledQty,omitempty"`
-	StopFilledQty       float64   `json:"stopFilledQty,omitempty"`
-	HitTP1              bool      `json:"hitTp1,omitempty"`
-	HitTP2              bool      `json:"hitTp2,omitempty"`
-	HitTP3              bool      `json:"hitTp3,omitempty"`
-	StopOrderID         int64     `json:"stopOrderId"`
-	TP1OrderID          int64     `json:"tp1OrderId"`
-	TP2OrderID          int64     `json:"tp2OrderId"`
-	TP3OrderID          int64     `json:"tp3OrderId"`
-	TrailOn             bool      `json:"trailOn"`
-	TrailRef            float64   `json:"trailRef"`
-	TrailStop           float64   `json:"trailStop"`
-	VPSetup             string    `json:"vpSetup,omitempty"`
-	VPLevel             float64   `json:"vpLevel,omitempty"`
-	VPTargetLevel       float64   `json:"vpTargetLevel,omitempty"`
-	VPStopMode          string    `json:"vpStopMode,omitempty"`
-	VPTargetMode        string    `json:"vpTargetMode,omitempty"`
-	RejectReason        string    `json:"rejectReason,omitempty"`
-	CustomRiskPct       float64   `json:"customRiskPct,omitempty"`
-	CustomTP1R          float64   `json:"customTp1R,omitempty"`
-	CustomTP2R          float64   `json:"customTp2R,omitempty"`
-	EntryReason         string    `json:"entryReason,omitempty"`
-	EntrySource         string    `json:"entrySource,omitempty"`
-	EntryGrade          string    `json:"entryGrade,omitempty"`
-	EntryState          string    `json:"entryState,omitempty"`
-	EntryTrigger        string    `json:"entryTrigger,omitempty"`
-	ExitProfile         string    `json:"exitProfile,omitempty"`
-	EntryConf           float64   `json:"entryConf,omitempty"`
-	DiscoveryScore      float64   `json:"discoveryScore,omitempty"`
-	TriggerScore        float64   `json:"triggerScore,omitempty"`
-	ExecutionScore      float64   `json:"executionScore,omitempty"`
-	CombinedScore       float64   `json:"combinedScore,omitempty"`
-	Sponsored           bool      `json:"sponsored,omitempty"`
-	SponsorshipScore    float64   `json:"sponsorshipScore,omitempty"`
-	WeakSponsorStreak   int       `json:"weakSponsorStreak,omitempty"`
-	StrongSponsorStreak int       `json:"strongSponsorStreak,omitempty"`
-	LastConfluenceRefresh time.Time `json:"lastConfluenceRefresh,omitempty"`
-	ConfluenceRefreshCount int      `json:"confluenceRefreshCount,omitempty"`
-	EntryTags           []string  `json:"entryTags,omitempty"`
-	EntryReasons        []string  `json:"entryReasons,omitempty"`
-	EntryVolumeUSD      float64   `json:"entryVolumeUsd,omitempty"`
-	StopReason          string    `json:"stopReason,omitempty"`
-	StopDistancePct     float64   `json:"stopDistancePct,omitempty"`
-	RegimeTag           string    `json:"regimeTag,omitempty"`
-	MaxFavorableR       float64   `json:"maxFavorableR,omitempty"`
-	MaxAdverseR         float64   `json:"maxAdverseR,omitempty"`
-	StallBars           int       `json:"stallBars,omitempty"`
-	LastMark            float64   `json:"lastMark,omitempty"`
-	RealizedPnL         float64   `json:"realizedPnl,omitempty"`
-	UnknownEntryChecks  int       `json:"unknownEntryChecks,omitempty"`
-	UnknownExitChecks   int       `json:"unknownExitChecks,omitempty"`
+	Symbol                 string          `json:"symbol"`
+	Side                   string          `json:"side"`
+	State                  execState       `json:"state"`
+	CreatedAt              time.Time       `json:"createdAt"`
+	UpdatedAt              time.Time       `json:"updatedAt"`
+	ClosedAt               time.Time       `json:"closedAt,omitempty"`
+	CloseReason            string          `json:"closeReason,omitempty"`
+	EntryOrderID           int64           `json:"entryOrderId"`
+	EntryPrice             float64         `json:"entryPrice"`
+	Qty                    float64         `json:"qty"`
+	FilledQty              float64         `json:"filledQty"`
+	RemainingQty           float64         `json:"remainingQty"`
+	Margin                 float64         `json:"margin"`
+	Leverage               int             `json:"leverage"`
+	StopPrice              float64         `json:"stopPrice"`
+	TP1Price               float64         `json:"tp1Price"`
+	TP2Price               float64         `json:"tp2Price"`
+	TP3Price               float64         `json:"tp3Price"`
+	TP1Qty                 float64         `json:"tp1Qty"`
+	TP2Qty                 float64         `json:"tp2Qty"`
+	TP3Qty                 float64         `json:"tp3Qty"`
+	TP1FilledQty           float64         `json:"tp1FilledQty,omitempty"`
+	TP2FilledQty           float64         `json:"tp2FilledQty,omitempty"`
+	TP3FilledQty           float64         `json:"tp3FilledQty,omitempty"`
+	StopFilledQty          float64         `json:"stopFilledQty,omitempty"`
+	HitTP1                 bool            `json:"hitTp1,omitempty"`
+	HitTP2                 bool            `json:"hitTp2,omitempty"`
+	HitTP3                 bool            `json:"hitTp3,omitempty"`
+	StopOrderID            int64           `json:"stopOrderId"`
+	TP1OrderID             int64           `json:"tp1OrderId"`
+	TP2OrderID             int64           `json:"tp2OrderId"`
+	TP3OrderID             int64           `json:"tp3OrderId"`
+	TrailOn                bool            `json:"trailOn"`
+	TrailRef               float64         `json:"trailRef"`
+	TrailStop              float64         `json:"trailStop"`
+	VPSetup                string          `json:"vpSetup,omitempty"`
+	VPLevel                float64         `json:"vpLevel,omitempty"`
+	VPTargetLevel          float64         `json:"vpTargetLevel,omitempty"`
+	VPStopMode             string          `json:"vpStopMode,omitempty"`
+	VPTargetMode           string          `json:"vpTargetMode,omitempty"`
+	RejectReason           string          `json:"rejectReason,omitempty"`
+	CustomRiskPct          float64         `json:"customRiskPct,omitempty"`
+	CustomTP1R             float64         `json:"customTp1R,omitempty"`
+	CustomTP2R             float64         `json:"customTp2R,omitempty"`
+	EntryReason            string          `json:"entryReason,omitempty"`
+	EntrySource            string          `json:"entrySource,omitempty"`
+	EntryGrade             string          `json:"entryGrade,omitempty"`
+	EntryState             string          `json:"entryState,omitempty"`
+	EntryTrigger           string          `json:"entryTrigger,omitempty"`
+	ExitProfile            string          `json:"exitProfile,omitempty"`
+	EntryConf              float64         `json:"entryConf,omitempty"`
+	DiscoveryScore         float64         `json:"discoveryScore,omitempty"`
+	TriggerScore           float64         `json:"triggerScore,omitempty"`
+	ExecutionScore         float64         `json:"executionScore,omitempty"`
+	CombinedScore          float64         `json:"combinedScore,omitempty"`
+	Sponsored              bool            `json:"sponsored,omitempty"`
+	SponsorshipScore       float64         `json:"sponsorshipScore,omitempty"`
+	WeakSponsorStreak      int             `json:"weakSponsorStreak,omitempty"`
+	StrongSponsorStreak    int             `json:"strongSponsorStreak,omitempty"`
+	LastConfluenceRefresh  time.Time       `json:"lastConfluenceRefresh,omitempty"`
+	ConfluenceRefreshCount int             `json:"confluenceRefreshCount,omitempty"`
+	EntryTags              []string        `json:"entryTags,omitempty"`
+	EntryReasons           []string        `json:"entryReasons,omitempty"`
+	EntryVolumeUSD         float64         `json:"entryVolumeUsd,omitempty"`
+	StopReason             string          `json:"stopReason,omitempty"`
+	StopDistancePct        float64         `json:"stopDistancePct,omitempty"`
+	RegimeTag              string          `json:"regimeTag,omitempty"`
+	MaxFavorableR          float64         `json:"maxFavorableR,omitempty"`
+	MaxAdverseR            float64         `json:"maxAdverseR,omitempty"`
+	StallBars              int             `json:"stallBars,omitempty"`
+	LastMark               float64         `json:"lastMark,omitempty"`
+	RealizedPnL            float64         `json:"realizedPnl,omitempty"`
+	UnknownEntryChecks     int             `json:"unknownEntryChecks,omitempty"`
+	UnknownExitChecks      int             `json:"unknownExitChecks,omitempty"`
+	ProtectionStage        protectionStage `json:"protectionStage,omitempty"`
+	FirstProtectAt         time.Time       `json:"firstProtectAt,omitempty"`
+	ProtectedStop          float64         `json:"protectedStop,omitempty"`
+	MaxGivebackR           float64         `json:"maxGivebackR,omitempty"`
+	CaptureRatio           float64         `json:"captureRatio,omitempty"`
 }
 
 type liveExecStore struct {
@@ -596,6 +671,7 @@ type liveExecStore struct {
 }
 
 type liveExecManager struct {
+	mu                   sync.RWMutex
 	rest                 *aster.RESTAuth
 	tg                   *notify.Telegram
 	path                 string
@@ -646,6 +722,15 @@ type liveExecManager struct {
 	fundingExitMinMFER   float64
 	fundingExitWindow    time.Duration
 	expensiveFundingRate float64
+	stopTriggerRef       string
+	tpTriggerRef         string
+	accountAssets        []string
+	snapshotPoll         time.Duration
+	wsLevels             int
+	wsSpeed              string
+	liveAccount          liveAccountSnapshot
+	marketStates         map[string]*aster.MarketState
+	marketCancels        map[string]context.CancelFunc
 	featureCache         *featureRuntimeCache
 }
 
@@ -661,37 +746,38 @@ type liveExecSnapshot struct {
 }
 
 type liveLiteStatus struct {
-	Generated       time.Time        `json:"generated"`
-	DryRun          bool             `json:"dry_run"`
-	LiveEnabled     bool             `json:"live_enabled"`
-	TopSymbol       string           `json:"top_symbol,omitempty"`
-	TopSide         string           `json:"top_side,omitempty"`
-	TopGrade        string           `json:"top_grade,omitempty"`
-	TopScore        float64          `json:"top_score,omitempty"`
-	TopSlope        float64          `json:"top_slope,omitempty"`
-	TopTriggerState string           `json:"top_trigger_state,omitempty"`
-	TopExitProfile  string           `json:"top_exit_profile,omitempty"`
-	TopDiscovery    float64          `json:"top_discovery,omitempty"`
-	TopTrigger      float64          `json:"top_trigger,omitempty"`
-	TopExecution    float64          `json:"top_execution,omitempty"`
-	TopCombined     float64          `json:"top_combined,omitempty"`
-	TopVPSetup      string           `json:"top_vp_setup,omitempty"`
-	TopVPLevel      float64          `json:"top_vp_level,omitempty"`
-	TopVPTarget     float64          `json:"top_vp_target_level,omitempty"`
-	TopVPStopMode   string           `json:"top_vp_stop_mode,omitempty"`
-	TopVPTargetMode string           `json:"top_vp_target_mode,omitempty"`
-	TopRejectReason string           `json:"top_reject_reason,omitempty"`
-	TopRegimeTag    string           `json:"top_regime_tag,omitempty"`
-	LongInPlay      int              `json:"long_inplay"`
-	ShortInPlay     int              `json:"short_inplay"`
-	AvailableUSDT   float64          `json:"available_usdt"`
-	PaperSummary    string           `json:"paper_summary,omitempty"`
-	PayoutCycleID   string           `json:"payout_cycle_id,omitempty"`
-	PayoutNextAt    string           `json:"payout_next_at,omitempty"`
-	PayoutLastAmt   float64          `json:"payout_last_amount,omitempty"`
-	PayoutLastPnL   float64          `json:"payout_last_profit,omitempty"`
-	PayoutLastType  string           `json:"payout_last_action,omitempty"`
-	Exec            liveExecSnapshot `json:"exec"`
+	Generated       time.Time           `json:"generated"`
+	DryRun          bool                `json:"dry_run"`
+	LiveEnabled     bool                `json:"live_enabled"`
+	TopSymbol       string              `json:"top_symbol,omitempty"`
+	TopSide         string              `json:"top_side,omitempty"`
+	TopGrade        string              `json:"top_grade,omitempty"`
+	TopScore        float64             `json:"top_score,omitempty"`
+	TopSlope        float64             `json:"top_slope,omitempty"`
+	TopTriggerState string              `json:"top_trigger_state,omitempty"`
+	TopExitProfile  string              `json:"top_exit_profile,omitempty"`
+	TopDiscovery    float64             `json:"top_discovery,omitempty"`
+	TopTrigger      float64             `json:"top_trigger,omitempty"`
+	TopExecution    float64             `json:"top_execution,omitempty"`
+	TopCombined     float64             `json:"top_combined,omitempty"`
+	TopVPSetup      string              `json:"top_vp_setup,omitempty"`
+	TopVPLevel      float64             `json:"top_vp_level,omitempty"`
+	TopVPTarget     float64             `json:"top_vp_target_level,omitempty"`
+	TopVPStopMode   string              `json:"top_vp_stop_mode,omitempty"`
+	TopVPTargetMode string              `json:"top_vp_target_mode,omitempty"`
+	TopRejectReason string              `json:"top_reject_reason,omitempty"`
+	TopRegimeTag    string              `json:"top_regime_tag,omitempty"`
+	LongInPlay      int                 `json:"long_inplay"`
+	ShortInPlay     int                 `json:"short_inplay"`
+	AvailableUSDT   float64             `json:"available_usdt"`
+	PaperSummary    string              `json:"paper_summary,omitempty"`
+	PayoutCycleID   string              `json:"payout_cycle_id,omitempty"`
+	PayoutNextAt    string              `json:"payout_next_at,omitempty"`
+	PayoutLastAmt   float64             `json:"payout_last_amount,omitempty"`
+	PayoutLastPnL   float64             `json:"payout_last_profit,omitempty"`
+	PayoutLastType  string              `json:"payout_last_action,omitempty"`
+	Exec            liveExecSnapshot    `json:"exec"`
+	Live            liveAccountSnapshot `json:"live"`
 }
 
 type liveLiteStatusStore struct {
@@ -889,6 +975,10 @@ func main() {
 		DayUTCWeight:         envFloat("LIVE_DAYUTC_WEIGHT", 0.30),
 		DayUTCMinAbsPct:      envFloat("LIVE_DAYUTC_MIN_ABS_PCT", 5.0),
 		DayUTCScalePct:       envFloat("LIVE_DAYUTC_SCALE_PCT", 20.0),
+		BlockContExhaustion:  envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", true),
+		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", true),
+		DayUTCMaturityPct:    envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
+		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", true),
 	}
 	acceptanceCfg := acceptanceQueueConfig{
 		TopN:                  envInt("LIVE_ACCEPTANCE_TOPN", 3),
@@ -1272,6 +1362,8 @@ func main() {
 	candidateMem := map[string]candidateMemory{}
 	triggerMem := map[string]triggerMemory{}
 	recentRejects := map[string]recentRejectMemory{}
+	sessionChurns := map[string]*sessionChurn{}
+	handledClosedLive := map[string]time.Time{}
 	recentEntryAttempts := []time.Time{}
 	missed := newMissedTracker()
 	lastScanAt := time.Time{}
@@ -1512,6 +1604,13 @@ func main() {
 			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
 				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 				if dayKey != lastDailyLiveReceiptDay {
+					tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
+						fmt.Sprintf("<b>Day:</b> %s", dayKey),
+						fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
+					))
+					if msg, ok := execMgr.DailyReportMessage(dayKey); ok {
+						tg.Sendf("%s", msg)
+					}
 					if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
 						tg.Sendf("%s", tgPre(msg))
 					}
@@ -1615,6 +1714,21 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.Reconcile(now, momBySymbol, flowMetricsBySymbol, metaBySymbol)
+			for sym, pos := range execMgr.positions {
+				if pos == nil || pos.State != execClosed || pos.ClosedAt.IsZero() {
+					continue
+				}
+				if seenAt, ok := handledClosedLive[sym]; ok && !pos.ClosedAt.After(seenAt) {
+					continue
+				}
+				handledClosedLive[sym] = pos.ClosedAt
+				reason := strings.ToUpper(strings.TrimSpace(pos.CloseReason))
+				if reason == "STOP_HIT" || reason == "SL" || reason == "TRAIL_STOP" || strings.Contains(reason, "STOP") {
+					dayUTC := metaBySymbol[sym].DayUTC24h
+					_, pnlPct := realizedFromFill(pos.Side, pos.EntryPrice, pos.LastMark, maxFloat(pos.FilledQty, pos.Qty))
+					markSessionStop(sessionChurns, pos.ClosedAt, sym, pos.Side, pos.ClosedAt.Sub(pos.CreatedAt).Minutes(), pnlPct, dayUTC)
+				}
+			}
 		}
 		if inMaint {
 			dayKey := localMaintNow.Format("2006-01-02")
@@ -1733,6 +1847,7 @@ func main() {
 				}
 			}
 			c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, c.QualityReasons = computeEntryScoreBreakdown(c, entryQualityCfg)
+			c.StructureFresh = requiresFreshPullback(c)
 			c.QualityReasons = append(c.QualityReasons, triggerReasons...)
 			if c.TriggerStage != "" {
 				c.QualityReasons = append(c.QualityReasons, "trigger_stage:"+strings.ToLower(c.TriggerStage))
@@ -1773,6 +1888,48 @@ func main() {
 					Combined:    c.CombinedScore,
 					GateAllow:   &f,
 					GateReasons: []string{c.RejectReason},
+				})
+				continue
+			}
+			if guardReason := continuationGuardReason(c, entryQualityCfg); guardReason != "" {
+				recordCandidateDecision(cmdCtx, c, guardReason)
+				rememberRecentReject(recentRejects, now, c, guardReason, acceptanceCfg)
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      rawCandidate,
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					Discovery:   c.DiscoveryScore,
+					Trigger:     c.TriggerScore,
+					Execution:   c.ExecutionScore,
+					Combined:    c.CombinedScore,
+					GateAllow:   &f,
+					GateReasons: []string{guardReason},
+				})
+				continue
+			}
+			if churnReason := churnRejectReason(sessionChurns, now, c); churnReason != "" {
+				recordCandidateDecision(cmdCtx, c, churnReason)
+				rememberRecentReject(recentRejects, now, c, churnReason, acceptanceCfg)
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      rawCandidate,
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					Discovery:   c.DiscoveryScore,
+					Trigger:     c.TriggerScore,
+					Execution:   c.ExecutionScore,
+					Combined:    c.CombinedScore,
+					GateAllow:   &f,
+					GateReasons: []string{churnReason},
 				})
 				continue
 			}
@@ -1986,9 +2143,11 @@ func main() {
 			ShortInPlay:   len(shortInPlay),
 			AvailableUSDT: acct.AvailableUSDT,
 			Exec:          liveExecSnapshot{},
+			Live:          liveAccountSnapshot{},
 		}
 		if execMgr != nil {
 			st.Exec = execMgr.Snapshot(10)
+			st.Live = execMgr.LiveAccountSnapshot(10)
 		}
 		if paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
@@ -2489,6 +2648,7 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
+					markSessionEntry(sessionChurns, now, best)
 					recentEntryAttempts = append(recentEntryAttempts, now)
 					eventLog.Emit(stats.Event{
 						Timestamp:    now,
@@ -2581,6 +2741,30 @@ func main() {
 		if execMgr != nil && execMgr.HasActiveSymbol(best.Entry.Symbol) {
 			recordCandidateDecision(cmdCtx, best, "already_active_in_exec_state")
 			fmt.Printf("live-lite: skip (%s already active in exec state)\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)))
+			waitAndReport()
+			continue
+		}
+		if reason := activeWinnerRejectReason(now, best, execMgr, paper, metaBySymbol, longCurrent, shortCurrent); reason != "" {
+			recordCandidateDecision(cmdCtx, best, reason)
+			st.TopRejectReason = reason
+			statusStore.Set(st)
+			eventAllow := false
+			eventLog.Emit(stats.Event{
+				Timestamp:   now,
+				Type:        "GATE_DECISION",
+				Symbol:      rawBest,
+				Side:        best.Side,
+				Strategy:    best.Strat,
+				Score:       best.Entry.CurrentScore,
+				Slope:       best.Entry.ScoreSlope,
+				Discovery:   best.DiscoveryScore,
+				Trigger:     best.TriggerScore,
+				Execution:   best.ExecutionScore,
+				Combined:    best.CombinedScore,
+				GateAllow:   &eventAllow,
+				GateReasons: []string{reason},
+			})
+			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
 			continue
 		}
@@ -2755,6 +2939,7 @@ func main() {
 				))
 			}
 		} else {
+			markSessionEntry(sessionChurns, now, best)
 			recentEntryAttempts = append(recentEntryAttempts, now)
 			recordCandidateDecision(cmdCtx, best, "")
 			eventLog.Emit(stats.Event{
@@ -2865,32 +3050,59 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, meta map[s
 	if m == nil {
 		return tgPre(fmt.Sprintf("%s (%s) session=%s\nlive disabled", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now)))
 	}
-	realized := m.dayRealizedAt(now)
-	openPnL := 0.0
-	openCount := 0
+	pulse, cards := buildLivePulseAndCards(strings.TrimSpace(label), now, m)
 	var b strings.Builder
-	for raw, pos := range m.positions {
-		if !m.isActive(pos) {
-			continue
+	b.WriteString(notify.BuildSessionPulseHTML(pulse))
+	if len(cards) > 0 {
+		for i, card := range cards {
+			if i >= 3 {
+				break
+			}
+			b.WriteString("\n\n")
+			b.WriteString(notify.BuildPositionCard(card))
 		}
-		openCount++
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
-		}
-		if mark <= 0 {
-			mark = pos.EntryPrice
-		}
-		upnl, _ := realizedFromFill(pos.Side, pos.EntryPrice, mark, pos.RemainingQty)
-		openPnL += upnl
 	}
-	fmt.Fprintf(&b, "%s (%s) session=%s\n", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now))
-	fmt.Fprintf(&b, "realized=%+.2f openPnL=%+.2f netDay=%+.2f open=%d\n\n", realized, openPnL, realized+openPnL, openCount)
-	fmt.Fprintf(&b, "Live Update (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
+	b.WriteString("\n\nLive Update\n")
 	b.WriteString(m.liveTradeUpdateMessage(meta))
 	b.WriteString("\n\nIn-Play Scanner\n")
 	appendUnifiedInPlayRows(&b, longInPlay, shortInPlay, meta, 10_000)
 	return tgPre(strings.TrimSpace(b.String()))
+}
+
+func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (notify.PulseSnapshot, []notify.PositionCard) {
+	snap := m.LiveAccountSnapshot(32)
+	cards := make([]notify.PositionCard, 0, len(snap.Positions))
+	for _, p := range snap.Positions {
+		cards = append(cards, notify.PositionCard{
+			Symbol:           p.Symbol,
+			Side:             p.Side,
+			Source:           p.Source,
+			Qty:              p.Qty,
+			EntryPrice:       p.EntryPrice,
+			MarkPrice:        p.MarkPrice,
+			LastPrice:        p.LastPrice,
+			SpreadBps:        p.SpreadBps,
+			UnrealizedPnL:    p.UnrealizedPnL,
+			UnrealizedPnLPct: p.UnrealizedPnLPct,
+			Leverage:         p.Leverage,
+			Setup:            p.EntryReason,
+			Confluence:       0,
+			AgeMin:           int(p.HoldMin),
+			StopLoss:         p.StopPrice,
+		})
+	}
+	return notify.PulseSnapshot{
+		Title:     title,
+		TimeLabel: now.Format("15:04 MST"),
+		Session:   sessionTag(now),
+		Balance:   snap.AvailableUSDT,
+		Equity:    snap.Equity,
+		Realized:  snap.RealizedDay,
+		OpenPnL:   snap.OpenPnL,
+		NetDay:    snap.RealizedDay + snap.OpenPnL,
+		OpenCount: snap.OpenCount,
+		OpenCap:   0,
+	}, cards
 }
 
 func buildPaperPulseAndCards(title string, now time.Time, p *paperTrader, meta map[string]symbolMeta) (notify.PulseSnapshot, []notify.PositionCard) {
@@ -3444,6 +3656,86 @@ func ratchetStopTarget(side string, entry, currentStop, tp1, tp2 float64, beLock
 	default:
 		return currentStop, false
 	}
+}
+
+func liveProtectionLevels() (float64, float64) {
+	stage1 := envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)
+	stage2 := envFloat("LIVE_PROFIT_LOCK_STAGE2_R", 2.0)
+	if stage1 <= 0 {
+		stage1 = 1.0
+	}
+	if stage2 < stage1 {
+		stage2 = stage1
+	}
+	return stage1, stage2
+}
+
+func lockToRPrice(side string, entry, stop, r float64) float64 {
+	risk := math.Abs(entry - stop)
+	if risk <= 0 || r <= 0 {
+		return stop
+	}
+	if strings.EqualFold(side, "BUY") {
+		return entry + risk*r
+	}
+	return entry - risk*r
+}
+
+func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mfeR float64, stage *protectionStage, firstProtectAt *time.Time, protectedStop *float64, beLockBps float64) (float64, bool) {
+	stage1R, stage2R := liveProtectionLevels()
+	newStop := currentStop
+	changed := false
+	if mfeR >= stage1R {
+		be := beLockPrice(side, entry, beLockBps)
+		if stop, ok := improvedStopPrice(side, newStop, be); ok {
+			newStop = stop
+			changed = true
+		}
+		if stage != nil && *stage < protectionStageArmed {
+			*stage = protectionStageArmed
+		}
+		if firstProtectAt != nil && firstProtectAt.IsZero() {
+			*firstProtectAt = now
+		}
+	}
+	if mfeR >= stage2R {
+		lockR := envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20)
+		stop := lockToRPrice(side, entry, currentStop, lockR)
+		if improved, ok := improvedStopPrice(side, newStop, stop); ok {
+			newStop = improved
+			changed = true
+		}
+		if stage != nil && *stage < protectionStageLocked {
+			*stage = protectionStageLocked
+		}
+		if firstProtectAt != nil && firstProtectAt.IsZero() {
+			*firstProtectAt = now
+		}
+	}
+	if protectedStop != nil && ((strings.EqualFold(side, "BUY") && newStop > *protectedStop) || (!strings.EqualFold(side, "BUY") && newStop < *protectedStop) || *protectedStop == 0) {
+		*protectedStop = newStop
+	}
+	return newStop, changed
+}
+
+func updateGivebackMetrics(mfeR, riskR float64, captureRatio *float64, maxGivebackR *float64) {
+	if captureRatio != nil && mfeR > 0 {
+		*captureRatio = clamp(riskR/mfeR, -10, 10)
+	}
+	if maxGivebackR != nil && mfeR > riskR {
+		*maxGivebackR = maxFloat(*maxGivebackR, mfeR-riskR)
+	}
+}
+
+func unrealizedRiskR(side string, entry, stop, mark float64) float64 {
+	risk := math.Abs(entry - stop)
+	if risk <= 0 || mark <= 0 || entry <= 0 {
+		return 0
+	}
+	if strings.EqualFold(side, "BUY") {
+		return (mark - entry) / risk
+	}
+	return (entry - mark) / risk
 }
 
 func enforceTPProgression(side string, tp1, tp2, tp3 float64) (float64, float64, float64) {
@@ -4462,8 +4754,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		riskMarginPct = 0
 	}
 	hybridStopCfg := loadHybridStopConfig()
-	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "mark"))
-	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "mark"))
+	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "last"))
+	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "last"))
 	markLastModel := strings.ToLower(envStr("PAPER_MARK_LAST_DIVERGENCE_MODEL", "orderbook_mid"))
 	markLastDivBps := envFloat("PAPER_MARK_LAST_DIVERGENCE_BPS", 0)
 	partialFillEnable := envBool("PAPER_PARTIAL_FILL_ENABLE", true)
@@ -4552,6 +4844,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 			UnsponsoredTightenR:    envFloat("LIVE_EXIT_UNSPONSORED_TIGHTEN_R", 0.18),
 			UnsponsoredWeakStreak:  envInt("LIVE_EXIT_UNSPONSORED_WEAK_STREAK", 2),
+			TightenAfterConfirm:    envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true),
+			RequireStructureLoss:   envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true),
+			ProfitLockTightenR:     envFloat("LIVE_PROFIT_LOCK_TIGHTEN_R", 0.35),
 		}),
 		riskOnMargin:       riskOnMargin,
 		riskMarginPct:      riskMarginPct,
@@ -4777,6 +5072,18 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if fundingExitWindow < 0 {
 		fundingExitWindow = 0
 	}
+	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "last"))
+	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "last"))
+	snapshotPoll := time.Duration(envInt("LIVE_ACCOUNT_SNAPSHOT_SEC", 2)) * time.Second
+	if snapshotPoll <= 0 {
+		snapshotPoll = 2 * time.Second
+	}
+	wsLevels := envInt("LIVE_ACCOUNT_WS_LEVELS", 20)
+	if wsLevels != 5 && wsLevels != 10 && wsLevels != 20 {
+		wsLevels = 20
+	}
+	wsSpeed := strings.TrimSpace(envStr("LIVE_ACCOUNT_WS_SPEED", "100ms"))
+	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 
 	m := &liveExecManager{
 		rest:                 rest,
@@ -4827,6 +5134,14 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		fundingExitMinMFER:   envFloat("LIVE_PRE_FUNDING_EXIT_MIN_MFE_R", 1.2),
 		fundingExitWindow:    fundingExitWindow,
 		expensiveFundingRate: envFloat("LIVE_PRE_FUNDING_EXPENSIVE_RATE", 0.0008),
+		stopTriggerRef:       stopTriggerRef,
+		tpTriggerRef:         tpTriggerRef,
+		accountAssets:        accountAssets,
+		snapshotPoll:         snapshotPoll,
+		wsLevels:             wsLevels,
+		wsSpeed:              wsSpeed,
+		marketStates:         map[string]*aster.MarketState{},
+		marketCancels:        map[string]context.CancelFunc{},
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
@@ -4842,6 +5157,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 			UnsponsoredTightenR:    envFloat("LIVE_EXIT_UNSPONSORED_TIGHTEN_R", 0.18),
 			UnsponsoredWeakStreak:  envInt("LIVE_EXIT_UNSPONSORED_WEAK_STREAK", 2),
+			TightenAfterConfirm:    envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true),
+			RequireStructureLoss:   envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true),
+			ProfitLockTightenR:     envFloat("LIVE_PROFIT_LOCK_TIGHTEN_R", 0.35),
 		}),
 	}
 	if m.entryTimeout <= 0 {
@@ -4857,6 +5175,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		m.recoverATRMult = 1.5
 	}
 	_ = m.load()
+	go m.runLiveAccountSnapshotLoop()
 	return m
 }
 
@@ -4955,6 +5274,8 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 			HoldMin:      holdMin,
 			MFER:         p.MaxFavorableR,
 			MAER:         p.MaxAdverseR,
+			CaptureRatio: p.CaptureRatio,
+			MaxGivebackR: p.MaxGivebackR,
 			MarkPx:       p.LastMark,
 			PnLUSD:       pnl,
 			PnLPct:       pct,
@@ -5090,6 +5411,61 @@ func (m *liveExecManager) DailyReceiptMessage(dayKey string, limit int) (string,
 			x.qty, x.fill, x.pnl, x.pct, x.hold, strings.ToUpper(strings.TrimSpace(x.reason)))
 	}
 	return strings.TrimSpace(b.String()), true
+}
+
+func (m *liveExecManager) DailyReportMessage(dayKey string) (string, bool) {
+	if m == nil || m.reportLoc == nil {
+		return "", false
+	}
+	eventsPath := resolveStatePath(envStr("LIVE_EVENTS_LOG", "logs/events.jsonl"))
+	fromLocal, err := time.ParseInLocation("2006-01-02 15:04:05", dayKey+" 00:00:00", m.reportLoc)
+	if err != nil {
+		return "", false
+	}
+	toLocal := fromLocal.Add(24*time.Hour - time.Nanosecond)
+	events, err := stats.LoadEvents(eventsPath, ptrTime(fromLocal.UTC()), ptrTime(toLocal.UTC()))
+	if err != nil {
+		return "", false
+	}
+	if len(events) == 0 {
+		return fmt.Sprintf("Live Daily Report %s (%s)\nno trades", dayKey, m.reportLoc.String()), true
+	}
+	report := stats.Aggregate(events)
+	if report.TotalTrades == 0 {
+		return fmt.Sprintf("Live Daily Report %s (%s)\nno trades", dayKey, m.reportLoc.String()), true
+	}
+	gross := 0.0
+	for _, row := range report.BySymbol {
+		gross += row.PnL
+	}
+	var reasons []string
+	for _, row := range report.ByExit {
+		reasons = append(reasons, fmt.Sprintf("%s=%d", row.Name, row.Count))
+	}
+	sort.Strings(reasons)
+	sourceCounts := map[string]int{}
+	for _, e := range events {
+		if e.Type != "POSITION_CLOSE" {
+			continue
+		}
+		src := nonEmpty(strings.ToUpper(strings.TrimSpace(e.Source)), "BOT")
+		sourceCounts[src]++
+	}
+	var sources []string
+	for src, count := range sourceCounts {
+		sources = append(sources, fmt.Sprintf("%s=%d", src, count))
+	}
+	sort.Strings(sources)
+	givebackLine := fmt.Sprintf("capture=%.2f givebackR=%.2f winnerGiveback=%d", report.AvgCapture, report.AvgGivebackR, report.WinnerGiveback)
+	sourceLine := "sources: none"
+	if len(sources) > 0 {
+		sourceLine = "sources: " + strings.Join(sources, ", ")
+	}
+	return fmt.Sprintf(
+		"Live Daily Report %s (%s)\ntrades=%d wins=%d losses=%d winRate=%.1f%%\ngross=%+.2f fees=%.2f net=%+.2f\nreasons: %s\ngiveback: %s\n%s",
+		dayKey, m.reportLoc.String(), report.TotalTrades, report.Wins, report.Losses, report.WinRate,
+		gross, report.Fees, gross-report.Fees, strings.Join(reasons, ", "), givebackLine, sourceLine,
+	), true
 }
 
 func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote int, err error) {
@@ -5424,39 +5800,32 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 	if m == nil {
 		return "live disabled"
 	}
-	rows := make([]string, 0, len(m.positions)+4)
-	rows = append(rows, "| Sym | Side | Src | Qty | Entry | Mark | Lev | uPnL | Age(m) |")
-	rows = append(rows, "|---|---|---|---:|---:|---:|---:|---:|---:|")
-	openPnL := 0.0
-	for raw, pos := range m.positions {
-		if !m.isActive(pos) {
-			continue
-		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
-		}
-		if mark <= 0 {
-			mark = pos.EntryPrice
-		}
-		upnl, _ := realizedFromFill(pos.Side, pos.EntryPrice, mark, pos.RemainingQty)
-		openPnL += upnl
-		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %.6f | %.6f | %.6f | %dx | %+.2f | %.1f |",
-			raw,
+	snap := m.LiveAccountSnapshot(32)
+	rows := make([]string, 0, len(snap.Positions)+5)
+	rows = append(rows, "| Sym | Side | Src | Qty | Entry | Mark | Last | Lev | uPnL | uPnL% | Age(m) |")
+	rows = append(rows, "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+	for _, pos := range snap.Positions {
+		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %.6f | %.6f | %.6f | %.6f | %dx | %+.2f | %+.2f%% | %.1f |",
+			pos.Symbol,
 			pos.Side,
-			nonEmpty(strings.ToUpper(strings.TrimSpace(pos.EntrySource)), "BOT"),
-			pos.RemainingQty,
+			pos.Source,
+			pos.Qty,
 			pos.EntryPrice,
-			mark,
+			pos.MarkPrice,
+			pos.LastPrice,
 			maxInt(1, pos.Leverage),
-			upnl,
-			time.Since(pos.CreatedAt).Minutes(),
+			pos.UnrealizedPnL,
+			pos.UnrealizedPnLPct,
+			pos.HoldMin,
 		))
 	}
 	if len(rows) == 2 {
 		return "no live positions"
 	}
-	rows = append(rows, "", fmt.Sprintf("Totals: openPnL=%+.2f", openPnL))
+	rows = append(rows, "",
+		fmt.Sprintf("Totals: openPnL=%+.2f realizedDay=%+.2f netDay=%+.2f", snap.OpenPnL, snap.RealizedDay, snap.RealizedDay+snap.OpenPnL),
+		fmt.Sprintf("Sources: bot=%d manual=%d combined=%d", snap.BotCount, snap.ManualCount, snap.OpenCount),
+	)
 	return strings.Join(rows, "\n")
 }
 
@@ -5802,6 +6171,13 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			}
 			p.LastMark = mark
 			updateFavorableRLive(p, mark)
+			if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+				p.StopPrice = newStop
+				if err := m.placeOrReplaceStop(p); err == nil {
+					changed = true
+				}
+			}
+			updateGivebackMetrics(p.MaxFavorableR, unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, mark), &p.CaptureRatio, &p.MaxGivebackR)
 			if updated, err := m.handleRatchetTargets(p, mark); err != nil {
 				return changed, err
 			} else if updated {
@@ -6196,6 +6572,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if p.RemainingQty <= 0 {
 		return nil
 	}
+	prevStop := p.ProtectedStop
+	if prevStop <= 0 {
+		prevStop = p.StopPrice
+	}
 	if p.StopOrderID > 0 {
 		_, _ = m.rest.CancelOrder(p.Symbol, p.StopOrderID)
 		p.StopOrderID = 0
@@ -6232,6 +6612,29 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		return err
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
+	p.ProtectedStop = stopPx
+	fmt.Printf("live-lite: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
+		p.Symbol,
+		p.Side,
+		fmtPrice(prevStop),
+		fmtPrice(stopPx),
+		strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
+		nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
+		nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
+	)
+	if m.eventLog != nil {
+		m.eventLog.Emit(stats.Event{
+			Timestamp:  time.Now().UTC(),
+			Type:       "STOP_UPDATE",
+			Symbol:     p.Symbol,
+			Side:       p.Side,
+			Source:     nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
+			EntryPx:    p.EntryPrice,
+			ExitPx:     stopPx,
+			TriggerRef: strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
+			Reason:     nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
+		})
+	}
 	return nil
 }
 
@@ -6659,6 +7062,48 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 					_ = m.placeOrReplaceStop(p)
 				}
 			}
+			if dec.TightenStop {
+				if (strings.EqualFold(p.Side, "BUY") && dec.TightenToPrice > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && dec.TightenToPrice < p.StopPrice) {
+					p.StopReason = dec.Reason
+					p.StopPrice = dec.TightenToPrice
+					_ = m.placeOrReplaceStop(p)
+					changed = true
+				}
+			}
+			if dec.FullExit {
+				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+				dayRealized := m.addDayRealized(now, pnl)
+				_ = m.cancelRemainingExits(p)
+				if err := m.closeSymbolMarket(sym); err != nil {
+					continue
+				}
+				p.State = execClosed
+				p.CloseReason = dec.Reason
+				p.ClosedAt = now
+				p.UpdatedAt = now
+				if m.tg != nil {
+					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(dec.Reason), "MOMENTUM EXIT",
+						fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+						fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+					))
+				}
+				_ = m.logFill(now, p, "CLOSE", dec.Reason, p.RemainingQty, mark, pnl, pct)
+				m.sendFillReceipt(now, p, "CLOSE", dec.Reason, p.RemainingQty, mark, pnl, pct)
+				changed = true
+				continue
+			}
+		}
+		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed) {
+			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (p.Sponsored || confluenceRefreshActive(now, p.LastConfluenceRefresh))) {
+				if stop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, maxFloat(p.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+					p.StopReason = "MOMENTUM_FADE_TIGHTEN"
+					p.StopPrice = stop
+					_ = m.placeOrReplaceStop(p)
+					changed = true
+				}
+			}
+			continue
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 		dayRealized := m.addDayRealized(now, pnl)
@@ -7755,6 +8200,10 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
+		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps); tightened {
+			pos.Stop = newStop
+		}
+		updateGivebackMetrics(pos.MaxFavorableR, unrealizedRiskR(pos.Side, pos.Entry, pos.Stop, mark), &pos.CaptureRatio, &pos.MaxGivebackR)
 		prevSponsored := pos.Sponsored
 		prevSponsorScore := pos.SponsorshipScore
 		sponsorSnap := classifySponsorship(pos.Side, raw, mom, flow)
@@ -7993,11 +8442,28 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 					continue
 				}
 			}
+			if dec.TightenStop {
+				if (strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice < pos.Stop) {
+					pos.StopReason = dec.Reason
+					pos.Stop = dec.TightenToPrice
+					changed = true
+				}
+			}
 			if dec.FullExit {
 				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])
 				changed = true
 				continue
 			}
+		}
+		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (pos.HitTP1 || pos.HitTP2 || pos.HitTP3 || pos.ProtectionStage >= protectionStageArmed) {
+			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (pos.Sponsored || confluenceRefreshActive(now, pos.LastConfluenceRefresh))) {
+				if stop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, maxFloat(pos.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps); tightened {
+					pos.StopReason = "MOMENTUM_FADE_TIGHTEN"
+					pos.Stop = stop
+					changed = true
+				}
+			}
+			continue
 		}
 		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
 		changed = true
@@ -8771,6 +9237,8 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 			HoldMin:      holdMin,
 			MFER:         pos.MaxFavorableR,
 			MAER:         pos.MaxAdverseR,
+			CaptureRatio: pos.CaptureRatio,
+			MaxGivebackR: pos.MaxGivebackR,
 			PnLUSD:       net,
 			PnLPct:       pnlPct,
 			Fees:         fee,
@@ -9447,6 +9915,178 @@ func directionalDayUTCScore(side string, dayUTC, minAbsPct, scalePct float64) fl
 		return normalize(-dayUTC)
 	}
 	return normalize(math.Abs(dayUTC))
+}
+
+func isContinuationStrategy(c candidate) bool {
+	switch strategyFamily(c) {
+	case "cont", "ignite":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresFreshPullback(c candidate) bool {
+	switch c.TriggerState {
+	case string(triggerOFReclaim), string(triggerStackedBid), string(triggerStackedAsk):
+		return true
+	default:
+		return false
+	}
+}
+
+func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
+	if !isContinuationStrategy(c) {
+		return ""
+	}
+	if cfg.BlockContExhaustion && c.TriggerState == string(triggerExhaustion) {
+		return "continuation_exhausted"
+	}
+	if !cfg.DayUTCMaturityBrake {
+		return ""
+	}
+	if math.Abs(c.DayUTC24h) < cfg.DayUTCMaturityPct {
+		return ""
+	}
+	if cfg.RequireFreshPullback && !requiresFreshPullback(c) {
+		return "extended_reentry_lock"
+	}
+	return ""
+}
+
+func sessionChurnKey(symbol, side string) string {
+	return strings.ToUpper(aster.RawSymbol(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(side))
+}
+
+func currentSessionDayKey(now time.Time) string {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		return now.UTC().Format("2006-01-02")
+	}
+	return now.In(loc).Format("2006-01-02")
+}
+
+func churnStateFor(mem map[string]*sessionChurn, now time.Time, symbol, side string) *sessionChurn {
+	key := sessionChurnKey(symbol, side)
+	st := mem[key]
+	dayKey := currentSessionDayKey(now)
+	if st == nil || st.DayKey != dayKey {
+		st = &sessionChurn{DayKey: dayKey}
+		mem[key] = st
+	}
+	return st
+}
+
+func markSessionEntry(mem map[string]*sessionChurn, now time.Time, c candidate) {
+	st := churnStateFor(mem, now, c.Entry.Symbol, c.Side)
+	st.EntryCount++
+	st.LastEntryAt = now
+	st.LastStyle = nonEmpty(c.Strat, c.Entry.EntryStyle)
+	st.LastDayUTCPct = c.DayUTC24h
+}
+
+func markSessionStop(mem map[string]*sessionChurn, now time.Time, symbol, side string, holdMin, pnlPct, dayUTCPct float64) {
+	st := churnStateFor(mem, now, symbol, side)
+	st.StopCount++
+	st.LastStopAt = now
+	st.LastDayUTCPct = dayUTCPct
+	if holdMin <= envFloat("LIVE_CHURN_LOCK_QUICK_LOSS_MAX_HOLD_MIN", 30) || pnlPct <= -envFloat("LIVE_CHURN_LOCK_QUICK_LOSS_MIN_PCT", 2.5) {
+		st.QuickLossCount++
+	}
+}
+
+func churnRejectReason(mem map[string]*sessionChurn, now time.Time, c candidate) string {
+	if !envBool("LIVE_CHURN_LOCK_ENABLE", true) {
+		return ""
+	}
+	st := churnStateFor(mem, now, c.Entry.Symbol, c.Side)
+	maxFails := envInt("LIVE_CHURN_LOCK_MAX_FAILS_PER_SESSION", 2)
+	if maxFails < 1 {
+		maxFails = 1
+	}
+	window := time.Duration(envInt("LIVE_CHURN_LOCK_WINDOW_MIN", 240)) * time.Minute
+	if window <= 0 {
+		window = 4 * time.Hour
+	}
+	if st.LastStopAt.IsZero() || now.Sub(st.LastStopAt) > window {
+		return ""
+	}
+	if st.StopCount >= maxFails || st.QuickLossCount >= maxFails {
+		if math.Abs(maxFloat(math.Abs(c.DayUTC24h), math.Abs(st.LastDayUTCPct))) >= envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0) {
+			return "extended_reentry_lock"
+		}
+		return "symbol_churn_lock"
+	}
+	return ""
+}
+
+func currentEntryBySide(side string, raw string, longCurrent, shortCurrent map[string]inplay.Entry) (inplay.Entry, bool) {
+	if strings.EqualFold(side, "BUY") {
+		e, ok := longCurrent[raw]
+		return e, ok
+	}
+	e, ok := shortCurrent[raw]
+	return e, ok
+}
+
+func activeWinnerRejectReason(now time.Time, c candidate, execMgr *liveExecManager, paper *paperTrader, meta map[string]symbolMeta, longCurrent, shortCurrent map[string]inplay.Entry) string {
+	if !envBool("LIVE_ACTIVE_WINNER_PRIORITY_ENABLE", true) {
+		return ""
+	}
+	minScore := envFloat("LIVE_ACTIVE_WINNER_MIN_SCORE", 88.0)
+	minPnLPct := envFloat("LIVE_ACTIVE_WINNER_MIN_PNL_PCT", 1.0)
+	suppressDelta := envFloat("LIVE_ACTIVE_WINNER_SUPPRESS_DELTA", 0.08)
+	candidateStrength := clamp(c.Entry.CurrentScore/100.0, 0, 1) + 0.25*clamp(c.Conf, 0, 1)
+	bestReason := ""
+	bestStrength := 0.0
+	checkPos := func(symbol, side, source string, entry, lastMark float64, sponsored bool, refreshAt time.Time) {
+		raw := strings.ToUpper(aster.RawSymbol(symbol))
+		px := lastMark
+		if m, ok := meta[raw]; ok && m.LastPrice > 0 {
+			px = m.LastPrice
+		}
+		if entry <= 0 || px <= 0 {
+			return
+		}
+		_, pnlPct := realizedFromFill(side, entry, px, 1)
+		if pnlPct < minPnLPct {
+			return
+		}
+		e, ok := currentEntryBySide(side, raw, longCurrent, shortCurrent)
+		if !ok || e.CurrentScore < minScore {
+			return
+		}
+		if !(sponsored || confluenceRefreshActive(now, refreshAt)) {
+			return
+		}
+		strength := clamp(e.CurrentScore/100.0, 0, 1) + clamp(pnlPct/10.0, 0, 0.30)
+		if strength < candidateStrength+suppressDelta || strength <= bestStrength {
+			return
+		}
+		bestStrength = strength
+		if strings.TrimSpace(source) != "" && !strings.EqualFold(source, "BOT") {
+			bestReason = "manual_position_stronger"
+		} else {
+			bestReason = "active_winner_stronger"
+		}
+	}
+	if execMgr != nil {
+		for _, p := range execMgr.positions {
+			if !execMgr.isActive(p) || p.RemainingQty <= 0 {
+				continue
+			}
+			checkPos(p.Symbol, p.Side, p.EntrySource, p.EntryPrice, p.LastMark, p.Sponsored, p.LastConfluenceRefresh)
+		}
+	}
+	if paper != nil && paper.enabled {
+		for _, p := range paper.positions {
+			if p == nil || p.Qty <= 0 {
+				continue
+			}
+			checkPos(p.Symbol, p.Side, "PAPER", p.Entry, p.LastMark, p.Sponsored, p.LastConfluenceRefresh)
+		}
+	}
+	return bestReason
 }
 
 func lifecycleStageScore(stage string) float64 {
@@ -10767,6 +11407,229 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapsho
 	return snap, nil
 }
 
+func (m *liveExecManager) runLiveAccountSnapshotLoop() {
+	if m == nil || m.rest == nil {
+		return
+	}
+	m.refreshLiveAccountSnapshot(time.Now().UTC())
+	ticker := time.NewTicker(m.snapshotPoll)
+	defer ticker.Stop()
+	for now := range ticker.C {
+		m.refreshLiveAccountSnapshot(now.UTC())
+	}
+}
+
+func (m *liveExecManager) refreshLiveAccountSnapshot(now time.Time) {
+	if m == nil || m.rest == nil {
+		return
+	}
+	snap, err := fetchAccountSnapshot(m.rest, m.accountAssets)
+	if err != nil {
+		return
+	}
+	symbols := make([]string, 0, len(snap.Positions))
+	for _, p := range snap.Positions {
+		if strings.TrimSpace(p.Symbol) != "" {
+			symbols = append(symbols, strings.ToUpper(strings.TrimSpace(p.Symbol)))
+		}
+	}
+	m.syncMarketStreams(symbols)
+	merged := m.mergeLiveAccountSnapshot(now, snap)
+	m.mu.Lock()
+	m.liveAccount = merged
+	m.mu.Unlock()
+}
+
+func (m *liveExecManager) syncMarketStreams(symbols []string) {
+	if m == nil {
+		return
+	}
+	want := map[string]struct{}{}
+	for _, sym := range symbols {
+		raw := strings.ToUpper(strings.TrimSpace(sym))
+		if raw != "" {
+			want[raw] = struct{}{}
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for sym, cancel := range m.marketCancels {
+		if _, ok := want[sym]; ok {
+			continue
+		}
+		cancel()
+		delete(m.marketCancels, sym)
+		delete(m.marketStates, sym)
+	}
+	for sym := range want {
+		if _, ok := m.marketStates[sym]; ok {
+			continue
+		}
+		state := aster.NewMarketState(sym, 50)
+		client := aster.NewStreamClient(sym, m.wsLevels, m.wsSpeed, state)
+		ctx, cancel := context.WithCancel(context.Background())
+		m.marketStates[sym] = state
+		m.marketCancels[sym] = cancel
+		go func() {
+			_ = client.Run(ctx)
+		}()
+	}
+}
+
+func (m *liveExecManager) priceQuoteForSymbol(symbol string, remoteMark float64) livePriceQuote {
+	raw := strings.ToUpper(strings.TrimSpace(symbol))
+	q := livePriceQuote{Symbol: raw, MarkPrice: remoteMark}
+	if m == nil || raw == "" {
+		return q
+	}
+	m.mu.RLock()
+	state := m.marketStates[raw]
+	m.mu.RUnlock()
+	if state == nil {
+		return q
+	}
+	bid, ask, mid, _, _, trades := state.SnapshotTop(5)
+	q.BidPrice = bid
+	q.AskPrice = ask
+	if len(trades) > 0 {
+		q.LastPrice = trades[0].Price
+	}
+	if q.LastPrice <= 0 {
+		q.LastPrice = mid
+	}
+	if bid > 0 && ask > 0 {
+		q.SpreadBps = ((ask - bid) / ((ask + bid) / 2)) * 10000.0
+	}
+	q.UpdatedAt = time.Now().UTC()
+	return q
+}
+
+func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSnapshot) liveAccountSnapshot {
+	out := liveAccountSnapshot{
+		Generated:     now,
+		AvailableUSDT: acct.AvailableUSDT,
+		RealizedDay:   m.dayRealizedAt(now),
+		Positions:     make([]liveAccountPosition, 0, len(acct.Positions)),
+	}
+	localBySymbol := map[string]*livePosition{}
+	if m != nil {
+		for sym, pos := range m.positions {
+			if pos == nil || !m.isActive(pos) {
+				continue
+			}
+			key := strings.ToUpper(strings.TrimSpace(sym)) + "|" + normalizePositionSide(pos.Side)
+			localBySymbol[key] = pos
+		}
+	}
+	for _, rp := range acct.Positions {
+		raw := strings.ToUpper(strings.TrimSpace(rp.Symbol))
+		if raw == "" {
+			continue
+		}
+		lp := localBySymbol[raw+"|"+normalizePositionSide(rp.Side)]
+		src := "MANUAL"
+		stop := 0.0
+		holdMin := 0.0
+		entryReason := ""
+		if lp != nil {
+			src = nonEmpty(strings.ToUpper(strings.TrimSpace(lp.EntrySource)), "BOT")
+			stop = lp.StopPrice
+			holdMin = now.Sub(lp.CreatedAt).Minutes()
+			if holdMin < 0 {
+				holdMin = 0
+			}
+			entryReason = lp.EntryReason
+		}
+		quote := m.priceQuoteForSymbol(raw, rp.Mark)
+		markPx := rp.Mark
+		if markPx <= 0 {
+			markPx = quote.LastPrice
+		}
+		lastPx := quote.LastPrice
+		if lastPx <= 0 {
+			lastPx = markPx
+		}
+		unreal := rp.Unreal
+		if lastPx > 0 {
+			unreal, _ = realizedFromFill(rp.Side, rp.Entry, lastPx, rp.SizeAbs)
+		}
+		unrealPct := 0.0
+		if rp.Margin > 0 {
+			unrealPct = (unreal / rp.Margin) * 100.0
+		} else if rp.Entry > 0 && rp.SizeAbs > 0 {
+			notional := rp.Entry * rp.SizeAbs
+			if notional > 0 {
+				unrealPct = (unreal / notional) * 100.0
+			}
+		}
+		pos := liveAccountPosition{
+			Symbol:           raw,
+			Side:             rp.Side,
+			Source:           src,
+			Qty:              rp.SizeAbs,
+			EntryPrice:       rp.Entry,
+			MarkPrice:        markPx,
+			LastPrice:        lastPx,
+			SpreadBps:        quote.SpreadBps,
+			UnrealizedPnL:    unreal,
+			UnrealizedPnLPct: unrealPct,
+			ExchangeUnreal:   rp.Unreal,
+			Leverage:         maxInt(int(rp.Leverage), 1),
+			Margin:           rp.Margin,
+			StopPrice:        stop,
+			HoldMin:          holdMin,
+			EntryReason:      entryReason,
+		}
+		out.OpenPnL += unreal
+		if src == "MANUAL" {
+			out.ManualCount++
+		} else {
+			out.BotCount++
+		}
+		out.Positions = append(out.Positions, pos)
+	}
+	out.OpenCount = len(out.Positions)
+	sort.Slice(out.Positions, func(i, j int) bool {
+		return abs(out.Positions[i].UnrealizedPnL) > abs(out.Positions[j].UnrealizedPnL)
+	})
+	out.Equity = acct.AvailableUSDT + out.OpenPnL
+	return out
+}
+
+func (m *liveExecManager) LiveAccountSnapshot(limit int) liveAccountSnapshot {
+	if m == nil {
+		return liveAccountSnapshot{Generated: time.Now().UTC()}
+	}
+	m.mu.RLock()
+	out := m.liveAccount
+	m.mu.RUnlock()
+	if limit > 0 && len(out.Positions) > limit {
+		out.Positions = append([]liveAccountPosition(nil), out.Positions[:limit]...)
+	}
+	return out
+}
+
+func (m *liveExecManager) LivePositionBySymbol(symbol string) (liveAccountPosition, bool) {
+	if m == nil {
+		return liveAccountPosition{}, false
+	}
+	input := strings.ToUpper(strings.TrimSpace(symbol))
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(input)))
+	if raw == "" {
+		raw = input
+	}
+	rawBase := strings.TrimSuffix(strings.TrimSuffix(raw, "USDT"), "USD")
+	snap := m.LiveAccountSnapshot(0)
+	for _, p := range snap.Positions {
+		posRaw := strings.ToUpper(strings.TrimSpace(p.Symbol))
+		posBase := strings.TrimSuffix(strings.TrimSuffix(posRaw, "USDT"), "USD")
+		if strings.EqualFold(posRaw, raw) || strings.EqualFold(posBase, rawBase) {
+			return p, true
+		}
+	}
+	return liveAccountPosition{}, false
+}
+
 func printAccountSnapshot(snap accountSnapshot, realizedToday float64) {
 	openPnL := 0.0
 	for _, p := range snap.Positions {
@@ -11341,6 +12204,17 @@ func accountEquity(s accountSnapshot) float64 {
 	return eq
 }
 
+func normalizePositionSide(side string) string {
+	switch strings.ToUpper(strings.TrimSpace(side)) {
+	case "BUY", "LONG":
+		return "LONG"
+	case "SELL", "SHORT":
+		return "SHORT"
+	default:
+		return strings.ToUpper(strings.TrimSpace(side))
+	}
+}
+
 func sessionTag(ts time.Time) string {
 	return string(data.CurrentRegimeCT(ts))
 }
@@ -11791,6 +12665,10 @@ func nonEmpty(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
 }
 
 func csvValue(rec []string, idx map[string]int, key string) string {
@@ -12478,6 +13356,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/status</code> runtime snapshot",
 			"<code>/balance</code> account holdings",
 			"<code>/positions</code> open trades",
+			"<code>/position SYMBOL</code> one live trade in detail",
 			"<code>/why SYMBOL</code> latest decision for a symbol",
 			"<code>/suggest SYMBOL SIDE</code> operator watch + re-evaluate",
 			"<code>/trade SYMBOL SIDE [LEV]</code> operator-priority trade request",
@@ -12491,6 +13370,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		)
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
+		liveSummary := "live snapshot unavailable"
+		if c.execMgr != nil {
+			ls := c.execMgr.LiveAccountSnapshot(3)
+			liveSummary = fmt.Sprintf("open=%d bot=%d manual=%d realized=%+.2f openPnL=%+.2f netDay=%+.2f",
+				ls.OpenCount, ls.BotCount, ls.ManualCount, ls.RealizedDay, ls.OpenPnL, ls.RealizedDay+ls.OpenPnL)
+		}
 		return notify.BuildEventHTML("🧭", "STATUS",
 			fmt.Sprintf("<b>Mode:</b> dry_run=%v live_enabled=%v", s.DryRun, s.LiveEnabled),
 			fmt.Sprintf("<b>In-Play:</b> long=%d short=%d", s.LongInPlay, s.ShortInPlay),
@@ -12498,8 +13383,21 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Available USDT:</b> %.2f", s.AvailableUSDT),
 			fmt.Sprintf("<b>Paper:</b> %s", summarizeOneLine(s.PaperSummary, 120)),
 			fmt.Sprintf("<b>Exec:</b> open=%d pending=%d partial1=%d partial2=%d", s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2),
+			fmt.Sprintf("<b>Live:</b> %s", liveSummary),
 		)
 	case strings.HasPrefix(cmd, "/balance"):
+		if c.execMgr != nil {
+			ls := c.execMgr.LiveAccountSnapshot(5)
+			if len(ls.Positions) > 0 || ls.AvailableUSDT > 0 || ls.Equity > 0 {
+				lines := []string{
+					fmt.Sprintf("<b>Available USDT:</b> %.4f", ls.AvailableUSDT),
+					fmt.Sprintf("<b>Equity (USDT view):</b> %.4f", ls.Equity),
+					fmt.Sprintf("<b>Open Positions:</b> %d", ls.OpenCount),
+					fmt.Sprintf("<b>Realized Day:</b> %+.2f | <b>Open PnL:</b> %+.2f", ls.RealizedDay, ls.OpenPnL),
+				}
+				return notify.BuildEventHTML("💼", "BALANCE", lines...)
+			}
+		}
 		if c.rest != nil {
 			assets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 			snap, err := fetchAccountSnapshot(c.rest, assets)
@@ -12548,27 +13446,45 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return b.String()
 		}
 		if c.execMgr != nil {
-			ex := c.execMgr.Snapshot(10)
-			if len(ex.Active) == 0 {
+			ls := c.execMgr.LiveAccountSnapshot(10)
+			if len(ls.Positions) == 0 {
 				return notify.BuildEventHTML("📦", "POSITIONS", "No active live positions")
 			}
+			now := time.Now().In(c.execMgr.reportLoc)
+			pulse, cards := buildLivePulseAndCards("LIVE POSITIONS", now, c.execMgr)
 			var b strings.Builder
-			b.WriteString(notify.BuildEventHTML("📦", "LIVE POSITIONS",
-				fmt.Sprintf("<b>Open:</b> %d | <b>Pending:</b> %d", ex.Open, ex.Pending),
-			))
-			for i, p := range ex.Active {
+			b.WriteString(notify.BuildSessionPulseHTML(pulse))
+			for i, card := range cards {
+				b.WriteString("\n\n")
 				if i >= 10 {
 					break
 				}
-				b.WriteString("\n\n")
-				b.WriteString(notify.BuildEventHTML("📍", fmt.Sprintf("%s %s", cleanSymbol(p.Symbol), p.Side),
-					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
-					fmt.Sprintf("<b>Stop:</b> %s | <b>Reason:</b> <code>%s</code>", fmtPrice(p.StopPrice), p.EntryReason),
-				))
+				b.WriteString(notify.BuildPositionCard(card))
 			}
 			return strings.TrimSpace(b.String())
 		}
 		return notify.BuildEventHTML("📦", "POSITIONS", "unavailable")
+	case strings.HasPrefix(cmd, "/position"):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/position SYMBOL</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(fields[1]))
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("📍", "POSITION", "live execution manager unavailable")
+		}
+		p, ok := c.execMgr.LivePositionBySymbol(sym)
+		if !ok {
+			return notify.BuildEventHTML("📍", "POSITION", fmt.Sprintf("%s is not an active live position", cleanSymbol(sym)))
+		}
+		lines := []string{
+			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), strings.ToUpper(strings.TrimSpace(p.Side)), nonEmpty(strings.ToUpper(strings.TrimSpace(p.Source)), "BOT")),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", p.Qty, maxInt(1, p.Leverage), p.Margin),
+			fmt.Sprintf("<b>Entry:</b> %s | <b>Mark:</b> %s | <b>Last:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.MarkPrice), fmtPrice(p.LastPrice)),
+			fmt.Sprintf("<b>uPnL:</b> %+.2f (%+.2f%%) | <b>Exchange uPnL:</b> %+.2f", p.UnrealizedPnL, p.UnrealizedPnLPct, p.ExchangeUnreal),
+			fmt.Sprintf("<b>Stop:</b> %s | <b>Spread:</b> %.1fbps | <b>Hold:</b> %.1fm", fmtPrice(p.StopPrice), p.SpreadBps, p.HoldMin),
+			fmt.Sprintf("<b>Reason:</b> <code>%s</code>", nonEmpty(strings.TrimSpace(p.EntryReason), "none")),
+		}
+		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
 	case cmd == "/mode":
 		modeDryRun := true
 		modeLiveEnabled := false

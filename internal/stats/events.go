@@ -31,6 +31,8 @@ type Event struct {
 	HoldMin           float64   `json:"hold_min,omitempty"`
 	MFER              float64   `json:"mfe_r,omitempty"`
 	MAER              float64   `json:"mae_r,omitempty"`
+	CaptureRatio      float64   `json:"capture_ratio,omitempty"`
+	MaxGivebackR      float64   `json:"max_giveback_r,omitempty"`
 	PnLUSD            float64   `json:"pnl_usd,omitempty"`
 	PnLPct            float64   `json:"pnl_pct,omitempty"`
 	Fees              float64   `json:"fees,omitempty"`
