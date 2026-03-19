@@ -1540,8 +1540,7 @@ func main() {
 			}
 		}
 		printScanHeader(localMaintNow)
-		printInPlay("LONG", longInPlay, metaBySymbol)
-		printInPlay("SHORT", shortInPlay, metaBySymbol)
+		printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
 		eventLog.Emit(stats.Event{
 			Timestamp: now,
 			Type:      "METRICS_SNAPSHOT",
@@ -2847,8 +2846,7 @@ func buildClassicDigest(label string, now time.Time, p *paperTrader, meta map[st
 	fmt.Fprintf(&b, "Paper Update (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
 	b.WriteString(p.TradeUpdateMessage(meta, 10_000))
 	b.WriteString("\n\nIn-Play Scanner\n")
-	appendInPlayRows(&b, "LONG", longInPlay, meta, 10_000)
-	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 10_000)
+	appendUnifiedInPlayRows(&b, longInPlay, shortInPlay, meta, 10_000)
 	return tgPre(strings.TrimSpace(b.String()))
 }
 
@@ -2887,8 +2885,7 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, meta map[s
 	fmt.Fprintf(&b, "Live Update (%s) session=%s\n", now.Format("15:04 MST"), sessionTag(now))
 	b.WriteString(m.liveTradeUpdateMessage(meta))
 	b.WriteString("\n\nIn-Play Scanner\n")
-	appendInPlayRows(&b, "LONG", longInPlay, meta, 10_000)
-	appendInPlayRows(&b, "SHORT", shortInPlay, meta, 10_000)
+	appendUnifiedInPlayRows(&b, longInPlay, shortInPlay, meta, 10_000)
 	return tgPre(strings.TrimSpace(b.String()))
 }
 
@@ -3076,6 +3073,92 @@ func appendInPlayRows(b *strings.Builder, tag string, rows []inplay.Entry, meta 
 		}
 		fmt.Fprintf(b, "%d) %s %s g=%s s=%.2f %s%.3f px=%s 24h=%+.2f%%\n",
 			i+1, raw, status, colorGradeTag(e.CurrentGrade), e.CurrentScore, slopeArrow, abs(e.ScoreSlope), price, m.Move24h)
+	}
+}
+
+type unifiedInPlayRow struct {
+	side  string
+	entry inplay.Entry
+	meta  symbolMeta
+}
+
+func validDisplayGrade(g string) bool {
+	switch strings.ToUpper(strings.TrimSpace(g)) {
+	case "A+", "A", "B", "C", "D":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildUnifiedInPlayRows(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, limit int) []unifiedInPlayRow {
+	rows := make([]unifiedInPlayRow, 0, len(longInPlay)+len(shortInPlay))
+	add := func(side string, entries []inplay.Entry) {
+		for _, e := range entries {
+			if !validDisplayGrade(e.CurrentGrade) {
+				continue
+			}
+			raw := strings.ToUpper(aster.RawSymbol(e.Symbol))
+			rows = append(rows, unifiedInPlayRow{
+				side:  side,
+				entry: e,
+				meta:  meta[raw],
+			})
+		}
+	}
+	add("LONG", longInPlay)
+	add("SHORT", shortInPlay)
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].entry.CurrentScore != rows[j].entry.CurrentScore {
+			return rows[i].entry.CurrentScore > rows[j].entry.CurrentScore
+		}
+		if rows[i].meta.VolumeUSD != rows[j].meta.VolumeUSD {
+			return rows[i].meta.VolumeUSD > rows[j].meta.VolumeUSD
+		}
+		if rows[i].entry.ScoreSlope != rows[j].entry.ScoreSlope {
+			return abs(rows[i].entry.ScoreSlope) > abs(rows[j].entry.ScoreSlope)
+		}
+		return strings.ToUpper(aster.RawSymbol(rows[i].entry.Symbol)) < strings.ToUpper(aster.RawSymbol(rows[j].entry.Symbol))
+	})
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
+func appendUnifiedInPlayRows(b *strings.Builder, longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, limit int) {
+	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, limit)
+	fmt.Fprintf(b, "RANKED (%d)\n", len(rows))
+	if len(rows) == 0 {
+		b.WriteString("- none\n")
+		return
+	}
+	for i, row := range rows {
+		raw := strings.ToUpper(aster.RawSymbol(row.entry.Symbol))
+		status := colorStateTag(row.entry.SideBias, row.entry.State)
+		slopeArrow := "→"
+		if row.entry.ScoreSlope > 0 {
+			slopeArrow = "↑"
+		} else if row.entry.ScoreSlope < 0 {
+			slopeArrow = "↓"
+		}
+		price := "n/a"
+		if row.meta.LastPrice > 0 {
+			price = fmtPrice(row.meta.LastPrice)
+		}
+		fmt.Fprintf(b, "%d) [%s] %s %s g=%s s=%.2f %s%.3f px=%s dayUTC=%+.2f%% vol=%s\n",
+			i+1,
+			row.side,
+			raw,
+			status,
+			colorGradeTag(row.entry.CurrentGrade),
+			row.entry.CurrentScore,
+			slopeArrow,
+			abs(row.entry.ScoreSlope),
+			price,
+			row.meta.DayUTC24h,
+			marketHumanUSD(row.meta.VolumeUSD),
+		)
 	}
 }
 
@@ -10371,29 +10454,28 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 	return sig
 }
 
-func printInPlay(tag string, entries []inplay.Entry, meta map[string]symbolMeta) {
-	fmt.Printf("IN-PLAY (%s)\n", strings.ToUpper(strings.TrimSpace(tag)))
-	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
-	fmt.Println("| sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
-	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
-	if len(entries) == 0 {
-		fmt.Println("| (none)                                                                                      |")
-		fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta) {
+	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, 0)
+	fmt.Printf("IN-PLAY (RANKED)\n")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	if len(rows) == 0 {
+		fmt.Println("| (none)                                                                                             |")
+		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 		return
 	}
-	for _, e := range entries {
+	for _, row := range rows {
+		e := row.entry
 		sym := strings.ToUpper(aster.RawSymbol(e.Symbol))
 		if sym == "" {
 			sym = strings.ToUpper(strings.TrimSpace(e.Symbol))
 		}
 		grade := strings.ToUpper(strings.TrimSpace(e.CurrentGrade))
-		if grade == "" {
-			grade = "N/A"
-		}
 		state := strings.ToUpper(strings.TrimSpace(displayState(e.SideBias, e.State)))
 		gColor := market.GradeColor(grade)
 		sColor := inPlayStateColor(inplay.State(strings.ToLower(state)))
-		m := meta[sym]
+		m := row.meta
 		dayUTC := "-"
 		if m.DayUTC24h != 0 {
 			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
@@ -10410,7 +10492,8 @@ func printInPlay(tag string, entries []inplay.Entry, meta map[string]symbolMeta)
 		if m.VolumeUSD > 0 {
 			vol = marketHumanUSD(m.VolumeUSD)
 		}
-		fmt.Printf("| %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
+		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
+			row.side,
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
@@ -10418,7 +10501,7 @@ func printInPlay(tag string, entries []inplay.Entry, meta map[string]symbolMeta)
 			dayUTC, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
