@@ -691,3 +691,59 @@ func TestDayUTCResetProgressUses1900Anchor(t *testing.T) {
 		t.Fatalf("unexpected progress values early=%.2f full=%.2f", early, full)
 	}
 }
+
+func TestQualifiesResetImpulseLong(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_RESET_IMPULSE", "1")
+	t.Setenv("LIVE_RESET_IMPULSE_WINDOW_MIN", "45")
+	t.Setenv("LIVE_RESET_IMPULSE_MAX_STATE_MIN", "25")
+	t.Setenv("LIVE_RESET_IMPULSE_MIN_SCORE", "72")
+	t.Setenv("LIVE_RESET_IMPULSE_MIN_SLOPE", "0.08")
+	t.Setenv("LIVE_RESET_IMPULSE_MIN_VOL_RATIO", "1.20")
+	t.Setenv("LIVE_RESET_IMPULSE_MIN_DAYUTC_PCT", "8.0")
+	t.Setenv("LIVE_DAYUTC_RESET_TZ", "America/Chicago")
+	t.Setenv("LIVE_DAYUTC_RESET_HOUR", "19")
+	t.Setenv("LIVE_DAYUTC_RESET_MIN", "0")
+	loc, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 3, 19, 19, 18, 0, 0, loc)
+	c := candidate{
+		Side:         "BUY",
+		TriggerState: string(triggerImpulseCont),
+		TriggerStage: "READY",
+		DayUTC24h:    18.0,
+		VolumeRatio:  1.55,
+		LastClose:    1.25,
+		SessionVWAP:  1.20,
+		EMA9:         1.22,
+		Entry: inplay.Entry{
+			State:          inplay.StateInPlay,
+			TimeInStateMin: 7,
+			CurrentScore:   91,
+			ScoreSlope:     0.19,
+		},
+	}
+	name, conf, _ := qualifiesResetImpulse(c, now)
+	if name != "reset_impulse_long" {
+		t.Fatalf("expected reset_impulse_long, got %q", name)
+	}
+	if conf < 0.62 {
+		t.Fatalf("expected meaningful confidence, got %.2f", conf)
+	}
+}
+
+func TestContinuationGuardAllowsResetImpulse(t *testing.T) {
+	cfg := entryQualityConfig{
+		BlockContExhaustion:  true,
+		DayUTCMaturityBrake:  true,
+		DayUTCMaturityPct:    25,
+		RequireFreshPullback: true,
+	}
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "reset_impulse_long",
+		TriggerState: string(triggerExhaustion),
+		DayUTC24h:    32,
+	}
+	if reason := continuationGuardReason(c, cfg); reason != "" {
+		t.Fatalf("expected reset impulse to bypass continuation guard, got %q", reason)
+	}
+}

@@ -9857,6 +9857,8 @@ func strategyFamily(c candidate) string {
 	switch {
 	case strings.Contains(strat, "ignite"):
 		return "ignite"
+	case strings.Contains(strat, "reset_impulse"):
+		return "ignite"
 	case strings.Contains(strat, "reversal"), strings.Contains(strat, "flip"):
 		return "rev"
 	}
@@ -9938,6 +9940,9 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 		_, triggerStateN, _ = deriveTriggerState(c)
 	}
 	triggerN := clamp(0.22*slopeN+0.18*confN+0.18*structureN+0.12*stageN+0.12*triggerStageN+0.08*freshnessN+0.10*triggerStateN, 0, 1)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
+		triggerN = maxFloat(triggerN, envFloat("LIVE_RESET_IMPULSE_TRIGGER_FLOOR", 0.82))
+	}
 
 	executionN := scoreExecutionFit(c)
 
@@ -10042,6 +10047,87 @@ func effectiveDayUTCWeight(now time.Time, baseWeight float64) float64 {
 	return clamp(baseWeight*dayUTCResetProgress(now), 0, 1)
 }
 
+func minutesSinceDayUTCReset(now time.Time) float64 {
+	return maxFloat(0, now.Sub(dayUTCResetAnchor(now)).Minutes())
+}
+
+func resetImpulseWindowActive(now time.Time) bool {
+	windowMin := envFloat("LIVE_RESET_IMPULSE_WINDOW_MIN", 45.0)
+	if windowMin <= 0 {
+		return false
+	}
+	return minutesSinceDayUTCReset(now) <= windowMin
+}
+
+func qualifiesResetImpulse(c candidate, now time.Time) (string, float64, []string) {
+	if !envBool("LIVE_ENABLE_RESET_IMPULSE", true) || !resetImpulseWindowActive(now) {
+		return "", 0, nil
+	}
+	side := strings.ToUpper(strings.TrimSpace(c.Side))
+	if side != "BUY" && side != "SELL" {
+		return "", 0, nil
+	}
+	stateOK := c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping
+	if !stateOK || c.Entry.TimeInStateMin > envFloat("LIVE_RESET_IMPULSE_MAX_STATE_MIN", 25.0) {
+		return "", 0, nil
+	}
+	if c.Entry.CurrentScore < envFloat("LIVE_RESET_IMPULSE_MIN_SCORE", 72.0) {
+		return "", 0, nil
+	}
+	minSlope := envFloat("LIVE_RESET_IMPULSE_MIN_SLOPE", 0.08)
+	minDayUTC := envFloat("LIVE_RESET_IMPULSE_MIN_DAYUTC_PCT", 8.0)
+	if side == "BUY" {
+		if c.Entry.ScoreSlope < minSlope || c.DayUTC24h < minDayUTC {
+			return "", 0, nil
+		}
+		if c.SessionVWAP > 0 && c.LastClose < c.SessionVWAP {
+			return "", 0, nil
+		}
+		if c.EMA9 > 0 && c.LastClose < c.EMA9 {
+			return "", 0, nil
+		}
+	} else {
+		if c.Entry.ScoreSlope > -minSlope || c.DayUTC24h > -minDayUTC {
+			return "", 0, nil
+		}
+		if c.SessionVWAP > 0 && c.LastClose > c.SessionVWAP {
+			return "", 0, nil
+		}
+		if c.EMA9 > 0 && c.LastClose > c.EMA9 {
+			return "", 0, nil
+		}
+	}
+	if c.VolumeRatio < envFloat("LIVE_RESET_IMPULSE_MIN_VOL_RATIO", 1.20) {
+		return "", 0, nil
+	}
+	switch c.TriggerState {
+	case string(triggerImpulseCont), string(triggerOFReclaim), string(triggerStackedBid), string(triggerStackedAsk):
+	default:
+		return "", 0, nil
+	}
+	if c.TriggerStage == "INVALIDATED" {
+		return "", 0, nil
+	}
+	progress := dayUTCResetProgress(now)
+	confBase := envFloat("LIVE_RESET_IMPULSE_BASE_CONF", 0.62)
+	confBoost := min(0.20,
+		maxFloat(0.0, math.Abs(c.DayUTC24h)-minDayUTC)*0.008+
+			maxFloat(0.0, c.VolumeRatio-envFloat("LIVE_RESET_IMPULSE_MIN_VOL_RATIO", 1.20))*0.08+
+			maxFloat(0.0, math.Abs(c.Entry.ScoreSlope)-minSlope)*0.40)
+	conf := clamp(confBase+confBoost+(1.0-progress)*envFloat("LIVE_RESET_IMPULSE_EARLY_BONUS", 0.08), 0, 0.90)
+	strat := "reset_impulse_long"
+	if side == "SELL" {
+		strat = "reset_impulse_short"
+	}
+	reasons := []string{
+		fmt.Sprintf("reset_age_min=%.1f", minutesSinceDayUTCReset(now)),
+		fmt.Sprintf("dayutc=%+.2f", c.DayUTC24h),
+		fmt.Sprintf("vol_ratio=%.2f", c.VolumeRatio),
+		fmt.Sprintf("trigger_state=%s", c.TriggerState),
+	}
+	return strat, conf, reasons
+}
+
 func isContinuationStrategy(c candidate) bool {
 	switch strategyFamily(c) {
 	case "cont", "ignite":
@@ -10062,6 +10148,9 @@ func requiresFreshPullback(c candidate) bool {
 
 func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 	if !isContinuationStrategy(c) {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
 		return ""
 	}
 	if cfg.BlockContExhaustion && c.TriggerState == string(triggerExhaustion) {
@@ -10302,7 +10391,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "momentum_ignite_long", "momentum_ignite_short":
+	case "continuation_fast", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -10781,6 +10870,22 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 	ofiMinSamples := envInt("LIVE_OFI_MIN_SAMPLES", 8)
 	if ofiMinSamples < 1 {
 		ofiMinSamples = 1
+	}
+	if resetName, resetConf, resetReasons := qualifiesResetImpulse(cand, time.Now()); resetName != "" {
+		cand.Strat = resetName
+		cand.Conf = resetConf
+		cand.Sig = strategies.Signal{
+			Active:       true,
+			Name:         resetName,
+			Side:         toFeatureSide(cand.Side),
+			Confidence:   resetConf,
+			RejectReason: "",
+			Reasons:      resetReasons,
+			Tags:         []string{"reset_impulse", "post_1900_breakout"},
+		}
+		cand.Sig = applySignalRiskGeometry(cand, resetName)
+		cand.RejectReason = ""
+		return cand
 	}
 	if envBool("LIVE_ENABLE_MOMENTUM_IGNITE", true) {
 		igniteMinScore := envFloat("LIVE_IGNITE_MIN_SCORE", 60.0)
