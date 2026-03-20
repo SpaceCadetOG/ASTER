@@ -16,7 +16,8 @@ func evalMomentum(m Market, side string, cfg RankConfig) MomentumResult {
 	m5 := directional(m.Change5m, side)
 	m30 := directional(m.Change30m, side)
 	m4h := directional(m.Change4h, side)
-	m24 := directional(&m.Change24h, side)
+	primaryMove := PrimaryMovePct(m)
+	m24 := directional(&primaryMove, side)
 
 	weights := []float64{cfg.MomW5m, cfg.MomW30m, cfg.MomW4h, cfg.MomW24h}
 	values := []float64{m5, m30, m4h, m24}

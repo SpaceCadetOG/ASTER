@@ -169,7 +169,7 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 		seen[sym] = struct{}{}
 		g := strings.TrimSpace(grades[sym])
 		if g == "" {
-			g = market.FallbackGradeDirectional(r.Score, r.Change24h, t.side)
+			g = market.FallbackGradeForMarket(r.Score, r.Market, t.side)
 		}
 
 		ss := t.data[sym]

@@ -92,6 +92,20 @@ func TopN(scored []Scored, n int) []Scored {
 	return filtered[:n]
 }
 
+func PrimaryMovePct(m Market) float64 {
+	if m.DayUTC24h != nil {
+		return *m.DayUTC24h
+	}
+	return m.Change24h
+}
+
+func primaryMoveLabel(m Market) string {
+	if m.DayUTC24h != nil {
+		return "DayUTC%"
+	}
+	return "Δ24h%"
+}
+
 const (
 	W_CHANGE_SHORT  = 1.0
 	W_LOG_VOL_SHORT = 8.0
@@ -110,8 +124,9 @@ func EligibleShort(m Market) (bool, string) {
 	if m.VolumeUSD < 1_000_000 {
 		return false, "low volume"
 	}
-	if m.Change24h > -3.0 {
-		return false, "weak down move"
+	move := PrimaryMovePct(m)
+	if move > -3.0 {
+		return false, "weak " + primaryMoveLabel(m)
 	}
 	return true, ""
 }
@@ -194,6 +209,14 @@ func FallbackGrade(score, delta24h float64) string {
 // FallbackGradeDirectional returns A+/A/B/C/D/N/A based on momentum score
 // and 24h move, with bias for LONG vs SHORT.
 func FallbackGradeDirectional(score, delta24h float64, side string) string {
+	return FallbackGradeDirectionalView(score, delta24h, delta24h, side)
+}
+
+func FallbackGradeForMarket(score float64, m Market, side string) string {
+	return FallbackGradeDirectionalView(score, PrimaryMovePct(m), m.Change24h, side)
+}
+
+func FallbackGradeDirectionalView(score, primaryMove, view24h float64, side string) string {
 	side = strings.ToLower(side)
 	if score < 0 {
 		score = 0
@@ -202,18 +225,17 @@ func FallbackGradeDirectional(score, delta24h float64, side string) string {
 		score = 150
 	}
 
-	// Movement that helps the current bias:
-	// - LONG likes positive delta
-	// - SHORT likes negative delta (so we flip the sign)
-	mover := delta24h
+	mover := primaryMove
 	if side == "short" {
-		mover = -delta24h
+		mover = -primaryMove
 	}
-
-	// Volatility bonus: reward strong directional movers (cap ±15)
-	// +0.25 per 1% move feels responsive but not crazy.
-	bonus := math.Max(-15, math.Min(15, mover*0.25))
-	adj := score + bonus
+	viewMover := view24h
+	if side == "short" {
+		viewMover = -view24h
+	}
+	primaryBonus := math.Max(-15, math.Min(15, mover*0.25))
+	viewBonus := math.Max(-4, math.Min(4, viewMover*0.08))
+	adj := score + primaryBonus + viewBonus
 
 	switch {
 	case adj >= 100:
@@ -255,7 +277,8 @@ func confidenceFromParts(cfg RankConfig, completeness, agreement, execPenaltyFra
 
 func baseLongRawScore(m Market) float64 {
 	score := 0.0
-	score += W_CHANGE * m.Change24h
+	score += W_CHANGE * PrimaryMovePct(m)
+	score += rolling24ContextAdjustment("long", m.Change24h)
 	v := math.Max(m.VolumeUSD, 1)
 	score += W_LOG_VOL * math.Log10(v)
 	if m.OIUSD != nil {
@@ -269,16 +292,14 @@ func baseLongRawScore(m Market) float64 {
 		}
 		score += directionalFundingAdjustment("long", *m.FundingRate)
 	}
-	if m.DayUTC24h != nil {
-		score += directionalDayAlignment("long", *m.DayUTC24h)
-	}
 	score += oiParticipationAdjustment(m)
 	score -= fragilityPenalty("long", m)
 	return score
 }
 
 func baseShortRawScore(m Market) float64 {
-	score := W_CHANGE_SHORT * math.Max(0, -m.Change24h)
+	score := W_CHANGE_SHORT * math.Max(0, -PrimaryMovePct(m))
+	score += rolling24ContextAdjustment("short", m.Change24h)
 	v := math.Max(m.VolumeUSD, 1)
 	score += W_LOG_VOL_SHORT * math.Log10(v)
 	if m.OIUSD != nil {
@@ -292,12 +313,17 @@ func baseShortRawScore(m Market) float64 {
 		}
 		score += directionalFundingAdjustment("short", *m.FundingRate)
 	}
-	if m.DayUTC24h != nil {
-		score += directionalDayAlignment("short", *m.DayUTC24h)
-	}
 	score += oiParticipationAdjustment(m)
 	score -= fragilityPenalty("short", m)
 	return score
+}
+
+func rolling24ContextAdjustment(side string, change24h float64) float64 {
+	mover := change24h
+	if normalizeSide(side) == "short" {
+		mover = -change24h
+	}
+	return clamp(mover*0.18, -6, 8)
 }
 
 func directionalDayAlignment(side string, dayUTC float64) float64 {

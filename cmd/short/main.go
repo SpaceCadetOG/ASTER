@@ -100,12 +100,12 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	fmt.Println(market.FormatHeader("asterdex (SHORTS)", active))
-	fmt.Println("Symbol       | Score  | Δ%(24h) | DayUTC% | Vol($)  | OI($)   | Funding(%) | OpenUTC |     Last")
-	fmt.Println("-------------+--------+----------+---------+---------+---------+------------+---------+---------")
+	fmt.Println("Symbol       | Score  | DayUTC% | Δ%(24h) | Vol($)  | OI($)   | Funding(%) | OpenUTC |     Last")
+	fmt.Println("-------------+--------+---------+----------+---------+---------+------------+---------+---------")
 
 	confMap := make(map[string]string, len(scored))
 	for _, s := range scored {
-		confMap[s.Symbol] = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
+		confMap[s.Symbol] = market.FallbackGradeForMarket(s.Score, s.Market, "short")
 	}
 	trk.Update(now, scored, confMap)
 	entryBySymbol := entryMap(trk.Entries())
@@ -123,7 +123,7 @@ func runOnce(st *status.Store, asterClient *aster.Client, trk *inplay.Tracker) {
 		eligible = append(eligible, s)
 		lbl := confluenceLabel(asterClient, s.Symbol, "short")
 		if lbl == "" || lbl == "_" || lbl == "C" {
-			lbl = market.FallbackGradeDirectional(s.Score, s.Change24h, "short")
+			lbl = market.FallbackGradeForMarket(s.Score, s.Market, "short")
 		}
 		confMap[s.Symbol] = lbl
 

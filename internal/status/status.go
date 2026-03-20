@@ -116,6 +116,7 @@ tr:hover{background:var(--row)}
 <tr>
   <th>Symbol</th>
   <th class="num">Score</th>
+  <th class="num">DayUTC%</th>
   <th class="num">Δ24h%</th>
   <th class="num">Vol($)</th>
   <th class="num">OI($)</th>
@@ -136,10 +137,15 @@ tr:hover{background:var(--row)}
 			if snap.Conf != nil && snap.Conf[row.Symbol] != "" {
 				grade = snap.Conf[row.Symbol]
 			} else {
-				grade = market.FallbackGradeDirectional(row.Score, row.Change24h, direction)
+				grade = market.FallbackGradeForMarket(row.Score, row.Market, direction)
 			}
 			textHex, bgHex := market.GradePalette(grade)
 
+			dayMove := row.Change24h
+			if row.DayUTC24h != nil {
+				dayMove = *row.DayUTC24h
+			}
+			pDay, cDay, aDay := pctCell(dayMove)
 			// Δ24h
 			p24, c24, a24 := pctCell(row.Change24h)
 
@@ -162,6 +168,7 @@ tr:hover{background:var(--row)}
 <td>%s</td>
 <td class="num">%0.2f</td>
 <td class="num %s">%s%0.1f%%</td>
+<td class="num %s">%s%0.1f%%</td>
 <td class="num">%0.2fM</td>
 <td class="num">%s</td>
 <td class="num">%s</td>
@@ -171,6 +178,8 @@ tr:hover{background:var(--row)}
 </tr>`,
 				html.EscapeString(row.Symbol),
 				row.Score,
+				// DayUTC
+				cDay, aDay, pDay,
 				// 24h Δ
 				c24, a24, p24,
 				// Vol($)

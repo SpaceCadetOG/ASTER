@@ -9481,7 +9481,7 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 		eligibleByScore = append(eligibleByScore, r)
 		grade := strings.TrimSpace(r.Grade)
 		if grade == "" || strings.EqualFold(grade, "N/A") {
-			grade = market.FallbackGradeDirectional(r.Score, r.Change24h, side)
+			grade = market.FallbackGradeForMarket(r.Score, r.Market, side)
 		}
 		conf[r.Symbol] = grade
 	}
@@ -9490,7 +9490,7 @@ func buildEligible(c *aster.Client, rows []market.Scored, side string, gradeTopN
 		sym := eligibleByScore[i].Symbol
 		lbl := confluenceLabel(c, sym, side)
 		if lbl == "" || lbl == "_" || lbl == "C" {
-			lbl = market.FallbackGradeDirectional(eligibleByScore[i].Score, eligibleByScore[i].Change24h, side)
+			lbl = market.FallbackGradeForMarket(eligibleByScore[i].Score, eligibleByScore[i].Market, side)
 		}
 		conf[sym] = lbl
 	}
@@ -9524,6 +9524,10 @@ type rankSortConfig struct {
 func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, enableMomentumReversal bool, reversalMinGrade string, reversalSlopeMin float64, bNearAOnly bool, bNearAScoreMin float64, reversalTopLongN int, cfg candidateSelectConfig) []candidate {
 	minVal := gradeValue(minGrade)
 	revMinVal := gradeValue(reversalMinGrade)
+	longByRaw := make(map[string]inplay.Entry, len(longInPlay))
+	for _, e := range longInPlay {
+		longByRaw[strings.ToUpper(aster.RawSymbol(e.Symbol))] = e
+	}
 	if reversalSlopeMin < 0 {
 		reversalSlopeMin = -reversalSlopeMin
 	}
@@ -9650,6 +9654,48 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		}
 		return true
 	}
+	leaderUnwindShortReady := func(shortE, longE inplay.Entry, hasLong bool) bool {
+		if !hasLong {
+			return false
+		}
+		minScore := envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SCORE", 88.0)
+		minDayUTC := envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_DAYUTC_PCT", -20.0)
+		minSlope := envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SLOPE", 0.35)
+		minGap := envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SCORE_GAP", 12.0)
+		maxOppSlope := envFloat("LIVE_LEADER_UNWIND_OPPOSING_MAX_SLOPE", 0.10)
+		if shortE.CurrentScore < minScore {
+			return false
+		}
+		if shortE.DayUTCPct > minDayUTC {
+			return false
+		}
+		switch shortE.State {
+		case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		default:
+			return false
+		}
+		if shortE.ScoreSlope < minSlope && !shortE.Momentum {
+			return false
+		}
+		longWeakState := longE.State == inplay.StateBalanced || longE.State == inplay.StateCooling || longE.State == inplay.StateDumping || longE.State == inplay.StateExhausted
+		longWeakStyle := longE.EntryStyle == "none" || longE.EntryStyle == "avoid_chase" || longE.EntryStyle == "reversal_watch_short"
+		longScoreGap := shortE.CurrentScore - longE.CurrentScore
+		if longE.LongDemotionFlag {
+			return true
+		}
+		if !longE.Momentum && (longWeakState || longWeakStyle || longE.ScoreSlope <= maxOppSlope || longScoreGap >= minGap) {
+			return true
+		}
+		return false
+	}
+	leaderUnwindShortRankBoost := func(shortE, longE inplay.Entry) float64 {
+		boost := envFloat("LIVE_LEADER_UNWIND_SHORT_RANK_BOOST", 12.0)
+		minDayUTC := math.Abs(envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_DAYUTC_PCT", -20.0))
+		boost += min(6.0, maxFloat(0.0, math.Abs(shortE.DayUTCPct)-minDayUTC)*0.25)
+		boost += min(4.0, maxFloat(0.0, shortE.CurrentScore-longE.CurrentScore)/6.0)
+		boost += min(3.0, maxFloat(0.0, shortE.ScoreSlope-envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SLOPE", 0.35))*4.0)
+		return boost
+	}
 	out := make([]candidate, 0, len(longInPlay)+len(shortInPlay))
 	for _, e := range longInPlay {
 		if !allow(e) {
@@ -9716,7 +9762,11 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 			shortContinuationOK = shortContinuationOK && gradeValue(e.CurrentGrade) >= minVal
 		}
 		if shortContinuationOK {
-			out = append(out, candidate{Entry: e, Side: "SELL"})
+			candEntry := e
+			if longPeer, ok := longByRaw[strings.ToUpper(aster.RawSymbol(e.Symbol))]; ok && leaderUnwindShortReady(e, longPeer, true) {
+				candEntry.Rank = e.Rank + leaderUnwindShortRankBoost(e, longPeer)
+			}
+			out = append(out, candidate{Entry: candEntry, Side: "SELL"})
 		}
 		reversalOK := enableMomentumReversal &&
 			reversalReady(e)
@@ -11137,6 +11187,21 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		lateMinSlope := envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16)
 		lateMinVolRatio := envFloat("LIVE_CONT_FAST_LATE_MIN_VOL_RATIO", 1.35)
 		lateMinScore := envFloat("LIVE_CONT_FAST_LATE_MIN_SCORE", 90.0)
+		leaderUnwindShortMode := false
+		if strings.EqualFold(cand.Side, "SELL") {
+			leaderUnwindShortMode =
+				cand.Entry.CurrentScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SCORE", 88.0) &&
+					cand.Entry.DayUTCPct <= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_DAYUTC_PCT", -20.0) &&
+					(cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping) &&
+					(cand.Entry.ScoreSlope >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SLOPE", 0.35) || cand.Entry.Momentum) &&
+					(cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.EntryStyle == "momentum_ignite_short") &&
+					cand.Entry.BearReversalScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_BEAR_SCORE", 3.0)
+			if leaderUnwindShortMode {
+				fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_VOL_RATIO", 0.80))
+				fastMinOFIZ = min(fastMinOFIZ, envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_ABS_OFI_Z", 0.15))
+				lateStateMin = maxFloat(lateStateMin, envFloat("LIVE_LEADER_UNWIND_SHORT_MAX_STATE_MIN", 30.0))
+			}
+		}
 		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
 		vwapEMAOK := false
 		if strings.EqualFold(cand.Side, "BUY") {
@@ -11179,7 +11244,11 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			len(lateRejects) == 0 &&
 			vwapEMAOK {
 			cand.Strat = "continuation_fast"
-			cand.Conf = clamp(fastBaseConf+min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
+			confBoost := min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30)
+			if leaderUnwindShortMode {
+				confBoost = maxFloat(confBoost, 0.06+min(0.10, maxFloat(0.0, math.Abs(cand.Entry.DayUTCPct)-20.0)*0.004))
+			}
+			cand.Conf = clamp(fastBaseConf+confBoost, 0, 0.90)
 			cand.Sig = strategies.Signal{
 				Active: true,
 				Name:   "continuation_fast",

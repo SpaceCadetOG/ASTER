@@ -8,8 +8,9 @@ const (
 )
 
 func Eligible(m Market) (bool, string) {
-	if m.Change24h < MIN_CHANGE {
-		return false, fmt.Sprintf("Δ%% < %.1f", MIN_CHANGE)
+	move := PrimaryMovePct(m)
+	if move < MIN_CHANGE {
+		return false, fmt.Sprintf("%s < %.1f", primaryMoveLabel(m), MIN_CHANGE)
 	}
 	if m.VolumeUSD < MIN_VOL_USD {
 		return false, fmt.Sprintf("Vol < $%.0f", float64(MIN_VOL_USD))
