@@ -640,3 +640,35 @@ func TestLivePositionBySymbolNormalizesRawSymbol(t *testing.T) {
 		t.Fatalf("did not expect ETHUSDT position")
 	}
 }
+
+func TestEvaluateSwingHoldKeepsPersistentLeader(t *testing.T) {
+	t.Setenv("LIVE_SWING_HOLD_MIN_STATE_MIN", "20")
+	t.Setenv("LIVE_SWING_HOLD_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_SWING_HOLD_MIN_SCORE", "88")
+	t.Setenv("LIVE_SWING_HOLD_MIN_DAYUTC_PCT", "5")
+	t.Setenv("LIVE_SWING_HOLD_MAX_SCORE_OFF_PEAK_PCT", "18")
+	t.Setenv("LIVE_SWING_HOLD_MIN_MFE_R", "0.8")
+	t.Setenv("LIVE_SWING_HOLD_MIN_SCORE_TOTAL", "0.58")
+	mv := momentumView{
+		Long: &inplay.Entry{
+			Symbol:          "LYNUSDT",
+			State:           inplay.StateInPlay,
+			CurrentScore:    94,
+			ScoreSlope:      0.18,
+			TimeInStateMin:  34,
+			DayUTCPct:       16,
+			ScoreOffPeakPct: 8,
+		},
+	}
+	score, reason, hold := evaluateSwingHold("BUY", mv, true, true, 1.4, true, false, false)
+	if !hold {
+		t.Fatalf("expected swing hold, got hold=%v score=%.2f reason=%s", hold, score, reason)
+	}
+}
+
+func TestEvaluateSwingHoldRejectsMissingScannerSupport(t *testing.T) {
+	score, reason, hold := evaluateSwingHold("BUY", momentumView{}, false, false, 0.2, false, false, false)
+	if hold || reason != "scanner_missing" || score != 0 {
+		t.Fatalf("expected scanner_missing rejection, got hold=%v score=%.2f reason=%s", hold, score, reason)
+	}
+}

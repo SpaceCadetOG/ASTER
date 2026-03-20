@@ -6738,6 +6738,68 @@ func isSponsoredMomentum(side string, mv momentumView, minScore, minSlope float6
 	}
 }
 
+func sameSideMomentumEntry(side string, mv momentumView) *inplay.Entry {
+	if strings.EqualFold(side, "BUY") {
+		return mv.Long
+	}
+	return mv.Short
+}
+
+func evaluateSwingHold(side string, mv momentumView, sponsored bool, refreshed bool, maxFavorableR float64, hitTP1, hitTP2, hitTP3 bool) (float64, string, bool) {
+	e := sameSideMomentumEntry(side, mv)
+	if e == nil {
+		return 0, "scanner_missing", false
+	}
+	if e.LongDemotionFlag || e.ShortDemotionFlag {
+		return 0, "scanner_demoted", false
+	}
+	score := 0.0
+	switch e.State {
+	case inplay.StateHeating:
+		score += 0.22
+	case inplay.StateInPlay:
+		score += 0.30
+	case inplay.StatePumping:
+		score += 0.34
+	default:
+		return score, "state_not_persistent", false
+	}
+	if abs(e.ScoreSlope) >= envFloat("LIVE_SWING_HOLD_MIN_SLOPE", 0.02) {
+		score += 0.18
+	} else if e.Momentum {
+		score += 0.12
+	}
+	if e.TimeInStateMin >= envFloat("LIVE_SWING_HOLD_MIN_STATE_MIN", 20.0) {
+		score += 0.14
+	}
+	if e.CurrentScore >= envFloat("LIVE_SWING_HOLD_MIN_SCORE", 88.0) {
+		score += 0.16
+	}
+	if abs(e.DayUTCPct) >= envFloat("LIVE_SWING_HOLD_MIN_DAYUTC_PCT", 5.0) {
+		score += 0.08
+	}
+	if e.ScoreOffPeakPct <= envFloat("LIVE_SWING_HOLD_MAX_SCORE_OFF_PEAK_PCT", 18.0) {
+		score += 0.08
+	}
+	if sponsored {
+		score += 0.12
+	}
+	if refreshed {
+		score += 0.10
+	}
+	if maxFavorableR >= envFloat("LIVE_SWING_HOLD_MIN_MFE_R", 0.80) {
+		score += 0.06
+	}
+	if hitTP1 || hitTP2 || hitTP3 {
+		score += 0.06
+	}
+	minScore := envFloat("LIVE_SWING_HOLD_MIN_SCORE_TOTAL", 0.58)
+	if score >= minScore {
+		return score, "persistent_same_thesis", true
+	}
+	return score, "hold_score_too_low", false
+}
+
 func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (bool, error) {
 	if p == nil || !p.TrailOn || p.RemainingQty <= 0 || mark <= 0 {
 		return false, nil
@@ -6994,6 +7056,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
 	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120)) * time.Minute
+	swingHoldEnable := envBool("LIVE_SWING_HOLD_GUARD_ENABLE", true)
+	swingHoldLog := envBool("LIVE_SWING_HOLD_GUARD_LOG", true)
 	changed := false
 	for sym, p := range m.positions {
 		if p == nil || p.State == execClosed || p.RemainingQty <= 0 {
@@ -7009,6 +7073,15 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		}
 		if confluenceRefreshActive(now, p.LastConfluenceRefresh) {
 			continue
+		}
+		if swingHoldEnable {
+			if holdScore, holdReason, hold := evaluateSwingHold(p.Side, mv, sponsored, confluenceRefreshActive(now, p.LastConfluenceRefresh), p.MaxFavorableR, p.HitTP1, p.HitTP2, p.HitTP3); hold {
+				if swingHoldLog {
+					fmt.Printf("live-lite: swing hold %s %s score=%.2f reason=%s state=%s slope=%.3f\n",
+						sym, p.Side, holdScore, holdReason, sameSideMomentumEntry(p.Side, mv).State, sameSideMomentumEntry(p.Side, mv).ScoreSlope)
+				}
+				continue
+			}
 		}
 		if minHold > 0 && now.Sub(p.CreatedAt) < minHold {
 			continue
@@ -8375,6 +8448,8 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 	sponsorMinScore := envFloat("LIVE_EXIT_SPONSOR_MIN_SCORE", 70.0)
 	sponsorMinSlope := envFloat("LIVE_EXIT_SPONSOR_MIN_SLOPE", 0.02)
 	sponsorFadeHoldMin := time.Duration(envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120)) * time.Minute
+	swingHoldEnable := envBool("LIVE_SWING_HOLD_GUARD_ENABLE", true)
+	swingHoldLog := envBool("LIVE_SWING_HOLD_GUARD_LOG", true)
 	changed := false
 	for raw, pos := range p.positions {
 		if pos == nil || pos.Qty <= 0 {
@@ -8390,6 +8465,15 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		}
 		if confluenceRefreshActive(now, pos.LastConfluenceRefresh) {
 			continue
+		}
+		if swingHoldEnable {
+			if holdScore, holdReason, hold := evaluateSwingHold(pos.Side, mv, sponsored, confluenceRefreshActive(now, pos.LastConfluenceRefresh), pos.MaxFavorableR, pos.HitTP1, pos.HitTP2, pos.HitTP3); hold {
+				if swingHoldLog {
+					fmt.Printf("paper: swing hold %s %s score=%.2f reason=%s state=%s slope=%.3f\n",
+						raw, pos.Side, holdScore, holdReason, sameSideMomentumEntry(pos.Side, mv).State, sameSideMomentumEntry(pos.Side, mv).ScoreSlope)
+				}
+				continue
+			}
 		}
 		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
 			continue
