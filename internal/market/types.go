@@ -8,12 +8,16 @@ type Market struct {
 	Change30m   *float64
 	Change5m    *float64
 	DayUTC24h   *float64
+	UTC4hPct    *float64
+	UTC1hPct    *float64
 	VolumeUSD   float64
 	OIUSD       *float64
 	FundingRate *float64
 	LongsPct    *float64
 
 	OpenPrice float64
+	Open4hUTC float64
+	Open1hUTC float64
 	LastPrice float64
 
 	SpreadBps      *float64

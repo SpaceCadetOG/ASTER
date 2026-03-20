@@ -346,6 +346,8 @@ type symbolMeta struct {
 	OpenPrice   float64
 	Move24h     float64
 	DayUTC24h   float64
+	UTC4hPct    float64
+	UTC1hPct    float64
 	VolumeUSD   float64
 	FundingRate float64
 	Bid         float64
@@ -2389,7 +2391,7 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f utc4h=%+.2f utc1h=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -2406,6 +2408,8 @@ func main() {
 			best.ExecutionScore,
 			best.CombinedScore,
 			bestMeta.DayUTC24h,
+			bestMeta.UTC4hPct,
+			bestMeta.UTC1hPct,
 			fmtPrice(bestMeta.OpenPrice),
 			fmtPrice(bestMeta.LastPrice),
 			marketHumanUSD(bestMeta.VolumeUSD),
@@ -3411,7 +3415,7 @@ func appendUnifiedInPlayRows(b *strings.Builder, longInPlay, shortInPlay []inpla
 		if row.meta.LastPrice > 0 {
 			price = fmtPrice(row.meta.LastPrice)
 		}
-		fmt.Fprintf(b, "%d) [%s] %s %s g=%s s=%.2f %s%.3f px=%s dayUTC=%+.2f%% vol=%s\n",
+		fmt.Fprintf(b, "%d) [%s] %s %s g=%s s=%.2f %s%.3f px=%s dayUTC=%+.2f%% utc4h=%+.2f%% utc1h=%+.2f%% vol=%s\n",
 			i+1,
 			row.side,
 			raw,
@@ -3422,6 +3426,8 @@ func appendUnifiedInPlayRows(b *strings.Builder, longInPlay, shortInPlay []inpla
 			abs(row.entry.ScoreSlope),
 			price,
 			row.meta.DayUTC24h,
+			row.meta.UTC4hPct,
+			row.meta.UTC1hPct,
 			marketHumanUSD(row.meta.VolumeUSD),
 		)
 	}
@@ -4120,11 +4126,21 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 			if r.DayUTC24h != nil {
 				dayUTC = *r.DayUTC24h
 			}
+			utc4h := 0.0
+			if r.UTC4hPct != nil {
+				utc4h = *r.UTC4hPct
+			}
+			utc1h := 0.0
+			if r.UTC1hPct != nil {
+				utc1h = *r.UTC1hPct
+			}
 			out[raw] = symbolMeta{
 				LastPrice:   r.LastPrice,
 				OpenPrice:   r.OpenPrice,
 				Move24h:     r.Change24h,
 				DayUTC24h:   dayUTC,
+				UTC4hPct:    utc4h,
+				UTC1hPct:    utc1h,
 				VolumeUSD:   r.VolumeUSD,
 				FundingRate: fr,
 			}
@@ -11571,12 +11587,12 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta) {
 	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, 0)
 	fmt.Printf("IN-PLAY (RANKED)\n")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
-	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
+	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | utc4h% | utc1h% | open       | mark       | vol($)   |")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
 	if len(rows) == 0 {
-		fmt.Println("| (none)                                                                                             |")
-		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+		fmt.Println("| (none)                                                                                                             |")
+		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
 		return
 	}
 	for _, row := range rows {
@@ -11594,6 +11610,14 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.DayUTC24h != 0 {
 			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
 		}
+		utc4h := "-"
+		if m.UTC4hPct != 0 {
+			utc4h = fmt.Sprintf("%+6.1f", m.UTC4hPct)
+		}
+		utc1h := "-"
+		if m.UTC1hPct != 0 {
+			utc1h = fmt.Sprintf("%+6.1f", m.UTC1hPct)
+		}
 		openPx := "-"
 		if m.OpenPrice > 0 {
 			openPx = fmtPrice(m.OpenPrice)
@@ -11606,16 +11630,16 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.VolumeUSD > 0 {
 			vol = marketHumanUSD(m.VolumeUSD)
 		}
-		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
+		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %6s | %6s | %10s | %10s | %8s |\n",
 			row.side,
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
-			dayUTC, openPx, markPx, vol,
+			dayUTC, utc4h, utc1h, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
@@ -14004,7 +14028,8 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("🔎", "WHY",
 				fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
 				"Symbol is visible in market data but has no current candidate decision",
-				fmt.Sprintf("<b>Price:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(m.LastPrice), m.Move24h, m.VolumeUSD/1_000_000.0),
+				fmt.Sprintf("<b>Price:</b> %s | <b>DayUTC:</b> %.2f%% | <b>UTC4h:</b> %.2f%% | <b>UTC1h:</b> %.2f%% | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM",
+					fmtPrice(m.LastPrice), m.DayUTC24h, m.UTC4hPct, m.UTC1hPct, m.Move24h, m.VolumeUSD/1_000_000.0),
 			)
 		}
 		return notify.BuildEventHTML("🔎", "WHY", fmt.Sprintf("%s is not in the current market snapshot", cleanSymbol(sym)))
@@ -14077,8 +14102,8 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				d.Side, firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
 		}
 		if meta, ok := c.getMeta()[sym]; ok {
-			lines = append(lines, fmt.Sprintf("<b>Snapshot:</b> dayUTC=%.2f%% vol=%.2fM last=%s",
-				meta.DayUTC24h, meta.VolumeUSD/1_000_000.0, fmtPrice(meta.LastPrice)))
+			lines = append(lines, fmt.Sprintf("<b>Snapshot:</b> dayUTC=%.2f%% | utc4h=%.2f%% | utc1h=%.2f%% | 24h=%.2f%% | vol=%.2fM | last=%s",
+				meta.DayUTC24h, meta.UTC4hPct, meta.UTC1hPct, meta.Move24h, meta.VolumeUSD/1_000_000.0, fmtPrice(meta.LastPrice)))
 		}
 		return notify.BuildEventHTML("🎯", "TRADE REQUEST ARMED", lines...)
 	case strings.HasPrefix(cmd, "/pause"):

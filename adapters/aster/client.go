@@ -23,9 +23,8 @@ type Client struct {
 	HTTP    *http.Client
 	RL      *ratelimit.Limiter // 10 req/s, burst 20
 
-	dayOpenMu    sync.RWMutex
-	dayOpenDate  string
-	dayOpenCache map[string]float64
+	openMu    sync.RWMutex
+	openCache map[string]map[string]float64
 }
 
 func New(base string) *Client {
@@ -44,8 +43,8 @@ func New(base string) *Client {
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
-		RL:           ratelimit.New(10, 20),
-		dayOpenCache: map[string]float64{},
+		RL:        ratelimit.New(10, 20),
+		openCache: map[string]map[string]float64{},
 	}
 }
 
@@ -194,28 +193,40 @@ func (c *Client) openInterestUSD(symbol string, lastPrice float64) (*float64, er
 
 func utcDayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
-func utcMidnightMS(t time.Time) int64 {
+func utcBucketStart(t time.Time, d time.Duration) time.Time {
 	u := t.UTC()
-	mid := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
-	return mid.UnixMilli()
+	switch {
+	case d >= 24*time.Hour:
+		return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	case d > 0:
+		secs := int64(d / time.Second)
+		if secs <= 0 {
+			return u
+		}
+		floored := u.Unix() - (u.Unix() % secs)
+		return time.Unix(floored, 0).UTC()
+	default:
+		return u
+	}
 }
 
-func (c *Client) dayOpenUTC(symbol string, now time.Time) (float64, error) {
-	day := utcDayKey(now)
-	c.dayOpenMu.RLock()
-	if c.dayOpenDate == day {
-		if px, ok := c.dayOpenCache[symbol]; ok && px > 0 {
-			c.dayOpenMu.RUnlock()
+func (c *Client) bucketOpenUTC(symbol string, now time.Time, bucket time.Duration, bucketName string) (float64, error) {
+	start := utcBucketStart(now, bucket)
+	cacheKey := bucketName + "|" + start.Format(time.RFC3339)
+
+	c.openMu.RLock()
+	if bySymbol, ok := c.openCache[cacheKey]; ok {
+		if px, ok := bySymbol[symbol]; ok && px > 0 {
+			c.openMu.RUnlock()
 			return px, nil
 		}
 	}
-	c.dayOpenMu.RUnlock()
+	c.openMu.RUnlock()
 
-	start := utcMidnightMS(now)
 	params := map[string]string{
 		"symbol":    symbol,
 		"interval":  "1m",
-		"startTime": strconv.FormatInt(start, 10),
+		"startTime": strconv.FormatInt(start.UnixMilli(), 10),
 		"limit":     "1",
 	}
 	u := c.buildURL("/klines", params)
@@ -228,17 +239,28 @@ func (c *Client) dayOpenUTC(symbol string, now time.Time) (float64, error) {
 	}
 	px, err := numToFloat(arr[0][1]) // open
 	if err != nil || px <= 0 {
-		return 0, fmt.Errorf("bad utc day open for %s", symbol)
+		return 0, fmt.Errorf("bad %s open for %s", bucketName, symbol)
 	}
 
-	c.dayOpenMu.Lock()
-	if c.dayOpenDate != day {
-		c.dayOpenDate = day
-		c.dayOpenCache = map[string]float64{}
+	c.openMu.Lock()
+	if _, ok := c.openCache[cacheKey]; !ok {
+		c.openCache[cacheKey] = map[string]float64{}
 	}
-	c.dayOpenCache[symbol] = px
-	c.dayOpenMu.Unlock()
+	c.openCache[cacheKey][symbol] = px
+	c.openMu.Unlock()
 	return px, nil
+}
+
+func (c *Client) dayOpenUTC(symbol string, now time.Time) (float64, error) {
+	return c.bucketOpenUTC(symbol, now, 24*time.Hour, "1d")
+}
+
+func (c *Client) open4hUTC(symbol string, now time.Time) (float64, error) {
+	return c.bucketOpenUTC(symbol, now, 4*time.Hour, "4h")
+}
+
+func (c *Client) open1hUTC(symbol string, now time.Time) (float64, error) {
+	return c.bucketOpenUTC(symbol, now, time.Hour, "1h")
 }
 
 // ToMarket maps raw stats to internal market.Market
@@ -311,6 +333,16 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 					mkts[i].DayUTC24h = &v
 				} else if mkts[i].OpenPrice == 0 {
 					mkts[i].OpenPrice = deriveOpen(p, mkts[i].Change24h)
+				}
+				if open4h, err := c.open4hUTC(raw, time.Now().UTC()); err == nil && open4h > 0 {
+					mkts[i].Open4hUTC = open4h
+					v := (p/open4h - 1.0) * 100.0
+					mkts[i].UTC4hPct = &v
+				}
+				if open1h, err := c.open1hUTC(raw, time.Now().UTC()); err == nil && open1h > 0 {
+					mkts[i].Open1hUTC = open1h
+					v := (p/open1h - 1.0) * 100.0
+					mkts[i].UTC1hPct = &v
 				}
 			}
 		}

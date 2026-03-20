@@ -117,6 +117,8 @@ tr:hover{background:var(--row)}
   <th>Symbol</th>
   <th class="num">Score</th>
   <th class="num">DayUTC%</th>
+  <th class="num">UTC4h%</th>
+  <th class="num">UTC1h%</th>
   <th class="num">Δ24h%</th>
   <th class="num">Vol($)</th>
   <th class="num">OI($)</th>
@@ -146,6 +148,20 @@ tr:hover{background:var(--row)}
 				dayMove = *row.DayUTC24h
 			}
 			pDay, cDay, aDay := pctCell(dayMove)
+			utc4h := 0.0
+			hasUTC4h := false
+			if row.UTC4hPct != nil {
+				utc4h = *row.UTC4hPct
+				hasUTC4h = true
+			}
+			p4h, c4h, a4h := pctCell(utc4h)
+			utc1h := 0.0
+			hasUTC1h := false
+			if row.UTC1hPct != nil {
+				utc1h = *row.UTC1hPct
+				hasUTC1h = true
+			}
+			p1h, c1h, a1h := pctCell(utc1h)
 			// Δ24h
 			p24, c24, a24 := pctCell(row.Change24h)
 
@@ -168,6 +184,8 @@ tr:hover{background:var(--row)}
 <td>%s</td>
 <td class="num">%0.2f</td>
 <td class="num %s">%s%0.1f%%</td>
+<td class="num %s">%s</td>
+<td class="num %s">%s</td>
 <td class="num %s">%s%0.1f%%</td>
 <td class="num">%0.2fM</td>
 <td class="num">%s</td>
@@ -180,6 +198,20 @@ tr:hover{background:var(--row)}
 				row.Score,
 				// DayUTC
 				cDay, aDay, pDay,
+				// UTC4h
+				c4h, func() string {
+					if hasUTC4h {
+						return fmt.Sprintf("%s%0.1f%%", a4h, p4h)
+					}
+					return "-"
+				}(),
+				// UTC1h
+				c1h, func() string {
+					if hasUTC1h {
+						return fmt.Sprintf("%s%0.1f%%", a1h, p1h)
+					}
+					return "-"
+				}(),
 				// 24h Δ
 				c24, a24, p24,
 				// Vol($)
