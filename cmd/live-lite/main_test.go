@@ -238,6 +238,20 @@ func TestContinuationGuardReasonBlocksExhaustion(t *testing.T) {
 	}
 }
 
+func TestDirectionalConflictRejectReasonBlocksContradictoryContinuation(t *testing.T) {
+	t.Setenv("LIVE_DIRECTIONAL_CONFLICT_BLOCK_ENABLE", "1")
+	t.Setenv("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", "3.0")
+	c := candidate{
+		Side:      "BUY",
+		Strat:     "continuation_fast",
+		DayUTC24h: -4.8,
+		Entry:     inplay.Entry{Symbol: "UAIUSDT", EntryStyle: "pullback_long"},
+	}
+	if got := directionalConflictRejectReason(c); got != "directional_dayutc_conflict" {
+		t.Fatalf("expected directional_dayutc_conflict, got %q", got)
+	}
+}
+
 func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 	mem := map[string]*sessionChurn{}
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
@@ -251,6 +265,29 @@ func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 	markSessionStop(mem, now.Add(-10*time.Minute), "LYNUSDT", "BUY", 6, -2.8, 31)
 	if got := churnRejectReason(mem, now, c); got != "extended_reentry_lock" {
 		t.Fatalf("expected extended_reentry_lock, got %q", got)
+	}
+}
+
+func TestSideDominanceRejectReasonBlocksWeakerOppositeCandidate(t *testing.T) {
+	t.Setenv("LIVE_SIDE_DOMINANCE_ENABLE", "1")
+	t.Setenv("LIVE_SIDE_DOMINANCE_MIN_STRONGER", "2")
+	t.Setenv("LIVE_SIDE_DOMINANCE_MIN_RANK_GAP", "8")
+	t.Setenv("LIVE_SIDE_DOMINANCE_MAX_SCORE_ALLOW", "96")
+	t.Setenv("LIVE_SIDE_DOMINANCE_CONFLICT_DAYUTC_PCT", "2.5")
+	c := candidate{
+		Side:      "BUY",
+		Strat:     "continuation_fast",
+		DayUTC24h: -4.8,
+		FinalRank: 146.91,
+		Entry:     inplay.Entry{Symbol: "UAIUSDT", CurrentScore: 93.89},
+	}
+	ranked := []candidate{
+		{Side: "SELL", Strat: "continuation_fast", FinalRank: 170.0, Entry: inplay.Entry{Symbol: "PIPPINUSDT", CurrentScore: 106.33}},
+		{Side: "SELL", Strat: "continuation_fast", FinalRank: 158.0, Entry: inplay.Entry{Symbol: "RIVERUSDT", CurrentScore: 100.95}},
+		c,
+	}
+	if got := sideDominanceRejectReason(c, ranked); got != "side_dominance_block" {
+		t.Fatalf("expected side_dominance_block, got %q", got)
 	}
 }
 

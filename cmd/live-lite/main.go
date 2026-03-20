@@ -44,6 +44,7 @@ type candidate struct {
 	Side           string // BUY/SELL
 	Strat          string
 	Conf           float64
+	FinalRank      float64
 	TriggerState   string
 	TriggerStateN  float64
 	TriggerStage   string
@@ -1912,6 +1913,48 @@ func main() {
 				})
 				continue
 			}
+			if directionReason := directionalConflictRejectReason(c); directionReason != "" {
+				recordCandidateDecision(cmdCtx, c, directionReason)
+				rememberRecentReject(recentRejects, now, c, directionReason, acceptanceCfg)
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      rawCandidate,
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					Discovery:   c.DiscoveryScore,
+					Trigger:     c.TriggerScore,
+					Execution:   c.ExecutionScore,
+					Combined:    c.CombinedScore,
+					GateAllow:   &f,
+					GateReasons: []string{directionReason},
+				})
+				continue
+			}
+			if dominanceReason := sideDominanceRejectReason(c, cands); dominanceReason != "" {
+				recordCandidateDecision(cmdCtx, c, dominanceReason)
+				rememberRecentReject(recentRejects, now, c, dominanceReason, acceptanceCfg)
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      rawCandidate,
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					Discovery:   c.DiscoveryScore,
+					Trigger:     c.TriggerScore,
+					Execution:   c.ExecutionScore,
+					Combined:    c.CombinedScore,
+					GateAllow:   &f,
+					GateReasons: []string{dominanceReason},
+				})
+				continue
+			}
 			if churnReason := churnRejectReason(sessionChurns, now, c); churnReason != "" {
 				recordCandidateDecision(cmdCtx, c, churnReason)
 				rememberRecentReject(recentRejects, now, c, churnReason, acceptanceCfg)
@@ -2128,10 +2171,15 @@ func main() {
 			topN := minInt(acceptanceCfg.TopN, len(cands))
 			queue := append([]candidate(nil), cands[:topN]...)
 			sort.SliceStable(queue, func(i, j int) bool {
-				if queue[i].CombinedScore == queue[j].CombinedScore {
-					return queue[i].Entry.Rank > queue[j].Entry.Rank
+				ri := candidateSelectionRank(queue[i])
+				rj := candidateSelectionRank(queue[j])
+				if ri == rj {
+					if queue[i].CombinedScore == queue[j].CombinedScore {
+						return queue[i].Entry.Rank > queue[j].Entry.Rank
+					}
+					return queue[i].CombinedScore > queue[j].CombinedScore
 				}
-				return queue[i].CombinedScore > queue[j].CombinedScore
+				return ri > rj
 			})
 			copy(cands[:topN], queue)
 		}
@@ -2341,13 +2389,14 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
 			best.Entry.CurrentScore,
 			best.Entry.ScoreSlope,
 			best.Entry.Rank,
+			best.FinalRank,
 			best.Strat,
 			best.Conf,
 			best.TriggerState,
@@ -10168,6 +10217,40 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 	return ""
 }
 
+func directionallyConflicting(c candidate, minAbsPct float64) (bool, float64) {
+	if minAbsPct < 0 {
+		minAbsPct = -minAbsPct
+	}
+	move := c.DayUTC24h
+	switch strings.ToUpper(strings.TrimSpace(c.Side)) {
+	case "BUY":
+		if move <= -minAbsPct {
+			return true, math.Abs(move)
+		}
+	case "SELL":
+		if move >= minAbsPct {
+			return true, math.Abs(move)
+		}
+	}
+	return false, math.Abs(move)
+}
+
+func directionalConflictRejectReason(c candidate) string {
+	if !envBool("LIVE_DIRECTIONAL_CONFLICT_BLOCK_ENABLE", true) {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
+		return ""
+	}
+	if strategyFamily(c) == "rev" {
+		return ""
+	}
+	if ok, _ := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)); ok {
+		return "directional_dayutc_conflict"
+	}
+	return ""
+}
+
 func sessionChurnKey(symbol, side string) string {
 	return strings.ToUpper(aster.RawSymbol(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(side))
 }
@@ -10230,6 +10313,61 @@ func churnRejectReason(mem map[string]*sessionChurn, now time.Time, c candidate)
 			return "extended_reentry_lock"
 		}
 		return "symbol_churn_lock"
+	}
+	return ""
+}
+
+func candidateSelectionRank(c candidate) float64 {
+	if c.FinalRank > 0 {
+		return c.FinalRank
+	}
+	if c.CombinedScore > 0 {
+		return c.CombinedScore * 100.0
+	}
+	return c.Entry.Rank
+}
+
+func sideDominanceRejectReason(c candidate, ranked []candidate) string {
+	if !envBool("LIVE_SIDE_DOMINANCE_ENABLE", true) {
+		return ""
+	}
+	if strategyFamily(c) == "rev" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
+		return ""
+	}
+	minStronger := envInt("LIVE_SIDE_DOMINANCE_MIN_STRONGER", 2)
+	if minStronger < 1 {
+		minStronger = 1
+	}
+	minGap := envFloat("LIVE_SIDE_DOMINANCE_MIN_RANK_GAP", 10.0)
+	maxScoreAllow := envFloat("LIVE_SIDE_DOMINANCE_MAX_SCORE_ALLOW", 96.0)
+	conflictPct := envFloat("LIVE_SIDE_DOMINANCE_CONFLICT_DAYUTC_PCT", 2.5)
+	cRank := candidateSelectionRank(c)
+	bestOpp := 0.0
+	strongerOpp := 0
+	for _, other := range ranked {
+		if strings.EqualFold(aster.RawSymbol(other.Entry.Symbol), aster.RawSymbol(c.Entry.Symbol)) && strings.EqualFold(other.Side, c.Side) {
+			continue
+		}
+		if strings.EqualFold(other.Side, c.Side) {
+			continue
+		}
+		oRank := candidateSelectionRank(other)
+		if oRank <= cRank {
+			continue
+		}
+		strongerOpp++
+		if oRank > bestOpp {
+			bestOpp = oRank
+		}
+	}
+	if strongerOpp < minStronger || bestOpp-cRank < minGap {
+		return ""
+	}
+	if conflicting, _ := directionallyConflicting(c, conflictPct); conflicting {
+		return "side_dominance_block"
+	}
+	if c.Entry.CurrentScore <= maxScoreAllow {
+		return "side_dominance_block"
 	}
 	return ""
 }
@@ -10515,10 +10653,11 @@ func rankWithStrategy(cache *featureRuntimeCache, in []candidate, topN int, stop
 			out[i] = enrichCandidate(cache, out[i], stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, flow)
 		}
 	}
+	for i := range out {
+		out[i].FinalRank = finalSortRank(out[i], sortCfg, rel)
+	}
 	sort.Slice(out, func(i, j int) bool {
-		ri := finalSortRank(out[i], sortCfg, rel)
-		rj := finalSortRank(out[j], sortCfg, rel)
-		return ri > rj
+		return out[i].FinalRank > out[j].FinalRank
 	})
 	return out
 }
@@ -10555,6 +10694,13 @@ func finalSortRank(c candidate, cfg rankSortConfig, rel reliability.Store) float
 			w = 0
 		}
 		r += clamp(c.VolumeRatio/2.5, 0, 1) * w
+	}
+	if strategyFamily(c) != "rev" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
+		if conflicting, magnitude := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)); conflicting {
+			penalty := envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY", 18.0)
+			penalty += maxFloat(0.0, magnitude-envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)) * envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PER_PCT", 2.0)
+			r -= penalty
+		}
 	}
 	return r
 }
