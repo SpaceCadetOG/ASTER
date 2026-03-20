@@ -9923,9 +9923,10 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 	gradeN := clamp(float64(gradeValue(c.Entry.CurrentGrade))/6.0, 0, 1)
 	freshnessN := clamp(1.0-c.Entry.TimeInStateMin/35.0, 0, 1)
 	dayUTCN := directionalDayUTCScore(c.Side, c.DayUTC24h, cfg.DayUTCMinAbsPct, cfg.DayUTCScalePct)
-	baseDiscoveryWeight := clamp(1.0-cfg.DayUTCWeight, 0, 1)
+	dayUTCWeight := effectiveDayUTCWeight(time.Now(), cfg.DayUTCWeight)
+	baseDiscoveryWeight := clamp(1.0-dayUTCWeight, 0, 1)
 	discoveryBase := 0.40*scoreN + 0.20*rankN + 0.20*volN + 0.20*gradeN
-	discoveryN := clamp(baseDiscoveryWeight*discoveryBase+cfg.DayUTCWeight*dayUTCN, 0, 1)
+	discoveryN := clamp(baseDiscoveryWeight*discoveryBase+dayUTCWeight*dayUTCN, 0, 1)
 
 	slopeN := clamp((c.Entry.ScoreSlope+0.15)/0.50, 0, 1)
 	confN := clamp(c.Conf, 0, 1)
@@ -9999,6 +10000,46 @@ func directionalDayUTCScore(side string, dayUTC, minAbsPct, scalePct float64) fl
 		return normalize(-dayUTC)
 	}
 	return normalize(math.Abs(dayUTC))
+}
+
+func dayUTCResetAnchor(now time.Time) time.Time {
+	locName := envStr("LIVE_DAYUTC_RESET_TZ", "America/Chicago")
+	loc, err := time.LoadLocation(locName)
+	if err != nil {
+		loc = time.Local
+	}
+	localNow := now.In(loc)
+	hour := envInt("LIVE_DAYUTC_RESET_HOUR", 19)
+	minute := envInt("LIVE_DAYUTC_RESET_MIN", 0)
+	anchor := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), hour, minute, 0, 0, loc)
+	if localNow.Before(anchor) {
+		anchor = anchor.Add(-24 * time.Hour)
+	}
+	return anchor
+}
+
+func dayUTCResetProgress(now time.Time) float64 {
+	rampMin := envFloat("LIVE_DAYUTC_RESET_RAMP_MIN", 90.0)
+	if rampMin <= 0 {
+		return 1
+	}
+	floor := envFloat("LIVE_DAYUTC_RESET_WEIGHT_FLOOR", 0.35)
+	if floor < 0 {
+		floor = 0
+	}
+	if floor > 1 {
+		floor = 1
+	}
+	ageMin := now.Sub(dayUTCResetAnchor(now)).Minutes()
+	if ageMin <= 0 {
+		return floor
+	}
+	progress := clamp(ageMin/rampMin, 0, 1)
+	return clamp(floor+(1.0-floor)*progress, 0, 1)
+}
+
+func effectiveDayUTCWeight(now time.Time, baseWeight float64) float64 {
+	return clamp(baseWeight*dayUTCResetProgress(now), 0, 1)
 }
 
 func isContinuationStrategy(c candidate) bool {

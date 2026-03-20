@@ -672,3 +672,22 @@ func TestEvaluateSwingHoldRejectsMissingScannerSupport(t *testing.T) {
 		t.Fatalf("expected scanner_missing rejection, got hold=%v score=%.2f reason=%s", hold, score, reason)
 	}
 }
+
+func TestDayUTCResetProgressUses1900Anchor(t *testing.T) {
+	t.Setenv("LIVE_DAYUTC_RESET_TZ", "America/Chicago")
+	t.Setenv("LIVE_DAYUTC_RESET_HOUR", "19")
+	t.Setenv("LIVE_DAYUTC_RESET_MIN", "0")
+	t.Setenv("LIVE_DAYUTC_RESET_RAMP_MIN", "90")
+	t.Setenv("LIVE_DAYUTC_RESET_WEIGHT_FLOOR", "0.35")
+	loc, _ := time.LoadLocation("America/Chicago")
+	justAfterReset := time.Date(2026, 3, 19, 19, 5, 0, 0, loc)
+	later := time.Date(2026, 3, 19, 21, 0, 0, 0, loc)
+	early := dayUTCResetProgress(justAfterReset)
+	full := dayUTCResetProgress(later)
+	if early >= full {
+		t.Fatalf("expected early reset progress %.2f to be less than later %.2f", early, full)
+	}
+	if early < 0.35 || full != 1 {
+		t.Fatalf("unexpected progress values early=%.2f full=%.2f", early, full)
+	}
+}
