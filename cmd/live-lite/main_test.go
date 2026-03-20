@@ -253,6 +253,7 @@ func TestDirectionalConflictRejectReasonBlocksContradictoryContinuation(t *testi
 }
 
 func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
+	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN", "0")
 	mem := map[string]*sessionChurn{}
 	now := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 	c := candidate{
@@ -265,6 +266,50 @@ func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 	markSessionStop(mem, now.Add(-10*time.Minute), "LYNUSDT", "BUY", 6, -2.8, 31)
 	if got := churnRejectReason(mem, now, c); got != "extended_reentry_lock" {
 		t.Fatalf("expected extended_reentry_lock, got %q", got)
+	}
+}
+
+func TestContinuationGuardReasonBlocksLateShortWithoutReset(t *testing.T) {
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	t.Setenv("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", "1")
+	t.Setenv("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", "25")
+	t.Setenv("LIVE_CONT_FAST_LATE_MIN_SLOPE", "0.16")
+	cfg := entryQualityConfig{DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
+	c := candidate{
+		Side:      "SELL",
+		Strat:     "continuation_fast",
+		DayUTC24h: -37.0,
+		Entry:     inplay.Entry{EntryStyle: "pullback_short", ScoreSlope: 0.04},
+	}
+	if got := continuationGuardReason(c, cfg); got != "late_extension_no_reset" {
+		t.Fatalf("expected late_extension_no_reset, got %q", got)
+	}
+	c.RetestHold = true
+	if got := continuationGuardReason(c, cfg); got != "" {
+		t.Fatalf("expected reset/retest to clear late-entry block, got %q", got)
+	}
+}
+
+func TestChurnRejectReasonQuickLossLockExtremeSymbol(t *testing.T) {
+	t.Setenv("LIVE_CHURN_LOCK_ENABLE", "1")
+	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_COUNT", "1")
+	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN", "60")
+	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_DAYUTC_PCT", "25")
+	mem := map[string]*sessionChurn{}
+	now := time.Date(2026, 3, 20, 15, 0, 0, 0, time.UTC)
+	c := candidate{
+		Side:      "SELL",
+		Strat:     "continuation_fast",
+		DayUTC24h: -31.0,
+		Entry:     inplay.Entry{Symbol: "LYNUSDT", EntryStyle: "pullback_short"},
+	}
+	markSessionStop(mem, now.Add(-10*time.Minute), c.Entry.Symbol, c.Side, 4, -3.5, c.DayUTC24h)
+	if got := churnRejectReason(mem, now, c); got != "quick_loss_symbol_lock" {
+		t.Fatalf("expected quick_loss_symbol_lock, got %q", got)
+	}
+	c.RetestHold = true
+	if got := churnRejectReason(mem, now, c); got != "" {
+		t.Fatalf("expected structure reset to clear quick loss lock, got %q", got)
 	}
 }
 

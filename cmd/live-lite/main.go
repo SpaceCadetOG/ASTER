@@ -40,47 +40,55 @@ import (
 )
 
 type candidate struct {
-	Entry          inplay.Entry
-	Side           string // BUY/SELL
-	Strat          string
-	Conf           float64
-	FinalRank      float64
-	TriggerState   string
-	TriggerStateN  float64
-	TriggerStage   string
-	TriggerScans   int
-	ExitProfile    string
-	VolumeUSD      float64
-	FundingRate    float64
-	DayUTC24h      float64
-	VolumeRatio    float64
-	OFIRaw         float64
-	OFIZ           float64
-	OFISamples     int
-	SpreadBps      float64
-	DepthBid       float64
-	DepthAsk       float64
-	BookImbalance  float64
-	ATR            float64
-	ATRPct         float64
-	Sig            strategies.Signal
-	RejectReason   string
-	LastClose      float64
-	SessionVWAP    float64
-	EMA9           float64
-	FastSlope      float64
-	SlowSlope      float64
-	ReliabilityAdj float64
-	DiscoveryScore float64
-	TriggerScore   float64
-	ExecutionScore float64
-	CombinedScore  float64
-	TradeQuality   float64
-	QualityReasons []string
-	LifecycleStage string
-	LifecycleScans int
-	StopPlan       exitmgr.HybridStopResult
-	StructureFresh bool
+	Entry           inplay.Entry
+	Side            string // BUY/SELL
+	Strat           string
+	Conf            float64
+	FinalRank       float64
+	TriggerState    string
+	TriggerStateN   float64
+	TriggerStage    string
+	TriggerScans    int
+	ExitProfile     string
+	VolumeUSD       float64
+	FundingRate     float64
+	DayUTC24h       float64
+	UTC4hPct        float64
+	UTC1hPct        float64
+	VolumeRatio     float64
+	OFIRaw          float64
+	OFIZ            float64
+	OFISamples      int
+	SpreadBps       float64
+	DepthBid        float64
+	DepthAsk        float64
+	BookImbalance   float64
+	ATR             float64
+	ATRPct          float64
+	Sig             strategies.Signal
+	RejectReason    string
+	LastClose       float64
+	SessionVWAP     float64
+	EMA9            float64
+	FastSlope       float64
+	SlowSlope       float64
+	ReliabilityAdj  float64
+	DiscoveryScore  float64
+	TriggerScore    float64
+	ExecutionScore  float64
+	CombinedScore   float64
+	TradeQuality    float64
+	QualityReasons  []string
+	LifecycleStage  string
+	LifecycleScans  int
+	StopPlan        exitmgr.HybridStopResult
+	StructureFresh  bool
+	ClosedBreakHold bool
+	ReclaimHold     bool
+	RetestHold      bool
+	ResetRebreak    bool
+	ExtensionATR    float64
+	StructureReason string
 }
 
 type entryQualityConfig struct {
@@ -385,6 +393,7 @@ type ofiTracker struct {
 type watchConfig struct {
 	Enable          bool
 	Every           time.Duration
+	PriorityEvery   time.Duration
 	MaxCandidates   int
 	TopNOnly        bool
 	WatchOpen       bool
@@ -399,21 +408,25 @@ type watchConfig struct {
 }
 
 type watchRuntime struct {
-	cfg          watchConfig
-	client       *aster.Client
-	longInPlay   []inplay.Entry
-	shortInPlay  []inplay.Entry
-	meta         map[string]symbolMeta
-	symbols      []string
-	ofi          map[string]*ofiTracker
-	flow         map[string]flowMetrics
-	lastUrgentAt time.Time
+	cfg            watchConfig
+	client         *aster.Client
+	longInPlay     []inplay.Entry
+	shortInPlay    []inplay.Entry
+	meta           map[string]symbolMeta
+	symbols        []string
+	priority       map[string]operatorSuggestion
+	ofi            map[string]*ofiTracker
+	flow           map[string]flowMetrics
+	lastUrgentAt   time.Time
+	lastPriorityAt time.Time
 }
 
 var (
-	liveLiteWatchEvery time.Duration
-	liveLiteWatchTick  func(time.Time) bool
-	liveLiteWakeReason string
+	liveLiteWatchEvery     time.Duration
+	liveLiteWatchTick      func(time.Time) bool
+	liveLiteWakeReason     string
+	liveLitePriorityEvery  time.Duration
+	liveLitePriorityActive func() bool
 )
 
 type paperPosition struct {
@@ -1130,8 +1143,11 @@ func main() {
 	watcher := newWatchRuntime(watchCfg, client)
 	liveLiteWatchEvery = 0
 	liveLiteWatchTick = nil
+	liveLitePriorityEvery = 0
+	liveLitePriorityActive = nil
 	if watcher != nil {
 		liveLiteWatchEvery = watchCfg.Every
+		liveLitePriorityEvery = watchCfg.PriorityEvery
 		liveLiteWatchTick = func(ts time.Time) bool {
 			return watcher.Tick(ts)
 		}
@@ -1296,6 +1312,7 @@ func main() {
 		suggestions: map[string]operatorSuggestion{},
 		suggestTTL:  time.Duration(envInt("LIVE_TG_SUGGEST_TTL_MIN", 15)) * time.Minute,
 	}
+	liveLitePriorityActive = cmdCtx.hasActiveSuggestions
 	if envBool("LIVE_TG_COMMANDS_ENABLE", true) {
 		go cmdCtx.run()
 	}
@@ -1544,8 +1561,15 @@ func main() {
 			watchExtra = append(watchExtra, execMgr.ActiveSymbols()...)
 		}
 		watchExtra = append(watchExtra, activeRecentRejectSymbols(now, recentRejects)...)
+		activeSuggestions := []operatorSuggestion(nil)
+		if cmdCtx != nil && envBool("LIVE_PRIORITY_WATCH_ENABLE", true) {
+			activeSuggestions = cmdCtx.activeSuggestions()
+			for _, s := range activeSuggestions {
+				watchExtra = append(watchExtra, s.Symbol)
+			}
+		}
 		if watcher != nil {
-			watcher.SetSnapshot(longInPlay, shortInPlay, metaBySymbol, watchExtra)
+			watcher.SetSnapshot(longInPlay, shortInPlay, metaBySymbol, watchExtra, activeSuggestions)
 			_ = watcher.Tick(now)
 		}
 		flowMetricsBySymbol := map[string]flowMetrics{}
@@ -1838,6 +1862,8 @@ func main() {
 				c.VolumeUSD = meta.VolumeUSD
 				c.FundingRate = meta.FundingRate
 				c.DayUTC24h = meta.DayUTC24h
+				c.UTC4hPct = meta.UTC4hPct
+				c.UTC1hPct = meta.UTC1hPct
 			}
 			triggerReasons := []string(nil)
 			c.TriggerState, c.TriggerStateN, triggerReasons = deriveTriggerState(c)
@@ -1852,6 +1878,9 @@ func main() {
 			c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, c.QualityReasons = computeEntryScoreBreakdown(c, entryQualityCfg)
 			c.StructureFresh = requiresFreshPullback(c)
 			c.QualityReasons = append(c.QualityReasons, triggerReasons...)
+			if c.StructureReason != "" {
+				c.QualityReasons = append(c.QualityReasons, "structure:"+c.StructureReason)
+			}
 			if c.TriggerStage != "" {
 				c.QualityReasons = append(c.QualityReasons, "trigger_stage:"+strings.ToLower(c.TriggerStage))
 			}
@@ -2391,7 +2420,7 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f utc4h=%+.2f utc1h=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f utc4h=%+.2f utc1h=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -2430,6 +2459,11 @@ func main() {
 			best.Entry.FailedBreakLowCount,
 			best.Entry.EntryStyle,
 			best.Entry.MetaState,
+			best.StructureReason,
+			best.ClosedBreakHold,
+			best.ReclaimHold,
+			best.RetestHold,
+			best.ExtensionATR,
 		)
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
@@ -4306,6 +4340,11 @@ func loadWatchConfig() watchConfig {
 	if every <= 0 {
 		every = 3 * time.Second
 	}
+	prioritySec := envInt("LIVE_PRIORITY_WATCH_EVERY_SEC", 1)
+	priorityEvery := time.Duration(prioritySec) * time.Second
+	if priorityEvery <= 0 {
+		priorityEvery = time.Second
+	}
 	maxCandidates := envInt("LIVE_WATCHLIST_SIZE", envInt("WATCH_MAX_CANDIDATES", 20))
 	if maxCandidates <= 0 {
 		maxCandidates = 20
@@ -4325,6 +4364,7 @@ func loadWatchConfig() watchConfig {
 	return watchConfig{
 		Enable:          envBool("WATCH_ENABLE", true),
 		Every:           every,
+		PriorityEvery:   priorityEvery,
 		MaxCandidates:   maxCandidates,
 		TopNOnly:        envBool("LIVE_WATCH_TOPN_ONLY", true),
 		WatchOpen:       envBool("LIVE_WATCH_OPEN_POSITIONS", true),
@@ -4341,8 +4381,8 @@ func loadWatchConfig() watchConfig {
 
 func loadHybridStopConfig() exitmgr.HybridStopConfig {
 	cfg := exitmgr.DefaultHybridStopConfig()
-	cfg.Enabled = envBool("LIVE_STOP_ENGINE_V2_ENABLE", false)
-	cfg.TemplateMode = strings.ToLower(envStr("LIVE_STOP_TEMPLATE_MODE", "adaptive"))
+	cfg.Enabled = envBool("LIVE_STOP_ENGINE_V2_ENABLE", true)
+	cfg.TemplateMode = strings.ToLower(envStr("LIVE_STOP_TEMPLATE_MODE", "setup"))
 	cfg.ATRMultCont = envFloat("LIVE_STOP_ATR_MULT_CONT", cfg.ATRMultCont)
 	cfg.ATRMultPullback = envFloat("LIVE_STOP_ATR_MULT_PULLBACK", cfg.ATRMultPullback)
 	cfg.ATRMultReversal = envFloat("LIVE_STOP_ATR_MULT_REVERSAL", cfg.ATRMultReversal)
@@ -4502,21 +4542,30 @@ func newWatchRuntime(cfg watchConfig, client *aster.Client) *watchRuntime {
 		return nil
 	}
 	return &watchRuntime{
-		cfg:    cfg,
-		client: client,
-		ofi:    map[string]*ofiTracker{},
-		flow:   map[string]flowMetrics{},
-		meta:   map[string]symbolMeta{},
+		cfg:      cfg,
+		client:   client,
+		ofi:      map[string]*ofiTracker{},
+		flow:     map[string]flowMetrics{},
+		meta:     map[string]symbolMeta{},
+		priority: map[string]operatorSuggestion{},
 	}
 }
 
-func (w *watchRuntime) SetSnapshot(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, extraSymbols []string) {
+func (w *watchRuntime) SetSnapshot(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, extraSymbols []string, priority []operatorSuggestion) {
 	if w == nil {
 		return
 	}
 	w.longInPlay = append([]inplay.Entry(nil), longInPlay...)
 	w.shortInPlay = append([]inplay.Entry(nil), shortInPlay...)
 	w.meta = copySymbolMetaMap(meta)
+	w.priority = map[string]operatorSuggestion{}
+	for _, s := range priority {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s.Symbol)))
+		if raw == "" {
+			continue
+		}
+		w.priority[raw] = s
+	}
 	w.symbols = buildWatchSymbols(longInPlay, shortInPlay, extraSymbols, w.cfg.MaxCandidates)
 }
 
@@ -4592,8 +4641,29 @@ func (w *watchRuntime) shouldWake(now time.Time) bool {
 	if w == nil || !w.cfg.Enable || len(w.flow) == 0 {
 		return false
 	}
+	priorityReady := func(raw string, side string) bool {
+		if len(w.priority) == 0 {
+			return false
+		}
+		s, ok := w.priority[raw]
+		if !ok || !strings.EqualFold(strings.TrimSpace(s.Side), strings.TrimSpace(side)) {
+			return false
+		}
+		if !w.lastPriorityAt.IsZero() && now.Sub(w.lastPriorityAt) < w.cfg.PriorityEvery {
+			return false
+		}
+		w.lastPriorityAt = now
+		return true
+	}
 	check := func(e inplay.Entry) bool {
 		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(e.Symbol)))
+		wantSide := "BUY"
+		if strings.EqualFold(strings.TrimSpace(e.SideBias), "short") {
+			wantSide = "SELL"
+		}
+		if priorityReady(raw, wantSide) {
+			return true
+		}
 		fm, ok := w.flow[raw]
 		if !ok || fm.OFISamples < w.cfg.OFIMinSamples {
 			return false
@@ -4819,8 +4889,8 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		riskMarginPct = 0
 	}
 	hybridStopCfg := loadHybridStopConfig()
-	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "last"))
-	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "last"))
+	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "mark"))
+	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "mark"))
 	markLastModel := strings.ToLower(envStr("PAPER_MARK_LAST_DIVERGENCE_MODEL", "orderbook_mid"))
 	markLastDivBps := envFloat("PAPER_MARK_LAST_DIVERGENCE_BPS", 0)
 	partialFillEnable := envBool("PAPER_PARTIAL_FILL_ENABLE", true)
@@ -5137,8 +5207,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if fundingExitWindow < 0 {
 		fundingExitWindow = 0
 	}
-	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "last"))
-	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "last"))
+	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "mark"))
+	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "mark"))
 	snapshotPoll := time.Duration(envInt("LIVE_ACCOUNT_SNAPSHOT_SEC", 2)) * time.Second
 	if snapshotPoll <= 0 {
 		snapshotPoll = 2 * time.Second
@@ -10275,10 +10345,31 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 		return ""
 	}
 	if math.Abs(c.DayUTC24h) < cfg.DayUTCMaturityPct {
+		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !continuationStructureConfirmed(c) {
+			return "continuation_no_structure_confirm"
+		}
 		return ""
 	}
-	if cfg.RequireFreshPullback && !requiresFreshPullback(c) {
+	if envBool("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", true) && !hasFreshStructureReset(c) {
+		resetMin := envFloat("LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT", 0.8)
+		if strings.EqualFold(c.Side, "SELL") {
+			if c.UTC1hPct == 0 || c.UTC1hPct <= -resetMin {
+				return "late_extension_no_reset"
+			}
+		} else {
+			if c.UTC1hPct == 0 || c.UTC1hPct >= resetMin {
+				return "late_extension_no_reset"
+			}
+		}
+	}
+	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !continuationStructureConfirmed(c) {
 		return "extended_reentry_lock"
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.DayUTC24h <= -envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", cfg.DayUTCMaturityPct) {
+		lateMinSlope := envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16)
+		if c.Entry.ScoreSlope < lateMinSlope && !hasFreshStructureReset(c) {
+			return "late_cycle_short_weak_slope"
+		}
 	}
 	return ""
 }
@@ -10373,6 +10464,19 @@ func churnRejectReason(mem map[string]*sessionChurn, now time.Time, c candidate)
 	}
 	if st.LastStopAt.IsZero() || now.Sub(st.LastStopAt) > window {
 		return ""
+	}
+	quickLockMin := time.Duration(envInt("LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN", 60)) * time.Minute
+	quickLockCount := envInt("LIVE_SYMBOL_QUICK_LOSS_LOCK_COUNT", 1)
+	if quickLockCount < 1 {
+		quickLockCount = 1
+	}
+	quickLossExtremePct := envFloat("LIVE_SYMBOL_QUICK_LOSS_DAYUTC_PCT", 25.0)
+	quickLossCountNeeded := maxInt(2, quickLockCount+1)
+	if math.Abs(maxFloat(math.Abs(c.DayUTC24h), math.Abs(st.LastDayUTCPct))) >= quickLossExtremePct {
+		quickLossCountNeeded = quickLockCount
+	}
+	if quickLockMin > 0 && now.Sub(st.LastStopAt) <= quickLockMin && st.QuickLossCount >= quickLossCountNeeded && !hasFreshStructureReset(c) {
+		return "quick_loss_symbol_lock"
 	}
 	if st.StopCount >= maxFails || st.QuickLossCount >= maxFails {
 		if math.Abs(maxFloat(math.Abs(c.DayUTC24h), math.Abs(st.LastDayUTCPct))) >= envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0) {
@@ -10587,7 +10691,184 @@ func normalizedEntryScoreWeights(cfg entryQualityConfig) (float64, float64, floa
 	return dw / total, tw / total, ew / total
 }
 
+func closesAboveLevel(c []features.Candle, n int, level float64) bool {
+	if len(c) == 0 || n <= 0 || level <= 0 || len(c) < n {
+		return false
+	}
+	for i := len(c) - n; i < len(c); i++ {
+		if c[i].C < level {
+			return false
+		}
+	}
+	return true
+}
+
+func closesBelowLevel(c []features.Candle, n int, level float64) bool {
+	if len(c) == 0 || n <= 0 || level <= 0 || len(c) < n {
+		return false
+	}
+	for i := len(c) - n; i < len(c); i++ {
+		if c[i].C > level {
+			return false
+		}
+	}
+	return true
+}
+
+func recentPivotHigh(c []features.Candle, pivotBars, confirmBars int) float64 {
+	if len(c) < confirmBars+2 {
+		return 0
+	}
+	end := len(c) - confirmBars
+	if end <= 1 {
+		end = len(c) - 1
+	}
+	start := end - pivotBars
+	if start < 0 {
+		start = 0
+	}
+	hi := 0.0
+	for i := start; i < end; i++ {
+		hi = maxFloat(hi, c[i].H)
+	}
+	return hi
+}
+
+func recentPivotLow(c []features.Candle, pivotBars, confirmBars int) float64 {
+	if len(c) < confirmBars+2 {
+		return 0
+	}
+	end := len(c) - confirmBars
+	if end <= 1 {
+		end = len(c) - 1
+	}
+	start := end - pivotBars
+	if start < 0 {
+		start = 0
+	}
+	lo := 0.0
+	for i := start; i < end; i++ {
+		if c[i].L <= 0 {
+			continue
+		}
+		if lo == 0 || c[i].L < lo {
+			lo = c[i].L
+		}
+	}
+	return lo
+}
+
+func deriveContinuationStructureSignals(cand *candidate, bars []features.Candle) {
+	if cand == nil || len(bars) < 6 {
+		return
+	}
+	confirmBars := envInt("LIVE_CONT_CONFIRM_BARS", 2)
+	if confirmBars < 1 {
+		confirmBars = 1
+	}
+	reclaimBars := envInt("LIVE_RECLAIM_HOLD_BARS", 1)
+	if reclaimBars < 1 {
+		reclaimBars = 1
+	}
+	retestBars := envInt("LIVE_BREAK_RETEST_MAX_BARS", 3)
+	if retestBars < 1 {
+		retestBars = 1
+	}
+	pivotBars := maxInt(confirmBars+2, envInt("LIVE_STOP_LOOKBACK_CONT_BARS", 6))
+	if pivotBars < 4 {
+		pivotBars = 4
+	}
+
+	last := bars[len(bars)-1]
+	prev := bars[len(bars)-2]
+	if strings.EqualFold(cand.Side, "BUY") {
+		pivot := recentPivotHigh(bars, pivotBars, confirmBars)
+		if pivot > 0 && closesAboveLevel(bars, confirmBars, pivot) {
+			cand.ClosedBreakHold = true
+			cand.StructureReason = "break_hold"
+		}
+		if cand.SessionVWAP > 0 && closesAboveLevel(bars, reclaimBars, cand.SessionVWAP) && prev.C < cand.SessionVWAP {
+			cand.ReclaimHold = true
+			if cand.StructureReason == "" {
+				cand.StructureReason = "reclaim_hold"
+			}
+		}
+		if !cand.ReclaimHold && cand.EMA9 > 0 && closesAboveLevel(bars, reclaimBars, cand.EMA9) && prev.C < cand.EMA9 {
+			cand.ReclaimHold = true
+			if cand.StructureReason == "" {
+				cand.StructureReason = "reclaim_hold"
+			}
+		}
+		if pivot > 0 && last.C > pivot {
+			start := maxInt(0, len(bars)-retestBars-1)
+			for i := start; i < len(bars)-1; i++ {
+				if bars[i].L <= pivot && bars[i].C >= pivot {
+					cand.RetestHold = true
+					cand.ResetRebreak = true
+					if cand.StructureReason == "" {
+						cand.StructureReason = "retest_hold"
+					}
+					break
+				}
+			}
+		}
+		anchor := maxFloat(cand.SessionVWAP, cand.EMA9)
+		if anchor > 0 && cand.ATR > 0 {
+			cand.ExtensionATR = math.Abs(last.C-anchor) / cand.ATR
+		}
+	} else {
+		pivot := recentPivotLow(bars, pivotBars, confirmBars)
+		if pivot > 0 && closesBelowLevel(bars, confirmBars, pivot) {
+			cand.ClosedBreakHold = true
+			cand.StructureReason = "break_hold"
+		}
+		if cand.SessionVWAP > 0 && closesBelowLevel(bars, reclaimBars, cand.SessionVWAP) && prev.C > cand.SessionVWAP {
+			cand.ReclaimHold = true
+			if cand.StructureReason == "" {
+				cand.StructureReason = "reclaim_hold"
+			}
+		}
+		if !cand.ReclaimHold && cand.EMA9 > 0 && closesBelowLevel(bars, reclaimBars, cand.EMA9) && prev.C > cand.EMA9 {
+			cand.ReclaimHold = true
+			if cand.StructureReason == "" {
+				cand.StructureReason = "reclaim_hold"
+			}
+		}
+		if pivot > 0 && last.C < pivot {
+			start := maxInt(0, len(bars)-retestBars-1)
+			for i := start; i < len(bars)-1; i++ {
+				if bars[i].H >= pivot && bars[i].C <= pivot {
+					cand.RetestHold = true
+					cand.ResetRebreak = true
+					if cand.StructureReason == "" {
+						cand.StructureReason = "retest_hold"
+					}
+					break
+				}
+			}
+		}
+		anchor := minPositive(cand.SessionVWAP, cand.EMA9)
+		if anchor > 0 && cand.ATR > 0 {
+			cand.ExtensionATR = math.Abs(last.C-anchor) / cand.ATR
+		}
+	}
+}
+
+func continuationStructureConfirmed(c candidate) bool {
+	return c.ClosedBreakHold || c.ReclaimHold || c.RetestHold
+}
+
+func hasFreshStructureReset(c candidate) bool {
+	return c.ReclaimHold || c.RetestHold || c.ResetRebreak
+}
+
 func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
+	switch strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle)) {
+	case "leader_unwind_short", "reversal_watch_short", "reversal_watch_long":
+		return exitmgr.StopTemplateReversalExhaustion
+	case "pullback_long", "pullback_short", "breakout_hold_long", "breakout_hold_short":
+		return exitmgr.StopTemplateReclaimPullback
+	}
 	switch strategyFamily(c) {
 	case "ignite":
 		return exitmgr.StopTemplateContinuationImpulse
@@ -10796,6 +11077,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	cand.VolumeRatio = snapView.VolumeRatio
 	cand.ATR = snapView.ATR
 	cand.ATRPct = snapView.ATRPct
+	deriveContinuationStructureSignals(&cand, fc)
 	if fm, ok := flow[raw]; ok {
 		cand.OFIRaw = fm.OFIRaw
 		cand.OFIZ = fm.OFIZ
@@ -11023,6 +11305,9 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
 		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
 		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
+		ContinuationDayUTCPct:     envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
+		ContinuationReset1hPct:    envFloat("LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT", 0.8),
+		ContinuationLateSlopeMin:  envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
 		RejectIfTargetTooClosePct: vpMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(stopMode),
@@ -11036,6 +11321,11 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		ScannerScore: cand.Entry.CurrentScore,
 		ScannerGrade: cand.Entry.CurrentGrade,
 		ScoreSlope:   cand.Entry.ScoreSlope,
+		DayUTCPct:    cand.DayUTC24h,
+		UTC4hPct:     cand.UTC4hPct,
+		UTC1hPct:     cand.UTC1hPct,
+		EntryStyle:   cand.Entry.EntryStyle,
+		MetaState:    cand.Entry.MetaState,
 		Snapshot:     snap,
 		Candles:      fc,
 	}
@@ -11210,7 +11500,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 					cand.Entry.DayUTCPct <= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_DAYUTC_PCT", -20.0) &&
 					(cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping) &&
 					(cand.Entry.ScoreSlope >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SLOPE", 0.35) || cand.Entry.Momentum) &&
-					(cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.EntryStyle == "momentum_ignite_short") &&
+					(cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.EntryStyle == "momentum_ignite_short" || cand.Entry.EntryStyle == "leader_unwind_short") &&
 					cand.Entry.BearReversalScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_BEAR_SCORE", 3.0)
 			if leaderUnwindShortMode {
 				fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_VOL_RATIO", 0.80))
@@ -11234,6 +11524,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			}
 		}
 		lateRejects := make([]string, 0, 3)
+		structureConfirmOK := !envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) || continuationStructureConfirmed(cand)
 		stateAgeLimit := lateStateMin
 		if gradeValue(cand.Entry.CurrentGrade) >= gradeValue("A+") {
 			stateAgeLimit = lateAPlusStateMin
@@ -11257,6 +11548,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			cand.Entry.ScoreSlope >= fastMinSlope &&
 			cand.VolumeRatio >= fastMinVolRatio &&
 			ofiOK &&
+			structureConfirmOK &&
 			len(lateRejects) == 0 &&
 			vwapEMAOK {
 			cand.Strat = "continuation_fast"
@@ -11293,6 +11585,9 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			} else {
 				fails = append(fails, fmt.Sprintf("ofi_z:%.2f>%.2f", cand.OFIZ, -fastMinOFIZ))
 			}
+		}
+		if !structureConfirmOK {
+			fails = append(fails, firstNonEmpty(cand.StructureReason, "continuation_no_structure_confirm"))
 		}
 		if !vwapEMAOK {
 			if strings.EqualFold(cand.Side, "BUY") {
@@ -11553,10 +11848,22 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 	tp2Px := entryPx
 	tp3Px := entryPx
 	profile := chooseExitProfile(cand)
+	provisionalTP1 := entryPx
 	if side == features.SideLong {
 		stopPx = entryPx - stopDist
+		provisionalTP1 = entryPx + stopDist*tp1R
 	} else {
 		stopPx = entryPx + stopDist
+		provisionalTP1 = entryPx - stopDist*tp1R
+	}
+	hybridCfg := loadHybridStopConfig()
+	if hybridCfg.Enabled {
+		stopPlan := exitmgr.ComputeHybridStop(hybridCfg, hybridStopInputForCandidate(cand, entryPx, provisionalTP1))
+		if !stopPlan.Rejected && stopPlan.StopPrice > 0 {
+			cand.StopPlan = stopPlan
+			stopPx = stopPlan.StopPrice
+			stopDist = math.Abs(entryPx - stopPx)
+		}
 	}
 	if envBool("LIVE_DYNAMIC_TP_ENABLE", true) {
 		profile, tp1Px, tp2Px, tp3Px = computeDynamicTargetLadder(cand, entryPx, stopDist, tp1R, tp2R, tp3R)
@@ -11581,6 +11888,9 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 	sig.TP2 = tp2Px
 	sig.TP3 = tp3Px
 	sig.Tags = append(sig.Tags, "exit_profile:"+strings.ToLower(profile))
+	if cand.StopPlan.StopReason != "" {
+		sig.Tags = append(sig.Tags, "stop_anchor:"+cand.StopPlan.StopReason)
+	}
 	return sig
 }
 
@@ -12651,6 +12961,9 @@ func waitForNextCycle(cycleStart time.Time, scanEvery, reconEvery time.Duration,
 		}
 		if liveLiteWatchTick != nil && liveLiteWatchEvery > 0 && sleepFor > liveLiteWatchEvery {
 			sleepFor = liveLiteWatchEvery
+		}
+		if liveLitePriorityActive != nil && liveLitePriorityEvery > 0 && liveLitePriorityActive() && sleepFor > liveLitePriorityEvery {
+			sleepFor = liveLitePriorityEvery
 		}
 		time.Sleep(sleepFor)
 		if execMgr != nil {
@@ -13726,13 +14039,20 @@ func (c *telegramCommandCtx) getDecision(symbol string) (operatorDecision, bool)
 }
 
 func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferredLev int) operatorSuggestion {
+	ttl := c.suggestTTL
+	if strings.Contains(strings.ToLower(strings.TrimSpace(source)), "trade") {
+		ttl = time.Duration(envInt("LIVE_PRIORITY_WATCH_TTL_MIN", int(c.suggestTTL/time.Minute))) * time.Minute
+		if ttl <= 0 {
+			ttl = c.suggestTTL
+		}
+	}
 	s := operatorSuggestion{
 		Symbol:       strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
 		Side:         strings.ToUpper(strings.TrimSpace(side)),
 		Source:       source,
 		PreferredLev: preferredLev,
 		CreatedAt:    time.Now().UTC(),
-		ExpiresAt:    time.Now().UTC().Add(c.suggestTTL),
+		ExpiresAt:    time.Now().UTC().Add(ttl),
 	}
 	c.suggestMu.Lock()
 	if c.suggestions == nil {
@@ -13741,6 +14061,31 @@ func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferre
 	c.suggestions[s.Symbol] = s
 	c.suggestMu.Unlock()
 	return s
+}
+
+func (c *telegramCommandCtx) activeSuggestions() []operatorSuggestion {
+	if c == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	c.suggestMu.Lock()
+	defer c.suggestMu.Unlock()
+	if len(c.suggestions) == 0 {
+		return nil
+	}
+	out := make([]operatorSuggestion, 0, len(c.suggestions))
+	for sym, s := range c.suggestions {
+		if !s.ExpiresAt.IsZero() && now.After(s.ExpiresAt) {
+			delete(c.suggestions, sym)
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func (c *telegramCommandCtx) hasActiveSuggestions() bool {
+	return len(c.activeSuggestions()) > 0
 }
 
 func (c *telegramCommandCtx) getSuggestion(symbol string) (operatorSuggestion, bool) {
@@ -14091,7 +14436,8 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), side),
 			fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
 			fmt.Sprintf("<b>Priority TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
-			"Next evaluation will try this symbol first through the normal bot entry, sizing, and risk gates.",
+			"Priority watch is armed for this symbol and side with elevated watcher cadence.",
+			"Next evaluation will process it ahead of normal candidate competition while still respecting hard safety gates.",
 			"This does not bypass liquidity, stop, funding, or session protection.",
 		}
 		if s.PreferredLev > 0 {

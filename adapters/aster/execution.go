@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -206,6 +207,8 @@ func (t *Trader) Bracket(isLong bool, qty float64, tpPrice *float64, slPrice *fl
 		vals.Set("stopPrice", formatFloat(tp, t.Meta.PricePrecision))
 		vals.Set("reduceOnly", "true")
 		vals.Set("positionSide", "BOTH")
+		vals.Set("workingType", triggerWorkingType())
+		vals.Set("priceProtect", triggerPriceProtect())
 		resp, err := t.Rest.PlaceOrder(vals)
 		if err != nil {
 			return nil, err
@@ -226,6 +229,8 @@ func (t *Trader) Bracket(isLong bool, qty float64, tpPrice *float64, slPrice *fl
 		vals.Set("stopPrice", formatFloat(sl, t.Meta.PricePrecision))
 		vals.Set("reduceOnly", "true")
 		vals.Set("positionSide", "BOTH")
+		vals.Set("workingType", triggerWorkingType())
+		vals.Set("priceProtect", triggerPriceProtect())
 		resp, err := t.Rest.PlaceOrder(vals)
 		if err != nil {
 			return nil, err
@@ -233,6 +238,28 @@ func (t *Trader) Bracket(isLong bool, qty float64, tpPrice *float64, slPrice *fl
 		out["sl"] = resp
 	}
 	return out, nil
+}
+
+func triggerWorkingType() string {
+	ref := strings.ToLower(strings.TrimSpace(os.Getenv("LIVE_STOP_TRIGGER_REF")))
+	switch ref {
+	case "mark", "mark_price", "markprice":
+		return "MARK_PRICE"
+	default:
+		return "CONTRACT_PRICE"
+	}
+}
+
+func triggerPriceProtect() string {
+	if v := strings.TrimSpace(os.Getenv("LIVE_TRIGGER_PRICE_PROTECT")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			return "FALSE"
+		default:
+			return "TRUE"
+		}
+	}
+	return "TRUE"
 }
 
 func (t *Trader) CancelAll() (map[string]any, error) {

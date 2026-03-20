@@ -425,6 +425,8 @@ func (r *RESTAuth) ReplaceStopOrder(symbol, side string, oldOrderID int64, qty, 
 	vals.Set("reduceOnly", "true")
 	vals.Set("quantity", formatPrecision(qty, qtyPrecision))
 	vals.Set("stopPrice", formatPrecision(stopPrice, pricePrecision))
+	vals.Set("workingType", triggerWorkingType())
+	vals.Set("priceProtect", triggerPriceProtect())
 	return r.PlaceOrder(vals)
 }
 

@@ -1,6 +1,10 @@
 package strategies
 
-import "go-machine/internal/features"
+import (
+	"strings"
+
+	"go-machine/internal/features"
+)
 
 type StopMode string
 type TargetMode string
@@ -19,10 +23,14 @@ type RiskPolicyConfig struct {
 	StopMode             StopMode
 	TargetMode           TargetMode
 	FixedStopPct         float64
+	FixedStopPctPullback float64
+	FixedStopPctReversal float64
 	VPMinShare           float64
 	VPFrontRunPct        float64
 	MinTargetDistancePct float64
 	MinRMultiple         float64
+	MinRMultiplePullback float64
+	MinRMultipleReversal float64
 }
 
 func DefaultRiskPolicy() RiskPolicyConfig {
@@ -30,10 +38,14 @@ func DefaultRiskPolicy() RiskPolicyConfig {
 		StopMode:             StopModeHybrid,
 		TargetMode:           TargetModeHybrid,
 		FixedStopPct:         0.60,
+		FixedStopPctPullback: 0.45,
+		FixedStopPctReversal: 0.80,
 		VPMinShare:           0.10,
 		VPFrontRunPct:        0.10,
 		MinTargetDistancePct: 0.10,
 		MinRMultiple:         1.20,
+		MinRMultiplePullback: 1.00,
+		MinRMultipleReversal: 1.10,
 	}
 }
 
@@ -44,6 +56,12 @@ func ApplyRiskPolicy(sig Signal, snap features.Snapshot, cfg RiskPolicyConfig) S
 	if cfg.FixedStopPct <= 0 {
 		cfg.FixedStopPct = 0.60
 	}
+	if cfg.FixedStopPctPullback <= 0 {
+		cfg.FixedStopPctPullback = 0.45
+	}
+	if cfg.FixedStopPctReversal <= 0 {
+		cfg.FixedStopPctReversal = 0.80
+	}
 	if cfg.VPMinShare <= 0 || cfg.VPMinShare >= 1 {
 		cfg.VPMinShare = 0.10
 	}
@@ -53,8 +71,25 @@ func ApplyRiskPolicy(sig Signal, snap features.Snapshot, cfg RiskPolicyConfig) S
 	if cfg.MinRMultiple <= 0 {
 		cfg.MinRMultiple = 1.20
 	}
+	if cfg.MinRMultiplePullback <= 0 {
+		cfg.MinRMultiplePullback = 1.00
+	}
+	if cfg.MinRMultipleReversal <= 0 {
+		cfg.MinRMultipleReversal = 1.10
+	}
 
-	stopFixed := stopByFixedPct(sig.Entry, sig.Side, cfg.FixedStopPct)
+	template := riskTemplateForSignal(sig)
+	stopPct := cfg.FixedStopPct
+	minRMultiple := cfg.MinRMultiple
+	switch template {
+	case "pullback":
+		stopPct = cfg.FixedStopPctPullback
+		minRMultiple = cfg.MinRMultiplePullback
+	case "reversal":
+		stopPct = cfg.FixedStopPctReversal
+		minRMultiple = cfg.MinRMultipleReversal
+	}
+	stopFixed := stopByFixedPct(sig.Entry, sig.Side, stopPct)
 	stopVP := stopByVP(sig, snap)
 	stop := sig.Stop
 	switch cfg.StopMode {
@@ -92,7 +127,7 @@ func ApplyRiskPolicy(sig Signal, snap features.Snapshot, cfg RiskPolicyConfig) S
 		if tp1VP > 0 {
 			risk := riskDistance(sig.Entry, stop, sig.Side)
 			rewardVP := rewardDistance(sig.Entry, tp1VP, sig.Side)
-			if risk > 0 && rewardVP/risk >= cfg.MinRMultiple {
+			if risk > 0 && rewardVP/risk >= minRMultiple {
 				tp1, tp2 = tp1VP, tp2VP
 			}
 		}
@@ -104,6 +139,33 @@ func ApplyRiskPolicy(sig Signal, snap features.Snapshot, cfg RiskPolicyConfig) S
 	sig.StopMode = string(cfg.StopMode)
 	sig.TargetMode = string(cfg.TargetMode)
 	return sig
+}
+
+func riskTemplateForSignal(sig Signal) string {
+	name := sig.Name
+	switch {
+	case hasAnyTag(sig.Tags, "reversal", "role_flip", "failed_auction"):
+		return "reversal"
+	case hasAnyTag(sig.Tags, "pullback", "retest", "confluence"):
+		return "pullback"
+	case strings.Contains(name, "reversal"), strings.Contains(name, "flip"), strings.Contains(name, "failed_auction"):
+		return "reversal"
+	case strings.Contains(name, "pullback"), strings.Contains(name, "retest"), strings.Contains(name, "vwap"):
+		return "pullback"
+	default:
+		return "continuation"
+	}
+}
+
+func hasAnyTag(tags []string, want ...string) bool {
+	for _, tag := range tags {
+		for _, needle := range want {
+			if strings.EqualFold(strings.TrimSpace(tag), strings.TrimSpace(needle)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func stopByFixedPct(entry float64, side features.Side, stopPct float64) float64 {

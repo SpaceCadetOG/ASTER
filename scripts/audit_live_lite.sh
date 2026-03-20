@@ -21,7 +21,7 @@ done
 
 if [[ ${#selected[@]} -eq 0 ]]; then
   echo "no matching log files found in ./logs for since=${SINCE_DATE}" >&2
-  echo "tip: start runtime with scripts/run_live_lite_logged.sh" >&2
+  echo "tip: start runtime with scripts/run_live_lite_safe_logged.sh for conservative live validation" >&2
   exit 1
 fi
 

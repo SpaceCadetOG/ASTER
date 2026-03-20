@@ -33,6 +33,9 @@ type RouterConfig struct {
 	StrategyWeight            float64
 	FlowWeight                float64
 	StructureWeight           float64
+	ContinuationDayUTCPct     float64
+	ContinuationReset1hPct    float64
+	ContinuationLateSlopeMin  float64
 	RiskPolicy                RiskPolicyConfig
 }
 
@@ -75,6 +78,15 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	if cfg.LocationTolerancePct <= 0 {
 		cfg.LocationTolerancePct = 0.006 // 60 bps
+	}
+	if cfg.ContinuationDayUTCPct <= 0 {
+		cfg.ContinuationDayUTCPct = 25.0
+	}
+	if cfg.ContinuationReset1hPct <= 0 {
+		cfg.ContinuationReset1hPct = 0.8
+	}
+	if cfg.ContinuationLateSlopeMin <= 0 {
+		cfg.ContinuationLateSlopeMin = 0.16
 	}
 	if cfg.RiskPolicy.StopMode == "" {
 		cfg.RiskPolicy = DefaultRiskPolicy()
@@ -122,6 +134,11 @@ func (r *Router) Eval(ctx Context) []Candidate {
 	for _, s := range r.strat {
 		sig := s.Eval(ctx)
 		if !sig.Active {
+			continue
+		}
+		if reason := r.continuationMaturityReject(ctx, sig); reason != "" {
+			sig.RejectReason = reason
+			sig.Reasons = append(sig.Reasons, reason)
 			continue
 		}
 		sig = ApplyRiskPolicy(sig, ctx.Snapshot, r.cfg.RiskPolicy)
@@ -226,6 +243,30 @@ func (r *Router) Eval(ctx Context) []Candidate {
 		}
 	}
 	return []Candidate{best}
+}
+
+func (r *Router) continuationMaturityReject(ctx Context, sig Signal) string {
+	if sig.Side == features.SideLong || ctx.DayUTCPct == 0 {
+		return ""
+	}
+	name := strings.ToLower(strings.TrimSpace(sig.Name))
+	if strings.Contains(name, "reversal") || strings.Contains(name, "flip") {
+		return ""
+	}
+	if hasAnyTag(sig.Tags, "reversal", "failed_auction", "role_flip") {
+		return ""
+	}
+	if ctx.DayUTCPct > -r.cfg.ContinuationDayUTCPct {
+		return ""
+	}
+	reset := ctx.UTC1hPct >= r.cfg.ContinuationReset1hPct || hasAnyTag(sig.Tags, "pullback", "retest", "confluence")
+	if !reset {
+		return "late_extension_no_reset"
+	}
+	if ctx.ScoreSlope < r.cfg.ContinuationLateSlopeMin && !hasAnyTag(sig.Tags, "retest") {
+		return "late_cycle_short_weak_slope"
+	}
+	return ""
 }
 
 func (r *Router) locationHandshake(ctx Context, sig *Signal) bool {

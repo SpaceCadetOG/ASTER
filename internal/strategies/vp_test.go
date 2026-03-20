@@ -171,3 +171,88 @@ func TestRouterSessionRegimeTagSet(t *testing.T) {
 		t.Fatalf("unexpected regime tag: %s", out[0].Signal.RegimeTag)
 	}
 }
+
+func TestApplyRiskPolicyUsesSetupFamilyTemplates(t *testing.T) {
+	snap := features.Snapshot{
+		VP: features.VolumeProfile{
+			VAH:         103,
+			VAL:         98,
+			TotalVolume: 1000,
+			Bins: []features.PriceVolume{
+				{Price: 98, Volume: 150},
+				{Price: 99, Volume: 100},
+				{Price: 100, Volume: 200},
+				{Price: 101, Volume: 250},
+				{Price: 102, Volume: 160},
+			},
+		},
+	}
+	cfg := DefaultRiskPolicy()
+	cfg.StopMode = StopModeFixed
+
+	pullback := Signal{
+		Active: true,
+		Name:   "bos_pb",
+		Side:   features.SideLong,
+		Entry:  100,
+		Stop:   99.4,
+		TP1:    102,
+		TP2:    103,
+		Tags:   []string{"pullback", "retest"},
+	}
+	reversal := Signal{
+		Active: true,
+		Name:   "failed_auction_magnet",
+		Side:   features.SideLong,
+		Entry:  100,
+		Stop:   99.4,
+		TP1:    102,
+		TP2:    103,
+		Tags:   []string{"failed_auction", "reversal"},
+	}
+	outPullback := ApplyRiskPolicy(pullback, snap, cfg)
+	outReversal := ApplyRiskPolicy(reversal, snap, cfg)
+	if !(outReversal.Stop < outPullback.Stop) {
+		t.Fatalf("expected reversal stop wider than pullback stop, pullback=%.4f reversal=%.4f", outPullback.Stop, outReversal.Stop)
+	}
+}
+
+func TestRouterRejectsLateShortContinuationWithoutReset(t *testing.T) {
+	c := make([]features.Candle, 0, 40)
+	for i := 0; i < 40; i++ {
+		c = append(c, mkC(i+1, 100, 101, 99, 100.0-float64(i)*0.2, 100))
+	}
+	ctx := Context{
+		Symbol:       "LYNUSDT",
+		TF:           "1m",
+		ScannerScore: 95,
+		ScannerGrade: "A+",
+		ScoreSlope:   0.05,
+		DayUTCPct:    -36,
+		UTC1hPct:     -4.0,
+		Snapshot: features.Snapshot{
+			Structure: features.StructureState{Trend: features.TrendBear},
+			Flow:      features.FlowState{WhaleDelta1m: -100},
+			OBs: []features.OBZone{
+				{Rejected: true, Side: features.SideShort, High: 101, Low: 99.5},
+			},
+			Candle: c[len(c)-1],
+		},
+		Candles: c,
+	}
+	r := NewRouter(RouterConfig{
+		MinGrade:                 "B",
+		MinScore:                 0,
+		MinWhaleDelta:            -1e9,
+		MinConfluenceScore:       0.1,
+		AllowDeadZoneOnlyAPlus:   false,
+		ContinuationDayUTCPct:    25,
+		ContinuationReset1hPct:   0.8,
+		ContinuationLateSlopeMin: 0.16,
+		RiskPolicy:               DefaultRiskPolicy(),
+	})
+	out := r.Eval(ctx)
+	if len(out) != 0 {
+		t.Fatalf("expected no candidates due to late extension without reset, got %d", len(out))
+	}
+}

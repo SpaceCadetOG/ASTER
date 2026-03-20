@@ -861,6 +861,9 @@ func deriveMetaState(e Entry) string {
 	if shouldDemoteShort(e) && e.BullReversalScore >= 5 {
 		return "short_exhausting"
 	}
+	if e.EntryStyle == "leader_unwind_short" {
+		return "leader_unwind_short"
+	}
 	if e.EntryStyle == "momentum_ignite_long" {
 		return "ignite_long"
 	}
@@ -891,6 +894,14 @@ func deriveEntryStyle(e Entry) string {
 	}
 	if e.ExhaustionRisk >= 4.5 {
 		return "avoid_chase"
+	}
+	if strings.EqualFold(strings.TrimSpace(e.SideBias), "short") &&
+		e.CurrentScore >= 88 &&
+		e.DayUTCPct <= -20 &&
+		(e.State == StateHeating || e.State == StateInPlay || e.State == StatePumping) &&
+		(e.ScoreSlope >= 0.35 || e.Momentum) &&
+		e.BearReversalScore >= 3.0 {
+		return "leader_unwind_short"
 	}
 	if e.Momentum && e.ScoreSlope >= 0.08 {
 		freshHeating := e.State == StateHeating && e.TimeInStateMin <= 14

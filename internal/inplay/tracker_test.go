@@ -108,3 +108,22 @@ func TestTrackerStatesPumpingAndDumpingShort(t *testing.T) {
 		t.Fatalf("expected dumping/cooling/exhausted, got %s", es[0].State)
 	}
 }
+
+func TestDeriveEntryStyleLeaderUnwindShort(t *testing.T) {
+	e := Entry{
+		SideBias:          "short",
+		CurrentScore:      94,
+		DayUTCPct:         -28,
+		State:             StateInPlay,
+		ScoreSlope:        0.42,
+		Momentum:          true,
+		BearReversalScore: 3.6,
+		ExhaustionRisk:    2.0,
+	}
+	if got := deriveEntryStyle(e); got != "leader_unwind_short" {
+		t.Fatalf("expected leader_unwind_short, got %s", got)
+	}
+	if got := deriveMetaState(Entry{EntryStyle: "leader_unwind_short"}); got != "leader_unwind_short" {
+		t.Fatalf("expected leader_unwind_short meta state, got %s", got)
+	}
+}

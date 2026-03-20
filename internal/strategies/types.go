@@ -47,6 +47,11 @@ type Context struct {
 	ScannerScore      float64
 	ScannerGrade      string
 	ScoreSlope        float64
+	DayUTCPct         float64
+	UTC4hPct          float64
+	UTC1hPct          float64
+	EntryStyle        string
+	MetaState         string
 	ScanAccel         float64
 	NotionalUSD       float64
 	FundingRate       float64

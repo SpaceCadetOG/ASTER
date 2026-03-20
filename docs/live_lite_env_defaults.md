@@ -14,6 +14,7 @@ Notes:
 - `LIVE_ALLOW_SHORTS`: default `true`
 - `LIVE_DRY_RUN`: default `true`
 - `LIVE_ENABLE_LIVE_TRADING`: default `false`
+- For cautious real-money validation, prefer starting with `scripts/run_live_lite_safe_logged.sh` instead of the generic launcher.
 - `LIVE_ENTRY_OFFSET_BPS`: default `2`
 - `LIVE_GRADE_TOP_N`: default `6`
 - `LIVE_KILL_CLOSE_POSITIONS`: default `false`
@@ -111,7 +112,11 @@ Notes:
 - `LIVE_REVERSAL_VOL_SPIKE_MIN`: default `3.0`
 - `LIVE_RISK_SHELL_ENABLE`: default `true`
 - `LIVE_VP_MIN_TARGET_PCT`: default `0.10`
+- `LIVE_PRIORITY_WATCH_ENABLE`: default `true`
+- `LIVE_PRIORITY_WATCH_EVERY_SEC`: default `1`
+- `LIVE_PRIORITY_WATCH_TTL_MIN`: default `15`
 - `LIVE_WATCH_SEC`: default `3`
+- `LIVE_WATCHER_SEC`: default `LIVE_WATCH_SEC (3)`
 - `WATCH_BOOK_LEVELS`: default `5`
 - `WATCH_ENABLE`: default `true`
 - `WATCH_MAX_CANDIDATES`: default `20`
@@ -272,16 +277,21 @@ Notes:
 - `LIVE_RECOVERY_STOP_RETRY_SEC`: default `1`
 - `LIVE_RISK_MARGIN_PCT`: default `5.0`
 - `LIVE_RISK_ON_MARGIN_ENABLE`: default `true`
+- `LIVE_STOP_ENGINE_V2_ENABLE`: default `true`
 - `LIVE_STOP_ATR_MULT_CONT`: default `1.8`
 - `LIVE_STOP_ATR_MULT_IGNITE`: default `1.4`
 - `LIVE_STOP_ATR_MULT_REV`: default `1.2`
 - `LIVE_STOP_PCT`: default `3.0`
+- `LIVE_STOP_TEMPLATE_MODE`: default `setup`
+- `LIVE_STOP_TRIGGER_REF`: default `mark`
 - `LIVE_TP1_FRAC`: default `0.20`
 - `LIVE_TP1_R`: default `1.20`
 - `LIVE_TP2_FRAC`: default `0.15`
 - `LIVE_TP2_R`: default `2.50`
 - `LIVE_TP3_FRAC`: default `0.15`
 - `LIVE_TP3_R`: default `4.00`
+- `LIVE_TP_TRIGGER_REF`: default `mark`
+- `LIVE_TRIGGER_PRICE_PROTECT`: default `true`
 - `LIVE_TP_FRONT_RUN_PCT`: default `0.001`
 - `LIVE_TRAIL_AFTER_TP`: default `3`
 - `LIVE_TRAIL_ATR_MULT_CONT`: default `2.6`
@@ -294,9 +304,11 @@ Notes:
 
 ## Strategy Routing: Ignite Continuation Reversal Exhaustion
 
+- `LIVE_BREAK_RETEST_MAX_BARS`: default `3`
 - `LIVE_CONFLUENCE_FLOW_WEIGHT`: default `0.30`
 - `LIVE_CONFLUENCE_STRATEGY_WEIGHT`: default `0.50`
 - `LIVE_CONFLUENCE_STRUCTURE_WEIGHT`: default `0.20`
+- `LIVE_CONT_CONFIRM_BARS`: default `2`
 - `LIVE_CONT_FAST_APLUS_MAX_STATE_MIN`: default `28.0`
 - `LIVE_CONT_FAST_BASE_CONF`: default `0.58`
 - `LIVE_CONT_FAST_LATE_MIN_SCORE`: default `90.0`
@@ -306,6 +318,7 @@ Notes:
 - `LIVE_CONT_FAST_MIN_SCORE`: default `65.0`
 - `LIVE_CONT_FAST_MIN_SLOPE`: default `0.02`
 - `LIVE_CONT_FAST_MIN_VOL_RATIO`: default `1.15`
+- `LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM`: default `true`
 - `LIVE_LEADER_UNWIND_OPPOSING_MAX_SLOPE`: default `0.10`
 - `LIVE_LEADER_UNWIND_SHORT_MAX_STATE_MIN`: default `30.0`
 - `LIVE_LEADER_UNWIND_SHORT_MIN_ABS_OFI_Z`: default `0.15`
@@ -356,8 +369,12 @@ Notes:
 - `LIVE_IGNITE_TP1_R`: default `1.0`
 - `LIVE_IGNITE_TP2_R`: default `2.4`
 - `LIVE_IGNITE_TP3_R`: default `4.2`
+- `LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT`: default `25`
+- `LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET`: default `true`
+- `LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT`: default `0.8`
 - `LIVE_MIN_CONFLUENCE_SCORE`: default `0.52`
 - `LIVE_MIN_VP_CONFIDENCE`: default `0.55`
+- `LIVE_RECLAIM_HOLD_BARS`: default `1`
 - `LIVE_REQUIRE_LOCATION_HANDSHAKE`: default `false`
 - `LIVE_REQUIRE_ORDERFLOW_HANDSHAKE`: default `false`
 - `LIVE_REVERSAL_MIN_COMPLETENESS`: default `0.0`
@@ -379,6 +396,9 @@ Notes:
 - `LIVE_ORDER_COOLDOWN_SEC`: default `180`
 - `LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC`: default `120`
 - `LIVE_SYMBOL_COOLDOWN_SAME_SIDE_SEC`: default `envInt("LIVE_SYMBOL_COOLDOWN_SEC", 900`
+- `LIVE_SYMBOL_QUICK_LOSS_DAYUTC_PCT`: default `25.0`
+- `LIVE_SYMBOL_QUICK_LOSS_LOCK_COUNT`: default `1`
+- `LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN`: default `60`
 - `LIVE_SYMBOL_STOPOUT_COUNT`: default `3`
 - `LIVE_SYMBOL_STOPOUT_LOCK_MIN`: default `5`
 - `LIVE_SYMBOL_STOPOUT_WINDOW_MIN`: default `60`
