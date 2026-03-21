@@ -14,7 +14,8 @@ Notes:
 - `LIVE_ALLOW_SHORTS`: default `true`
 - `LIVE_DRY_RUN`: default `true`
 - `LIVE_ENABLE_LIVE_TRADING`: default `false`
-- For cautious real-money validation, prefer starting with `scripts/run_live_lite_safe_logged.sh` instead of the generic launcher.
+- For cautious real-money validation, prefer `scripts/run_live_lite_safe_logged.sh`.
+- For normal live trading with anti-churn guards still enforced, prefer `scripts/run_live_lite_balanced_logged.sh`.
 - `LIVE_ENTRY_OFFSET_BPS`: default `2`
 - `LIVE_GRADE_TOP_N`: default `6`
 - `LIVE_KILL_CLOSE_POSITIONS`: default `false`
