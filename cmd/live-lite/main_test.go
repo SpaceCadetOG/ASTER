@@ -252,6 +252,33 @@ func TestDirectionalConflictRejectReasonBlocksContradictoryContinuation(t *testi
 	}
 }
 
+func TestChooseCandidatesAllowsStrongCGradeMomentumOverride(t *testing.T) {
+	cfg := candidateSelectConfig{
+		EnableCGradeMomentum: true,
+		CGradeMinScore:       80,
+		CGradeMinSlope:       0.18,
+		CGradeMinDayUTC:      5,
+		CGradeMaxStateMin:    35,
+	}
+	longInPlay := []inplay.Entry{{
+		Symbol:         "LYNUSDT",
+		CurrentGrade:   "C",
+		CurrentScore:   83.2,
+		ScoreSlope:     0.26,
+		DayUTCPct:      17.0,
+		State:          inplay.StateInPlay,
+		TimeInStateMin: 8,
+		EntryStyle:     "pullback_long",
+	}}
+	got := chooseCandidates(longInPlay, nil, "B", false, "A+", 0.15, false, 92, 1, cfg)
+	if len(got) != 1 {
+		t.Fatalf("expected strong C momentum override to produce one candidate, got %d", len(got))
+	}
+	if got[0].Side != "BUY" || got[0].Entry.Symbol != "LYNUSDT" {
+		t.Fatalf("unexpected candidate: %+v", got[0])
+	}
+}
+
 func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN", "0")
 	mem := map[string]*sessionChurn{}
