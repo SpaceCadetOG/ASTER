@@ -262,6 +262,12 @@ func (t *Tracker) Update(now time.Time, rows []market.Scored, grades map[string]
 	}
 }
 
+func (t *Tracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data = map[string]*symbolState{}
+}
+
 func (t *Tracker) Entries() []Entry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

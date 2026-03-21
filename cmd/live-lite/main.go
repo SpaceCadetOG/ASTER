@@ -43,6 +43,7 @@ type candidate struct {
 	Entry           inplay.Entry
 	Side            string // BUY/SELL
 	Strat           string
+	SetupFamily     string
 	Conf            float64
 	FinalRank       float64
 	TriggerState    string
@@ -89,6 +90,8 @@ type candidate struct {
 	ResetRebreak    bool
 	ExtensionATR    float64
 	StructureReason string
+	PatternBias     float64
+	PatternReasons  []string
 }
 
 type entryQualityConfig struct {
@@ -1392,6 +1395,7 @@ func main() {
 	cachedMetaBySymbol := map[string]symbolMeta{}
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
+	lastDayUTCResetKey := ""
 	reserveGate := newReserveLockGate()
 	discoveryCfg := loadDiscoveryConfig()
 	gateCfg := loadEntryGateConfig()
@@ -1417,6 +1421,23 @@ func main() {
 	for {
 		cycleStart := time.Now()
 		now := cycleStart.UTC()
+		resetKey := dayUTCResetKey(now)
+		if resetKey != lastDayUTCResetKey {
+			if lastDayUTCResetKey != "" {
+				longTrk.Reset()
+				shortTrk.Reset()
+				candidateMem = map[string]candidateMemory{}
+				triggerMem = map[string]triggerMemory{}
+				recentRejects = map[string]recentRejectMemory{}
+				sessionChurns = map[string]*sessionChurn{}
+				cachedLongInPlay = nil
+				cachedShortInPlay = nil
+				cachedMetaBySymbol = map[string]symbolMeta{}
+				lastScanAt = time.Time{}
+				fmt.Printf("live-lite: dayutc reset state cleared anchor=%s rolling24_context=preserved\n", resetKey)
+			}
+			lastDayUTCResetKey = resetKey
+		}
 		if modeCtrl != nil {
 			modeDryRun, modeLiveEnabled, modePaperEnabled := modeCtrl.snapshot()
 			dryRun = modeDryRun
@@ -1868,6 +1889,12 @@ func main() {
 			triggerReasons := []string(nil)
 			c.TriggerState, c.TriggerStateN, triggerReasons = deriveTriggerState(c)
 			c = applyTriggerLifecycle(c, now, triggerMem, triggerCfg)
+			c.SetupFamily = classifySetupFamily(c, now)
+			if strings.TrimSpace(c.Strat) != "" && !strings.EqualFold(strings.TrimSpace(c.Strat), "none") && c.SetupFamily == "" {
+				c.Strat = "none"
+				c.Conf = 0
+				c.RejectReason = "setup_family_none"
+			}
 			c.ExitProfile = chooseExitProfile(c)
 			operatorSuggested := false
 			if cmdCtx != nil {
@@ -1881,6 +1908,10 @@ func main() {
 			if c.StructureReason != "" {
 				c.QualityReasons = append(c.QualityReasons, "structure:"+c.StructureReason)
 			}
+			if c.SetupFamily != "" {
+				c.QualityReasons = append(c.QualityReasons, "setup:"+c.SetupFamily)
+			}
+			c.QualityReasons = append(c.QualityReasons, c.PatternReasons...)
 			if c.TriggerStage != "" {
 				c.QualityReasons = append(c.QualityReasons, "trigger_stage:"+strings.ToLower(c.TriggerStage))
 			}
@@ -10125,6 +10156,9 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 		_, triggerStateN, _ = deriveTriggerState(c)
 	}
 	triggerN := clamp(0.22*slopeN+0.18*confN+0.18*structureN+0.12*stageN+0.12*triggerStageN+0.08*freshnessN+0.10*triggerStateN, 0, 1)
+	if c.PatternBias != 0 {
+		triggerN = clamp(triggerN+c.PatternBias, 0, 1)
+	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
 		triggerN = maxFloat(triggerN, envFloat("LIVE_RESET_IMPULSE_TRIGGER_FLOOR", 0.82))
 	}
@@ -10232,16 +10266,32 @@ func effectiveDayUTCWeight(now time.Time, baseWeight float64) float64 {
 	return clamp(baseWeight*dayUTCResetProgress(now), 0, 1)
 }
 
+func dayUTCResetKey(now time.Time) string {
+	return dayUTCResetAnchor(now).Format(time.RFC3339)
+}
+
 func minutesSinceDayUTCReset(now time.Time) float64 {
 	return maxFloat(0, now.Sub(dayUTCResetAnchor(now)).Minutes())
 }
 
 func resetImpulseWindowActive(now time.Time) bool {
-	windowMin := envFloat("LIVE_RESET_IMPULSE_WINDOW_MIN", 45.0)
+	windowMin := envFloat("LIVE_RESET_IMPULSE_WINDOW_MIN", 15.0)
 	if windowMin <= 0 {
 		return false
 	}
 	return minutesSinceDayUTCReset(now) <= windowMin
+}
+
+func canonicalSymbolBase(symbol string) string {
+	s := strings.ToUpper(strings.TrimSpace(symbol))
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "-USD")
+	s = strings.TrimSuffix(s, "USD")
+	return s
+}
+
+func positionLookupKey(symbol, side string) string {
+	return canonicalSymbolBase(symbol) + "|" + normalizePositionSide(side)
 }
 
 func qualifiesResetImpulse(c candidate, now time.Time) (string, float64, []string) {
@@ -10313,6 +10363,106 @@ func qualifiesResetImpulse(c candidate, now time.Time) (string, float64, []strin
 	return strat, conf, reasons
 }
 
+func classifySetupFamily(c candidate, now time.Time) string {
+	strat := strings.ToLower(strings.TrimSpace(c.Strat))
+	style := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
+	if strings.HasPrefix(strat, "reset_impulse_") || (resetImpulseWindowActive(now) && c.TriggerState == string(triggerImpulseCont) && c.ClosedBreakHold) {
+		return "reset_impulse_breakout"
+	}
+	if strategyFamily(c) == "rev" || strings.Contains(strat, "reversal") || strings.Contains(strat, "flip") {
+		return "reversal_exhaustion"
+	}
+	if c.RetestHold || c.ResetRebreak || strings.Contains(style, "breakout_hold") {
+		return "breakout_retest"
+	}
+	if c.ReclaimHold && c.ExtensionATR >= envFloat("LIVE_DEEP_PULLBACK_EXTENSION_ATR", 1.35) {
+		return "deep_pullback_reclaim"
+	}
+	if c.ReclaimHold || c.ClosedBreakHold || strings.Contains(style, "pullback") || c.TriggerState == string(triggerOFReclaim) {
+		return "micro_pullback_continuation"
+	}
+	return ""
+}
+
+func continuationDeteriorating(c candidate) bool {
+	if strings.EqualFold(c.Side, "BUY") {
+		lostTrend := (c.SessionVWAP > 0 && c.LastClose < c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose < c.EMA9)
+		weakSlope := c.Entry.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01)
+		return c.TriggerState == string(triggerFailReclaim) || (c.TriggerState == string(triggerExhaustion) && lostTrend && weakSlope)
+	}
+	lostTrend := (c.SessionVWAP > 0 && c.LastClose > c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose > c.EMA9)
+	weakSlope := c.Entry.ScoreSlope >= -envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01)
+	return c.TriggerState == string(triggerFailReclaim) || (c.TriggerState == string(triggerExhaustion) && lostTrend && weakSlope)
+}
+
+func applyPatternModifiers(cand *candidate, bars []features.Candle) {
+	if cand == nil || !envBool("LIVE_PATTERN_CONFIRM_ENABLE", true) || len(bars) < 2 {
+		return
+	}
+	typed := make([]types.Candle, 0, len(bars))
+	for _, b := range bars {
+		typed = append(typed, types.Candle{T: b.Ts, O: b.O, H: b.H, L: b.L, C: b.C, V: b.V})
+	}
+	pats := ta.DetectPatterns(typed)
+	if len(pats) == 0 {
+		return
+	}
+	lastIdx := len(typed) - 1
+	reclaimProxPct := envFloat("LIVE_PATTERN_RECLAIM_PROX_PCT", 0.35)
+	nearReclaim := cand.ReclaimHold || cand.RetestHold ||
+		(cand.SessionVWAP > 0 && math.Abs(relativePct(cand.LastClose, cand.SessionVWAP)) <= reclaimProxPct) ||
+		(cand.EMA9 > 0 && math.Abs(relativePct(cand.LastClose, cand.EMA9)) <= reclaimProxPct)
+	extended := cand.ExtensionATR >= envFloat("LIVE_PATTERN_EXTENDED_ATR", 1.40)
+	bias := 0.0
+	reasons := make([]string, 0, 4)
+	for _, p := range pats {
+		if p.Index < lastIdx-1 {
+			continue
+		}
+		strength := clamp(p.Strength, 0, 1)
+		switch strings.ToUpper(strings.TrimSpace(cand.Side)) {
+		case "BUY":
+			switch p.Name {
+			case ta.PatBullEngulf, ta.PatHammer, ta.PatPiercing, ta.PatMarubozuBull:
+				if nearReclaim || cand.ClosedBreakHold {
+					bias += 0.08 * strength
+					reasons = append(reasons, "pattern_bull_confirm:"+string(p.Name))
+				}
+			case ta.PatDoji, ta.PatSpinningTop:
+				if extended {
+					bias -= 0.05 * strength
+					reasons = append(reasons, "pattern_indecision:"+string(p.Name))
+				}
+			case ta.PatBearEngulf, ta.PatShootingStar, ta.PatDarkCloud, ta.PatMarubozuBear:
+				if extended || cand.TriggerState == string(triggerExhaustion) {
+					bias -= 0.08 * strength
+					reasons = append(reasons, "pattern_bear_warn:"+string(p.Name))
+				}
+			}
+		case "SELL":
+			switch p.Name {
+			case ta.PatBearEngulf, ta.PatShootingStar, ta.PatDarkCloud, ta.PatMarubozuBear:
+				if nearReclaim || cand.ClosedBreakHold {
+					bias += 0.08 * strength
+					reasons = append(reasons, "pattern_bear_confirm:"+string(p.Name))
+				}
+			case ta.PatDoji, ta.PatSpinningTop:
+				if extended {
+					bias -= 0.05 * strength
+					reasons = append(reasons, "pattern_indecision:"+string(p.Name))
+				}
+			case ta.PatBullEngulf, ta.PatHammer, ta.PatPiercing, ta.PatMarubozuBull:
+				if extended || cand.TriggerState == string(triggerExhaustion) {
+					bias -= 0.08 * strength
+					reasons = append(reasons, "pattern_bull_warn:"+string(p.Name))
+				}
+			}
+		}
+	}
+	cand.PatternBias = clamp(bias, -0.14, 0.14)
+	cand.PatternReasons = reasons
+}
+
 func isContinuationStrategy(c candidate) bool {
 	switch strategyFamily(c) {
 	case "cont", "ignite":
@@ -10338,14 +10488,14 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Strat)), "reset_impulse_") {
 		return ""
 	}
-	if cfg.BlockContExhaustion && c.TriggerState == string(triggerExhaustion) {
+	if cfg.BlockContExhaustion && c.TriggerState == string(triggerExhaustion) && continuationDeteriorating(c) {
 		return "continuation_exhausted"
 	}
 	if !cfg.DayUTCMaturityBrake {
 		return ""
 	}
 	if math.Abs(c.DayUTC24h) < cfg.DayUTCMaturityPct {
-		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !continuationStructureConfirmed(c) {
+		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
 			return "continuation_no_structure_confirm"
 		}
 		return ""
@@ -10362,7 +10512,7 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 			}
 		}
 	}
-	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !continuationStructureConfirmed(c) {
+	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
 		return "extended_reentry_lock"
 	}
 	if strings.EqualFold(c.Side, "SELL") && c.DayUTC24h <= -envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", cfg.DayUTCMaturityPct) {
@@ -10863,6 +11013,14 @@ func hasFreshStructureReset(c candidate) bool {
 }
 
 func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
+	switch c.SetupFamily {
+	case "reset_impulse_breakout":
+		return exitmgr.StopTemplateContinuationImpulse
+	case "micro_pullback_continuation", "breakout_retest", "deep_pullback_reclaim":
+		return exitmgr.StopTemplateReclaimPullback
+	case "reversal_exhaustion":
+		return exitmgr.StopTemplateReversalExhaustion
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle)) {
 	case "leader_unwind_short", "reversal_watch_short", "reversal_watch_long":
 		return exitmgr.StopTemplateReversalExhaustion
@@ -11078,6 +11236,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	cand.ATR = snapView.ATR
 	cand.ATRPct = snapView.ATRPct
 	deriveContinuationStructureSignals(&cand, fc)
+	applyPatternModifiers(&cand, fc)
 	if fm, ok := flow[raw]; ok {
 		cand.OFIRaw = fm.OFIRaw
 		cand.OFIZ = fm.OFIZ
@@ -12296,7 +12455,7 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 			if pos == nil || !m.isActive(pos) {
 				continue
 			}
-			key := strings.ToUpper(strings.TrimSpace(sym)) + "|" + normalizePositionSide(pos.Side)
+			key := positionLookupKey(sym, pos.Side)
 			localBySymbol[key] = pos
 		}
 	}
@@ -12305,7 +12464,7 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		if raw == "" {
 			continue
 		}
-		lp := localBySymbol[raw+"|"+normalizePositionSide(rp.Side)]
+		lp := localBySymbol[positionLookupKey(raw, rp.Side)]
 		src := "MANUAL"
 		stop := 0.0
 		holdMin := 0.0

@@ -255,6 +255,12 @@ func relativePct(px, anchor float64) float64 {
 }
 
 func chooseExitProfile(c candidate) string {
+	switch c.SetupFamily {
+	case "reset_impulse_breakout":
+		return "IMPULSE"
+	case "micro_pullback_continuation", "breakout_retest", "deep_pullback_reclaim", "reversal_exhaustion":
+		return "ROTATION"
+	}
 	if c.TriggerState == string(triggerImpulseCont) || c.Entry.Momentum && c.VolumeRatio >= envFloat("LIVE_EXIT_IMPULSE_MIN_VOL_RATIO", 1.40) {
 		return "IMPULSE"
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go-machine/adapters/aster"
+	"go-machine/internal/features"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 )
@@ -225,12 +226,16 @@ func TestOrderbookEntryDecisionReasons(t *testing.T) {
 }
 
 func TestContinuationGuardReasonBlocksExhaustion(t *testing.T) {
+	t.Setenv("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", "0")
 	cfg := entryQualityConfig{BlockContExhaustion: true, DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
 	c := candidate{
 		Side:         "BUY",
 		Strat:        "continuation_fast",
 		TriggerState: "OF_EXHAUSTION",
 		DayUTC24h:    31,
+		LastClose:    0.99,
+		SessionVWAP:  1.01,
+		EMA9:         1.02,
 		Entry:        inplay.Entry{EntryStyle: "continuation_fast"},
 	}
 	if got := continuationGuardReason(c, cfg); got != "continuation_exhausted" {
@@ -827,5 +832,107 @@ func TestContinuationGuardAllowsResetImpulse(t *testing.T) {
 	}
 	if reason := continuationGuardReason(c, cfg); reason != "" {
 		t.Fatalf("expected reset impulse to bypass continuation guard, got %q", reason)
+	}
+}
+
+func TestClassifySetupFamilyBreakoutRetest(t *testing.T) {
+	now := time.Date(2026, 3, 21, 20, 0, 0, 0, time.UTC)
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		RetestHold:   true,
+		ResetRebreak: true,
+		Entry:        inplay.Entry{EntryStyle: "breakout_hold_long"},
+	}
+	if got := classifySetupFamily(c, now); got != "breakout_retest" {
+		t.Fatalf("expected breakout_retest, got %q", got)
+	}
+}
+
+func TestClassifySetupFamilyDeepPullback(t *testing.T) {
+	now := time.Date(2026, 3, 21, 20, 0, 0, 0, time.UTC)
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		ReclaimHold:  true,
+		ExtensionATR: 1.8,
+		Entry:        inplay.Entry{EntryStyle: "pullback_long"},
+	}
+	if got := classifySetupFamily(c, now); got != "deep_pullback_reclaim" {
+		t.Fatalf("expected deep_pullback_reclaim, got %q", got)
+	}
+}
+
+func TestContinuationGuardDoesNotBlockConstructiveExhaustion(t *testing.T) {
+	cfg := entryQualityConfig{BlockContExhaustion: true, DayUTCMaturityBrake: false}
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		SetupFamily:  "micro_pullback_continuation",
+		TriggerState: string(triggerExhaustion),
+		LastClose:    1.08,
+		SessionVWAP:  1.05,
+		EMA9:         1.06,
+		Entry:        inplay.Entry{EntryStyle: "pullback_long", ScoreSlope: 0.08},
+	}
+	if got := continuationGuardReason(c, cfg); got != "" {
+		t.Fatalf("expected no reject, got %q", got)
+	}
+}
+
+func TestApplyPatternModifiersBullishEngulfingNearReclaim(t *testing.T) {
+	now := time.Now().UTC()
+	c := candidate{
+		Side:        "BUY",
+		ReclaimHold: true,
+		LastClose:   10.4,
+		SessionVWAP: 10.2,
+		EMA9:        10.25,
+	}
+	bars := []features.Candle{
+		{Ts: now.Add(-2 * time.Minute), O: 10.30, H: 10.35, L: 10.00, C: 10.10, V: 100},
+		{Ts: now.Add(-1 * time.Minute), O: 10.05, H: 10.45, L: 10.00, C: 10.40, V: 160},
+	}
+	applyPatternModifiers(&c, bars)
+	if c.PatternBias <= 0 {
+		t.Fatalf("expected bullish pattern bias, got %.3f", c.PatternBias)
+	}
+}
+
+func TestPositionLookupKeyNormalizesAsterSymbols(t *testing.T) {
+	if got, want := positionLookupKey("LYN-USD", "buy"), "LYN|LONG"; got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+	if got, want := positionLookupKey("LYNUSDT", "BUY"), "LYN|LONG"; got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestMergeLiveAccountSnapshotMatchesBotPositionByCanonicalSymbol(t *testing.T) {
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYN-USD": {
+				Symbol:      "LYN-USD",
+				Side:        "BUY",
+				State:       execOpen,
+				CreatedAt:   time.Now().UTC().Add(-5 * time.Minute),
+				EntrySource: "BOT",
+				EntryReason: "TEST",
+				StopPrice:   0.1234,
+			},
+		},
+	}
+	now := time.Now().UTC()
+	snap := m.mergeLiveAccountSnapshot(now, accountSnapshot{
+		AvailableUSDT: 50,
+		Positions: []positionView{
+			{Symbol: "LYNUSDT", Side: "BUY", SizeAbs: 100, Entry: 0.12, Mark: 0.13, Unreal: 1, Leverage: 5, Margin: 10},
+		},
+	})
+	if len(snap.Positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(snap.Positions))
+	}
+	if snap.Positions[0].Source != "BOT" {
+		t.Fatalf("expected BOT source, got %s", snap.Positions[0].Source)
 	}
 }
