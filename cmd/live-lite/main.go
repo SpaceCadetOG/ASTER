@@ -958,11 +958,6 @@ func main() {
 		MinNormalizedScore:      envFloat("LIVE_RANK_MIN_SCORE", 75.0),
 		MinCompleteness:         envFloat("LIVE_RANK_MIN_COMPLETENESS", 0.0),
 		MinConfidence:           envFloat("LIVE_RANK_MIN_CONFIDENCE", 0.0),
-		EnableCGradeMomentum:    envBool("LIVE_C_GRADE_MOMENTUM_OVERRIDE_ENABLE", true),
-		CGradeMinScore:          envFloat("LIVE_C_GRADE_MOMENTUM_MIN_SCORE", 80.0),
-		CGradeMinSlope:          envFloat("LIVE_C_GRADE_MOMENTUM_MIN_SLOPE", 0.18),
-		CGradeMinDayUTC:         envFloat("LIVE_C_GRADE_MOMENTUM_MIN_DAYUTC_PCT", 5.0),
-		CGradeMaxStateMin:       envFloat("LIVE_C_GRADE_MOMENTUM_MAX_STATE_MIN", 35.0),
 		ReversalMinScore:        envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
 		ReversalMinConfidence:   envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
 		ReversalMinComplete:     envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
@@ -9593,11 +9588,6 @@ type candidateSelectConfig struct {
 	MinNormalizedScore      float64
 	MinCompleteness         float64
 	MinConfidence           float64
-	EnableCGradeMomentum    bool
-	CGradeMinScore          float64
-	CGradeMinSlope          float64
-	CGradeMinDayUTC         float64
-	CGradeMaxStateMin       float64
 	ReversalMinScore        float64
 	ReversalMinConfidence   float64
 	ReversalMinComplete     float64
@@ -9750,33 +9740,6 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		}
 		return true
 	}
-	allowGradeOverride := func(e inplay.Entry, side string) bool {
-		if !cfg.EnableCGradeMomentum {
-			return false
-		}
-		if !strings.EqualFold(strings.TrimSpace(e.CurrentGrade), "C") {
-			return false
-		}
-		switch e.State {
-		case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
-		default:
-			return false
-		}
-		if cfg.CGradeMaxStateMin > 0 && e.TimeInStateMin > cfg.CGradeMaxStateMin {
-			return false
-		}
-		if e.CurrentScore < cfg.CGradeMinScore {
-			return false
-		}
-		if !e.Momentum && e.ScoreSlope < cfg.CGradeMinSlope {
-			return false
-		}
-		minDayUTC := math.Abs(cfg.CGradeMinDayUTC)
-		if strings.EqualFold(side, "BUY") {
-			return e.DayUTCPct >= minDayUTC
-		}
-		return e.DayUTCPct <= -minDayUTC
-	}
 	leaderUnwindShortReady := func(shortE, longE inplay.Entry, hasLong bool) bool {
 		if !hasLong {
 			return false
@@ -9840,7 +9803,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if cfg.UseContinuous {
 			longContinuationOK = longContinuationOK && allowByQuality(e, false)
 		} else {
-			longContinuationOK = longContinuationOK && (gradeValue(e.CurrentGrade) >= minVal || allowGradeOverride(e, "BUY"))
+			longContinuationOK = longContinuationOK && gradeValue(e.CurrentGrade) >= minVal
 		}
 		if longContinuationOK {
 			out = append(out, candidate{Entry: e, Side: "BUY"})
@@ -9882,7 +9845,7 @@ func chooseCandidates(longInPlay, shortInPlay []inplay.Entry, minGrade string, e
 		if cfg.UseContinuous {
 			shortContinuationOK = shortContinuationOK && allowByQuality(e, false)
 		} else {
-			shortContinuationOK = shortContinuationOK && (gradeValue(e.CurrentGrade) >= minVal || allowGradeOverride(e, "SELL"))
+			shortContinuationOK = shortContinuationOK && gradeValue(e.CurrentGrade) >= minVal
 		}
 		if shortContinuationOK {
 			candEntry := e
