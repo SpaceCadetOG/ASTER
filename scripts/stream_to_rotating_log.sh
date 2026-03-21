@@ -10,22 +10,25 @@ PREFIX="$1"
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 LOG_TZ="${ASTER_LOG_TZ:-America/Chicago}"
 LOG_ROLLOVER_TZ="${ASTER_LOG_ROLLOVER_TZ:-UTC}"
-LOG_DATE_MODE="${ASTER_LOG_DATE_MODE:-current_date}"
-LOG_CYCLE_HOUR="${ASTER_LOG_CYCLE_HOUR:-16}"
+LOG_DATE_MODE="${ASTER_LOG_DATE_MODE:-trading_day}"
+LOG_CYCLE_HOUR="${ASTER_LOG_CYCLE_HOUR:-19}"
+LOG_CYCLE_MINUTE="${ASTER_LOG_CYCLE_MINUTE:-0}"
 LATEST_LINK="${LOG_DIR}/${PREFIX}-latest.log"
 
 mkdir -p "$LOG_DIR"
 
 trading_day_key() {
-  python3 - "$LOG_TZ" "$LOG_CYCLE_HOUR" <<'PY'
+  python3 - "$LOG_TZ" "$LOG_CYCLE_HOUR" "$LOG_CYCLE_MINUTE" <<'PY'
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import sys
 
 tz = ZoneInfo(sys.argv[1])
 cycle_hour = int(sys.argv[2])
+cycle_minute = int(sys.argv[3])
 now = datetime.now(tz)
-if now.hour < cycle_hour:
+anchor = now.replace(hour=cycle_hour, minute=cycle_minute, second=0, microsecond=0)
+if now < anchor:
     now -= timedelta(days=1)
 print(now.strftime("%Y-%m-%d"))
 PY
