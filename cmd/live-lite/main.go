@@ -235,6 +235,21 @@ type liveAccountSnapshot struct {
 	Positions     []liveAccountPosition
 }
 
+type manualManageRequest struct {
+	Key         string
+	Fingerprint string
+	Symbol      string
+	Side        string
+	Qty         float64
+	Entry       float64
+	Margin      float64
+	Leverage    int
+	DetectedAt  time.Time
+	PromptedAt  time.Time
+	DecidedAt   time.Time
+	Status      string
+}
+
 type safetyConfig struct {
 	enableLiveTrading      bool
 	maxLeverage            int
@@ -751,6 +766,8 @@ type liveExecManager struct {
 	marketStates         map[string]*aster.MarketState
 	marketCancels        map[string]context.CancelFunc
 	featureCache         *featureRuntimeCache
+	manualConfirm        bool
+	manualRequests       map[string]manualManageRequest
 }
 
 type liveExecSnapshot struct {
@@ -5306,6 +5323,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		wsSpeed:              wsSpeed,
 		marketStates:         map[string]*aster.MarketState{},
 		marketCancels:        map[string]context.CancelFunc{},
+		manualConfirm:        envBool("LIVE_MANUAL_CONFIRM_ENABLE", true),
+		manualRequests:       map[string]manualManageRequest{},
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
@@ -5341,6 +5360,130 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	_ = m.load()
 	go m.runLiveAccountSnapshotLoop()
 	return m
+}
+
+func manualManageFingerprint(symbol, side string, qty, entry float64) string {
+	return fmt.Sprintf("%s|%.6f|%.8f", positionLookupKey(symbol, side), qty, entry)
+}
+
+func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty, entry, margin float64, lev int, now time.Time) bool {
+	if m == nil || !m.manualConfirm {
+		return false
+	}
+	key := positionLookupKey(symbol, side)
+	req := manualManageRequest{
+		Key:         key,
+		Fingerprint: manualManageFingerprint(symbol, side, qty, entry),
+		Symbol:      strings.ToUpper(strings.TrimSpace(symbol)),
+		Side:        normalizePositionSide(side),
+		Qty:         qty,
+		Entry:       entry,
+		Margin:      margin,
+		Leverage:    maxInt(1, lev),
+		DetectedAt:  now,
+		PromptedAt:  now,
+		Status:      "PENDING",
+	}
+	m.mu.Lock()
+	existing, ok := m.manualRequests[key]
+	switch {
+	case ok && existing.Fingerprint == req.Fingerprint && (existing.Status == "PENDING" || existing.Status == "DECLINED"):
+		m.mu.Unlock()
+		return true
+	default:
+		m.manualRequests[key] = req
+		m.mu.Unlock()
+	}
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("✍️", "MANUAL TRADE DETECTED",
+			fmt.Sprintf("<b>%s %s</b>", req.Symbol, req.Side),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s | <b>Lev:</b> %dx", req.Qty, fmtPrice(req.Entry), req.Leverage),
+			"Let the bot manage this trade?",
+			fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", req.Symbol, req.Symbol),
+			"If there is only one pending manual trade, you can also just reply <code>y</code> or <code>n</code>.",
+		))
+	}
+	return true
+}
+
+func (m *liveExecManager) pendingManualRequests(limit int) []manualManageRequest {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	out := make([]manualManageRequest, 0, len(m.manualRequests))
+	for _, req := range m.manualRequests {
+		if req.Status != "PENDING" {
+			continue
+		}
+		out = append(out, req)
+	}
+	m.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].DetectedAt.Before(out[j].DetectedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (m *liveExecManager) pendingManualRequest(symbol string) (manualManageRequest, bool) {
+	if m == nil {
+		return manualManageRequest{}, false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	base := canonicalSymbolBase(raw)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, req := range m.manualRequests {
+		if req.Status != "PENDING" {
+			continue
+		}
+		if canonicalSymbolBase(req.Symbol) == base {
+			return req, true
+		}
+	}
+	return manualManageRequest{}, false
+}
+
+func (m *liveExecManager) markManualRequestDeclined(req manualManageRequest, now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.manualRequests[req.Key]
+	if !ok || cur.Fingerprint != req.Fingerprint {
+		return
+	}
+	cur.Status = "DECLINED"
+	cur.DecidedAt = now
+	m.manualRequests[req.Key] = cur
+}
+
+func (m *liveExecManager) pruneManualRequests(remoteKeys map[string]string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	activeKeys := map[string]struct{}{}
+	for sym, pos := range m.positions {
+		if m.isActive(pos) {
+			activeKeys[positionLookupKey(sym, pos.Side)] = struct{}{}
+		}
+	}
+	for key, req := range m.manualRequests {
+		if _, ok := activeKeys[positionLookupKey(req.Symbol, req.Side)]; ok {
+			delete(m.manualRequests, key)
+			continue
+		}
+		fp, ok := remoteKeys[key]
+		if !ok || fp != req.Fingerprint {
+			delete(m.manualRequests, key)
+		}
+	}
 }
 
 func (m *liveExecManager) load() error {
@@ -5648,20 +5791,32 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		margin float64
 	}
 	remote := map[string]remotePos{}
+	remoteKeys := map[string]string{}
 	for _, row := range rows {
 		sym := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
 		amt := mapFloat(row["positionAmt"])
 		if sym == "" || abs(amt) <= 1e-10 {
 			continue
 		}
+		side := "BUY"
+		if amt < 0 {
+			side = "SELL"
+		}
+		entry := mapFloat(row["entryPrice"])
+		mark := mapFloat(row["markPrice"])
+		if entry <= 0 {
+			entry = mark
+		}
 		remote[sym] = remotePos{
 			amt:    amt,
-			entry:  mapFloat(row["entryPrice"]),
-			mark:   mapFloat(row["markPrice"]),
+			entry:  entry,
+			mark:   mark,
 			lev:    int(mapFloat(row["leverage"])),
 			margin: maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"])),
 		}
+		remoteKeys[positionLookupKey(sym, side)] = manualManageFingerprint(sym, side, abs(amt), entry)
 	}
+	m.pruneManualRequests(remoteKeys)
 	now := time.Now().UTC()
 	for sym, p := range m.positions {
 		if !m.isActive(p) {
@@ -5692,6 +5847,9 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			entry = rp.mark
 		}
 		if entry <= 0 || qty <= 0 {
+			continue
+		}
+		if m.queueManualManagementRequest(sym, side, qty, entry, rp.margin, rp.lev, now) {
 			continue
 		}
 		p := m.newImportedRemotePosition(sym, side, qty, entry, rp.margin, rp.lev, now, "MANUAL")
@@ -5773,6 +5931,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		return 0, err
 	}
 	imported := 0
+	remoteKeys := map[string]string{}
 	for _, row := range rows {
 		sym := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
 		amt := mapFloat(row["positionAmt"])
@@ -5794,28 +5953,65 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		qty := abs(amt)
 		margin := maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"]))
 		lev := int(maxFloat(1, mapFloat(row["leverage"])))
-		p := m.newImportedRemotePosition(sym, side, qty, entry, margin, lev, now, "MANUAL")
-		if err := m.placeInitialBrackets(p); err != nil {
-			if err := m.placeOrReplaceStopWithRetry(p); err != nil {
-				if m.recoverForceFlatFail {
-					_ = m.forceFlatRecovered(p)
-				}
-				continue
-			}
+		remoteKeys[positionLookupKey(sym, side)] = manualManageFingerprint(sym, side, qty, entry)
+		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
+			continue
 		}
-		m.positions[sym] = p
+		if _, err := m.activateManualManagement(manualManageRequest{
+			Key:         positionLookupKey(sym, side),
+			Fingerprint: manualManageFingerprint(sym, side, qty, entry),
+			Symbol:      sym,
+			Side:        side,
+			Qty:         qty,
+			Entry:       entry,
+			Margin:      margin,
+			Leverage:    lev,
+		}, now, "MANUAL_DETECTED"); err != nil {
+			continue
+		}
 		imported++
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("✍️", "MANUAL TRADE DETECTED",
-				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
-				fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
-			))
-		}
-		_ = m.logFill(now, p, "ENTRY", "MANUAL_DETECTED", p.FilledQty, p.EntryPrice, 0, 0)
-		m.sendFillReceipt(now, p, "ENTRY", "MANUAL_DETECTED", p.FilledQty, p.EntryPrice, 0, 0)
 	}
+	m.pruneManualRequests(remoteKeys)
 	return imported, nil
+}
+
+func (m *liveExecManager) activateManualManagement(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
+	if m == nil {
+		return nil, fmt.Errorf("live execution manager unavailable")
+	}
+	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
+	if sym == "" {
+		return nil, fmt.Errorf("invalid symbol")
+	}
+	if m.isActive(m.positions[sym]) {
+		m.mu.Lock()
+		delete(m.manualRequests, req.Key)
+		m.mu.Unlock()
+		return m.positions[sym], nil
+	}
+	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	if err := m.placeInitialBrackets(p); err != nil {
+		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
+			if m.recoverForceFlatFail {
+				_ = m.forceFlatRecovered(p)
+			}
+			return nil, err
+		}
+	}
+	m.positions[sym] = p
+	m.mu.Lock()
+	delete(m.manualRequests, req.Key)
+	m.mu.Unlock()
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED",
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
+			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
+		))
+	}
+	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
+	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
+	return p, nil
 }
 
 func (m *liveExecManager) placeOrReplaceStopWithRetry(p *livePosition) error {
@@ -14343,6 +14539,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/why SYMBOL</code> latest decision for a symbol",
 			"<code>/suggest SYMBOL SIDE</code> operator watch + re-evaluate",
 			"<code>/trade SYMBOL SIDE [LEV]</code> operator-priority trade request",
+			"<code>/manage SYMBOL y|n</code> approve or decline bot management for a detected manual trade",
 			"<code>/mode</code> show live/paper mode",
 			"<code>/mode live</code> switch new entries to live mode",
 			"<code>/mode paper</code> switch new entries to paper mode",
@@ -14354,10 +14551,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
 		liveSummary := "live snapshot unavailable"
+		pendingManual := 0
 		if c.execMgr != nil {
 			ls := c.execMgr.LiveAccountSnapshot(3)
 			liveSummary = fmt.Sprintf("open=%d bot=%d manual=%d realized=%+.2f openPnL=%+.2f netDay=%+.2f",
 				ls.OpenCount, ls.BotCount, ls.ManualCount, ls.RealizedDay, ls.OpenPnL, ls.RealizedDay+ls.OpenPnL)
+			pendingManual = len(c.execMgr.pendingManualRequests(0))
 		}
 		return notify.BuildEventHTML("🧭", "STATUS",
 			fmt.Sprintf("<b>Mode:</b> dry_run=%v live_enabled=%v", s.DryRun, s.LiveEnabled),
@@ -14367,6 +14566,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Paper:</b> %s", summarizeOneLine(s.PaperSummary, 120)),
 			fmt.Sprintf("<b>Exec:</b> open=%d pending=%d partial1=%d partial2=%d", s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2),
 			fmt.Sprintf("<b>Live:</b> %s", liveSummary),
+			fmt.Sprintf("<b>Manual approvals pending:</b> %d", pendingManual),
 		)
 	case strings.HasPrefix(cmd, "/balance"):
 		if c.execMgr != nil {
@@ -14431,7 +14631,17 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if c.execMgr != nil {
 			ls := c.execMgr.LiveAccountSnapshot(10)
 			if len(ls.Positions) == 0 {
-				return notify.BuildEventHTML("📦", "POSITIONS", "No active live positions")
+				pending := c.execMgr.pendingManualRequests(5)
+				if len(pending) == 0 {
+					return notify.BuildEventHTML("📦", "POSITIONS", "No active live positions")
+				}
+				lines := []string{"No active live positions"}
+				for _, req := range pending {
+					lines = append(lines, fmt.Sprintf("<b>Pending manual:</b> %s %s | qty=%.6f | entry=%s",
+						cleanSymbol(req.Symbol), req.Side, req.Qty, fmtPrice(req.Entry)))
+				}
+				lines = append(lines, "Reply <code>/manage SYMBOL y</code> to let the bot manage one.")
+				return notify.BuildEventHTML("📦", "POSITIONS", lines...)
 			}
 			now := time.Now().In(c.execMgr.reportLoc)
 			pulse, cards := buildLivePulseAndCards("LIVE POSITIONS", now, c.execMgr)
@@ -14457,6 +14667,15 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		p, ok := c.execMgr.LivePositionBySymbol(sym)
 		if !ok {
+			if req, pending := c.execMgr.pendingManualRequest(sym); pending {
+				return notify.BuildEventHTML("📍", "POSITION DETAIL",
+					fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> MANUAL", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", req.Qty, maxInt(1, req.Leverage), req.Margin),
+					fmt.Sprintf("<b>Entry:</b> %s", fmtPrice(req.Entry)),
+					"<b>Bot Management:</b> pending approval",
+					fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", cleanSymbol(req.Symbol), cleanSymbol(req.Symbol)),
+				)
+			}
 			return notify.BuildEventHTML("📍", "POSITION", fmt.Sprintf("%s is not an active live position", cleanSymbol(sym)))
 		}
 		lines := []string{
@@ -14468,6 +14687,78 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Reason:</b> <code>%s</code>", nonEmpty(strings.TrimSpace(p.EntryReason), "none")),
 		}
 		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
+	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no":
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
+		}
+		pending := c.execMgr.pendingManualRequests(2)
+		if len(pending) == 0 {
+			return notify.BuildEventHTML("ℹ️", "MANAGE", "No pending manual trades")
+		}
+		if len(pending) > 1 {
+			return notify.BuildEventHTML("❓", "MANAGE",
+				"More than one manual trade is pending.",
+				"Use <code>/manage SYMBOL y</code> or <code>/manage SYMBOL n</code>.",
+			)
+		}
+		approve := cmd == "y" || cmd == "yes"
+		req := pending[0]
+		if approve {
+			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
+				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+				)
+			}
+			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed", cleanSymbol(req.Symbol), req.Side),
+			)
+		}
+		c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
+		return notify.BuildEventHTML("🟡", "MANAGE DECLINED",
+			fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), req.Side),
+		)
+	case strings.HasPrefix(cmd, "/manage"):
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
+		}
+		if len(fields) < 3 {
+			pending := c.execMgr.pendingManualRequests(5)
+			if len(pending) == 0 {
+				return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
+			}
+			lines := []string{"<code>/manage SYMBOL y|n</code>"}
+			for _, req := range pending {
+				lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | qty=%.6f | entry=%s",
+					cleanSymbol(req.Symbol), req.Side, req.Qty, fmtPrice(req.Entry)))
+			}
+			return notify.BuildEventHTML("🤝", "MANAGE", lines...)
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		answer := strings.ToLower(strings.TrimSpace(fields[2]))
+		req, ok := c.execMgr.pendingManualRequest(sym)
+		if !ok {
+			return notify.BuildEventHTML("ℹ️", "MANAGE", fmt.Sprintf("No pending manual trade for %s", cleanSymbol(sym)))
+		}
+		switch answer {
+		case "y", "yes":
+			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
+				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+				)
+			}
+			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed", cleanSymbol(req.Symbol), req.Side),
+			)
+		case "n", "no":
+			c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
+			return notify.BuildEventHTML("🟡", "MANAGE DECLINED",
+				fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), req.Side),
+			)
+		default:
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
+		}
 	case cmd == "/mode":
 		modeDryRun := true
 		modeLiveEnabled := false
@@ -14484,7 +14775,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Dry Run:</b> %v", modeDryRun),
 			fmt.Sprintf("<b>Live Entries Enabled:</b> %v", modeLiveEnabled),
 			fmt.Sprintf("<b>Paper Entries Enabled:</b> %v", modePaperEnabled),
-			"Manual trades opened on the exchange are still imported and managed by the bot.",
+			"Manual trades opened on the exchange can be approved for bot management from Telegram.",
 		)
 	case cmd == "/mode live" || cmd == "/live":
 		if c.mode == nil {
@@ -14500,7 +14791,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		c.safety.enableLiveTrading = true
 		return notify.BuildEventHTML("🟢", "LIVE MODE ENABLED",
 			"New entries will be placed live.",
-			"Manual trades opened on your phone will still be imported and managed.",
+			"Manual trades opened on your phone can still be approved for bot management.",
 		)
 	case cmd == "/mode paper" || cmd == "/paper":
 		if c.mode == nil {
@@ -14513,7 +14804,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		c.safety.enableLiveTrading = false
 		return notify.BuildEventHTML("🧪", "PAPER MODE ENABLED",
 			"New entries will stay in paper mode.",
-			"Existing live/manual positions are still reconciled and risk-managed.",
+			"Existing approved live positions are still reconciled and risk-managed.",
 		)
 	case strings.HasPrefix(cmd, "/why "):
 		if len(fields) < 2 {

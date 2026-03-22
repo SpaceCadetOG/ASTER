@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -748,6 +749,57 @@ func TestLivePositionBySymbolNormalizesRawSymbol(t *testing.T) {
 	}
 	if _, ok := m.LivePositionBySymbol("ETHUSDT"); ok {
 		t.Fatalf("did not expect ETHUSDT position")
+	}
+}
+
+func TestPendingManualRequestNormalizesSymbol(t *testing.T) {
+	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{},
+	}
+	if !m.queueManualManagementRequest("LYNUSDT", "BUY", 10, 0.125, 5, 5, now) {
+		t.Fatalf("expected pending manual management request to be queued")
+	}
+	req, ok := m.pendingManualRequest("LYN")
+	if !ok {
+		t.Fatalf("expected pending request lookup by raw symbol")
+	}
+	if req.Symbol != "LYNUSDT" || req.Side != "LONG" {
+		t.Fatalf("unexpected pending request: %+v", req)
+	}
+}
+
+func TestHandleCommandManageDecline(t *testing.T) {
+	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{},
+	}
+	_ = m.queueManualManagementRequest("LYNUSDT", "BUY", 10, 0.125, 5, 5, now)
+	ctx := &telegramCommandCtx{execMgr: m}
+	resp := ctx.handleCommand("", "/manage LYN n")
+	if !strings.Contains(resp, "MANAGE DECLINED") {
+		t.Fatalf("expected decline response, got %s", resp)
+	}
+	req, ok := m.manualRequests[positionLookupKey("LYNUSDT", "BUY")]
+	if !ok || req.Status != "DECLINED" {
+		t.Fatalf("expected declined request persisted, got %+v", req)
+	}
+}
+
+func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T) {
+	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{},
+	}
+	_ = m.queueManualManagementRequest("LYNUSDT", "BUY", 10, 0.125, 5, 5, now)
+	_ = m.queueManualManagementRequest("BTCUSDT", "SELL", 1, 70000, 10, 3, now)
+	ctx := &telegramCommandCtx{execMgr: m}
+	resp := ctx.handleCommand("", "y")
+	if !strings.Contains(resp, "/manage SYMBOL y") {
+		t.Fatalf("expected explicit /manage guidance, got %s", resp)
 	}
 }
 
