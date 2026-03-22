@@ -10688,8 +10688,11 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 	if !cfg.DayUTCMaturityBrake {
 		return ""
 	}
+	if qualifiesDominantLeaderOverride(c) {
+		return ""
+	}
 	if math.Abs(c.DayUTC24h) < cfg.DayUTCMaturityPct {
-		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
+		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !relaxedPullbackStructureConfirmed(c) && c.SetupFamily == "" {
 			return "continuation_no_structure_confirm"
 		}
 		return ""
@@ -10710,7 +10713,7 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 			return "late_extension_no_reset"
 		}
 	}
-	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
+	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !relaxedPullbackStructureConfirmed(c) && c.SetupFamily == "" {
 		return "extended_reentry_lock"
 	}
 	if strings.EqualFold(c.Side, "SELL") && c.DayUTC24h <= -envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", cfg.DayUTCMaturityPct) {
@@ -11204,6 +11207,60 @@ func deriveContinuationStructureSignals(cand *candidate, bars []features.Candle)
 
 func continuationStructureConfirmed(c candidate) bool {
 	return c.ClosedBreakHold || c.ReclaimHold || c.RetestHold
+}
+
+func dayUTCAligned(c candidate, minAbsPct float64) bool {
+	if minAbsPct < 0 {
+		minAbsPct = -minAbsPct
+	}
+	switch strings.ToUpper(strings.TrimSpace(c.Side)) {
+	case "BUY":
+		return c.DayUTC24h >= minAbsPct
+	case "SELL":
+		return c.DayUTC24h <= -minAbsPct
+	default:
+		return false
+	}
+}
+
+func qualifiesDominantLeaderOverride(c candidate) bool {
+	if c.TriggerStage == "INVALIDATED" {
+		return false
+	}
+	if !dayUTCAligned(c, envFloat("LIVE_DOMINANT_LEADER_MIN_DAYUTC_PCT", 10.0)) {
+		return false
+	}
+	if c.Entry.CurrentScore < envFloat("LIVE_DOMINANT_LEADER_MIN_SCORE", 110.0) {
+		return false
+	}
+	if c.Entry.Rank > envFloat("LIVE_DOMINANT_LEADER_RANK_MAX", 1.25) {
+		return false
+	}
+	if math.Abs(c.Entry.ScoreSlope) < envFloat("LIVE_DOMINANT_LEADER_MIN_SLOPE", 0.05) && !c.Entry.Momentum {
+		return false
+	}
+	switch c.Entry.State {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		return true
+	default:
+		return false
+	}
+}
+
+func relaxedPullbackStructureConfirmed(c candidate) bool {
+	if continuationStructureConfirmed(c) {
+		return true
+	}
+	if c.TriggerState == string(triggerFailReclaim) {
+		return false
+	}
+	proxPct := envFloat("LIVE_PULLBACK_RECLAIM_PROX_PCT", 0.45)
+	nearVWAP := c.SessionVWAP > 0 && math.Abs(relativePct(c.LastClose, c.SessionVWAP)) <= proxPct
+	nearEMA := c.EMA9 > 0 && math.Abs(relativePct(c.LastClose, c.EMA9)) <= proxPct
+	if nearVWAP || nearEMA {
+		return dayUTCAligned(c, envFloat("LIVE_PULLBACK_RECLAIM_MIN_DAYUTC_PCT", 5.0))
+	}
+	return false
 }
 
 func hasFreshStructureReset(c candidate) bool {
@@ -11866,6 +11923,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			}
 		}
 		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
+		dominantLeader := qualifiesDominantLeaderOverride(cand)
 		vwapEMAOK := false
 		if strings.EqualFold(cand.Side, "BUY") {
 			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
@@ -11884,6 +11942,9 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		structureConfirmOK := !envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) || continuationStructureConfirmed(cand)
 		pullbackSetup := cand.SetupFamily == "micro_pullback_continuation" || cand.SetupFamily == "deep_pullback_reclaim" || cand.SetupFamily == "breakout_retest" ||
 			cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "pullback_short"
+		if pullbackSetup && !structureConfirmOK && relaxedPullbackStructureConfirmed(cand) {
+			structureConfirmOK = true
+		}
 		if pullbackSetup && structureConfirmOK {
 			fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_PULLBACK_CONT_MIN_VOL_RATIO", 0.75))
 			fastBaseConf = maxFloat(fastBaseConf, envFloat("LIVE_PULLBACK_CONT_BASE_CONF", 0.54))
@@ -11896,6 +11957,28 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 				}
 			} else {
 				ofiOK = true
+			}
+		}
+		if pullbackSetup {
+			proxPct := envFloat("LIVE_PULLBACK_VWAP_EMA_TOL_PCT", 0.45)
+			nearVWAP := cand.SessionVWAP > 0 && math.Abs(relativePct(cand.LastClose, cand.SessionVWAP)) <= proxPct
+			nearEMA := cand.EMA9 > 0 && math.Abs(relativePct(cand.LastClose, cand.EMA9)) <= proxPct
+			vwapEMAOK = vwapEMAOK || nearVWAP || nearEMA
+		}
+		if dominantLeader {
+			if pullbackSetup {
+				fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_DOMINANT_LEADER_PULLBACK_MIN_VOL_RATIO", 0.35))
+				fastBaseConf = maxFloat(fastBaseConf, envFloat("LIVE_DOMINANT_LEADER_PULLBACK_BASE_CONF", 0.58))
+				structureConfirmOK = structureConfirmOK || relaxedPullbackStructureConfirmed(cand)
+				vwapEMAOK = vwapEMAOK || relaxedPullbackStructureConfirmed(cand)
+			}
+			if ofiEnabled && cand.OFISamples >= ofiMinSamples {
+				leaderMinAbsOFI := envFloat("LIVE_DOMINANT_LEADER_MIN_ABS_OFI_Z", 0.05)
+				if strings.EqualFold(cand.Side, "BUY") {
+					ofiOK = cand.OFIZ >= -leaderMinAbsOFI
+				} else {
+					ofiOK = cand.OFIZ <= leaderMinAbsOFI
+				}
 			}
 		}
 		stateAgeLimit := lateStateMin

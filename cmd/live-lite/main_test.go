@@ -319,6 +319,41 @@ func TestContinuationGuardAllowsLeaderPullbackWithoutUtc1hReset(t *testing.T) {
 	}
 }
 
+func TestContinuationGuardAllowsDominantLeaderWithoutFreshReset(t *testing.T) {
+	cfg := entryQualityConfig{DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
+	c := candidate{
+		Side:      "BUY",
+		Strat:     "continuation_fast",
+		DayUTC24h: 112.0,
+		Entry: inplay.Entry{
+			Symbol:       "SIRENUSDT",
+			CurrentScore: 196.5,
+			ScoreSlope:   1.61,
+			Rank:         1.0,
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_long",
+		},
+	}
+	if got := continuationGuardReason(c, cfg); got != "" {
+		t.Fatalf("expected dominant leader override, got %q", got)
+	}
+}
+
+func TestRelaxedPullbackStructureConfirmedNearVWAP(t *testing.T) {
+	t.Setenv("LIVE_PULLBACK_RECLAIM_PROX_PCT", "0.45")
+	t.Setenv("LIVE_PULLBACK_RECLAIM_MIN_DAYUTC_PCT", "5.0")
+	c := candidate{
+		Side:       "BUY",
+		DayUTC24h:  6.0,
+		LastClose:  1.0000,
+		SessionVWAP: 1.0030,
+		EMA9:       1.0040,
+	}
+	if !relaxedPullbackStructureConfirmed(c) {
+		t.Fatalf("expected near-vwap pullback to count as structure confirmation")
+	}
+}
+
 func TestChurnRejectReasonQuickLossLockExtremeSymbol(t *testing.T) {
 	t.Setenv("LIVE_CHURN_LOCK_ENABLE", "1")
 	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_COUNT", "1")
