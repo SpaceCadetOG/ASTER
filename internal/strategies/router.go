@@ -82,9 +82,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.ContinuationDayUTCPct <= 0 {
 		cfg.ContinuationDayUTCPct = 25.0
 	}
-	if cfg.ContinuationReset1hPct <= 0 {
-		cfg.ContinuationReset1hPct = 0.8
-	}
 	if cfg.ContinuationLateSlopeMin <= 0 {
 		cfg.ContinuationLateSlopeMin = 0.16
 	}
@@ -259,7 +256,7 @@ func (r *Router) continuationMaturityReject(ctx Context, sig Signal) string {
 	if ctx.DayUTCPct > -r.cfg.ContinuationDayUTCPct {
 		return ""
 	}
-	reset := ctx.UTC1hPct >= r.cfg.ContinuationReset1hPct || hasAnyTag(sig.Tags, "pullback", "retest", "confluence")
+	reset := hasAnyTag(sig.Tags, "pullback", "retest", "confluence")
 	if !reset {
 		return "late_extension_no_reset"
 	}

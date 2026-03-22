@@ -2451,7 +2451,7 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f utc4h=%+.2f utc1h=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -2468,8 +2468,6 @@ func main() {
 			best.ExecutionScore,
 			best.CombinedScore,
 			bestMeta.DayUTC24h,
-			bestMeta.UTC4hPct,
-			bestMeta.UTC1hPct,
 			fmtPrice(bestMeta.OpenPrice),
 			fmtPrice(bestMeta.LastPrice),
 			marketHumanUSD(bestMeta.VolumeUSD),
@@ -10500,7 +10498,7 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 		}
 		return ""
 	}
-	if envBool("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", true) && !hasFreshStructureReset(c) {
+	if !hasFreshStructureReset(c) {
 		if c.SetupFamily == "micro_pullback_continuation" || c.SetupFamily == "breakout_retest" {
 			leaderScoreMin := envFloat("LIVE_LATE_ENTRY_LEADER_SCORE_MIN", 96.0)
 			leaderSlopeMin := envFloat("LIVE_LATE_ENTRY_LEADER_SLOPE_MIN", 0.14)
@@ -10512,15 +10510,8 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 				return ""
 			}
 		}
-		resetMin := envFloat("LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT", 0.8)
-		if strings.EqualFold(c.Side, "SELL") {
-			if c.UTC1hPct == 0 || c.UTC1hPct <= -resetMin {
-				return "late_extension_no_reset"
-			}
-		} else {
-			if c.UTC1hPct == 0 || c.UTC1hPct >= resetMin {
-				return "late_extension_no_reset"
-			}
+		if math.Abs(c.DayUTC24h) >= envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", cfg.DayUTCMaturityPct) {
+			return "late_extension_no_reset"
 		}
 	}
 	if cfg.RequireFreshPullback && !requiresFreshPullback(c) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
@@ -11476,7 +11467,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
 		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
 		ContinuationDayUTCPct:     envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
-		ContinuationReset1hPct:    envFloat("LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT", 0.8),
+		ContinuationReset1hPct:    0,
 		ContinuationLateSlopeMin:  envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
 		RejectIfTargetTooClosePct: vpMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
@@ -12083,12 +12074,12 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta) {
 	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, 0)
 	fmt.Printf("IN-PLAY (RANKED)\n")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
-	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | utc4h% | utc1h% | open       | mark       | vol($)   |")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 	if len(rows) == 0 {
-		fmt.Println("| (none)                                                                                                             |")
-		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
+		fmt.Println("| (none)                                                                                           |")
+		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 		return
 	}
 	for _, row := range rows {
@@ -12106,14 +12097,6 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.DayUTC24h != 0 {
 			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
 		}
-		utc4h := "-"
-		if m.UTC4hPct != 0 {
-			utc4h = fmt.Sprintf("%+6.1f", m.UTC4hPct)
-		}
-		utc1h := "-"
-		if m.UTC1hPct != 0 {
-			utc1h = fmt.Sprintf("%+6.1f", m.UTC1hPct)
-		}
 		openPx := "-"
 		if m.OpenPrice > 0 {
 			openPx = fmtPrice(m.OpenPrice)
@@ -12126,16 +12109,16 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.VolumeUSD > 0 {
 			vol = marketHumanUSD(m.VolumeUSD)
 		}
-		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %6s | %6s | %10s | %10s | %8s |\n",
+		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
 			row.side,
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
-			dayUTC, utc4h, utc1h, openPx, markPx, vol,
+			dayUTC, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+--------+--------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {

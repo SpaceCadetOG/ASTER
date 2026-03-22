@@ -275,8 +275,6 @@ func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 }
 
 func TestContinuationGuardReasonBlocksLateShortWithoutReset(t *testing.T) {
-	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
-	t.Setenv("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", "1")
 	t.Setenv("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", "25")
 	t.Setenv("LIVE_CONT_FAST_LATE_MIN_SLOPE", "0.16")
 	cfg := entryQualityConfig{DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
@@ -284,20 +282,19 @@ func TestContinuationGuardReasonBlocksLateShortWithoutReset(t *testing.T) {
 		Side:      "SELL",
 		Strat:     "continuation_fast",
 		DayUTC24h: -37.0,
-		Entry:     inplay.Entry{EntryStyle: "pullback_short", ScoreSlope: 0.04},
+		Entry:     inplay.Entry{EntryStyle: "continuation_fast", ScoreSlope: 0.04},
 	}
 	if got := continuationGuardReason(c, cfg); got != "late_extension_no_reset" {
 		t.Fatalf("expected late_extension_no_reset, got %q", got)
 	}
 	c.RetestHold = true
+	c.SetupFamily = "breakout_retest"
 	if got := continuationGuardReason(c, cfg); got != "" {
 		t.Fatalf("expected reset/retest to clear late-entry block, got %q", got)
 	}
 }
 
 func TestContinuationGuardAllowsLeaderPullbackWithoutUtc1hReset(t *testing.T) {
-	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
-	t.Setenv("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", "1")
 	t.Setenv("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", "25")
 	t.Setenv("LIVE_LATE_ENTRY_LEADER_SCORE_MIN", "96")
 	t.Setenv("LIVE_LATE_ENTRY_LEADER_SLOPE_MIN", "0.14")
@@ -308,7 +305,6 @@ func TestContinuationGuardAllowsLeaderPullbackWithoutUtc1hReset(t *testing.T) {
 		Strat:       "continuation_fast",
 		SetupFamily: "micro_pullback_continuation",
 		DayUTC24h:   27.0,
-		UTC1hPct:    27.0,
 		Entry: inplay.Entry{
 			EntryStyle:   "pullback_long",
 			CurrentScore: 99.0,
