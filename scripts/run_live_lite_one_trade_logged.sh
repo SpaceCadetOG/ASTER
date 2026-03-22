@@ -14,6 +14,14 @@ if ! flock -n 9; then
   exit 1
 fi
 
+require_tty_start="${LIVE_REQUIRE_TTY_START:-1}"
+allow_noninteractive="${LIVE_ALLOW_NONINTERACTIVE_START:-0}"
+if [[ "$require_tty_start" == "1" && "$allow_noninteractive" != "1" && ! -t 0 ]]; then
+  echo "live-lite start blocked: interactive terminal required" >&2
+  echo "Use a shell on the Pi to start it, or set LIVE_ALLOW_NONINTERACTIVE_START=1 explicitly." >&2
+  exit 1
+fi
+
 pkill -9 -x live-lite 2>/dev/null || true
 pkill -9 -f 'cmd/live-lite' 2>/dev/null || true
 
