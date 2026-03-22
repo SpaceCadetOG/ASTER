@@ -28,8 +28,10 @@ cycle_hour = int(sys.argv[2])
 cycle_minute = int(sys.argv[3])
 now = datetime.now(tz)
 anchor = now.replace(hour=cycle_hour, minute=cycle_minute, second=0, microsecond=0)
-if now < anchor:
-    now -= timedelta(days=1)
+# The Aster trading day rolls at the reset anchor. After the reset,
+# the active trading day should be labeled as the next calendar date.
+if now >= anchor:
+    now += timedelta(days=1)
 print(now.strftime("%Y-%m-%d"))
 PY
 }
