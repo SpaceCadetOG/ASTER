@@ -92,6 +92,20 @@ type candidate struct {
 	StructureReason string
 	PatternBias     float64
 	PatternReasons  []string
+	WallMode        string
+	WallStatus      string
+	WallConfidence  float64
+	WallBiasScore   float64
+	WallSpoofRisk   float64
+	WallDistanceBps float64
+	WallSizeRatio   float64
+	WallPersistence time.Duration
+	WallPullRate    float64
+	WallAddRate     float64
+	WallRefillCount int
+	WallPrice       float64
+	WallSide        string
+	WallReasons     []string
 }
 
 type entryQualityConfig struct {
@@ -400,6 +414,46 @@ type flowMetrics struct {
 	Mid           float64
 }
 
+type wallObservation struct {
+	Price       float64
+	Size        float64
+	SizeRatio   float64
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+	Samples     int
+	Adds        int
+	Pulls       int
+	Refills     int
+}
+
+type wallSignal struct {
+	Mode        string
+	Status      string
+	Confidence  float64
+	BiasScore   float64
+	SpoofRisk   float64
+	DistanceBps float64
+	SizeRatio   float64
+	Persistence time.Duration
+	PullRate    float64
+	AddRate     float64
+	RefillCount int
+	Price       float64
+	Side        string
+	Reasons     []string
+	BidWall     *ta.OBWall
+	AskWall     *ta.OBWall
+	Interaction float64
+}
+
+type wallTracker struct {
+	mu     sync.RWMutex
+	bidObs map[string]wallObservation
+	askObs map[string]wallObservation
+	ctx    map[string]ta.OBContext
+	sig    map[string]wallSignal
+}
+
 type ofiTracker struct {
 	Last    topBookSnapshot
 	Mu      float64
@@ -435,6 +489,7 @@ type watchRuntime struct {
 	priority       map[string]operatorSuggestion
 	ofi            map[string]*ofiTracker
 	flow           map[string]flowMetrics
+	walls          *wallTracker
 	lastUrgentAt   time.Time
 	lastPriorityAt time.Time
 }
@@ -1161,6 +1216,7 @@ func main() {
 	}
 	watchCfg := loadWatchConfig()
 	watcher := newWatchRuntime(watchCfg, client)
+	wallSignals := map[string]wallSignal{}
 	liveLiteWatchEvery = 0
 	liveLiteWatchTick = nil
 	liveLitePriorityEvery = 0
@@ -1238,12 +1294,7 @@ func main() {
 	}
 	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
 	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 0)) * time.Minute
-	preEODExitEnable := envBool("LIVE_PRE_EOD_EXIT_ENABLE", true)
-	preEODEndHour := envInt("LIVE_PRE_EOD_EXIT_END_HOUR", 16)
-	preEODEndMin := envInt("LIVE_PRE_EOD_EXIT_END_MIN", 0)
-	preEODMinHold := time.Duration(envInt("LIVE_PRE_EOD_EXIT_MIN_HOLD_MIN", 0)) * time.Minute
-	preEODUpnlPctMax := envFloat("LIVE_PRE_EOD_EXIT_UPNL_PCT_MAX", 0.30)
-	preEODEntryBlockMin := envInt("LIVE_PRE_EOD_ENTRY_BLOCK_MIN", 60)
+	preEODEntryBlockMin := 0
 	postSLCooldown := time.Duration(envInt("POST_SL_COOLDOWN_MIN", 30)) * time.Minute
 	allowDeadSessionTrading := envBool("ALLOW_DEAD_SESSION_TRADING", false)
 	inertiaEnable := envBool("LIVE_INERTIA_BREAKER_ENABLE", false)
@@ -1259,9 +1310,6 @@ func main() {
 	if postSLCooldown < 0 {
 		postSLCooldown = 0
 	}
-	if preEODEntryBlockMin < 0 {
-		preEODEntryBlockMin = 0
-	}
 	if inertiaSlowN < 2 {
 		inertiaSlowN = 15
 	}
@@ -1276,12 +1324,12 @@ func main() {
 	}
 	maintEOD := maintenanceWindow{
 		Name:      "EOD",
-		Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", true),
+		Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", false),
 		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
 		StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
 		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
 		EndMin:    envInt("LIVE_MAINT2_END_MIN", 0),
-		ForceFlat: envBool("LIVE_MAINT2_FORCE_FLAT", true),
+		ForceFlat: false,
 		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
 		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
 	}
@@ -1293,7 +1341,6 @@ func main() {
 	lastSODReportDay := ""
 	lastPreUSReportDay := ""
 	lastM2ReportDay := ""
-	lastPreEODDecisionDay := ""
 	lastHourlyKey := ""
 	var lastPulseSentAt time.Time
 	maintState := maintenanceState{
@@ -1694,19 +1741,6 @@ func main() {
 		if execMgr != nil {
 			execMgr.ApplyMomentumExit(now, momBySymbol, externalFlow)
 		}
-		if preEODExitEnable {
-			dayKey := localMaintNow.Format("2006-01-02")
-			decisionNow := localMaintNow.Hour() == preEODEndHour && localMaintNow.Minute() == preEODEndMin
-			if decisionNow && lastPreEODDecisionDay != dayKey {
-				if paper.enabled {
-					paper.ApplyPreEODExit(now, momBySymbol, metaBySymbol, paperDepth, preEODMinHold, preEODUpnlPctMax)
-				}
-				if execMgr != nil {
-					execMgr.ApplyPreEODExit(now, momBySymbol, preEODMinHold, preEODUpnlPctMax)
-				}
-				lastPreEODDecisionDay = dayKey
-			}
-		}
 		printScanHeader(localMaintNow)
 		printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
 		eventLog.Emit(stats.Event{
@@ -1893,9 +1927,15 @@ func main() {
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(featureCache, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore, flowMetricsBySymbol)
 		cands = applyCandidateLifecycle(cands, now, candidateMem, lifecycleCfg)
+		if watcher != nil {
+			wallSignals = watcher.WallSignals()
+		}
 		filtered := make([]candidate, 0, len(cands))
 		for _, c := range cands {
 			rawCandidate := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+			if ws, ok := wallSignals[rawCandidate]; ok {
+				c = applyWallSignal(c, ws)
+			}
 			if meta, ok := metaBySymbol[rawCandidate]; ok {
 				c.VolumeUSD = meta.VolumeUSD
 				c.FundingRate = meta.FundingRate
@@ -1922,11 +1962,15 @@ func main() {
 			c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, c.QualityReasons = computeEntryScoreBreakdown(c, entryQualityCfg)
 			c.StructureFresh = requiresFreshPullback(c)
 			c.QualityReasons = append(c.QualityReasons, triggerReasons...)
+			c.QualityReasons = append(c.QualityReasons, c.WallReasons...)
 			if c.StructureReason != "" {
 				c.QualityReasons = append(c.QualityReasons, "structure:"+c.StructureReason)
 			}
 			if c.SetupFamily != "" {
 				c.QualityReasons = append(c.QualityReasons, "setup:"+c.SetupFamily)
+			}
+			if c.WallMode != "" {
+				c.QualityReasons = append(c.QualityReasons, "wall_mode:"+c.WallMode)
 			}
 			c.QualityReasons = append(c.QualityReasons, c.PatternReasons...)
 			if c.TriggerStage != "" {
@@ -2334,6 +2378,16 @@ func main() {
 		if len(depthSyms) > 0 {
 			depthLevels := maxInt(obLevels, envInt("LIVE_PAPER_OB_LEVELS", 20))
 			prefetchedDepth = fetchOrderBooks(client, depthSyms, depthLevels)
+			if watcher != nil && watcher.walls != nil {
+				watcher.walls.update(now, prefetchedDepth, flowMetricsBySymbol, metaBySymbol, depthLevels)
+				wallSignals = watcher.WallSignals()
+				for i := range cands {
+					raw := strings.ToUpper(aster.RawSymbol(cands[i].Entry.Symbol))
+					if ws, ok := wallSignals[raw]; ok {
+						cands[i] = applyWallSignal(cands[i], ws)
+					}
+				}
+			}
 		}
 		queueCtx := queueDeepPreflightCtx{
 			Now:                   now,
@@ -2468,7 +2522,7 @@ func main() {
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
+		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -2492,6 +2546,13 @@ func main() {
 			best.OFIZ,
 			best.SpreadBps,
 			best.ATRPct*100.0,
+			best.WallMode,
+			best.WallStatus,
+			best.WallConfidence,
+			best.WallBiasScore,
+			best.WallSpoofRisk,
+			best.WallDistanceBps,
+			best.WallSizeRatio,
 			best.Entry.LongDemotionFlag,
 			best.Entry.ShortDemotionFlag,
 			best.Entry.ReversalWatchFlag,
@@ -2581,26 +2642,6 @@ func main() {
 				GateAllow: boolPtr(false),
 				GateReasons: []string{
 					"DEAD_SESSION_BLOCK",
-				},
-			})
-			waitAndReport()
-			continue
-		}
-		if preEODEntryBlockMin > 0 && inPreEODEntryBlock(localMaintNow, maintEOD, preEODEntryBlockMin) {
-			recordCandidateDecision(cmdCtx, best, "PRE_EOD_ENTRY_BLOCK")
-			st.TopRejectReason = "PRE_EOD_ENTRY_BLOCK"
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"PRE_EOD_ENTRY_BLOCK",
 				},
 			})
 			waitAndReport()
@@ -4592,6 +4633,7 @@ func newWatchRuntime(cfg watchConfig, client *aster.Client) *watchRuntime {
 		client:   client,
 		ofi:      map[string]*ofiTracker{},
 		flow:     map[string]flowMetrics{},
+		walls:    newWallTracker(),
 		meta:     map[string]symbolMeta{},
 		priority: map[string]operatorSuggestion{},
 	}
@@ -4626,11 +4668,200 @@ func (w *watchRuntime) FlowMetrics() map[string]flowMetrics {
 	return out
 }
 
+func newWallTracker() *wallTracker {
+	return &wallTracker{
+		bidObs: map[string]wallObservation{},
+		askObs: map[string]wallObservation{},
+		ctx:    map[string]ta.OBContext{},
+		sig:    map[string]wallSignal{},
+	}
+}
+
+func (wt *wallTracker) update(now time.Time, books map[string]aster.OrderBook, flow map[string]flowMetrics, meta map[string]symbolMeta, levels int) {
+	if wt == nil || len(books) == 0 {
+		return
+	}
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+	for raw, ob := range books {
+		ctx := ta.OrderBookContext(raw, ob.Bids, ob.Asks, levels)
+		wt.ctx[raw] = ctx
+		bidObs := wt.updateSide(now, raw, "bid", ctx.NearestBidWall)
+		askObs := wt.updateSide(now, raw, "ask", ctx.NearestAskWall)
+		wt.sig[raw] = buildWallSignal(raw, ctx, bidObs, askObs, flow[raw], meta[raw])
+	}
+}
+
+func (wt *wallTracker) updateSide(now time.Time, raw, side string, wall *ta.OBWall) wallObservation {
+	var store map[string]wallObservation
+	if strings.EqualFold(side, "ask") {
+		store = wt.askObs
+	} else {
+		store = wt.bidObs
+	}
+	prev := store[raw]
+	if wall == nil || wall.Price <= 0 || wall.Size <= 0 {
+		if !prev.LastSeenAt.IsZero() {
+			prev.LastSeenAt = now
+			store[raw] = prev
+		}
+		return prev
+	}
+	if prev.Price > 0 && math.Abs(prev.Price-wall.Price)/maxFloat(wall.Price, 1e-9) <= 0.0005 {
+		if prev.FirstSeenAt.IsZero() {
+			prev.FirstSeenAt = now
+		}
+		if wall.Size > prev.Size*1.02 {
+			prev.Adds++
+			if prev.Size > 0 && wall.Size > prev.Size*1.10 {
+				prev.Refills++
+			}
+		} else if wall.Size < prev.Size*0.98 {
+			prev.Pulls++
+		}
+		prev.Price = wall.Price
+		prev.Size = wall.Size
+		prev.SizeRatio = wall.SizeRatio
+		prev.LastSeenAt = now
+		prev.Samples++
+		store[raw] = prev
+		return prev
+	}
+	obs := wallObservation{
+		Price:       wall.Price,
+		Size:        wall.Size,
+		SizeRatio:   wall.SizeRatio,
+		FirstSeenAt: now,
+		LastSeenAt:  now,
+		Samples:     1,
+	}
+	store[raw] = obs
+	return obs
+}
+
+func (wt *wallTracker) signalFor(raw string) wallSignal {
+	if wt == nil {
+		return wallSignal{}
+	}
+	wt.mu.RLock()
+	defer wt.mu.RUnlock()
+	return wt.sig[raw]
+}
+
+func buildWallSignal(raw string, ctx ta.OBContext, bidObs, askObs wallObservation, fm flowMetrics, meta symbolMeta) wallSignal {
+	maxWallDist := envFloat("LIVE_WALL_MAX_DISTANCE_BPS", 18.0)
+	minWallRatio := envFloat("LIVE_WALL_MIN_SIZE_RATIO", 2.5)
+	minPersistentMs := float64(envInt("LIVE_WALL_MIN_PERSIST_MS", 3000))
+	out := wallSignal{
+		BidWall: ctx.NearestBidWall,
+		AskWall: ctx.NearestAskWall,
+	}
+	choose := func(side string, wall *ta.OBWall, obs wallObservation) {
+		if wall == nil || wall.Price <= 0 || wall.SizeRatio < minWallRatio || wall.DistanceBps > maxWallDist {
+			return
+		}
+		persistence := obs.LastSeenAt.Sub(obs.FirstSeenAt)
+		persistMs := persistence.Seconds() * 1000.0
+		pullRate := 0.0
+		addRate := 0.0
+		if obs.Samples > 0 {
+			pullRate = float64(obs.Pulls) / float64(obs.Samples)
+			addRate = float64(obs.Adds) / float64(obs.Samples)
+		}
+		spoofRisk := 0.0
+		if persistMs < minPersistentMs {
+			spoofRisk += 0.45
+		}
+		spoofRisk += clamp(pullRate*1.5, 0, 0.45)
+		if wall.SizeRatio < minWallRatio*1.25 {
+			spoofRisk += 0.10
+		}
+		interaction := clamp(math.Abs(fm.OFIZ)/1.2, 0, 1)
+		status := "defended"
+		mode := "wall_defense"
+		conf := 0.35 + clamp((wall.SizeRatio-minWallRatio)/4.0, 0, 0.25) + clamp((1.0-spoofRisk)*0.25, 0, 0.25)
+		bias := 0.0
+		reasons := []string{
+			fmt.Sprintf("wall_side=%s", side),
+			fmt.Sprintf("wall_dist_bps=%.1f", wall.DistanceBps),
+			fmt.Sprintf("wall_ratio=%.2f", wall.SizeRatio),
+		}
+		if strings.EqualFold(side, "bid") {
+			bias = clamp((wall.SizeRatio/4.0)+(fm.OFIZ/2.0), -1, 1)
+			if fm.OFIZ > envFloat("LIVE_WALL_CONSUMPTION_MIN_OFI_Z", 0.35) && ctx.NearestAskWall != nil && ctx.NearestAskWall.DistanceBps <= maxWallDist {
+				status = "absorbing"
+				mode = "wall_consumption"
+				conf = clamp(conf+0.12+interaction*0.15, 0, 0.95)
+				reasons = append(reasons, "ask_wall_under_pressure")
+			}
+			if spoofRisk >= envFloat("LIVE_WALL_SPOOF_RISK_REJECT", 0.75) || (meta.LastPrice > 0 && meta.LastPrice < wall.Price && pullRate > 0.25) {
+				status = "failed"
+				mode = "wall_failure"
+				conf = clamp(0.35+interaction*0.20, 0, 0.90)
+				reasons = append(reasons, "bid_wall_failed")
+			}
+		} else {
+			bias = clamp(-((wall.SizeRatio / 4.0) + (-fm.OFIZ / 2.0)), -1, 1)
+			if fm.OFIZ < -envFloat("LIVE_WALL_CONSUMPTION_MIN_OFI_Z", 0.35) && ctx.NearestBidWall != nil && ctx.NearestBidWall.DistanceBps <= maxWallDist {
+				status = "absorbing"
+				mode = "wall_consumption"
+				conf = clamp(conf+0.12+interaction*0.15, 0, 0.95)
+				reasons = append(reasons, "bid_wall_under_pressure")
+			}
+			if spoofRisk >= envFloat("LIVE_WALL_SPOOF_RISK_REJECT", 0.75) || (meta.LastPrice > 0 && meta.LastPrice > wall.Price && pullRate > 0.25) {
+				status = "failed"
+				mode = "wall_failure"
+				conf = clamp(0.35+interaction*0.20, 0, 0.90)
+				reasons = append(reasons, "ask_wall_failed")
+			}
+		}
+		if persistMs < minPersistentMs {
+			reasons = append(reasons, "wall_not_persistent")
+		}
+		if pullRate > addRate && pullRate > 0.15 {
+			reasons = append(reasons, "wall_pull_dominant")
+		}
+		if out.Confidence == 0 || math.Abs(bias) > math.Abs(out.BiasScore) {
+			out.Mode = mode
+			out.Status = status
+			out.Confidence = conf
+			out.BiasScore = bias
+			out.SpoofRisk = clamp(spoofRisk, 0, 1)
+			out.DistanceBps = wall.DistanceBps
+			out.SizeRatio = wall.SizeRatio
+			out.Persistence = persistence
+			out.PullRate = pullRate
+			out.AddRate = addRate
+			out.RefillCount = obs.Refills
+			out.Price = wall.Price
+			out.Side = side
+			out.Reasons = reasons
+			out.Interaction = interaction
+		}
+	}
+	choose("bid", ctx.NearestBidWall, bidObs)
+	choose("ask", ctx.NearestAskWall, askObs)
+	return out
+}
+
 func (w *watchRuntime) MetaSnapshot() map[string]symbolMeta {
 	if w == nil || len(w.meta) == 0 {
 		return map[string]symbolMeta{}
 	}
 	return copySymbolMetaMap(w.meta)
+}
+
+func (w *watchRuntime) WallSignals() map[string]wallSignal {
+	if w == nil || w.walls == nil {
+		return map[string]wallSignal{}
+	}
+	w.walls.mu.RLock()
+	defer w.walls.mu.RUnlock()
+	out := make(map[string]wallSignal, len(w.walls.sig))
+	for k, v := range w.walls.sig {
+		out[k] = v
+	}
+	return out
 }
 
 func (w *watchRuntime) Tick(now time.Time) bool {
@@ -4672,6 +4903,9 @@ func (w *watchRuntime) Tick(now time.Time) bool {
 			}
 			w.meta[raw] = meta
 		}
+	}
+	if w.walls != nil {
+		w.walls.update(now, books, w.flow, w.meta, w.cfg.BookLevels)
 	}
 	if now.Sub(w.lastUrgentAt) < w.cfg.Every {
 		return false
@@ -10333,6 +10567,27 @@ func computeTradeQuality(c candidate, cfg entryQualityConfig) (float64, []string
 	return total, reasons
 }
 
+func applyWallSignal(c candidate, ws wallSignal) candidate {
+	if ws.Price <= 0 {
+		return c
+	}
+	c.WallMode = ws.Mode
+	c.WallStatus = ws.Status
+	c.WallConfidence = ws.Confidence
+	c.WallBiasScore = ws.BiasScore
+	c.WallSpoofRisk = ws.SpoofRisk
+	c.WallDistanceBps = ws.DistanceBps
+	c.WallSizeRatio = ws.SizeRatio
+	c.WallPersistence = ws.Persistence
+	c.WallPullRate = ws.PullRate
+	c.WallAddRate = ws.AddRate
+	c.WallRefillCount = ws.RefillCount
+	c.WallPrice = ws.Price
+	c.WallSide = ws.Side
+	c.WallReasons = append([]string(nil), ws.Reasons...)
+	return c
+}
+
 func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, float64, float64, float64, []string) {
 	reasons := make([]string, 0, 8)
 	scoreN := clamp(c.Entry.CurrentScore/100.0, 0, 1)
@@ -10356,6 +10611,9 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 		_, triggerStateN, _ = deriveTriggerState(c)
 	}
 	triggerN := clamp(0.22*slopeN+0.18*confN+0.18*structureN+0.12*stageN+0.12*triggerStageN+0.08*freshnessN+0.10*triggerStateN, 0, 1)
+	if c.WallConfidence > 0 {
+		triggerN = clamp(triggerN+c.WallConfidence*0.12+c.WallBiasScore*0.08-c.WallSpoofRisk*0.18, 0, 1)
+	}
 	if c.PatternBias != 0 {
 		triggerN = clamp(triggerN+c.PatternBias, 0, 1)
 	}
@@ -10364,6 +10622,9 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 	}
 
 	executionN := scoreExecutionFit(c)
+	if c.WallConfidence > 0 {
+		executionN = clamp(executionN+c.WallConfidence*0.10-c.WallSpoofRisk*0.15, 0, 1)
+	}
 
 	dw, tw, ew := normalizedEntryScoreWeights(cfg)
 	total := clamp(dw*discoveryN+tw*triggerN+ew*executionN, 0, 1)
@@ -10383,6 +10644,12 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 	}
 	if c.TriggerState != "" && c.TriggerState != string(triggerNone) {
 		reasons = append(reasons, "trigger_"+strings.ToLower(c.TriggerState))
+	}
+	if c.WallMode != "" {
+		reasons = append(reasons, "wall_"+strings.ToLower(c.WallMode))
+	}
+	if c.WallSpoofRisk >= envFloat("LIVE_WALL_SPOOF_RISK_REJECT", 0.75) {
+		reasons = append(reasons, "wall_spoof_risk")
 	}
 	if cfg.EnableScoreGate {
 		if discoveryN < cfg.MinDiscovery {
@@ -11005,6 +11272,10 @@ func scoreStructureAlignment(c candidate) float64 {
 		if c.Entry.Momentum {
 			score += 0.20
 		}
+	}
+	if c.WallConfidence > 0 {
+		score += c.WallConfidence * 0.20
+		score -= c.WallSpoofRisk * 0.20
 	}
 	return clamp(score, 0, 1)
 }

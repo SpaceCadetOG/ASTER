@@ -172,3 +172,49 @@ func TestParseOrderProgressPartial(t *testing.T) {
 		t.Fatalf("unexpected partial progress: %+v", prog)
 	}
 }
+
+func TestComputeEntryScoreBreakdownUsesWallConfidence(t *testing.T) {
+	cfg := entryQualityConfig{}
+	base := candidate{
+		Side:         "BUY",
+		Conf:         0.55,
+		SpreadBps:    5,
+		VolumeRatio:  1.4,
+		TriggerState: string(triggerDeltaFlip),
+		Entry: inplay.Entry{
+			CurrentScore: 90,
+			CurrentGrade: "A",
+			Rank:         95,
+			ScoreSlope:   0.12,
+		},
+	}
+	_, baseTrigger, baseExec, _, _ := computeEntryScoreBreakdown(base, cfg)
+	withWall := base
+	withWall.WallMode = "wall_defense"
+	withWall.WallConfidence = 0.72
+	withWall.WallBiasScore = 0.35
+	withWall.WallSpoofRisk = 0.05
+	_, wallTrigger, wallExec, _, reasons := computeEntryScoreBreakdown(withWall, cfg)
+	if wallTrigger <= baseTrigger {
+		t.Fatalf("expected wall confidence to boost trigger score, base=%.2f wall=%.2f", baseTrigger, wallTrigger)
+	}
+	if wallExec <= baseExec {
+		t.Fatalf("expected wall confidence to boost execution score, base=%.2f wall=%.2f", baseExec, wallExec)
+	}
+	if len(reasons) == 0 {
+		t.Fatalf("expected reasons from wall-enhanced score breakdown")
+	}
+}
+
+func TestDeepQueuePreflightRejectsWallSpoofRisk(t *testing.T) {
+	c := candidate{
+		Entry:         inplay.Entry{Symbol: "BTCUSDT"},
+		WallSpoofRisk: 0.90,
+	}
+	res := deepQueuePreflight(c, queueDeepPreflightCtx{
+		MetaBySymbol: map[string]symbolMeta{"BTCUSDT": {LastPrice: 100}},
+	})
+	if res.RejectReason != "wall_spoof_risk" {
+		t.Fatalf("expected wall_spoof_risk reject, got %s", res.RejectReason)
+	}
+}

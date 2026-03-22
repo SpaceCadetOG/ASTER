@@ -74,40 +74,46 @@ type Config struct {
 }
 
 type Trade struct {
-	Symbol        string    `json:"symbol"`
-	Strategy      string    `json:"strategy"`
-	Side          string    `json:"side"`
-	EntryTs       time.Time `json:"entry_ts"`
-	ExitTs        time.Time `json:"exit_ts"`
-	Entry         float64   `json:"entry"`
-	Exit          float64   `json:"exit"`
-	Stop          float64   `json:"stop"`
-	StopReason    string    `json:"stop_reason,omitempty"`
-	TP1           float64   `json:"tp1"`
-	TP2           float64   `json:"tp2"`
-	TP3           float64   `json:"tp3"`
-	Qty           float64   `json:"qty"`
-	PnL           float64   `json:"pnl"`
-	R             float64   `json:"r"`
-	MFER          float64   `json:"mfe_r,omitempty"`
-	MAER          float64   `json:"mae_r,omitempty"`
-	Reason        string    `json:"reason"`
-	HoldMins      float64   `json:"hold_mins"`
-	Fees          float64   `json:"fees"`
-	Slippage      float64   `json:"slippage"`
-	Confidence    float64   `json:"confidence"`
-	CandidateRaw  float64   `json:"candidate_score"`
-	VPSetup       string    `json:"vp_setup,omitempty"`
-	VPLevel       float64   `json:"vp_level,omitempty"`
-	VPTargetLevel float64   `json:"vp_target_level,omitempty"`
-	VPStopMode    string    `json:"vp_stop_mode,omitempty"`
-	VPTargetMode  string    `json:"vp_target_mode,omitempty"`
-	RejectReason  string    `json:"reject_reason,omitempty"`
-	RegimeTag     string    `json:"regime_tag,omitempty"`
-	Reasons       string    `json:"reasons,omitempty"`
-	SignalSource  string    `json:"signal_source,omitempty"`
-	FundingImpact float64   `json:"funding_impact,omitempty"`
-	LiqBufferOK   bool      `json:"liq_buffer_ok,omitempty"`
+	Symbol         string    `json:"symbol"`
+	Strategy       string    `json:"strategy"`
+	Side           string    `json:"side"`
+	EntryTs        time.Time `json:"entry_ts"`
+	ExitTs         time.Time `json:"exit_ts"`
+	Entry          float64   `json:"entry"`
+	Exit           float64   `json:"exit"`
+	Stop           float64   `json:"stop"`
+	StopReason     string    `json:"stop_reason,omitempty"`
+	TP1            float64   `json:"tp1"`
+	TP2            float64   `json:"tp2"`
+	TP3            float64   `json:"tp3"`
+	Qty            float64   `json:"qty"`
+	PnL            float64   `json:"pnl"`
+	R              float64   `json:"r"`
+	MFER           float64   `json:"mfe_r,omitempty"`
+	MAER           float64   `json:"mae_r,omitempty"`
+	Reason         string    `json:"reason"`
+	HoldMins       float64   `json:"hold_mins"`
+	Fees           float64   `json:"fees"`
+	Slippage       float64   `json:"slippage"`
+	Confidence     float64   `json:"confidence"`
+	CandidateRaw   float64   `json:"candidate_score"`
+	VPSetup        string    `json:"vp_setup,omitempty"`
+	VPLevel        float64   `json:"vp_level,omitempty"`
+	VPTargetLevel  float64   `json:"vp_target_level,omitempty"`
+	VPStopMode     string    `json:"vp_stop_mode,omitempty"`
+	VPTargetMode   string    `json:"vp_target_mode,omitempty"`
+	RejectReason   string    `json:"reject_reason,omitempty"`
+	RegimeTag      string    `json:"regime_tag,omitempty"`
+	Reasons        string    `json:"reasons,omitempty"`
+	SignalSource   string    `json:"signal_source,omitempty"`
+	FundingImpact  float64   `json:"funding_impact,omitempty"`
+	LiqBufferOK    bool      `json:"liq_buffer_ok,omitempty"`
+	WallMode       string    `json:"wall_mode,omitempty"`
+	WallStatus     string    `json:"wall_status,omitempty"`
+	WallConfidence float64   `json:"wall_confidence,omitempty"`
+	WallBiasScore  float64   `json:"wall_bias_score,omitempty"`
+	WallSpoofRisk  float64   `json:"wall_spoof_risk,omitempty"`
+	WallReasons    string    `json:"wall_reasons,omitempty"`
 }
 
 type btPosition struct {
@@ -338,31 +344,37 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 				slip := notional * cfg.SlipBps / 10000.0
 				balance -= fee + slip
 				trade := Trade{
-					Symbol:        cfg.Symbol,
-					Strategy:      pending.Signal.Name,
-					Side:          string(pending.Signal.Side),
-					EntryTs:       c.Ts,
-					Entry:         entryPx,
-					Stop:          stopPx,
-					StopReason:    stopReason,
-					TP1:           pending.Signal.TP1,
-					TP2:           pending.Signal.TP2,
-					TP3:           nonZero(pending.Signal.TP3, pending.Signal.TP2),
-					Qty:           qty,
-					Fees:          fee,
-					Slippage:      slip,
-					Confidence:    pending.Signal.Confidence,
-					CandidateRaw:  pending.Score,
-					VPSetup:       pending.Signal.VPSetup,
-					VPLevel:       pending.Signal.VPLevel,
-					VPTargetLevel: pending.Signal.VPTargetLevel,
-					VPStopMode:    pending.Signal.StopMode,
-					VPTargetMode:  pending.Signal.TargetMode,
-					RejectReason:  pending.Signal.RejectReason,
-					RegimeTag:     pending.Signal.RegimeTag,
-					Reasons:       strings.Join(pending.Signal.Reasons, "|"),
-					SignalSource:  strings.Join(pending.Signal.SignalSource, "|"),
-					LiqBufferOK:   pendingRisk.LiqBufferOK,
+					Symbol:         cfg.Symbol,
+					Strategy:       pending.Signal.Name,
+					Side:           string(pending.Signal.Side),
+					EntryTs:        c.Ts,
+					Entry:          entryPx,
+					Stop:           stopPx,
+					StopReason:     stopReason,
+					TP1:            pending.Signal.TP1,
+					TP2:            pending.Signal.TP2,
+					TP3:            nonZero(pending.Signal.TP3, pending.Signal.TP2),
+					Qty:            qty,
+					Fees:           fee,
+					Slippage:       slip,
+					Confidence:     pending.Signal.Confidence,
+					CandidateRaw:   pending.Score,
+					VPSetup:        pending.Signal.VPSetup,
+					VPLevel:        pending.Signal.VPLevel,
+					VPTargetLevel:  pending.Signal.VPTargetLevel,
+					VPStopMode:     pending.Signal.StopMode,
+					VPTargetMode:   pending.Signal.TargetMode,
+					RejectReason:   pending.Signal.RejectReason,
+					RegimeTag:      pending.Signal.RegimeTag,
+					Reasons:        strings.Join(pending.Signal.Reasons, "|"),
+					SignalSource:   strings.Join(pending.Signal.SignalSource, "|"),
+					LiqBufferOK:    pendingRisk.LiqBufferOK,
+					WallMode:       pending.Signal.WallMode,
+					WallStatus:     pending.Signal.WallStatus,
+					WallConfidence: pending.Signal.WallConfidence,
+					WallBiasScore:  pending.Signal.WallBiasScore,
+					WallSpoofRisk:  pending.Signal.WallSpoofRisk,
+					WallReasons:    strings.Join(pending.Signal.WallReasons, "|"),
 				}
 				open = &btPosition{
 					Trade:        trade,
@@ -1017,9 +1029,9 @@ func WriteOutputs(res Result, outDir string) error {
 		return err
 	}
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "stop_reason", "tp1", "tp2", "tp3", "qty", "pnl", "r", "mfe_r", "mae_r", "reason", "hold_mins", "fees", "slippage", "funding_impact", "liq_buffer_ok", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason", "regime_tag", "signal_reasons", "signal_source"})
+	_ = w.Write([]string{"symbol", "strategy", "side", "entry_ts", "exit_ts", "entry", "exit", "stop", "stop_reason", "tp1", "tp2", "tp3", "qty", "pnl", "r", "mfe_r", "mae_r", "reason", "hold_mins", "fees", "slippage", "funding_impact", "liq_buffer_ok", "confidence", "candidate_score", "vp_setup", "vp_level", "vp_target_level", "vp_stop_mode", "vp_target_mode", "reject_reason", "regime_tag", "signal_reasons", "signal_source", "wall_mode", "wall_status", "wall_confidence", "wall_bias_score", "wall_spoof_risk", "wall_reasons"})
 	for _, t := range res.Trades {
-		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), t.StopReason, f64(t.TP1), f64(t.TP2), f64(t.TP3), f64(t.Qty), f64(t.PnL), f64(t.R), f64(t.MFER), f64(t.MAER), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.FundingImpact), fmt.Sprintf("%t", t.LiqBufferOK), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason, t.RegimeTag, t.Reasons, t.SignalSource})
+		_ = w.Write([]string{t.Symbol, t.Strategy, t.Side, t.EntryTs.Format(time.RFC3339), t.ExitTs.Format(time.RFC3339), f64(t.Entry), f64(t.Exit), f64(t.Stop), t.StopReason, f64(t.TP1), f64(t.TP2), f64(t.TP3), f64(t.Qty), f64(t.PnL), f64(t.R), f64(t.MFER), f64(t.MAER), t.Reason, f64(t.HoldMins), f64(t.Fees), f64(t.Slippage), f64(t.FundingImpact), fmt.Sprintf("%t", t.LiqBufferOK), f64(t.Confidence), f64(t.CandidateRaw), t.VPSetup, f64(t.VPLevel), f64(t.VPTargetLevel), t.VPStopMode, t.VPTargetMode, t.RejectReason, t.RegimeTag, t.Reasons, t.SignalSource, t.WallMode, t.WallStatus, f64(t.WallConfidence), f64(t.WallBiasScore), f64(t.WallSpoofRisk), t.WallReasons})
 	}
 	w.Flush()
 	_ = f.Close()

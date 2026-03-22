@@ -197,6 +197,15 @@ func deriveTriggerState(c candidate) (string, float64, []string) {
 	reasons := []string{}
 
 	if strings.EqualFold(c.Side, "BUY") {
+		if c.WallMode == "wall_defense" && c.WallSide == "bid" && c.WallConfidence >= envFloat("LIVE_WALL_DEFENSE_MIN_CONF", 0.55) {
+			return string(triggerOFAbsorb), clamp(0.72+c.WallConfidence*0.18-c.WallSpoofRisk*0.20, 0, 0.92), append([]string{"wall_defense"}, c.WallReasons...)
+		}
+		if c.WallMode == "wall_consumption" && c.WallSide == "ask" && c.WallConfidence >= envFloat("LIVE_WALL_CONSUMPTION_MIN_CONF", 0.45) {
+			return string(triggerImpulseCont), clamp(0.72+c.WallConfidence*0.16-c.WallSpoofRisk*0.15, 0, 0.92), append([]string{"wall_consumption"}, c.WallReasons...)
+		}
+		if c.WallMode == "wall_failure" && c.WallSide == "bid" {
+			return string(triggerFailReclaim), clamp(0.18+c.WallConfidence*0.18, 0, 0.50), append([]string{"wall_failure"}, c.WallReasons...)
+		}
 		if spreadTight && extVWAP <= maxExtVWAP && extEMA <= maxExtEMA && c.OFIZ >= envFloat("LIVE_OF_RECLAIM_MIN_OFI_Z", 0.45) && c.LastClose >= c.SessionVWAP && c.LastClose >= c.EMA9 {
 			return string(triggerOFReclaim), 0.92, []string{"vwap_reclaim", "ema_hold", fmt.Sprintf("ofi_z=%.2f", c.OFIZ)}
 		}
@@ -222,6 +231,15 @@ func deriveTriggerState(c candidate) (string, float64, []string) {
 		return string(triggerNone), 0.20, []string{"trigger_not_ready"}
 	}
 
+	if c.WallMode == "wall_defense" && c.WallSide == "ask" && c.WallConfidence >= envFloat("LIVE_WALL_DEFENSE_MIN_CONF", 0.55) {
+		return string(triggerOFAbsorb), clamp(0.72+c.WallConfidence*0.18-c.WallSpoofRisk*0.20, 0, 0.92), append([]string{"wall_defense_short"}, c.WallReasons...)
+	}
+	if c.WallMode == "wall_consumption" && c.WallSide == "bid" && c.WallConfidence >= envFloat("LIVE_WALL_CONSUMPTION_MIN_CONF", 0.45) {
+		return string(triggerImpulseCont), clamp(0.72+c.WallConfidence*0.16-c.WallSpoofRisk*0.15, 0, 0.92), append([]string{"wall_consumption_short"}, c.WallReasons...)
+	}
+	if c.WallMode == "wall_failure" && c.WallSide == "ask" {
+		return string(triggerFailReclaim), clamp(0.18+c.WallConfidence*0.18, 0, 0.50), append([]string{"wall_failure_short"}, c.WallReasons...)
+	}
 	if spreadTight && extVWAP <= maxExtVWAP && extEMA <= maxExtEMA && c.OFIZ <= -envFloat("LIVE_OF_RECLAIM_MIN_OFI_Z", 0.45) && c.LastClose <= c.SessionVWAP && c.LastClose <= c.EMA9 {
 		return string(triggerOFReclaim), 0.92, []string{"vwap_reclaim_short", "ema_hold_short", fmt.Sprintf("ofi_z=%.2f", c.OFIZ)}
 	}
@@ -436,14 +454,14 @@ func structureTrailDistance(ref, friction float64) float64 {
 
 func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDeadSessionTrading bool, preEODEntryBlockMin int, localMaintNow time.Time, maintEOD maintenanceWindow, postSLCooldown time.Duration, paper *paperTrader, execMgr *liveExecManager, safety safetyConfig, lastOrderAt time.Time, lastOrderBySymbol map[string]time.Time, lastOrderBySymbolSide map[string]time.Time, orderCountByDay, orderCountByHour map[string]int, symbolStopoutLockUntil map[string]time.Time) string {
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+	_ = preEODEntryBlockMin
+	_ = localMaintNow
+	_ = maintEOD
 	if postSLCooldown > 0 && hasRecentStopLoss(raw, c.Side, now, postSLCooldown, paper, execMgr) {
 		return "POST_SL_COOLDOWN"
 	}
 	if !allowDeadSessionTrading && data.CurrentRegimeCT(now) == data.RegimeDead {
 		return "DEAD_SESSION_BLOCK"
-	}
-	if preEODEntryBlockMin > 0 && inPreEODEntryBlock(localMaintNow, maintEOD, preEODEntryBlockMin) {
-		return "PRE_EOD_ENTRY_BLOCK"
 	}
 	if !pureMode {
 		if reason := safetyReject(safety, c, localMaintNow, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
@@ -666,6 +684,18 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 		if _, ok := maintenanceWarmupUntil(ctx.LocalMaintNow, ctx.MaintWarmup, ctx.MaintState); ok {
 			return queueDeepPreflightResult{RejectReason: "post_maint_warmup"}
 		}
+	}
+	if c.WallSpoofRisk >= envFloat("LIVE_WALL_SPOOF_RISK_REJECT", 0.75) {
+		return queueDeepPreflightResult{RejectReason: "wall_spoof_risk"}
+	}
+	if c.WallMode == "wall_failure" && c.WallConfidence >= envFloat("LIVE_WALL_FAILURE_REJECT_CONF", 0.55) {
+		return queueDeepPreflightResult{RejectReason: "wall_failed_on_touch"}
+	}
+	if c.WallMode == "wall_consumption" && c.WallConfidence < envFloat("LIVE_WALL_CONSUMPTION_MIN_CONF", 0.45) {
+		return queueDeepPreflightResult{RejectReason: "wall_consumption_not_confirmed"}
+	}
+	if c.WallConfidence > 0 && c.WallPersistence < time.Duration(envInt("LIVE_WALL_MIN_PERSIST_MS", 3000))*time.Millisecond {
+		return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
 	}
 	if ctx.OBFilterEnable {
 		ob := ctx.EntryDepth[raw]

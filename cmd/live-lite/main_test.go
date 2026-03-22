@@ -343,11 +343,11 @@ func TestRelaxedPullbackStructureConfirmedNearVWAP(t *testing.T) {
 	t.Setenv("LIVE_PULLBACK_RECLAIM_PROX_PCT", "0.45")
 	t.Setenv("LIVE_PULLBACK_RECLAIM_MIN_DAYUTC_PCT", "5.0")
 	c := candidate{
-		Side:       "BUY",
-		DayUTC24h:  6.0,
-		LastClose:  1.0000,
+		Side:        "BUY",
+		DayUTC24h:   6.0,
+		LastClose:   1.0000,
 		SessionVWAP: 1.0030,
-		EMA9:       1.0040,
+		EMA9:        1.0040,
 	}
 	if !relaxedPullbackStructureConfirmed(c) {
 		t.Fatalf("expected near-vwap pullback to count as structure confirmation")
@@ -560,6 +560,15 @@ func TestPreEODExitReason(t *testing.T) {
 	}
 	if got := preEODExitReason("BUY", mvStable, 0.90, 0.30); got != "" {
 		t.Fatalf("expected no exit reason, got %s", got)
+	}
+}
+
+func TestInPreEODEntryBlockStillCalculatesWindow(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	eod := maintenanceWindow{Name: "EOD", StartHour: 16, StartMin: 0, EndHour: 18, EndMin: 0}
+	now := time.Date(2026, 3, 22, 15, 30, 0, 0, loc)
+	if !inPreEODEntryBlock(now, eod, 60) {
+		t.Fatalf("expected helper to identify pre-EOD block window")
 	}
 }
 

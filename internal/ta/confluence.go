@@ -99,6 +99,27 @@ func ComputeConfluence(tr TrendResult, ef EffortResult, ob OBContext, side strin
 		}
 	}
 
+	// Nearby wall confluence favors defended pullbacks and consumption breakouts.
+	if side == "long" {
+		if ob.NearestBidWall != nil && ob.NearestBidWall.SizeRatio >= 2.0 && ob.NearestBidWall.DistanceBps <= 18 {
+			score += 4
+			notes = append(notes, "wall: nearby bid support")
+		}
+		if ob.NearestAskWall != nil && ob.NearestAskWall.SizeRatio >= 2.0 && ob.NearestAskWall.DistanceBps <= 12 {
+			score -= 2
+			notes = append(notes, "wall: nearby ask overhead")
+		}
+	} else {
+		if ob.NearestAskWall != nil && ob.NearestAskWall.SizeRatio >= 2.0 && ob.NearestAskWall.DistanceBps <= 18 {
+			score += 4
+			notes = append(notes, "wall: nearby ask resistance")
+		}
+		if ob.NearestBidWall != nil && ob.NearestBidWall.SizeRatio >= 2.0 && ob.NearestBidWall.DistanceBps <= 12 {
+			score -= 2
+			notes = append(notes, "wall: nearby bid support risk")
+		}
+	}
+
 	return ConfluenceResult{
 		Score: round2(score),
 		Label: label,

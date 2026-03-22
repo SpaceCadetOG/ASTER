@@ -75,3 +75,22 @@ func TestComputeConfluence_SideAwareness(t *testing.T) {
 			longRes.Score, shortRes.Score)
 	}
 }
+
+func TestComputeConfluence_UsesNearbyWallSupport(t *testing.T) {
+	tr := TrendResult{TrendScore: 58, EMARatio: 1.0, AboveVWAP: 0.6, Slope9: 1, Slope21: 1, Bias: "bull"}
+	ef := EffortResult{EffortScore: 28}
+	base := OBContext{
+		Imbalance:  +0.12,
+		TopBidWall: &OBWall{Rank: 2, Size: 12, Side: "bid"},
+		TopAskWall: &OBWall{Rank: 4, Size: 10, Side: "ask"},
+	}
+	withWall := base
+	withWall.NearestBidWall = &OBWall{Rank: 2, Size: 30, Side: "bid", SizeRatio: 3.1, DistanceBps: 8}
+
+	plain := ComputeConfluence(tr, ef, base, "long")
+	boosted := ComputeConfluence(tr, ef, withWall, "long")
+
+	if boosted.Score <= plain.Score {
+		t.Fatalf("expected nearby bid wall to boost long score, plain=%.2f boosted=%.2f", plain.Score, boosted.Score)
+	}
+}

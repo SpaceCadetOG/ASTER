@@ -29,6 +29,12 @@ type Signal struct {
 	ConfluenceScore ConfluenceScore
 	RegimeTag       string
 	SignalSource    []string
+	WallMode        string
+	WallStatus      string
+	WallConfidence  float64
+	WallBiasScore   float64
+	WallSpoofRisk   float64
+	WallReasons     []string
 	Ts              time.Time
 }
 
