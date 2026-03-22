@@ -10501,6 +10501,17 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 		return ""
 	}
 	if envBool("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", true) && !hasFreshStructureReset(c) {
+		if c.SetupFamily == "micro_pullback_continuation" || c.SetupFamily == "breakout_retest" {
+			leaderScoreMin := envFloat("LIVE_LATE_ENTRY_LEADER_SCORE_MIN", 96.0)
+			leaderSlopeMin := envFloat("LIVE_LATE_ENTRY_LEADER_SLOPE_MIN", 0.14)
+			leaderRankMax := envFloat("LIVE_LATE_ENTRY_LEADER_RANK_MAX", 1.5)
+			if c.Entry.CurrentScore >= leaderScoreMin &&
+				math.Abs(c.Entry.ScoreSlope) >= leaderSlopeMin &&
+				c.Entry.Rank <= leaderRankMax &&
+				(c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping) {
+				return ""
+			}
+		}
 		resetMin := envFloat("LIVE_LATE_ENTRY_UTC1H_RESET_MIN_PCT", 0.8)
 		if strings.EqualFold(c.Side, "SELL") {
 			if c.UTC1hPct == 0 || c.UTC1hPct <= -resetMin {
@@ -11684,6 +11695,22 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		}
 		lateRejects := make([]string, 0, 3)
 		structureConfirmOK := !envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) || continuationStructureConfirmed(cand)
+		pullbackSetup := cand.SetupFamily == "micro_pullback_continuation" || cand.SetupFamily == "deep_pullback_reclaim" || cand.SetupFamily == "breakout_retest" ||
+			cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "pullback_short"
+		if pullbackSetup && structureConfirmOK {
+			fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_PULLBACK_CONT_MIN_VOL_RATIO", 0.75))
+			fastBaseConf = maxFloat(fastBaseConf, envFloat("LIVE_PULLBACK_CONT_BASE_CONF", 0.54))
+			if ofiEnabled && cand.OFISamples >= ofiMinSamples {
+				minPullbackOFI := envFloat("LIVE_PULLBACK_CONT_MIN_ABS_OFI_Z", 0.10)
+				if strings.EqualFold(cand.Side, "BUY") {
+					ofiOK = cand.OFIZ >= -minPullbackOFI
+				} else {
+					ofiOK = cand.OFIZ <= minPullbackOFI
+				}
+			} else {
+				ofiOK = true
+			}
+		}
 		stateAgeLimit := lateStateMin
 		if gradeValue(cand.Entry.CurrentGrade) >= gradeValue("A+") {
 			stateAgeLimit = lateAPlusStateMin

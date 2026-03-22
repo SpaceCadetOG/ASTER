@@ -295,6 +295,33 @@ func TestContinuationGuardReasonBlocksLateShortWithoutReset(t *testing.T) {
 	}
 }
 
+func TestContinuationGuardAllowsLeaderPullbackWithoutUtc1hReset(t *testing.T) {
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	t.Setenv("LIVE_LATE_ENTRY_REQUIRE_UTC1H_RESET", "1")
+	t.Setenv("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", "25")
+	t.Setenv("LIVE_LATE_ENTRY_LEADER_SCORE_MIN", "96")
+	t.Setenv("LIVE_LATE_ENTRY_LEADER_SLOPE_MIN", "0.14")
+	t.Setenv("LIVE_LATE_ENTRY_LEADER_RANK_MAX", "1.5")
+	cfg := entryQualityConfig{DayUTCMaturityBrake: true, DayUTCMaturityPct: 25, RequireFreshPullback: true}
+	c := candidate{
+		Side:        "BUY",
+		Strat:       "continuation_fast",
+		SetupFamily: "micro_pullback_continuation",
+		DayUTC24h:   27.0,
+		UTC1hPct:    27.0,
+		Entry: inplay.Entry{
+			EntryStyle:   "pullback_long",
+			CurrentScore: 99.0,
+			ScoreSlope:   0.22,
+			Rank:         1,
+			State:        inplay.StateInPlay,
+		},
+	}
+	if got := continuationGuardReason(c, cfg); got != "" {
+		t.Fatalf("expected leader pullback override, got %q", got)
+	}
+}
+
 func TestChurnRejectReasonQuickLossLockExtremeSymbol(t *testing.T) {
 	t.Setenv("LIVE_CHURN_LOCK_ENABLE", "1")
 	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_COUNT", "1")
@@ -896,6 +923,43 @@ func TestApplyPatternModifiersBullishEngulfingNearReclaim(t *testing.T) {
 	applyPatternModifiers(&c, bars)
 	if c.PatternBias <= 0 {
 		t.Fatalf("expected bullish pattern bias, got %.3f", c.PatternBias)
+	}
+}
+
+func TestPullbackContinuationGetsConfidenceWithStructure(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_CONT_FAST_BASE_CONF", "0.58")
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	t.Setenv("LIVE_PULLBACK_CONT_MIN_VOL_RATIO", "0.75")
+	t.Setenv("LIVE_PULLBACK_CONT_BASE_CONF", "0.54")
+	t.Setenv("LIVE_PULLBACK_CONT_MIN_ABS_OFI_Z", "0.10")
+	c := candidate{
+		Side:        "BUY",
+		SetupFamily: "micro_pullback_continuation",
+		LastClose:   10.4,
+		SessionVWAP: 10.2,
+		EMA9:        10.25,
+		VolumeRatio: 0.82,
+		OFIZ:        -0.05,
+		OFISamples:  10,
+		ReclaimHold: true,
+		Entry: inplay.Entry{
+			EntryStyle:   "pullback_long",
+			State:        inplay.StateHeating,
+			CurrentScore: 92,
+			ScoreSlope:   0.14,
+		},
+	}
+	got := applySimpleContinuationFallback(c)
+	if got.Strat != "continuation_fast" {
+		t.Fatalf("expected continuation_fast, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+	if got.Conf <= 0 {
+		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
 	}
 }
 
