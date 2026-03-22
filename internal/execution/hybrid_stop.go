@@ -62,7 +62,7 @@ func DefaultHybridStopConfig() HybridStopConfig {
 		SweepBufferBps:    18,
 		MinWidthPct:       0.25,
 		MaxWidthPct:       8.00,
-		MinRRToTP1:        1.00,
+		MinRRToTP1:        0.00,
 	}
 }
 
