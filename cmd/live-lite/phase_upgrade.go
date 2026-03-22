@@ -457,11 +457,9 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 	_ = preEODEntryBlockMin
 	_ = localMaintNow
 	_ = maintEOD
+	_ = allowDeadSessionTrading
 	if postSLCooldown > 0 && hasRecentStopLoss(raw, c.Side, now, postSLCooldown, paper, execMgr) {
 		return "POST_SL_COOLDOWN"
-	}
-	if !allowDeadSessionTrading && data.CurrentRegimeCT(now) == data.RegimeDead {
-		return "DEAD_SESSION_BLOCK"
 	}
 	if !pureMode {
 		if reason := safetyReject(safety, c, localMaintNow, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
@@ -677,14 +675,10 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 	if raw == "" {
 		return queueDeepPreflightResult{RejectReason: "empty_symbol"}
 	}
-	if ctx.InMaint {
-		return queueDeepPreflightResult{RejectReason: "maintenance_window"}
-	}
-	if ctx.MaintWarmup > 0 {
-		if _, ok := maintenanceWarmupUntil(ctx.LocalMaintNow, ctx.MaintWarmup, ctx.MaintState); ok {
-			return queueDeepPreflightResult{RejectReason: "post_maint_warmup"}
-		}
-	}
+	_ = ctx.InMaint
+	_ = ctx.MaintWarmup
+	_ = ctx.LocalMaintNow
+	_ = ctx.MaintState
 	if c.WallSpoofRisk >= envFloat("LIVE_WALL_SPOOF_RISK_REJECT", 0.75) {
 		return queueDeepPreflightResult{RejectReason: "wall_spoof_risk"}
 	}

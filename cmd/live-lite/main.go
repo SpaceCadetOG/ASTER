@@ -1292,11 +1292,11 @@ func main() {
 	if err != nil {
 		maintLoc = hourlyLoc
 	}
-	maintEnabled := envBool("LIVE_MAINT_ENABLE", true)
+	maintEnabled := envBool("LIVE_MAINT_ENABLE", false)
 	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 0)) * time.Minute
 	preEODEntryBlockMin := 0
 	postSLCooldown := time.Duration(envInt("POST_SL_COOLDOWN_MIN", 30)) * time.Minute
-	allowDeadSessionTrading := envBool("ALLOW_DEAD_SESSION_TRADING", false)
+	allowDeadSessionTrading := true
 	inertiaEnable := envBool("LIVE_INERTIA_BREAKER_ENABLE", false)
 	inertiaScoreMin := envFloat("LIVE_INERTIA_SCORE_MIN", 80)
 	inertiaSlowMin := envFloat("LIVE_INERTIA_SLOW_SLOPE_MIN", 0.5)
@@ -1512,7 +1512,8 @@ func main() {
 		}
 		cacheStatsStart := featureCache.statsSnapshot()
 		localMaintNow := now.In(maintLoc)
-		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, maintEnabled, maintEOD)
+		maintWindow, inMaint := maintenanceWindow{}, false
+		_ = maintEnabled
 		watcherOnly := liveLiteWakeReason == "watcher" && !lastScanAt.IsZero() && now.Sub(lastScanAt) < scanEvery && len(cachedMetaBySymbol) > 0
 		cycleMode := "scan"
 		if watcherOnly {
@@ -2627,26 +2628,7 @@ func main() {
 			waitAndReport()
 			continue
 		}
-		if !allowDeadSessionTrading && data.CurrentRegimeCT(now) == data.RegimeDead {
-			recordCandidateDecision(cmdCtx, best, "DEAD_SESSION_BLOCK")
-			st.TopRejectReason = "DEAD_SESSION_BLOCK"
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"DEAD_SESSION_BLOCK",
-				},
-			})
-			waitAndReport()
-			continue
-		}
+		_ = allowDeadSessionTrading
 		if !pureMode && !symbolCooldownSameSide.Allow(rawBest+"|"+strings.ToUpper(strings.TrimSpace(best.Side)), now) {
 			recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
 			st.TopRejectReason = "symbol_cooldown_same_side"
@@ -2780,23 +2762,9 @@ func main() {
 			}
 		}
 
-		if inMaint {
-			recordCandidateDecision(cmdCtx, best, "maintenance_window")
-			st.TopRejectReason = "maintenance_window"
-			statusStore.Set(st)
-			waitAndReport()
-			continue
-		}
-		if maintWarmup > 0 {
-			if until, ok := maintenanceWarmupUntil(localMaintNow, maintWarmup, &maintState); ok {
-				recordCandidateDecision(cmdCtx, best, "post_maint_warmup")
-				st.TopRejectReason = "post_maint_warmup"
-				statusStore.Set(st)
-				fmt.Printf("live-lite: skip (reason=post_maint_warmup until %s)\n", until.Format("15:04 MST"))
-				waitAndReport()
-				continue
-			}
-		}
+		_ = inMaint
+		_ = maintWarmup
+		_ = maintState
 		if rest == nil || dryRun {
 			eventLog.Emit(stats.Event{
 				Timestamp:   now,
