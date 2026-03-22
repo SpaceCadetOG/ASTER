@@ -7,6 +7,13 @@ cd "$ROOT_DIR"
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR"
 
+LOCK_FILE="${ASTER_LOCK_FILE:-/tmp/aster-live-lite.lock}"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "live-lite already running (lock: $LOCK_FILE)" >&2
+  exit 1
+fi
+
 pkill -9 -x live-lite 2>/dev/null || true
 pkill -9 -f 'cmd/live-lite' 2>/dev/null || true
 
