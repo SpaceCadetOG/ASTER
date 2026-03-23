@@ -273,6 +273,9 @@ func relativePct(px, anchor float64) float64 {
 }
 
 func chooseExitProfile(c candidate) string {
+	if strings.EqualFold(c.Strat, "guerilla_long_runner") {
+		return "IMPULSE"
+	}
 	switch c.SetupFamily {
 	case "reset_impulse_breakout":
 		return "IMPULSE"
