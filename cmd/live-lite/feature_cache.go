@@ -107,6 +107,21 @@ func (c *featureRuntimeCache) candleSeries(symbol string, tf types.TF, limit int
 
 	bars, err := c.load(raw, tf, limit)
 	if err != nil {
+		fallbackLimit := envInt("LIVE_FEATURE_CACHE_FALLBACK_LIMIT", 120)
+		if fallbackLimit <= 0 {
+			fallbackLimit = 120
+		}
+		if limit > fallbackLimit {
+			bars, retryErr := c.load(raw, tf, fallbackLimit)
+			if retryErr == nil {
+				out := append([]types.Candle(nil), bars...)
+				c.mu.Lock()
+				c.pruneLocked(now)
+				c.candles[key] = cachedCandleSeries{bars: append([]types.Candle(nil), out...), expiresAt: now.Add(c.ttl)}
+				c.mu.Unlock()
+				return out, nil
+			}
+		}
 		if len(fallback) > 0 {
 			c.mu.Lock()
 			c.pruneLocked(now)
