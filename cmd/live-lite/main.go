@@ -414,6 +414,31 @@ type flowMetrics struct {
 	Mid           float64
 }
 
+var (
+	microErrMu sync.Mutex
+	microErrAt = map[string]time.Time{}
+)
+
+func logMicroSnapshotErr(symbol string, err error) {
+	if symbol == "" || err == nil {
+		return
+	}
+	ttl := time.Duration(envInt("LIVE_MICRO_ERR_LOG_TTL_SEC", 60)) * time.Second
+	if ttl <= 0 {
+		ttl = 60 * time.Second
+	}
+	now := time.Now().UTC()
+	microErrMu.Lock()
+	last := microErrAt[symbol]
+	if now.Sub(last) < ttl {
+		microErrMu.Unlock()
+		return
+	}
+	microErrAt[symbol] = now
+	microErrMu.Unlock()
+	fmt.Printf("live-lite: micro snapshot error symbol=%s err=%v\n", symbol, err)
+}
+
 type wallObservation struct {
 	Price       float64
 	Size        float64
@@ -11718,6 +11743,9 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	}
 	snapView, bars, err := cache.microSnapshot(raw, 240, envInt("LIVE_ATR_LEN", 14), inertiaFastN, inertiaSlowN, 20)
 	if err != nil || len(bars) < 30 {
+		if err != nil {
+			logMicroSnapshotErr(raw, err)
+		}
 		cand.Strat = "none"
 		return cand
 	}
