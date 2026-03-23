@@ -241,16 +241,15 @@ func TestRouterRejectsLateShortContinuationWithoutReset(t *testing.T) {
 		Candles: c,
 	}
 	r := NewRouter(RouterConfig{
-		MinGrade:                   "B",
-		MinScore:                   0,
-		MinWhaleDelta:              -1e9,
-		MinConfluenceScore:         0.1,
-		AllowDeadZoneOnlyAPlus:     false,
-		EnableContinuationMaturity: true,
-		ContinuationDayUTCPct:      25,
-		ContinuationReset1hPct:     0.8,
-		ContinuationLateSlopeMin:   0.16,
-		RiskPolicy:                 DefaultRiskPolicy(),
+		MinGrade:                 "B",
+		MinScore:                 0,
+		MinWhaleDelta:            -1e9,
+		MinConfluenceScore:       0.1,
+		AllowDeadZoneOnlyAPlus:   false,
+		ContinuationDayUTCPct:    25,
+		ContinuationReset1hPct:   0.8,
+		ContinuationLateSlopeMin: 0.16,
+		RiskPolicy:               DefaultRiskPolicy(),
 	})
 	out := r.Eval(ctx)
 	if len(out) != 0 {

@@ -1092,9 +1092,9 @@ func main() {
 		DayUTCMinAbsPct:      envFloat("LIVE_DAYUTC_MIN_ABS_PCT", 5.0),
 		DayUTCScalePct:       envFloat("LIVE_DAYUTC_SCALE_PCT", 20.0),
 		BlockContExhaustion:  envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", true),
-		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
+		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", true),
 		DayUTCMaturityPct:    envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
-		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
+		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", true),
 	}
 	acceptanceCfg := acceptanceQueueConfig{
 		TopN:                  envInt("LIVE_ACCEPTANCE_TOPN", 3),
@@ -4470,7 +4470,7 @@ func loadHybridStopConfig() exitmgr.HybridStopConfig {
 	cfg.SweepBufferBps = envFloat("LIVE_STOP_SWEEP_BUFFER_BPS", cfg.SweepBufferBps)
 	cfg.MinWidthPct = envFloat("LIVE_MIN_STOP_PCT", cfg.MinWidthPct)
 	cfg.MaxWidthPct = envFloat("LIVE_STOP_MAX_WIDTH_PCT", envFloat("LIVE_MAX_STOP_PCT", cfg.MaxWidthPct))
-	cfg.MinRRToTP1 = envFloat("LIVE_STOP_MIN_RR_TO_TP1", envFloat("LIVE_MIN_RR_TP1", 0.0))
+	cfg.MinRRToTP1 = envFloat("LIVE_STOP_MIN_RR_TO_TP1", envFloat("LIVE_MIN_RR_TP1", cfg.MinRRToTP1))
 	return cfg
 }
 
@@ -5099,9 +5099,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if maxStopPct < minStopPct {
 		maxStopPct = minStopPct
 	}
-	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.0)
-	if minTP1RR < 0 {
-		minTP1RR = 0
+	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.8)
+	if minTP1RR <= 0 {
+		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
 	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 0)) * time.Minute
@@ -5436,9 +5436,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if maxStopPct < minStopPct {
 		maxStopPct = minStopPct
 	}
-	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.0)
-	if minTP1RR < 0 {
-		minTP1RR = 0
+	minTP1RR := envFloat("LIVE_MIN_RR_TP1", 0.8)
+	if minTP1RR <= 0 {
+		minTP1RR = 0.8
 	}
 	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
 	riskOnMargin := envBool("LIVE_RISK_ON_MARGIN_ENABLE", true)
@@ -7057,10 +7057,7 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	}
 	risk := abs(p.EntryPrice - p.StopPrice)
 	reward := abs(p.TP1Price - p.EntryPrice)
-	if risk <= 0 {
-		return fmt.Errorf("tp1 rr invalid: risk=%.6f", risk)
-	}
-	if m.minTP1RR > 0 && reward/risk < m.minTP1RR {
+	if risk <= 0 || reward/risk < m.minTP1RR {
 		return fmt.Errorf("tp1 rr below minimum: rr=%.3f min=%.3f", reward/maxFloat(risk, 1e-9), m.minTP1RR)
 	}
 	p.TrailRef = p.EntryPrice
@@ -8794,10 +8791,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	risk := abs(entry - stop)
 	reward := abs(tp1 - entry)
-	if risk <= 0 {
-		return nil, fmt.Errorf("paper tp1 rr invalid")
-	}
-	if p.minTP1RR > 0 && reward/risk < p.minTP1RR {
+	if risk <= 0 || reward/risk < p.minTP1RR {
 		return nil, fmt.Errorf("paper tp1 rr below minimum")
 	}
 	p.balance -= entryFee
@@ -11917,29 +11911,28 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		return applySimpleContinuationFallback(cand)
 	}
 	rt := strategies.NewRouter(strategies.RouterConfig{
-		MinGrade:                   "B",
-		MinScore:                   0,
-		MinWhaleDelta:              -1e18,
-		AllowWarmup:                true,
-		WarmupSlopeMin:             0,
-		MaxOne:                     true,
-		EnableVPSetups:             envBool("LIVE_ENABLE_VP_SETUPS", false),
-		MinVPConfidence:            envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
-		UseVPReversal:              envBool("LIVE_USE_VP_REVERSAL", false),
-		EnableInstitutionalPA:      envBool("LIVE_ENABLE_INSTITUTIONAL_PA", false),
-		UseSessionRegimeRisk:       true,
-		AllowDeadZoneOnlyAPlus:     true,
-		RequireOrderFlowHandshake:  envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
-		RequireLocationHandshake:   envBool("LIVE_REQUIRE_LOCATION_HANDSHAKE", false),
-		MinConfluenceScore:         envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.52),
-		StrategyWeight:             envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
-		FlowWeight:                 envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
-		StructureWeight:            envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
-		EnableContinuationMaturity: envBool("LIVE_ROUTER_CONTINUATION_MATURITY_ENABLE", false),
-		ContinuationDayUTCPct:      envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
-		ContinuationReset1hPct:     0,
-		ContinuationLateSlopeMin:   envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
-		RejectIfTargetTooClosePct:  vpMinTargetPct,
+		MinGrade:                  "B",
+		MinScore:                  0,
+		MinWhaleDelta:             -1e18,
+		AllowWarmup:               true,
+		WarmupSlopeMin:            0,
+		MaxOne:                    true,
+		EnableVPSetups:            envBool("LIVE_ENABLE_VP_SETUPS", false),
+		MinVPConfidence:           envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
+		UseVPReversal:             envBool("LIVE_USE_VP_REVERSAL", false),
+		EnableInstitutionalPA:     envBool("LIVE_ENABLE_INSTITUTIONAL_PA", false),
+		UseSessionRegimeRisk:      true,
+		AllowDeadZoneOnlyAPlus:    true,
+		RequireOrderFlowHandshake: envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
+		RequireLocationHandshake:  envBool("LIVE_REQUIRE_LOCATION_HANDSHAKE", false),
+		MinConfluenceScore:        envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.52),
+		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
+		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
+		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
+		ContinuationDayUTCPct:     envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
+		ContinuationReset1hPct:    0,
+		ContinuationLateSlopeMin:  envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
+		RejectIfTargetTooClosePct: vpMinTargetPct,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(stopMode),
 			TargetMode:           strategies.TargetMode(targetMode),

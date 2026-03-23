@@ -10,34 +10,33 @@ import (
 )
 
 type RouterConfig struct {
-	MinGrade                   string
-	MinScore                   float64
-	MinWhaleDelta              float64
-	AllowWarmup                bool
-	WarmupSlopeMin             float64
-	MaxOne                     bool
-	ScannerScoreScale          float64
-	EnableVPSetups             bool
-	MinVPConfidence            float64
-	RequireFlowConfluence      bool
-	RejectIfTargetTooClosePct  float64
-	UseVPReversal              bool
-	EnableInstitutionalPA      bool
-	MinConfluenceScore         float64
-	UseSessionRegimeRisk       bool
-	AllowDeadZoneOnlyAPlus     bool
-	RequireOrderFlowHandshake  bool
-	RequireLocationHandshake   bool
-	RiskShell                  *risk.RiskShell
-	LocationTolerancePct       float64
-	StrategyWeight             float64
-	FlowWeight                 float64
-	StructureWeight            float64
-	EnableContinuationMaturity bool
-	ContinuationDayUTCPct      float64
-	ContinuationReset1hPct     float64
-	ContinuationLateSlopeMin   float64
-	RiskPolicy                 RiskPolicyConfig
+	MinGrade                  string
+	MinScore                  float64
+	MinWhaleDelta             float64
+	AllowWarmup               bool
+	WarmupSlopeMin            float64
+	MaxOne                    bool
+	ScannerScoreScale         float64
+	EnableVPSetups            bool
+	MinVPConfidence           float64
+	RequireFlowConfluence     bool
+	RejectIfTargetTooClosePct float64
+	UseVPReversal             bool
+	EnableInstitutionalPA     bool
+	MinConfluenceScore        float64
+	UseSessionRegimeRisk      bool
+	AllowDeadZoneOnlyAPlus    bool
+	RequireOrderFlowHandshake bool
+	RequireLocationHandshake  bool
+	RiskShell                 *risk.RiskShell
+	LocationTolerancePct      float64
+	StrategyWeight            float64
+	FlowWeight                float64
+	StructureWeight           float64
+	ContinuationDayUTCPct     float64
+	ContinuationReset1hPct    float64
+	ContinuationLateSlopeMin  float64
+	RiskPolicy                RiskPolicyConfig
 }
 
 type Candidate struct {
@@ -80,7 +79,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.LocationTolerancePct <= 0 {
 		cfg.LocationTolerancePct = 0.006 // 60 bps
 	}
-	if cfg.EnableContinuationMaturity && cfg.ContinuationDayUTCPct <= 0 {
+	if cfg.ContinuationDayUTCPct <= 0 {
 		cfg.ContinuationDayUTCPct = 25.0
 	}
 	if cfg.ContinuationLateSlopeMin <= 0 {
@@ -244,9 +243,6 @@ func (r *Router) Eval(ctx Context) []Candidate {
 }
 
 func (r *Router) continuationMaturityReject(ctx Context, sig Signal) string {
-	if !r.cfg.EnableContinuationMaturity {
-		return ""
-	}
 	if sig.Side == features.SideLong || ctx.DayUTCPct == 0 {
 		return ""
 	}
