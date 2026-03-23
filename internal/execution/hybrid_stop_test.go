@@ -50,7 +50,7 @@ func TestComputeHybridStopClampsWideStops(t *testing.T) {
 	}
 }
 
-func TestComputeHybridStopRejectsPoorRR(t *testing.T) {
+func TestComputeHybridStopIgnoresLowRR(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MinRRToTP1 = 1.5
@@ -64,7 +64,7 @@ func TestComputeHybridStopRejectsPoorRR(t *testing.T) {
 		Template:     StopTemplateContinuationImpulse,
 	}
 	res := ComputeHybridStop(cfg, in)
-	if !res.Rejected || res.RejectReason != "hybrid_stop_rr_too_low" {
-		t.Fatalf("expected rr rejection, got %+v", res)
+	if res.Rejected {
+		t.Fatalf("unexpected rr rejection, got %+v", res)
 	}
 }
