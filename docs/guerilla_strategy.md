@@ -106,7 +106,7 @@ Allow a slightly extended entry when all of the following are true:
 
 ### Risk Model
 
-Do not use the default `hybrid_stop_too_wide` gate for this branch. Use a
+Do not allow the wide-stop gate to reject runner entries. Use a
 runner-specific stop based on:
 
 - blended entry
