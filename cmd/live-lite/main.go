@@ -1030,10 +1030,10 @@ func main() {
 
 	candCfg := candidateSelectConfig{
 		UseContinuous:           envBool("LIVE_RANK_USE_CONTINUOUS", false),
-		MinNormalizedScore:      envFloat("LIVE_RANK_MIN_SCORE", 75.0),
+		MinNormalizedScore:      envFloat("LIVE_RANK_MIN_SCORE", 70.0),
 		MinCompleteness:         envFloat("LIVE_RANK_MIN_COMPLETENESS", 0.0),
 		MinConfidence:           envFloat("LIVE_RANK_MIN_CONFIDENCE", 0.0),
-		ReversalMinScore:        envFloat("LIVE_REVERSAL_MIN_SCORE", 72.0),
+		ReversalMinScore:        envFloat("LIVE_REVERSAL_MIN_SCORE", 68.0),
 		ReversalMinConfidence:   envFloat("LIVE_REVERSAL_MIN_CONFIDENCE", 0.0),
 		ReversalMinComplete:     envFloat("LIVE_REVERSAL_MIN_COMPLETENESS", 0.0),
 		ReversalMinStateMin:     envFloat("LIVE_REVERSAL_MIN_STATE_MIN", 1.0),
@@ -1042,20 +1042,20 @@ func main() {
 	}
 	entryQualityCfg := entryQualityConfig{
 		EnableMetaGate:       envBool("LIVE_META_GATE_ENABLE", true),
-		MinQuality:           envFloat("LIVE_META_MIN_QUALITY", 0.58),
-		MinQualityCont:       envFloat("LIVE_META_MIN_QUALITY_CONT", envFloat("LIVE_META_MIN_QUALITY", 0.58)),
-		MinQualityIgnite:     envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(envFloat("LIVE_META_MIN_QUALITY", 0.58), 0.55)),
-		MinQualityRev:        envFloat("LIVE_META_MIN_QUALITY_REV", min(envFloat("LIVE_META_MIN_QUALITY", 0.58), 0.52)),
+		MinQuality:           envFloat("LIVE_META_MIN_QUALITY", 0.52),
+		MinQualityCont:       envFloat("LIVE_META_MIN_QUALITY_CONT", envFloat("LIVE_META_MIN_QUALITY", 0.52)),
+		MinQualityIgnite:     envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.50)),
+		MinQualityRev:        envFloat("LIVE_META_MIN_QUALITY_REV", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.48)),
 		RequireStrategyMatch: envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
-		MinEntryConf:         envFloat("LIVE_MIN_ENTRY_CONF", 0.55),
-		MinEntryConfCont:     envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.55)),
-		MinEntryConfIgnite:   envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.55), 0.52)),
-		MinEntryConfRev:      envFloat("LIVE_MIN_ENTRY_CONF_REV", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.55), 0.48)),
+		MinEntryConf:         envFloat("LIVE_MIN_ENTRY_CONF", 0.48),
+		MinEntryConfCont:     envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.48)),
+		MinEntryConfIgnite:   envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.45)),
+		MinEntryConfRev:      envFloat("LIVE_MIN_ENTRY_CONF_REV", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.40)),
 		PersistenceOverride:  envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", true),
-		PersistMinQuality:    envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.55),
+		PersistMinQuality:    envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.50),
 		PersistMinScans:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SCANS", 3),
-		PersistMinScore:      envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 85.0),
-		PersistMinGrade:      envStr("LIVE_PERSISTENCE_OVERRIDE_MIN_GRADE", "A"),
+		PersistMinScore:      envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 80.0),
+		PersistMinGrade:      envStr("LIVE_PERSISTENCE_OVERRIDE_MIN_GRADE", "B"),
 		EnableScoreGate:      envBool("LIVE_ENTRY_SCORE_ENABLE", false),
 		MinDiscovery:         envFloat("LIVE_DISCOVERY_MIN_SCORE", 0.0),
 		MinTrigger:           envFloat("LIVE_TRIGGER_MIN_SCORE", 0.0),
@@ -1066,14 +1066,14 @@ func main() {
 		DayUTCWeight:         envFloat("LIVE_DAYUTC_WEIGHT", 0.30),
 		DayUTCMinAbsPct:      envFloat("LIVE_DAYUTC_MIN_ABS_PCT", 5.0),
 		DayUTCScalePct:       envFloat("LIVE_DAYUTC_SCALE_PCT", 20.0),
-		BlockContExhaustion:  envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", true),
-		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", true),
+		BlockContExhaustion:  envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", false),
+		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
 		DayUTCMaturityPct:    envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
-		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", true),
+		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
 	}
 	acceptanceCfg := acceptanceQueueConfig{
-		TopN:                  envInt("LIVE_ACCEPTANCE_TOPN", 3),
-		MaxAttemptsPerCycle:   envInt("LIVE_MAX_ENTRY_ATTEMPTS_PER_CYCLE", 2),
+		TopN:                  envInt("LIVE_ACCEPTANCE_TOPN", 4),
+		MaxAttemptsPerCycle:   envInt("LIVE_MAX_ENTRY_ATTEMPTS_PER_CYCLE", 3),
 		MaxNewPositionsWindow: envInt("LIVE_MAX_NEW_POSITIONS_PER_WINDOW", 1),
 		EntryWindow:           time.Duration(envInt("LIVE_ENTRY_WINDOW_SEC", 60)) * time.Second,
 		RecentRejectTTL:       time.Duration(envInt("LIVE_RECENT_REJECT_TTL_SEC", 180)) * time.Second,
@@ -4260,11 +4260,11 @@ func loadDiscoveryConfig() discovery.Config {
 func loadEntryGateConfig() gate.Config {
 	cfg := gate.DefaultConfig()
 	cfg.MinGrade = envStr("LIVE_GATE_MIN_GRADE", "B")
-	cfg.MinScore = envFloat("LIVE_GATE_MIN_SCORE", 75)
-	cfg.MinSlope = envFloat("LIVE_GATE_MIN_SLOPE", 0.15)
-	cfg.RequireVolumeSpike = envBool("LIVE_GATE_REQUIRE_VOLUME_SPIKE", true)
-	cfg.MinVolumeRatio = envFloat("LIVE_GATE_MIN_VOLUME_RATIO", 1.5)
-	cfg.RequireMTF = envBool("LIVE_GATE_REQUIRE_MTF", true)
+	cfg.MinScore = envFloat("LIVE_GATE_MIN_SCORE", 70)
+	cfg.MinSlope = envFloat("LIVE_GATE_MIN_SLOPE", 0.08)
+	cfg.RequireVolumeSpike = envBool("LIVE_GATE_REQUIRE_VOLUME_SPIKE", false)
+	cfg.MinVolumeRatio = envFloat("LIVE_GATE_MIN_VOLUME_RATIO", 1.2)
+	cfg.RequireMTF = envBool("LIVE_GATE_REQUIRE_MTF", false)
 	cfg.MTF.EMAFast = envInt("LIVE_GATE_EMA_FAST", 8)
 	cfg.MTF.EMASlow = envInt("LIVE_GATE_EMA_SLOW", 20)
 	cfg.MTF.Use15m = envBool("LIVE_GATE_MTF_USE_15M", false)
@@ -11897,7 +11897,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		AllowDeadZoneOnlyAPlus:    true,
 		RequireOrderFlowHandshake: envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
 		RequireLocationHandshake:  envBool("LIVE_REQUIRE_LOCATION_HANDSHAKE", false),
-		MinConfluenceScore:        envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.52),
+		MinConfluenceScore:        envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48),
 		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
 		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
 		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
