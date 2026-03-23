@@ -159,7 +159,11 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)
 		rr := reward / maxFloat(dist, 1e-9)
-		_ = rr
+		if rr < cfg.MinRRToTP1 {
+			res.Rejected = true
+			res.RejectReason = "hybrid_stop_rr_too_low"
+			return res
+		}
 	}
 
 	res.StopPrice = stopPrice
