@@ -147,14 +147,9 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 		reason += "+min_width"
 	}
 	if maxWidthPct > 0 && distPct > maxWidthPct {
-		if side == "BUY" {
-			stopPrice = in.Entry * (1 - maxWidthPct)
-		} else {
-			stopPrice = in.Entry * (1 + maxWidthPct)
-		}
-		dist = math.Abs(in.Entry - stopPrice)
-		distPct = dist / in.Entry
-		reason += "+max_width"
+		res.Rejected = true
+		res.RejectReason = "hybrid_stop_too_wide"
+		return res
 	}
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)

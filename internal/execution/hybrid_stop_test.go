@@ -28,7 +28,7 @@ func TestComputeHybridStopLongUsesStructureAndBuffer(t *testing.T) {
 	}
 }
 
-func TestComputeHybridStopClampsWideStops(t *testing.T) {
+func TestComputeHybridStopRejectsWideStops(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MaxWidthPct = 1.0
@@ -42,11 +42,8 @@ func TestComputeHybridStopClampsWideStops(t *testing.T) {
 		Template:      StopTemplateReversalExhaustion,
 	}
 	res := ComputeHybridStop(cfg, in)
-	if res.Rejected {
-		t.Fatalf("unexpected wide-stop rejection: %+v", res)
-	}
-	if res.StopDistancePct > cfg.MaxWidthPct+1e-6 {
-		t.Fatalf("expected clamped stop width <= %.2f, got %.4f", cfg.MaxWidthPct, res.StopDistancePct)
+	if !res.Rejected || res.RejectReason != "hybrid_stop_too_wide" {
+		t.Fatalf("expected wide-stop rejection, got %+v", res)
 	}
 }
 
