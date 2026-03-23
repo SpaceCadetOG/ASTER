@@ -276,6 +276,9 @@ func chooseExitProfile(c candidate) string {
 	if strings.EqualFold(c.Strat, "guerilla_long_runner") {
 		return "IMPULSE"
 	}
+	if strings.EqualFold(c.Strat, "guerilla_short_runner") {
+		return "IMPULSE"
+	}
 	switch c.SetupFamily {
 	case "reset_impulse_breakout":
 		return "IMPULSE"

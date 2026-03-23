@@ -2881,8 +2881,8 @@ func main() {
 			continue
 		}
 		if execMgr != nil && execMgr.HasActiveSymbol(best.Entry.Symbol) {
-			allowPyramid := strings.EqualFold(best.Strat, "guerilla_long_runner") &&
-				envBool("LIVE_GUERILLA_LONG_PYRAMID_ENABLE", true)
+			allowPyramid := (strings.EqualFold(best.Strat, "guerilla_long_runner") && envBool("LIVE_GUERILLA_LONG_PYRAMID_ENABLE", true)) ||
+				(strings.EqualFold(best.Strat, "guerilla_short_runner") && envBool("LIVE_GUERILLA_SHORT_RUNNER_PYRAMID_ENABLE", true))
 			if allowPyramid {
 				if pos, ok := execMgr.LivePositionBySymbol(best.Entry.Symbol); !ok || !strings.EqualFold(strings.TrimSpace(pos.Side), strings.TrimSpace(best.Side)) {
 					allowPyramid = false
@@ -12053,6 +12053,75 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 			return cand
 		}
 	}
+	if envBool("LIVE_ENABLE_GUERILLA_LONG_SNIPER", true) && strings.EqualFold(cand.Side, "BUY") {
+		minScore := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_SCORE", 78.0)
+		minSlope := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_SLOPE", 0.06)
+		minVolRatio := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_VOL_RATIO", 1.10)
+		minOFIZ := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_OFI_Z", 0.25)
+		maxRank := envFloat("LIVE_GUERILLA_LONG_SNIPER_MAX_RANK", 4.0)
+		minDayUTC := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_DAYUTC_PCT", 6.0)
+		minFails := envInt("LIVE_GUERILLA_LONG_SNIPER_MIN_FAILS", 1)
+		maxExtATR := envFloat("LIVE_GUERILLA_LONG_SNIPER_MAX_EXT_ATR", 2.2)
+		baseConf := envFloat("LIVE_GUERILLA_LONG_SNIPER_BASE_CONF", 0.58)
+
+		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping || cand.Entry.State == inplay.StateCooling
+		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
+		dayOK := minDayUTC <= 0 || cand.DayUTC24h >= minDayUTC
+		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
+		structureOK := (cand.SessionVWAP > 0 && cand.LastClose >= cand.SessionVWAP) || (cand.EMA9 > 0 && cand.LastClose >= cand.EMA9)
+		failCount := maxInt(cand.Entry.FailedBreakdownCount, cand.Entry.FailedBreakLowCount)
+		failCount = maxInt(failCount, cand.Entry.FailedReclaimCount)
+		failOK := minFails <= 0 || failCount >= minFails
+		styleOK := cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "breakout_hold_long" ||
+			cand.Entry.EntryStyle == "momentum_ignite_long" || failOK
+		if cand.Entry.EntryStyle == "avoid_chase" && failCount < maxInt(2, minFails) {
+			styleOK = false
+		}
+		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ >= minOFIZ
+		wallOK := cand.WallConfidence <= 0 ||
+			(strings.EqualFold(cand.WallSide, "bid") || cand.WallBiasScore >= 0) ||
+			strings.Contains(strings.ToLower(cand.WallMode), "defense") ||
+			strings.Contains(strings.ToLower(cand.WallMode), "consumption")
+
+		if stateOK &&
+			rankOK &&
+			dayOK &&
+			extOK &&
+			styleOK &&
+			structureOK &&
+			failOK &&
+			ofiOK &&
+			wallOK &&
+			cand.Entry.CurrentScore >= minScore &&
+			cand.Entry.ScoreSlope >= minSlope &&
+			cand.VolumeRatio >= minVolRatio {
+			confBoost := min(0.18, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.30+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.08)
+			if cand.OFIZ > minOFIZ {
+				confBoost += min(0.05, (cand.OFIZ-minOFIZ)*0.08)
+			}
+			if failCount > 0 {
+				confBoost += min(0.06, float64(failCount)*0.02)
+			}
+			cand.Strat = "guerilla_long_sniper"
+			cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
+			cand.Sig = strategies.Signal{
+				Active: true,
+				Name:   "guerilla_long_sniper",
+				Side:   toFeatureSide(cand.Side),
+				Reasons: []string{
+					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
+					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
+					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
+					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
+					fmt.Sprintf("fails=%d", failCount),
+				},
+				Tags: []string{"guerilla", "sniper", "failed_breakdown"},
+			}
+			cand.Sig = applySignalRiskGeometry(cand, "guerilla_long_sniper")
+			cand.RejectReason = ""
+			return cand
+		}
+	}
 	if envBool("LIVE_ENABLE_MOMENTUM_IGNITE", true) {
 		igniteMinScore := envFloat("LIVE_IGNITE_MIN_SCORE", 60.0)
 		igniteMinSlope := envFloat("LIVE_IGNITE_MIN_SLOPE", 0.08)
@@ -12184,6 +12253,65 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 				Tags: []string{"guerilla", "sniper", "failed_bounce"},
 			}
 			cand.Sig = applySignalRiskGeometry(cand, "guerilla_short_sniper")
+			cand.RejectReason = ""
+			return cand
+		}
+	}
+	if envBool("LIVE_ENABLE_GUERILLA_SHORT_RUNNER", true) && strings.EqualFold(cand.Side, "SELL") {
+		minScore := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_SCORE", 105.0)
+		minSlope := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_SLOPE", 0.28)
+		minVolRatio := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_VOL_RATIO", 1.50)
+		minOFIZ := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_OFI_Z", 0.65)
+		maxRank := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MAX_RANK", 1.25)
+		minDayUTC := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_DAYUTC_PCT", 12.0)
+		maxExtATR := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MAX_EXT_ATR", 2.5)
+		minWallConf := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_WALL_CONF", 0.55)
+		baseConf := envFloat("LIVE_GUERILLA_SHORT_RUNNER_BASE_CONF", 0.70)
+
+		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
+		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
+		dayOK := minDayUTC <= 0 || cand.DayUTC24h <= -minDayUTC
+		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
+		structureOK := cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
+		styleOK := cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.Momentum
+		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ <= -minOFIZ
+		wallOK := minWallConf <= 0 ||
+			(cand.WallConfidence >= minWallConf &&
+				(strings.EqualFold(cand.WallSide, "ask") || cand.WallBiasScore <= 0) &&
+				(strings.Contains(strings.ToLower(cand.WallMode), "defense") || strings.Contains(strings.ToLower(cand.WallMode), "consumption") || cand.WallStatus == "defended"))
+
+		if stateOK &&
+			rankOK &&
+			dayOK &&
+			extOK &&
+			styleOK &&
+			structureOK &&
+			ofiOK &&
+			wallOK &&
+			cand.Entry.CurrentScore >= minScore &&
+			cand.Entry.ScoreSlope >= minSlope &&
+			cand.VolumeRatio >= minVolRatio {
+			confBoost := min(0.22, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.35+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.10)
+			if cand.OFIZ < -minOFIZ {
+				confBoost += min(0.06, (-cand.OFIZ-minOFIZ)*0.08)
+			}
+			cand.Strat = "guerilla_short_runner"
+			cand.Conf = clamp(baseConf+confBoost, 0, 0.92)
+			cand.Sig = strategies.Signal{
+				Active: true,
+				Name:   "guerilla_short_runner",
+				Side:   toFeatureSide(cand.Side),
+				Reasons: []string{
+					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
+					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
+					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
+					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
+					fmt.Sprintf("rank=%.2f", cand.Entry.Rank),
+					fmt.Sprintf("wall_conf=%.2f", cand.WallConfidence),
+				},
+				Tags: []string{"guerilla", "runner", "pyramid_ok"},
+			}
+			cand.Sig = applySignalRiskGeometry(cand, "guerilla_short_runner")
 			cand.RejectReason = ""
 			return cand
 		}

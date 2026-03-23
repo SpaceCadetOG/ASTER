@@ -5,6 +5,8 @@ March 2026 trades:
 
 - `guerilla_long_runner`: rare, high-conviction long leader pyramids
 - `guerilla_short_sniper`: default short continuation / failed-bounce entries
+- `guerilla_long_sniper`: default long continuation / failed-breakdown entries
+- `guerilla_short_runner`: rare, high-conviction short leader pyramids
 
 The main lesson from the trade review is simple:
 
@@ -114,6 +116,42 @@ runner-specific stop based on:
 ## Guerilla Short Sniper
 
 This is the LYN / PIPPIN / DEGO template.
+
+## Guerilla Long Sniper
+
+This mirrors the short sniper but for long failed-breakdown entries.
+
+### Candidate Requirements
+
+- top long candidate, usually top 1–4
+- `score >= 78`
+- `slope >= 0.06`
+- `dayUTC >= +6%`
+- `vol_ratio >= 1.10`
+- at least one failed breakdown / reclaim
+
+### Entry Filters
+
+- structure confirms near VWAP/EMA
+- OFI supportive or improving
+- avoid `avoid_chase` unless failure count is strong
+
+## Guerilla Short Runner
+
+This mirrors the long runner but for rare short leaders.
+
+### Candidate Requirements
+
+- top short leader only
+- `score >= 105`
+- `slope >= 0.28`
+- `dayUTC <= -12%`
+- `vol_ratio >= 1.50`
+- strong ask wall or consumption pressure
+
+### Position Sizing
+
+- allow pyramids while green and still top leader
 
 ### Candidate Requirements
 
