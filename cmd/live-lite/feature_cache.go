@@ -87,6 +87,11 @@ func (c *featureRuntimeCache) candleSeries(symbol string, tf types.TF, limit int
 	}
 	now := c.now()
 	key := fmt.Sprintf("%s|%s|%d", raw, tf.String(), limit)
+	fallbackTTL := time.Duration(envInt("LIVE_FEATURE_CACHE_FALLBACK_TTL_SEC", 30)) * time.Second
+	if fallbackTTL <= 0 {
+		fallbackTTL = 30 * time.Second
+	}
+	var fallback []types.Candle
 	c.mu.Lock()
 	if cached, ok := c.candles[key]; ok && now.Before(cached.expiresAt) {
 		c.stats.CandleHits++
@@ -94,11 +99,21 @@ func (c *featureRuntimeCache) candleSeries(symbol string, tf types.TF, limit int
 		c.mu.Unlock()
 		return out, nil
 	}
+	if cached, ok := c.candles[key]; ok && len(cached.bars) > 0 {
+		fallback = append([]types.Candle(nil), cached.bars...)
+	}
 	c.stats.CandleMisses++
 	c.mu.Unlock()
 
 	bars, err := c.load(raw, tf, limit)
 	if err != nil {
+		if len(fallback) > 0 {
+			c.mu.Lock()
+			c.pruneLocked(now)
+			c.candles[key] = cachedCandleSeries{bars: append([]types.Candle(nil), fallback...), expiresAt: now.Add(fallbackTTL)}
+			c.mu.Unlock()
+			return fallback, nil
+		}
 		return nil, err
 	}
 	out := append([]types.Candle(nil), bars...)
@@ -119,6 +134,11 @@ func (c *featureRuntimeCache) microSnapshot(symbol string, limit, atrLen, fastSl
 	raw := strings.ToUpper(strings.TrimSpace(symbol))
 	now := c.now()
 	key := fmt.Sprintf("%s|%d|%d|%d|%d|%d", raw, limit, atrLen, fastSlopeN, slowSlopeN, volumeN)
+	fallbackTTL := time.Duration(envInt("LIVE_FEATURE_CACHE_FALLBACK_TTL_SEC", 30)) * time.Second
+	if fallbackTTL <= 0 {
+		fallbackTTL = 30 * time.Second
+	}
+	var fallback *ta.MicroSnapshot
 	c.mu.Lock()
 	if cached, ok := c.micro[key]; ok && now.Before(cached.expiresAt) {
 		c.stats.MicroHits++
@@ -126,11 +146,22 @@ func (c *featureRuntimeCache) microSnapshot(symbol string, limit, atrLen, fastSl
 		bars, err := c.candleSeries(raw, types.TF1m, limit)
 		return cached.snapshot, bars, err
 	}
+	if cached, ok := c.micro[key]; ok {
+		tmp := cached.snapshot
+		fallback = &tmp
+	}
 	c.stats.MicroMisses++
 	c.mu.Unlock()
 
 	bars, err := c.candleSeries(raw, types.TF1m, limit)
 	if err != nil {
+		if fallback != nil {
+			c.mu.Lock()
+			c.pruneLocked(now)
+			c.micro[key] = cachedMicroSnapshot{snapshot: *fallback, expiresAt: now.Add(fallbackTTL)}
+			c.mu.Unlock()
+			return *fallback, nil, nil
+		}
 		return ta.MicroSnapshot{}, nil, err
 	}
 	snap := ta.SnapshotFromTypesCandles(bars, atrLen, fastSlopeN, slowSlopeN, volumeN)
