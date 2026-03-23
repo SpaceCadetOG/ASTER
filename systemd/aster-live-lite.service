@@ -3,7 +3,6 @@ Description=Aster Live Lite Runner
 After=network-online.target
 Wants=network-online.target
 Conflicts=go-machine.service
-ConditionPathExists=/opt/aster/.allow-systemd-live-lite
 
 [Service]
 Type=simple
@@ -11,7 +10,6 @@ User=traderbot
 Group=traderbot
 WorkingDirectory=/opt/aster
 EnvironmentFile=-/opt/aster/env/live-lite.env
-Environment=LIVE_ALLOW_NONINTERACTIVE_START=1
 ExecStart=/usr/bin/flock -n /tmp/aster-live-lite.lock /opt/aster/bin/live-lite
 Restart=always
 RestartSec=2
