@@ -12094,6 +12094,25 @@ func qualifiesEarlyDevEntry(c candidate, now time.Time) bool {
 	return c.Entry.Momentum || c.VolumeRatio >= envFloat("LIVE_STARTER_MIN_VOL_RATIO", 0.80) || hasFreshStructureReset(c)
 }
 
+func qualifiesUTCOffHoursEntry(c candidate) bool {
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue("A") {
+		return false
+	}
+	if candidateExhaustionActive(c) || strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
+		return false
+	}
+	if c.CombinedScore < envFloat("LIVE_STARTER_FINAL_RANK_MIN", 0.72) && c.Conf < 0.55 {
+		return false
+	}
+	if strings.EqualFold(c.Side, "BUY") && c.Entry.LongDemotionFlag {
+		return false
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.Entry.ShortDemotionFlag {
+		return false
+	}
+	return continuationStateTrending(c.Entry.State) || c.Entry.Momentum || hasFreshStructureReset(c)
+}
+
 func continuationFastStarterSoftRejectAllowed(c candidate, reject string) bool {
 	switch {
 	case strings.HasPrefix(reject, "vol_ratio:"):
@@ -12325,7 +12344,9 @@ func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) strin
 	}
 	switch phase {
 	case sessionUTCOffHours:
-		return "utc_offhours_no_fresh_entry"
+		if !qualifiesUTCOffHoursEntry(c) {
+			return "utc_offhours_requires_a_grade"
+		}
 	case sessionAsiaDev:
 		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
 			return "asia_dev_starter_only"

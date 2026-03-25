@@ -1272,6 +1272,46 @@ func TestSessionEntryRejectReasonBlocksFreshAsiaContinue(t *testing.T) {
 	}
 }
 
+func TestSessionEntryRejectReasonAllowsOffHoursAGradeEntry(t *testing.T) {
+	c := candidate{
+		Side:          "BUY",
+		Strat:         "continuation_fast",
+		CombinedScore: 0.81,
+		Conf:          0.58,
+		VolumeRatio:   1.10,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateInPlay,
+			Momentum:     true,
+		},
+	}
+	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 21, 30, 0, 0, time.UTC), c, ladderPlan{})
+	if reason != "" {
+		t.Fatalf("expected off-hours A-grade entry to pass, got %q", reason)
+	}
+}
+
+func TestSessionEntryRejectReasonBlocksOffHoursBGradeEntry(t *testing.T) {
+	c := candidate{
+		Side:          "BUY",
+		Strat:         "continuation_fast",
+		CombinedScore: 0.81,
+		Conf:          0.58,
+		VolumeRatio:   1.10,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "B",
+			State:        inplay.StateInPlay,
+			Momentum:     true,
+		},
+	}
+	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 21, 30, 0, 0, time.UTC), c, ladderPlan{})
+	if reason != "utc_offhours_requires_a_grade" {
+		t.Fatalf("expected off-hours B-grade block, got %q", reason)
+	}
+}
+
 func TestPostWinCooldownRejectReasonBlocksOppositeAfterBigWin(t *testing.T) {
 	now := time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)
 	execMgr := &liveExecManager{
