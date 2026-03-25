@@ -639,6 +639,28 @@ func buildAccountHTML(report accountReport, growthOnly bool, includeMissed []str
 	return notify.BuildEventHTML(icon, title, lines...)
 }
 
+func compactAccountSummaryLine(report accountReport) string {
+	if report.Generated.IsZero() {
+		return "Account: unavailable"
+	}
+	fields := []string{}
+	if !hasMissingField(report.Summary, "perp_equity") {
+		fields = append(fields, fmt.Sprintf("Perp Eq %.2f", report.Summary.PerpEquity))
+	}
+	if !hasMissingField(report.Summary, "perp_available") {
+		fields = append(fields, fmt.Sprintf("Avail %.2f", report.Summary.PerpAvailable))
+	}
+	if !hasMissingField(report.Summary, "perp_unrealized_pnl") {
+		fields = append(fields, fmt.Sprintf("UPNL %+.2f", report.Summary.PerpUnrealizedPnL))
+	}
+	fields = append(fields, fmt.Sprintf("Pos %d", report.Summary.OpenPositions))
+	fields = append(fields, fmt.Sprintf("Ord %d", report.Summary.OpenOrders))
+	if len(fields) == 0 {
+		return "Account: unavailable"
+	}
+	return "Account: " + strings.Join(fields, " | ")
+}
+
 func (m *liveExecManager) AccountDigestSection() string {
 	report := m.AccountReportSnapshot()
 	if report.Generated.IsZero() {

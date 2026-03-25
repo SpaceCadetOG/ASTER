@@ -1040,6 +1040,7 @@ func main() {
 	tradeMarginMin := envFloat("LIVE_TRADE_MARGIN_MIN_USDT", 5.0)
 	tradeMarginMax := envFloat("LIVE_TRADE_MARGIN_MAX_USDT", 200.0)
 	ladderCfg := loadLadderConfig(tradeMargin)
+	reentryCfg := loadReentryConfig(ladderCfg.StarterUSDT)
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
 	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 3)
 	leverageMin := envInt("LIVE_LEVERAGE_MIN", 3)
@@ -1081,11 +1082,11 @@ func main() {
 	if strategyTopN <= 0 {
 		strategyTopN = 3
 	}
-	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 1)
+	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 5)
 	if maxOpenPos <= 0 {
-		maxOpenPos = 1
+		maxOpenPos = 5
 	}
-	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 1)
+	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 5)
 	if maxOpenPerSide < 0 {
 		maxOpenPerSide = 0
 	}
@@ -1262,7 +1263,6 @@ func main() {
 
 	client := aster.New("")
 	featureCache := newFeatureRuntimeCache(client.LoadCandles)
-	cfgPath := resolveConfigPath()
 	rest := buildRESTFromConfig()
 	if rest == nil {
 		fmt.Println("live-lite: no credentials found, forcing DRY_RUN mode")
@@ -1285,6 +1285,7 @@ func main() {
 				fmt.Sprintf("<b>Imported remote:</b> %d", nImported),
 			))
 		}
+		execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
 	}
 	statusStore := newLiveLiteStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
@@ -1481,33 +1482,29 @@ func main() {
 
 	pureMode := envBool("LIVE_PURE_MODE", true)
 	fmt.Println("live-lite started")
-	fmt.Printf("  scan=%s | dry_run=%v | min_grade=%s | margin=%s(%.2f) | reserve=%s(%.2f) | lev_mode=%s\n",
-		scanEvery, dryRun, strings.ToUpper(minGrade), tradeMarginMode, tradeMargin, reserveMode, reserveUSDT, leverageMode)
-	if cfgPath == "" {
-		cfgPath = "(none)"
+	modeLabel := "LIVE"
+	if dryRun {
+		modeLabel = "PAPER"
 	}
-	fmt.Printf("  config=%s | rest=%s | pure_mode=%v\n", cfgPath, effectiveRESTBaseURL(), pureMode)
-	fmt.Printf("  safety live=%v | shorts=%v | max_lev=%d | min_avail=%.2f | cooldown=%s | same_side=%s | flip=%s | caps=%d/day %d/hour\n",
-		safety.enableLiveTrading, safety.allowShorts, safety.maxLeverage, safety.minAvailUSDT, safety.orderCooldown, safety.symbolCooldownSameSide, safety.symbolCooldownFlipSide, safety.maxOrdersPerDay, safety.maxOrdersPerHour)
-	fmt.Printf("  stopout=%d/%s | lock=%s | pause=%s\n",
-		safety.stopoutCount, safety.stopoutWindow, safety.stopoutLock, safety.pauseFile)
-	fmt.Printf("  watcher enabled=%v | every=%s | max=%d | ofi=%v\n",
-		watchCfg.Enable, watchCfg.Every, watchCfg.MaxCandidates, watchCfg.EnableOFI)
+	fmt.Printf("  mode=%s | scan=%s | watch=%s | priority=%s | min_grade=%s\n",
+		modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery, strings.ToUpper(minGrade))
+	fmt.Printf("  starter=%.2f | add=%.2f | max=%.2f | reentry=%.2f | min_avail=%.2f\n",
+		ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, reentryCfg.SizeUSDT, safety.minAvailUSDT)
 	if execMgr != nil {
-		fmt.Printf("  execution=%s | isolated=%v | multi_asset=%v\n",
-			execMgr.marginType, execMgr.enforceIsolated, execMgr.multiAssetMode)
-	}
-	if payoutMgr != nil && payoutMgr.enabled {
-		fmt.Printf("  payout=%s | cycle=%dd | anchor=%02d:%02d | deadline=%dm | tz=%s\n",
-			payoutMgr.mode, payoutMgr.cycleDays, payoutMgr.anchorHour, payoutMgr.anchorMin, payoutMgr.deadlineMin, payoutMgr.loc.String())
+		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.AccountReportSnapshot()))
 	}
 	fmt.Println()
 	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE-LITE STARTED",
-		fmt.Sprintf("<b>Scan:</b> %s", scanEvery),
-		fmt.Sprintf("<b>Dry Run:</b> %v", dryRun),
-		fmt.Sprintf("<b>Min Grade:</b> %s", strings.ToUpper(minGrade)),
-		fmt.Sprintf("<b>Digest:</b> %s", digestEvery),
-		fmt.Sprintf("<b>Maint:</b> %02d:%02d-%02d:%02d", maintEOD.StartHour, maintEOD.StartMin, maintEOD.EndHour, maintEOD.EndMin),
+		fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
+		fmt.Sprintf("<b>Scan / Watch:</b> %s / %s", scanEvery, watchCfg.Every),
+		fmt.Sprintf("<b>Starter / Add / Max:</b> %.2f / %.2f / %.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT),
+		fmt.Sprintf("<b>Re-entry / Min Avail:</b> %.2f / %.2f", reentryCfg.SizeUSDT, safety.minAvailUSDT),
+		fmt.Sprintf("<b>%s</b>", compactAccountSummaryLine(func() accountReport {
+			if execMgr == nil {
+				return accountReport{}
+			}
+			return execMgr.AccountReportSnapshot()
+		}())),
 	))
 
 	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
@@ -4626,7 +4623,7 @@ func loadLadderConfig(defaultStarter float64) ladderConfig {
 		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
 		MinAddPnLPct:  envFloat("LIVE_PYRAMID_MIN_ADD_PNL_PCT", 0.75),
 		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 3),
-		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", true),
+		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", false),
 	}
 	if cfg.StarterUSDT <= 0 {
 		cfg.StarterUSDT = maxFloat(defaultStarter, 10)
