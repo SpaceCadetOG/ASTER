@@ -454,7 +454,8 @@ func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *li
 			})
 		}
 		st.LastReadyLogAt = now
-		fmt.Printf("PERSISTENCE_ENTRY symbol=%s side=%s starter=20 evidence=%s\n", st.Symbol, st.Side, st.ReadyReason)
+		fmt.Printf("PERSISTENCE_ENTRY symbol=%s side=%s starter=%.2f evidence=%s\n",
+			st.Symbol, st.Side, envFloat("LIVE_ENTRY_STARTER_USDT", 10), st.ReadyReason)
 	}
 	return c
 }

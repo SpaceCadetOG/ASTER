@@ -134,21 +134,6 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	if acctErr != nil {
 		missing["perp_account_summary"] = struct{}{}
 	}
-	bals, balErr := rest.GetBalance()
-	if balErr != nil {
-		missing["perp_balance"] = struct{}{}
-	}
-	rows, posErr := rest.PositionRisk("")
-	if posErr != nil {
-		missing["position_risk"] = struct{}{}
-	}
-	orders, ordersErr := rest.OpenOrders("")
-	if ordersErr != nil {
-		missing["open_orders"] = struct{}{}
-	}
-	if acctErr != nil && balErr != nil && posErr != nil && ordersErr != nil {
-		return out, fmt.Errorf("account summary unavailable: acct=%v balance=%v positions=%v orders=%v", acctErr, balErr, posErr, ordersErr)
-	}
 
 	perpEquity, havePerpEquity := floatFromMap(acct, "totalMarginBalance", "marginBalance")
 	perpWallet, havePerpWallet := floatFromMap(acct, "totalWalletBalance", "walletBalance")
@@ -161,7 +146,9 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 		haveMarginUsed = true
 	}
 	totalEquity, haveTotalEquity := floatFromMap(acct, "totalEquity")
-	if positionsArr, ok := sliceFromMap(acct, "positions"); ok && out.OpenPositions == 0 {
+	haveOpenPositions := false
+	if positionsArr, ok := sliceFromMap(acct, "positions"); ok {
+		haveOpenPositions = true
 		for _, raw := range positionsArr {
 			row := mapFromAny(raw)
 			if abs(mapFloat(row["positionAmt"])) <= 1e-10 {
@@ -170,7 +157,15 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 			out.OpenPositions++
 		}
 	}
-	haveOpenPositions := out.OpenPositions > 0
+
+	var bals []aster.Balance
+	var balErr error
+	if !havePerpWallet || !havePerpAvail || !havePerpUnreal {
+		bals, balErr = rest.GetBalance()
+		if balErr != nil {
+			missing["perp_balance"] = struct{}{}
+		}
+	}
 
 	if balErr == nil {
 		for _, b := range bals {
@@ -190,6 +185,15 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 				havePerpUnreal = true
 			}
 			break
+		}
+	}
+
+	var rows []map[string]any
+	var posErr error
+	if !haveOpenPositions || !havePerpUnreal || !haveMarginUsed {
+		rows, posErr = rest.PositionRisk("")
+		if posErr != nil {
+			missing["position_risk"] = struct{}{}
 		}
 	}
 
@@ -221,6 +225,14 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 			marginUsed = marginFromPositions
 			haveMarginUsed = true
 		}
+	}
+
+	orders, ordersErr := rest.OpenOrders("")
+	if ordersErr != nil {
+		missing["open_orders"] = struct{}{}
+	}
+	if acctErr != nil && balErr != nil && posErr != nil && ordersErr != nil {
+		return out, fmt.Errorf("account summary unavailable: acct=%v balance=%v positions=%v orders=%v", acctErr, balErr, posErr, ordersErr)
 	}
 
 	if ordersErr == nil {
