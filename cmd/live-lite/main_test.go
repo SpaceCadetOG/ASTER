@@ -1346,6 +1346,14 @@ func TestLoadSafetyConfigUsesStarterMarginForMinAvailable(t *testing.T) {
 	}
 }
 
+func TestLoadLadderConfigDefaultsStarterToTen(t *testing.T) {
+	t.Setenv("LIVE_ENTRY_STARTER_USDT", "")
+	cfg := loadLadderConfig(0)
+	if cfg.StarterUSDT != 10 {
+		t.Fatalf("expected starter default of 10, got %.2f", cfg.StarterUSDT)
+	}
+}
+
 func TestLoadWatchConfigDefaultsToOneSecond(t *testing.T) {
 	t.Setenv("LIVE_WATCHER_SEC", "")
 	t.Setenv("LIVE_WATCH_SEC", "")

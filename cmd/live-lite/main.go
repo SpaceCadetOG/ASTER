@@ -4620,7 +4620,7 @@ func loadHybridStopConfig() exitmgr.HybridStopConfig {
 
 func loadLadderConfig(defaultStarter float64) ladderConfig {
 	cfg := ladderConfig{
-		StarterUSDT:   envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(defaultStarter, 20)),
+		StarterUSDT:   envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(defaultStarter, 10)),
 		StepUSDT:      envFloat("LIVE_PYRAMID_STEP_USDT", 10),
 		MaxTotalUSDT:  envFloat("LIVE_PYRAMID_MAX_TOTAL_USDT", 50),
 		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
@@ -4629,7 +4629,7 @@ func loadLadderConfig(defaultStarter float64) ladderConfig {
 		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", true),
 	}
 	if cfg.StarterUSDT <= 0 {
-		cfg.StarterUSDT = maxFloat(defaultStarter, 20)
+		cfg.StarterUSDT = maxFloat(defaultStarter, 10)
 	}
 	if cfg.StepUSDT <= 0 {
 		cfg.StepUSDT = cfg.StarterUSDT
@@ -12168,7 +12168,7 @@ func positionPnLPct(p *livePosition, meta map[string]symbolMeta) float64 {
 
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
 	plan := ladderPlan{
-		MarginUSDT: envFloat("LIVE_ENTRY_STARTER_USDT", 20),
+		MarginUSDT: envFloat("LIVE_ENTRY_STARTER_USDT", 10),
 	}
 	if execMgr == nil {
 		return plan
@@ -14782,9 +14782,9 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 }
 
 func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
-	starterMargin := envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMargin, 20))
+	starterMargin := envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMargin, 10))
 	if starterMargin <= 0 {
-		starterMargin = maxFloat(tradeMargin, 20)
+		starterMargin = maxFloat(tradeMargin, 10)
 	}
 	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", starterMargin)
 	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
