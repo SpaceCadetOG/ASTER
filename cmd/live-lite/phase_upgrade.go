@@ -12,6 +12,7 @@ import (
 	"go-machine/internal/inplay"
 	"go-machine/internal/risk"
 	"go-machine/internal/stats"
+	"go-machine/internal/strategies"
 )
 
 type triggerState string
@@ -51,21 +52,544 @@ type missedOpportunity struct {
 	Emitted      bool
 }
 
+type OpportunityPersistence struct {
+	Symbol             string
+	Side               string
+	FirstSeenAt        time.Time
+	LastSeenAt         time.Time
+	SeenCount          int
+	TopNCount          int
+	BestRank           float64
+	VolumeTrendUp      bool
+	MomentumStableOrUp bool
+	DirectionStable    bool
+	RejectedReasons    []string
+	HadStarterSignal   bool
+	HadEntrySignal     bool
+	WasTraded          bool
+	Expired            bool
+
+	LastCombined     float64
+	LastVolumeUSD    float64
+	LastVolumeRatio  float64
+	LastSlope        float64
+	LastScore        float64
+	LastOFIZ         float64
+	LastRejectReason string
+	ReadyAt          time.Time
+	ReadyReason      string
+	LastReadyLogAt   time.Time
+}
+
+type softRejectMemory struct {
+	Symbol     string
+	Side       string
+	Reason     string
+	RecordedAt time.Time
+	ExpiresAt  time.Time
+	ImprovedAt time.Time
+	PromotedAt time.Time
+}
+
 type missedTracker struct {
-	items map[string]*missedOpportunity
+	items        map[string]*missedOpportunity
+	opp          map[string]*OpportunityPersistence
+	softRejects  map[string]softRejectMemory
+	lastPriority map[string]time.Time
 }
 
 func newMissedTracker() *missedTracker {
-	return &missedTracker{items: map[string]*missedOpportunity{}}
+	return &missedTracker{
+		items:        map[string]*missedOpportunity{},
+		opp:          map[string]*OpportunityPersistence{},
+		softRejects:  map[string]softRejectMemory{},
+		lastPriority: map[string]time.Time{},
+	}
 }
 
 func missedKey(symbol, side string, ts time.Time) string {
 	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(side)) + "|" + ts.UTC().Format(time.RFC3339)
 }
 
+func persistenceKey(symbol, side string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(side))
+}
+
+func loadOpportunityTrackConfig() opportunityTrackConfig {
+	cfg := opportunityTrackConfig{
+		Enable:                 envBool("LIVE_OPP_TRACK_ENABLE", true),
+		Window:                 time.Duration(envInt("LIVE_OPP_TRACK_WINDOW_SEC", 1800)) * time.Second,
+		MinSeenCount:           envInt("LIVE_OPP_MIN_SEEN_COUNT", 3),
+		MinTopNCount:           envInt("LIVE_OPP_MIN_TOPN_COUNT", 2),
+		SoftRejectMemoryEnable: envBool("LIVE_SOFT_REJECT_MEMORY_ENABLE", true),
+		SoftRejectMemoryTTL:    time.Duration(envInt("LIVE_SOFT_REJECT_MEMORY_TTL_SEC", 3600)) * time.Second,
+		PersistenceEntryEnable: envBool("LIVE_PERSISTENCE_ENTRY_ENABLE", true),
+		PersistenceMinRank:     envFloat("LIVE_PERSISTENCE_MIN_RANK", 0.70),
+		AllowStableVolume:      envBool("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", true),
+		AllowStableMomentum:    envBool("LIVE_PERSISTENCE_ALLOW_STABLE_MOMENTUM", true),
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = 30 * time.Minute
+	}
+	if cfg.MinSeenCount < 1 {
+		cfg.MinSeenCount = 1
+	}
+	if cfg.MinTopNCount < 1 {
+		cfg.MinTopNCount = 1
+	}
+	if cfg.SoftRejectMemoryTTL <= 0 {
+		cfg.SoftRejectMemoryTTL = time.Hour
+	}
+	if cfg.PersistenceMinRank < 0 {
+		cfg.PersistenceMinRank = 0
+	}
+	return cfg
+}
+
+type opportunityTrackConfig struct {
+	Enable                 bool
+	Window                 time.Duration
+	MinSeenCount           int
+	MinTopNCount           int
+	SoftRejectMemoryEnable bool
+	SoftRejectMemoryTTL    time.Duration
+	PersistenceEntryEnable bool
+	PersistenceMinRank     float64
+	AllowStableVolume      bool
+	AllowStableMomentum    bool
+}
+
+func softRejectReason(reason string) bool {
+	switch {
+	case strings.Contains(reason, "vol_ratio:"):
+		return true
+	case strings.Contains(reason, "below_vwap_ema"), strings.Contains(reason, "above_vwap_ema"):
+		return true
+	case strings.Contains(reason, "continuation_no_structure_confirm"):
+		return true
+	case strings.Contains(reason, "hybrid_stop_rr_too_low"), strings.Contains(reason, "hybrid_stop_too_wide"):
+		return true
+	default:
+		return false
+	}
+}
+
+func volumeIncreasing(prevVolUSD, prevRatio float64, c candidate, allowStable bool) bool {
+	curVol := maxFloat(c.VolumeUSD, 0)
+	curRatio := maxFloat(c.VolumeRatio, 0)
+	if prevVolUSD <= 0 && prevRatio <= 0 {
+		return curRatio >= 1.0 || curVol > 0
+	}
+	if prevVolUSD > 0 && curVol >= prevVolUSD*1.02 {
+		return true
+	}
+	if prevRatio > 0 && curRatio >= prevRatio*1.02 {
+		return true
+	}
+	if !allowStable {
+		return false
+	}
+	stableRatio := prevRatio > 0 && curRatio >= prevRatio*0.92 && maxFloat(curRatio, prevRatio) >= 1.0
+	stableVol := prevVolUSD > 0 && curVol >= prevVolUSD*0.92
+	return stableRatio || stableVol
+}
+
+func momentumStableOrImproving(prevSlope, prevScore float64, c candidate, allowStable bool) bool {
+	curSlope := c.Entry.ScoreSlope
+	curScore := c.Entry.CurrentScore
+	if prevSlope == 0 && prevScore == 0 {
+		return curSlope >= 0 || curScore > 0
+	}
+	if curSlope >= prevSlope+0.005 {
+		return true
+	}
+	if curScore >= prevScore+0.5 {
+		return true
+	}
+	if !allowStable {
+		return false
+	}
+	if curSlope >= prevSlope-0.015 && curScore >= prevScore-1.25 {
+		return true
+	}
+	return curSlope >= 0.02 && curScore >= prevScore-2.0
+}
+
+func directionPersistent(prevSide string, c candidate) bool {
+	if strings.TrimSpace(prevSide) == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(prevSide), strings.TrimSpace(c.Side))
+}
+
+func persistenceOFIAligned(c candidate) bool {
+	return continuationFastOFIAgrees(c, envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35))
+}
+
+func persistenceHardInvalidationReason(c candidate) string {
+	if candidateExhaustionActive(c) {
+		return "exhaustion_active"
+	}
+	if strings.EqualFold(c.Side, "BUY") && c.Entry.LongDemotionFlag {
+		return "long_demotion"
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.Entry.ShortDemotionFlag {
+		return "short_demotion"
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
+		return "avoid_chase"
+	}
+	if !continuationStateTrending(c.Entry.State) && !hasFreshStructureReset(c) {
+		return "state_not_persistent"
+	}
+	if !persistenceOFIAligned(c) && c.OFISamples >= maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8)) {
+		return "ofi_misaligned"
+	}
+	return ""
+}
+
+func appendUniqueReason(reasons []string, reason string, limit int) []string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return reasons
+	}
+	for _, existing := range reasons {
+		if strings.EqualFold(existing, reason) {
+			return reasons
+		}
+	}
+	reasons = append(reasons, reason)
+	if limit > 0 && len(reasons) > limit {
+		reasons = reasons[len(reasons)-limit:]
+	}
+	return reasons
+}
+
+func (t *missedTracker) pruneSoftRejects(now time.Time) {
+	if t == nil {
+		return
+	}
+	for key, mem := range t.softRejects {
+		if now.After(mem.ExpiresAt) {
+			delete(t.softRejects, key)
+		}
+	}
+}
+
+func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) {
+	cfg := loadOpportunityTrackConfig()
+	if t == nil || !cfg.Enable {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if raw == "" {
+		return
+	}
+	t.pruneSoftRejects(now)
+	key := persistenceKey(raw, c.Side)
+	st := t.opp[key]
+	if st == nil || st.Expired || (!st.LastSeenAt.IsZero() && now.Sub(st.LastSeenAt) > cfg.Window) {
+		st = &OpportunityPersistence{
+			Symbol:             raw,
+			Side:               strings.ToUpper(strings.TrimSpace(c.Side)),
+			FirstSeenAt:        now,
+			VolumeTrendUp:      true,
+			MomentumStableOrUp: true,
+			DirectionStable:    true,
+		}
+		t.opp[key] = st
+	}
+	prevSeen := st.SeenCount
+	st.LastSeenAt = now
+	st.Expired = false
+	st.SeenCount++
+	if topN {
+		st.TopNCount++
+	}
+	st.BestRank = maxFloat(st.BestRank, maxFloat(c.CombinedScore, c.Entry.Rank))
+	st.VolumeTrendUp = volumeIncreasing(st.LastVolumeUSD, st.LastVolumeRatio, c, cfg.AllowStableVolume)
+	st.MomentumStableOrUp = momentumStableOrImproving(st.LastSlope, st.LastScore, c, cfg.AllowStableMomentum)
+	st.DirectionStable = directionPersistent(st.Side, c)
+	st.HadStarterSignal = st.HadStarterSignal || strings.EqualFold(c.Strat, "continuation_fast_starter") || strings.EqualFold(c.Strat, "early_dev_entry") || strings.EqualFold(c.Strat, "persistence_entry")
+	st.HadEntrySignal = st.HadEntrySignal || (!strings.EqualFold(strings.TrimSpace(c.Strat), "") && !strings.EqualFold(c.Strat, "none"))
+	if strings.TrimSpace(c.RejectReason) != "" {
+		st.LastRejectReason = c.RejectReason
+		st.RejectedReasons = appendUniqueReason(st.RejectedReasons, c.RejectReason, 8)
+		if cfg.SoftRejectMemoryEnable && softRejectReason(c.RejectReason) {
+			t.softRejects[key] = softRejectMemory{
+				Symbol:     raw,
+				Side:       st.Side,
+				Reason:     c.RejectReason,
+				RecordedAt: now,
+				ExpiresAt:  now.Add(cfg.SoftRejectMemoryTTL),
+			}
+		}
+	}
+	st.LastCombined = c.CombinedScore
+	st.LastVolumeUSD = c.VolumeUSD
+	st.LastVolumeRatio = c.VolumeRatio
+	st.LastSlope = c.Entry.ScoreSlope
+	st.LastScore = c.Entry.CurrentScore
+	st.LastOFIZ = c.OFIZ
+	if prevSeen != st.SeenCount && (topN || st.SeenCount >= maxInt(2, cfg.MinSeenCount-1) || strings.TrimSpace(st.LastRejectReason) != "") {
+		fmt.Printf("MISSED_OPP_TRACK symbol=%s side=%s rank=%.2f volume_trend=%v momentum_trend=%v seen=%d topn=%d last_reject=%s\n",
+			st.Symbol, st.Side, maxFloat(c.CombinedScore, c.Entry.Rank), st.VolumeTrendUp, st.MomentumStableOrUp, st.SeenCount, st.TopNCount, firstNonEmpty(st.LastRejectReason, "none"))
+	}
+}
+
+func (t *missedTracker) persistenceState(now time.Time, c candidate) (*OpportunityPersistence, bool, []string) {
+	cfg := loadOpportunityTrackConfig()
+	if t == nil || !cfg.Enable || !cfg.PersistenceEntryEnable {
+		return nil, false, nil
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	key := persistenceKey(raw, c.Side)
+	st := t.opp[key]
+	if st == nil || st.Expired || st.WasTraded {
+		return st, false, nil
+	}
+	if now.Sub(st.LastSeenAt) > cfg.Window {
+		return st, false, nil
+	}
+	if c.Strat != "" && !strings.EqualFold(c.Strat, "none") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
+		return st, false, nil
+	}
+	if reason := persistenceHardInvalidationReason(c); reason != "" {
+		return st, false, []string{reason}
+	}
+	effectiveSeen := cfg.MinSeenCount
+	effectiveTopN := cfg.MinTopNCount
+	if mem, ok := t.softRejects[key]; ok && now.Before(mem.ExpiresAt) {
+		effectiveSeen = maxInt(2, cfg.MinSeenCount-1)
+		effectiveTopN = maxInt(1, cfg.MinTopNCount-1)
+	}
+	reasons := []string{}
+	if st.SeenCount < effectiveSeen {
+		reasons = append(reasons, fmt.Sprintf("seen_count:%d<%d", st.SeenCount, effectiveSeen))
+	}
+	if st.TopNCount < effectiveTopN {
+		reasons = append(reasons, fmt.Sprintf("topn_count:%d<%d", st.TopNCount, effectiveTopN))
+	}
+	rankNow := maxFloat(c.CombinedScore, 0)
+	if rankNow < cfg.PersistenceMinRank && st.BestRank < cfg.PersistenceMinRank {
+		reasons = append(reasons, fmt.Sprintf("rank:%.2f<%.2f", rankNow, cfg.PersistenceMinRank))
+	}
+	if !st.VolumeTrendUp {
+		reasons = append(reasons, "volume_not_stable_or_up")
+	}
+	if !st.MomentumStableOrUp {
+		reasons = append(reasons, "momentum_not_stable_or_up")
+	}
+	if !st.DirectionStable {
+		reasons = append(reasons, "direction_not_persistent")
+	}
+	if !persistenceOFIAligned(c) && c.OFISamples >= maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8)) {
+		reasons = append(reasons, "ofi_not_aligned")
+	}
+	if len(reasons) > 0 {
+		return st, false, reasons
+	}
+	return st, true, nil
+}
+
+func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *liveExecManager, log *stats.EventLogger) candidate {
+	st, ready, reasons := t.persistenceState(now, c)
+	if !ready || st == nil {
+		if st != nil && len(reasons) > 0 && strings.EqualFold(strings.TrimSpace(c.RejectReason), "") {
+			st.ReadyReason = strings.Join(reasons, ",")
+		}
+		return c
+	}
+	if execMgr != nil {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+		if execMgr.ActiveCount() > 0 && !execMgr.isActive(execMgr.positions[raw]) {
+			return c
+		}
+		if p, ok := execMgr.trackedPosition(raw); ok && p != nil && execMgr.isActive(p) {
+			return c
+		}
+	}
+	baseConf := clamp(0.46+float64(st.SeenCount)*0.02+float64(st.TopNCount)*0.03+maxFloat(0, c.CombinedScore-0.70)*0.15, 0.42, 0.68)
+	reasonsText := []string{
+		fmt.Sprintf("seen=%d", st.SeenCount),
+		fmt.Sprintf("topn=%d", st.TopNCount),
+		fmt.Sprintf("best_rank=%.2f", st.BestRank),
+		fmt.Sprintf("volume_trend=%v", st.VolumeTrendUp),
+		fmt.Sprintf("momentum_trend=%v", st.MomentumStableOrUp),
+	}
+	if strings.TrimSpace(st.LastRejectReason) != "" {
+		reasonsText = append(reasonsText, "prior_reject="+st.LastRejectReason)
+	}
+	c.Strat = "persistence_entry"
+	c.Conf = baseConf
+	c.Sig = strategies.Signal{
+		Active:     true,
+		Name:       "persistence_entry",
+		Side:       toFeatureSide(c.Side),
+		Confidence: c.Conf,
+		Tags:       []string{"starter_only", "missed_opportunity_ready", "persistence_watch"},
+		Reasons:    reasonsText,
+	}
+	c.Sig = applySignalRiskGeometry(c, "persistence_entry")
+	c.RejectReason = "missed_opportunity_ready"
+	c.QualityReasons = append(c.QualityReasons, "missed_opportunity_ready")
+	st.HadStarterSignal = true
+	st.HadEntrySignal = true
+	st.ReadyAt = now
+	st.ReadyReason = strings.Join(reasonsText, ",")
+	if st.LastReadyLogAt.IsZero() || now.Sub(st.LastReadyLogAt) > 2*time.Minute {
+		fmt.Printf("MISSED_OPP_READY symbol=%s side=%s why_now=%s why_prev_no_longer_blocks=%s\n",
+			st.Symbol, st.Side, strings.Join(reasonsText, ";"), firstNonEmpty(st.LastRejectReason, "scanner_persistence"))
+		if log != nil {
+			log.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "MISSED_OPP_READY",
+				Symbol:    st.Symbol,
+				Side:      st.Side,
+				Strategy:  c.Strat,
+				Score:     c.Entry.CurrentScore,
+				Slope:     c.Entry.ScoreSlope,
+				Combined:  c.CombinedScore,
+				Reason:    st.ReadyReason,
+			})
+		}
+		st.LastReadyLogAt = now
+		fmt.Printf("PERSISTENCE_ENTRY symbol=%s side=%s starter=20 evidence=%s\n", st.Symbol, st.Side, st.ReadyReason)
+	}
+	return c
+}
+
+func (t *missedTracker) PrioritySuggestions(now time.Time) []operatorSuggestion {
+	cfg := loadOpportunityTrackConfig()
+	if t == nil || !cfg.Enable {
+		return nil
+	}
+	t.pruneSoftRejects(now)
+	rows := make([]operatorSuggestion, 0, len(t.opp))
+	type ranked struct {
+		key string
+		opp *OpportunityPersistence
+	}
+	list := make([]ranked, 0, len(t.opp))
+	for key, opp := range t.opp {
+		if opp == nil || opp.Expired || opp.WasTraded {
+			continue
+		}
+		if now.Sub(opp.LastSeenAt) > cfg.Window {
+			continue
+		}
+		if opp.SeenCount < maxInt(2, cfg.MinSeenCount-1) {
+			continue
+		}
+		list = append(list, ranked{key: key, opp: opp})
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].opp.TopNCount == list[j].opp.TopNCount {
+			return list[i].opp.BestRank > list[j].opp.BestRank
+		}
+		return list[i].opp.TopNCount > list[j].opp.TopNCount
+	})
+	for _, item := range list {
+		opp := item.opp
+		rows = append(rows, operatorSuggestion{
+			Symbol:       opp.Symbol,
+			Side:         opp.Side,
+			Source:       "missed_opportunity_persistence",
+			PreferredLev: 0,
+			CreatedAt:    now,
+			ExpiresAt:    now.Add(smallerDuration(5*time.Minute, cfg.Window)),
+		})
+		t.lastPriority[item.key] = now
+		if len(rows) >= 6 {
+			break
+		}
+	}
+	return rows
+}
+
+func (t *missedTracker) HasPriority(now time.Time) bool {
+	return len(t.PrioritySuggestions(now)) > 0
+}
+
+func (t *missedTracker) MarkTraded(now time.Time, c candidate) {
+	if t == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	key := persistenceKey(raw, c.Side)
+	if opp := t.opp[key]; opp != nil {
+		opp.WasTraded = true
+		opp.LastSeenAt = now
+	}
+}
+
+func (t *missedTracker) ReviewLines(now time.Time, limit int) []string {
+	cfg := loadOpportunityTrackConfig()
+	if t == nil || !cfg.Enable {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	type row struct {
+		opp *OpportunityPersistence
+	}
+	rows := make([]row, 0, len(t.opp))
+	for _, opp := range t.opp {
+		if opp == nil || opp.Expired || opp.WasTraded {
+			continue
+		}
+		if now.Sub(opp.LastSeenAt) > cfg.Window {
+			continue
+		}
+		if opp.SeenCount < 2 {
+			continue
+		}
+		rows = append(rows, row{opp: opp})
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].opp.TopNCount == rows[j].opp.TopNCount {
+			return rows[i].opp.BestRank > rows[j].opp.BestRank
+		}
+		return rows[i].opp.TopNCount > rows[j].opp.TopNCount
+	})
+	out := make([]string, 0, minInt(limit, len(rows)))
+	for _, r := range rows {
+		opp := r.opp
+		status := "tracking"
+		if !opp.ReadyAt.IsZero() {
+			status = "ready"
+		}
+		out = append(out, fmt.Sprintf("%s %s seen=%d topN=%d best=%.2f status=%s lastReject=%s",
+			opp.Symbol, opp.Side, opp.SeenCount, opp.TopNCount, opp.BestRank, status, firstNonEmpty(opp.LastRejectReason, "none")))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func (t *missedTracker) Observe(now time.Time, c candidate, reason string) {
 	if t == nil || strings.TrimSpace(reason) == "" {
 		return
+	}
+	cfg := loadOpportunityTrackConfig()
+	if cfg.SoftRejectMemoryEnable {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+		key := persistenceKey(raw, c.Side)
+		if softRejectReason(reason) {
+			t.softRejects[key] = softRejectMemory{
+				Symbol:     raw,
+				Side:       strings.ToUpper(strings.TrimSpace(c.Side)),
+				Reason:     reason,
+				RecordedAt: now,
+				ExpiresAt:  now.Add(cfg.SoftRejectMemoryTTL),
+			}
+		}
+		if opp := t.opp[key]; opp != nil {
+			opp.LastRejectReason = reason
+			opp.RejectedReasons = appendUniqueReason(opp.RejectedReasons, reason, 8)
+		}
 	}
 	if c.DiscoveryScore < envFloat("LIVE_MISS_TRACK_MIN_DISCOVERY", 0.72) && c.CombinedScore < envFloat("LIVE_MISS_TRACK_MIN_COMBINED", 0.62) {
 		return
@@ -93,9 +617,11 @@ func (t *missedTracker) Observe(now time.Time, c candidate, reason string) {
 }
 
 func (t *missedTracker) Update(now time.Time, meta map[string]symbolMeta, longCurrent, shortCurrent map[string]inplay.Entry, log *stats.EventLogger) {
-	if t == nil || len(t.items) == 0 {
+	if t == nil {
 		return
 	}
+	cfg := loadOpportunityTrackConfig()
+	t.pruneSoftRejects(now)
 	for key, item := range t.items {
 		m := meta[item.Symbol]
 		px := m.LastPrice
@@ -145,6 +671,61 @@ func (t *missedTracker) Update(now time.Time, meta map[string]symbolMeta, longCu
 			delete(t.items, key)
 		}
 	}
+	for key, opp := range t.opp {
+		if opp == nil {
+			delete(t.opp, key)
+			continue
+		}
+		expireReason := ""
+		switch {
+		case opp.WasTraded && now.Sub(opp.LastSeenAt) > 10*time.Minute:
+			expireReason = "traded"
+		case now.Sub(opp.LastSeenAt) > cfg.Window:
+			expireReason = "stale_window"
+		default:
+			var cur inplay.Entry
+			var ok bool
+			if strings.EqualFold(opp.Side, "BUY") {
+				cur, ok = longCurrent[opp.Symbol]
+			} else {
+				cur, ok = shortCurrent[opp.Symbol]
+			}
+			if ok {
+				if cur.State == inplay.StateExhausted {
+					expireReason = "exhaustion"
+				} else if cur.ScoreSlope < -0.05 {
+					expireReason = "lost_momentum"
+				}
+			}
+		}
+		if expireReason == "" {
+			continue
+		}
+		opp.Expired = true
+		fmt.Printf("MISSED_OPP_EXPIRE symbol=%s side=%s why=%s seen=%d topn=%d\n",
+			opp.Symbol, opp.Side, expireReason, opp.SeenCount, opp.TopNCount)
+		if log != nil {
+			log.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "MISSED_OPP_EXPIRE",
+				Symbol:    opp.Symbol,
+				Side:      opp.Side,
+				Reason:    expireReason,
+				Combined:  opp.BestRank,
+			})
+		}
+		delete(t.opp, key)
+	}
+}
+
+func smallerDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 func forwardExcursionPct(side string, entry, px float64) float64 {

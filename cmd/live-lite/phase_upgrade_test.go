@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,99 @@ func TestMissedTrackerEmitsAfterFifteenMinutes(t *testing.T) {
 	trk.Update(now.Add(16*time.Minute), meta, nil, nil, nil)
 	if len(trk.items) != 0 {
 		t.Fatalf("expected tracker item to flush after 15m")
+	}
+}
+
+func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
+	t.Setenv("LIVE_OPP_TRACK_ENABLE", "1")
+	t.Setenv("LIVE_OPP_TRACK_WINDOW_SEC", "1800")
+	t.Setenv("LIVE_OPP_MIN_SEEN_COUNT", "3")
+	t.Setenv("LIVE_OPP_MIN_TOPN_COUNT", "2")
+	t.Setenv("LIVE_SOFT_REJECT_MEMORY_ENABLE", "1")
+	t.Setenv("LIVE_SOFT_REJECT_MEMORY_TTL_SEC", "3600")
+	t.Setenv("LIVE_PERSISTENCE_ENTRY_ENABLE", "1")
+	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
+	t.Setenv("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", "1")
+	t.Setenv("LIVE_PERSISTENCE_ALLOW_STABLE_MOMENTUM", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
+
+	trk := newMissedTracker()
+	base := candidate{
+		Side:          "BUY",
+		Strat:         "none",
+		CombinedScore: 0.76,
+		VolumeUSD:     1_000_000,
+		VolumeRatio:   1.05,
+		OFIZ:          0.48,
+		OFISamples:    10,
+		LastClose:     1.05,
+		SessionVWAP:   1.04,
+		EMA9:          1.04,
+		RejectReason:  "continuation_no_structure_confirm",
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateInPlay,
+			CurrentScore: 91,
+			ScoreSlope:   0.08,
+		},
+	}
+	now := time.Date(2026, 3, 25, 13, 0, 0, 0, time.UTC)
+	trk.ObserveCandidate(now, base, true)
+	base.VolumeUSD = 1_050_000
+	base.VolumeRatio = 1.10
+	base.Entry.ScoreSlope = 0.09
+	trk.ObserveCandidate(now.Add(30*time.Second), base, true)
+	base.VolumeUSD = 1_100_000
+	base.VolumeRatio = 1.12
+	base.Entry.ScoreSlope = 0.11
+	base.RejectReason = ""
+	trk.ObserveCandidate(now.Add(time.Minute), base, false)
+
+	got := trk.PromoteCandidate(now.Add(90*time.Second), base, nil, nil)
+	if got.Strat != "persistence_entry" {
+		t.Fatalf("expected persistence_entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+	if got.Conf <= 0 {
+		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	}
+}
+
+func TestMissedTrackerReviewLinesShowsPersistentReady(t *testing.T) {
+	t.Setenv("LIVE_OPP_TRACK_ENABLE", "1")
+	t.Setenv("LIVE_OPP_MIN_SEEN_COUNT", "2")
+	t.Setenv("LIVE_OPP_MIN_TOPN_COUNT", "1")
+	t.Setenv("LIVE_PERSISTENCE_ENTRY_ENABLE", "1")
+	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	trk := newMissedTracker()
+	now := time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)
+	c := candidate{
+		Side:          "SELL",
+		Strat:         "none",
+		CombinedScore: 0.79,
+		VolumeUSD:     900_000,
+		VolumeRatio:   1.15,
+		OFIZ:          -0.60,
+		OFISamples:    12,
+		LastClose:     0.95,
+		SessionVWAP:   0.96,
+		EMA9:          0.955,
+		Entry: inplay.Entry{
+			Symbol:       "SIRENUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateInPlay,
+			CurrentScore: 94,
+			ScoreSlope:   0.10,
+		},
+	}
+	trk.ObserveCandidate(now, c, true)
+	trk.ObserveCandidate(now.Add(20*time.Second), c, true)
+	_ = trk.PromoteCandidate(now.Add(25*time.Second), c, nil, nil)
+	rows := trk.ReviewLines(now.Add(30*time.Second), 2)
+	if len(rows) == 0 || !strings.Contains(rows[0], "SIRENUSDT") {
+		t.Fatalf("expected review line for ready persistent opportunity, got %v", rows)
 	}
 }
 

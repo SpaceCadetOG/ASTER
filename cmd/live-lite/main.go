@@ -159,6 +159,19 @@ const (
 	protectionStageLocked
 )
 
+type utcSessionPhase string
+
+const (
+	sessionUTCOffHours  utcSessionPhase = "UTC_OFF_HOURS"
+	sessionAsiaDev      utcSessionPhase = "ASIA_DEV"
+	sessionAsiaBreakout utcSessionPhase = "ASIA_BREAKOUT"
+	sessionAsiaContinue utcSessionPhase = "ASIA_CONTINUE"
+	sessionLondonOpen   utcSessionPhase = "LONDON_OPEN"
+	sessionLondonExpand utcSessionPhase = "LONDON_EXPAND"
+	sessionNYOpen       utcSessionPhase = "NY_OPEN"
+	sessionNYExpand     utcSessionPhase = "NY_EXPAND"
+)
+
 type candidateLifecycleConfig struct {
 	Enable        bool
 	ArmScans      int
@@ -298,6 +311,7 @@ type telegramCommandCtx struct {
 	rest    *aster.RESTAuth
 	execMgr *liveExecManager
 	paper   *paperTrader
+	missed  *missedTracker
 	safety  safetyConfig
 	status  *liveLiteStatusStore
 	mode    *runtimeModeController
@@ -687,7 +701,11 @@ type livePosition struct {
 	FilledQty              float64         `json:"filledQty"`
 	RemainingQty           float64         `json:"remainingQty"`
 	Margin                 float64         `json:"margin"`
+	DeployedMargin         float64         `json:"deployedMargin,omitempty"`
 	Leverage               int             `json:"leverage"`
+	AddCount               int             `json:"addCount,omitempty"`
+	StarterOnly            bool            `json:"starterOnly,omitempty"`
+	AddLockedUntilConfirm  bool            `json:"addLockedUntilConfirm,omitempty"`
 	StopPrice              float64         `json:"stopPrice"`
 	TP1Price               float64         `json:"tp1Price"`
 	TP2Price               float64         `json:"tp2Price"`
@@ -748,6 +766,16 @@ type livePosition struct {
 	RealizedPnL            float64         `json:"realizedPnl,omitempty"`
 	UnknownEntryChecks     int             `json:"unknownEntryChecks,omitempty"`
 	UnknownExitChecks      int             `json:"unknownExitChecks,omitempty"`
+	PendingAddOrderID      int64           `json:"pendingAddOrderId,omitempty"`
+	PendingAddPrice        float64         `json:"pendingAddPrice,omitempty"`
+	PendingAddQty          float64         `json:"pendingAddQty,omitempty"`
+	PendingAddFilledQty    float64         `json:"pendingAddFilledQty,omitempty"`
+	PendingAddMargin       float64         `json:"pendingAddMargin,omitempty"`
+	PendingAddCreatedAt    time.Time       `json:"pendingAddCreatedAt,omitempty"`
+	PendingAddEntryReason  string          `json:"pendingAddEntryReason,omitempty"`
+	ProfitSweptUSDT        float64         `json:"profitSweptUsdt,omitempty"`
+	ReentryCount           int             `json:"reentryCount,omitempty"`
+	ExhaustionExit         bool            `json:"exhaustionExit,omitempty"`
 	ProtectionStage        protectionStage `json:"protectionStage,omitempty"`
 	FirstProtectAt         time.Time       `json:"firstProtectAt,omitempty"`
 	ProtectedStop          float64         `json:"protectedStop,omitempty"`
@@ -823,7 +851,56 @@ type liveExecManager struct {
 	featureCache         *featureRuntimeCache
 	manualConfirm        bool
 	manualRequests       map[string]manualManageRequest
+	ladderCfg            ladderConfig
+	fundsCfg             fundsManagerConfig
+	reentryCfg           reentryConfig
+	postWinCooldownCfg   postWinCooldownConfig
+	transferManager      TransferManager
+	accountReportCfg     accountReportConfig
+	accountReport        accountReport
+	lastTransferStatus   string
 }
+
+type ladderConfig struct {
+	StarterUSDT   float64
+	StepUSDT      float64
+	MaxTotalUSDT  float64
+	OnlyIfGreen   bool
+	MinAddPnLPct  float64
+	MaxAdds       int
+	OneSymbolOnly bool
+}
+
+type fundsManagerConfig struct {
+	Enable                    bool
+	PerpTargetUSDT            float64
+	PerpFloorUSDT             float64
+	TopupMinUSDT              float64
+	SweepProfitEnable         bool
+	SweepExcessOverTargetOnly bool
+}
+
+type reentryConfig struct {
+	Enable       bool
+	SizeUSDT     float64
+	MaxPerSymbol int
+	Cooldown     time.Duration
+}
+
+type postWinCooldownConfig struct {
+	Enable       bool
+	ThresholdPct float64
+	Cooldown     time.Duration
+}
+
+type TransferManager interface {
+	Supported() bool
+	SpotAvailableUSDT() (float64, error)
+	TransferSpotToPerp(amount float64) error
+	TransferPerpToSpot(amount float64) error
+}
+
+type noopTransferManager struct{}
 
 type liveExecSnapshot struct {
 	Generated time.Time      `json:"generated"`
@@ -947,13 +1024,13 @@ type payoutManager struct {
 }
 
 func main() {
-	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 30)) * time.Second
+	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 10)) * time.Second
 	dryRun := envBool("LIVE_DRY_RUN", true)
 	minGrade := envStr("LIVE_MIN_GRADE", "B")
-	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 5)
+	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 0)
 	reserveMode := strings.ToLower(envStr("LIVE_RESERVE_MODE", "fixed")) // fixed|percent|dynamic
 	reservePct := envFloat("LIVE_RESERVE_PCT", 50.0)
-	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 10)
+	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 20)
 	tradeMarginMode := strings.ToLower(envStr("LIVE_TRADE_MARGIN_MODE", "fixed")) // fixed|percent|slots|dynamic
 	tradeMarginPct := envFloat("LIVE_TRADE_MARGIN_PCT", 10.0)
 	tradeSlots := envInt("LIVE_TRADE_SLOTS", 5)
@@ -962,6 +1039,7 @@ func main() {
 	}
 	tradeMarginMin := envFloat("LIVE_TRADE_MARGIN_MIN_USDT", 5.0)
 	tradeMarginMax := envFloat("LIVE_TRADE_MARGIN_MAX_USDT", 200.0)
+	ladderCfg := loadLadderConfig(tradeMargin)
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
 	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 3)
 	leverageMin := envInt("LIVE_LEVERAGE_MIN", 3)
@@ -1003,11 +1081,11 @@ func main() {
 	if strategyTopN <= 0 {
 		strategyTopN = 3
 	}
-	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 5)
+	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 1)
 	if maxOpenPos <= 0 {
 		maxOpenPos = 1
 	}
-	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 0)
+	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 1)
 	if maxOpenPerSide < 0 {
 		maxOpenPerSide = 0
 	}
@@ -1453,6 +1531,16 @@ func main() {
 	handledClosedLive := map[string]time.Time{}
 	recentEntryAttempts := []time.Time{}
 	missed := newMissedTracker()
+	if cmdCtx != nil {
+		cmdCtx.missed = missed
+	}
+	liveLitePriorityActive = func() bool {
+		active := cmdCtx != nil && cmdCtx.hasActiveSuggestions()
+		if missed != nil && missed.HasPriority(time.Now().UTC()) {
+			active = true
+		}
+		return active
+	}
 	lastScanAt := time.Time{}
 	cachedLongInPlay := []inplay.Entry{}
 	cachedShortInPlay := []inplay.Entry{}
@@ -1654,6 +1742,22 @@ func main() {
 				watchExtra = append(watchExtra, s.Symbol)
 			}
 		}
+		if missed != nil {
+			persistPriority := missed.PrioritySuggestions(now)
+			if len(persistPriority) > 0 {
+				activeSuggestions = append(activeSuggestions, persistPriority...)
+				for _, s := range persistPriority {
+					watchExtra = append(watchExtra, s.Symbol)
+				}
+			}
+		}
+		sessionPriority := buildSessionPrioritySuggestions(now, longInPlay, shortInPlay)
+		if len(sessionPriority) > 0 {
+			activeSuggestions = append(activeSuggestions, sessionPriority...)
+			for _, s := range sessionPriority {
+				watchExtra = append(watchExtra, s.Symbol)
+			}
+		}
 		if watcher != nil {
 			watcher.SetSnapshot(longInPlay, shortInPlay, metaBySymbol, watchExtra, activeSuggestions)
 			_ = watcher.Tick(now)
@@ -1754,7 +1858,7 @@ func main() {
 			hk := localMaintNow.Format("2006-01-02 15")
 			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 				if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, execMgr, missed, metaBySymbol, longInPlay, shortInPlay, digestLimit))
 					lastPulseSentAt = now
 					lastHourlyKey = hk
 				}
@@ -1932,7 +2036,7 @@ func main() {
 			wallSignals = watcher.WallSignals()
 		}
 		filtered := make([]candidate, 0, len(cands))
-		for _, c := range cands {
+		for idx, c := range cands {
 			rawCandidate := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 			if ws, ok := wallSignals[rawCandidate]; ok {
 				c = applyWallSignal(c, ws)
@@ -1978,6 +2082,10 @@ func main() {
 				c.QualityReasons = append(c.QualityReasons, "trigger_stage:"+strings.ToLower(c.TriggerStage))
 			}
 			c.TradeQuality = c.CombinedScore
+			if missed != nil {
+				missed.ObserveCandidate(now, c, idx < maxInt(1, acceptanceCfg.TopN))
+				c = missed.PromoteCandidate(now, c, execMgr, eventLog)
+			}
 			eventLog.Emit(stats.Event{
 				Timestamp:    now,
 				Type:         "SIGNAL",
@@ -2522,6 +2630,9 @@ func main() {
 			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*starterFrac)
 		}
 		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+		if ladderCfg.StarterUSDT > 0 {
+			effectiveMargin = ladderCfg.StarterUSDT
+		}
 		bestMeta := metaBySymbol[rawBest]
 		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
@@ -2790,6 +2901,9 @@ func main() {
 				if err != nil {
 					fmt.Println("paper enter skip:", err)
 				} else if pp != nil {
+					if missed != nil {
+						missed.MarkTraded(now, best)
+					}
 					markSessionEntry(sessionChurns, now, best)
 					recentEntryAttempts = append(recentEntryAttempts, now)
 					eventLog.Emit(stats.Event{
@@ -2880,17 +2994,32 @@ func main() {
 			waitAndReport()
 			continue
 		}
-		if execMgr != nil && execMgr.HasActiveSymbol(best.Entry.Symbol) {
-			allowPyramid := (strings.EqualFold(best.Strat, "guerilla_long_runner") && envBool("LIVE_GUERILLA_LONG_PYRAMID_ENABLE", true)) ||
-				(strings.EqualFold(best.Strat, "guerilla_short_runner") && envBool("LIVE_GUERILLA_SHORT_RUNNER_PYRAMID_ENABLE", true))
-			if allowPyramid {
-				if pos, ok := execMgr.LivePositionBySymbol(best.Entry.Symbol); !ok || !strings.EqualFold(strings.TrimSpace(pos.Side), strings.TrimSpace(best.Side)) {
-					allowPyramid = false
-				}
-			}
-			if !allowPyramid {
-				recordCandidateDecision(cmdCtx, best, "already_active_in_exec_state")
-				fmt.Printf("live-lite: skip (%s already active in exec state)\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)))
+		ladderPlan := resolveLadderPlan(now, best, execMgr, metaBySymbol)
+		if ladderPlan.MarginUSDT > 0 {
+			effectiveMargin = ladderPlan.MarginUSDT
+		}
+		if ladderPlan.RejectReason != "" {
+			recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
+			st.TopRejectReason = ladderPlan.RejectReason
+			statusStore.Set(st)
+			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
+			waitAndReport()
+			continue
+		}
+		if reason := sessionEntryRejectReason(now, best, ladderPlan); reason != "" {
+			recordCandidateDecision(cmdCtx, best, reason)
+			st.TopRejectReason = reason
+			statusStore.Set(st)
+			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
+			waitAndReport()
+			continue
+		}
+		if !ladderPlan.IsAdd {
+			if reason := postWinCooldownRejectReason(now, best, execMgr); reason != "" {
+				recordCandidateDecision(cmdCtx, best, reason)
+				st.TopRejectReason = reason
+				statusStore.Set(st)
+				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
 				waitAndReport()
 				continue
 			}
@@ -2930,6 +3059,11 @@ func main() {
 				continue
 			}
 		}
+		if execMgr != nil {
+			if refreshed, toppedUp := execMgr.EnsureEntryFunds(maxFloat(safety.minAvailUSDT, effectiveMargin), avail); toppedUp {
+				avail = refreshed
+			}
+		}
 		if avail < safety.minAvailUSDT {
 			recordCandidateDecision(cmdCtx, best, "min_available_usdt")
 			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
@@ -2943,7 +3077,9 @@ func main() {
 			continue
 		}
 		effectiveReserve = computeReserveUSDT(reserveMode, reserveUSDT, reservePct, avail, paper)
-		effectiveMargin = computeTradeMargin(tradeMarginMode, tradeMargin, tradeMarginPct, tradeSlots, tradeMarginMin, tradeMarginMax, effectiveReserve, avail, paper)
+		if ladderPlan.MarginUSDT > 0 {
+			effectiveMargin = ladderPlan.MarginUSDT
+		}
 		usable := avail - effectiveReserve
 		baseBal := sizingBaseBalance(avail, paper)
 		if reserveGate != nil {
@@ -2984,7 +3120,7 @@ func main() {
 				continue
 			}
 		}
-		if openCount >= maxOpenPos {
+		if !ladderPlan.IsAdd && openCount >= maxOpenPos {
 			recordCandidateDecision(cmdCtx, best, "max_open_positions")
 			fmt.Printf("live-lite: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
@@ -2996,7 +3132,7 @@ func main() {
 			waitAndReport()
 			continue
 		}
-		if maxOpenPerSide > 0 {
+		if !ladderPlan.IsAdd && maxOpenPerSide > 0 {
 			openSideCount := countOpenPositionsBySide(acct, best.Side)
 			if execMgr != nil && openSideCount == 0 {
 				openSideCount = execMgr.ActiveCountBySide(best.Side)
@@ -3014,7 +3150,7 @@ func main() {
 				continue
 			}
 		}
-		if execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
+		if !ladderPlan.IsAdd && execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
 			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
 			fmt.Printf("live-lite: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
 			waitAndReport()
@@ -3026,6 +3162,15 @@ func main() {
 			fmt.Println("live-lite: execution manager unavailable")
 			waitAndReport()
 			continue
+		}
+		intentReason := "live_intent"
+		submitType := "ORDER_SUBMIT"
+		if ladderPlan.IsAdd {
+			intentReason = "live_add_intent"
+			submitType = "ORDER_ADD_SUBMIT"
+		} else if ladderPlan.IsReentry {
+			intentReason = "live_reentry_intent"
+			submitType = "ORDER_REENTRY_SUBMIT"
 		}
 		eventLog.Emit(stats.Event{
 			Timestamp:    now,
@@ -3043,11 +3188,11 @@ func main() {
 			Execution:    best.ExecutionScore,
 			Combined:     best.CombinedScore,
 			EntryPx:      best.Sig.Entry,
-			Reason:       "live_intent",
+			Reason:       intentReason,
 		})
 		eventLog.Emit(stats.Event{
 			Timestamp:    now,
-			Type:         "ORDER_SUBMIT",
+			Type:         submitType,
 			Symbol:       strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
 			Side:         best.Side,
 			TF:           "1m",
@@ -3062,7 +3207,7 @@ func main() {
 			Combined:     best.CombinedScore,
 			EntryPx:      best.Sig.Entry,
 		})
-		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev); err != nil {
+		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev, ladderPlan); err != nil {
 			recordCandidateDecision(cmdCtx, best, "order_error")
 			fmt.Println("live-lite: place error:", err)
 			eventLog.Emit(stats.Event{
@@ -3090,6 +3235,9 @@ func main() {
 				))
 			}
 		} else {
+			if missed != nil {
+				missed.MarkTraded(now, best)
+			}
 			markSessionEntry(sessionChurns, now, best)
 			recentEntryAttempts = append(recentEntryAttempts, now)
 			recordCandidateDecision(cmdCtx, best, "")
@@ -3142,17 +3290,17 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, maxInt(1, limit))
 	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE-LITE DIGEST",
 		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
-		fmt.Sprintf("<b>Regime:</b> %s", data.CurrentRegimeCT(now)),
+		fmt.Sprintf("<b>Session:</b> %s", sessionTag(now)),
 		notify.BuildScannerSnapshotHTML(longTop, shortTop, bias),
 	))
 }
 
-func buildHourlyDigest(now time.Time, p *paperTrader, m *liveExecManager, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
+func buildHourlyDigest(now time.Time, p *paperTrader, m *liveExecManager, missed *missedTracker, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry, topN int) string {
 	if p != nil && p.enabled {
 		return buildClassicDigest("Hourly Digest", now, p, meta, longInPlay, shortInPlay)
 	}
 	if m != nil {
-		return buildLiveDigest("Hourly Digest", now, m, meta, longInPlay, shortInPlay)
+		return buildLiveDigest("Hourly Digest", now, m, missed, meta, longInPlay, shortInPlay)
 	}
 	return tgPre(fmt.Sprintf("Hourly Digest (%s) session=%s\nno active paper/live manager", now.Format("15:04 MST"), sessionTag(now)))
 }
@@ -3197,7 +3345,7 @@ func buildSODReport(now time.Time, p *paperTrader, meta map[string]symbolMeta) s
 	return buildClassicDigest("SOD Report", now, p, meta, nil, nil)
 }
 
-func buildLiveDigest(label string, now time.Time, m *liveExecManager, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) string {
+func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *missedTracker, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) string {
 	if m == nil {
 		return tgPre(fmt.Sprintf("%s (%s) session=%s\nlive disabled", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now)))
 	}
@@ -3211,6 +3359,21 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, meta map[s
 			}
 			b.WriteString("\n\n")
 			b.WriteString(notify.BuildPositionCard(card))
+		}
+	}
+	if acct := strings.TrimSpace(m.AccountDigestSection()); acct != "" {
+		b.WriteString("\n\n")
+		b.WriteString(acct)
+	}
+	if missed != nil {
+		if rows := missed.ReviewLines(now.UTC(), 4); len(rows) > 0 {
+			b.WriteString("\n\nMissed Opportunities\n")
+			for _, row := range rows {
+				b.WriteString("- ")
+				b.WriteString(row)
+				b.WriteByte('\n')
+			}
+			b.WriteString("What triggers persistence_entry: repeated top-rank presence, stable/up volume, stable/up momentum, no hard invalidation\n")
 		}
 	}
 	b.WriteString("\n\nLive Update\n")
@@ -3852,12 +4015,6 @@ func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mf
 		}
 	}
 	if mfeR >= stage2R {
-		lockR := envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20)
-		stop := lockToRPrice(side, entry, currentStop, lockR)
-		if improved, ok := improvedStopPrice(side, newStop, stop); ok {
-			newStop = improved
-			changed = true
-		}
 		if stage != nil && *stage < protectionStageLocked {
 			*stage = protectionStageLocked
 		}
@@ -4399,10 +4556,10 @@ func mergeTopOfBookIntoMeta(meta map[string]symbolMeta, books map[string]aster.O
 }
 
 func loadWatchConfig() watchConfig {
-	watchSec := envInt("LIVE_WATCHER_SEC", envInt("LIVE_WATCH_SEC", 3))
+	watchSec := envInt("LIVE_WATCHER_SEC", envInt("LIVE_WATCH_SEC", 1))
 	every := time.Duration(watchSec) * time.Second
 	if every <= 0 {
-		every = 3 * time.Second
+		every = time.Second
 	}
 	prioritySec := envInt("LIVE_PRIORITY_WATCH_EVERY_SEC", 1)
 	priorityEvery := time.Duration(prioritySec) * time.Second
@@ -4455,7 +4612,111 @@ func loadHybridStopConfig() exitmgr.HybridStopConfig {
 	cfg.MinWidthPct = envFloat("LIVE_MIN_STOP_PCT", cfg.MinWidthPct)
 	cfg.MaxWidthPct = envFloat("LIVE_STOP_MAX_WIDTH_PCT", envFloat("LIVE_MAX_STOP_PCT", cfg.MaxWidthPct))
 	cfg.MinRRToTP1 = envFloat("LIVE_STOP_MIN_RR_TO_TP1", envFloat("LIVE_MIN_RR_TP1", cfg.MinRRToTP1))
+	cfg.SoftRejectEnable = envBool("LIVE_STOP_SOFT_REJECT_ENABLE", cfg.SoftRejectEnable)
+	cfg.SoftRejectMaxWidthPct = envFloat("LIVE_STOP_SOFT_REJECT_MAX_WIDTH_PCT", cfg.SoftRejectMaxWidthPct)
+	cfg.SoftRejectMinRRToTP1 = envFloat("LIVE_STOP_SOFT_REJECT_MIN_RR_TO_TP1", cfg.SoftRejectMinRRToTP1)
 	return cfg
+}
+
+func loadLadderConfig(defaultStarter float64) ladderConfig {
+	cfg := ladderConfig{
+		StarterUSDT:   envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(defaultStarter, 20)),
+		StepUSDT:      envFloat("LIVE_PYRAMID_STEP_USDT", 10),
+		MaxTotalUSDT:  envFloat("LIVE_PYRAMID_MAX_TOTAL_USDT", 50),
+		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
+		MinAddPnLPct:  envFloat("LIVE_PYRAMID_MIN_ADD_PNL_PCT", 0.75),
+		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 3),
+		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", true),
+	}
+	if cfg.StarterUSDT <= 0 {
+		cfg.StarterUSDT = maxFloat(defaultStarter, 20)
+	}
+	if cfg.StepUSDT <= 0 {
+		cfg.StepUSDT = cfg.StarterUSDT
+	}
+	if cfg.MaxTotalUSDT < cfg.StarterUSDT {
+		cfg.MaxTotalUSDT = cfg.StarterUSDT
+	}
+	if cfg.MaxAdds < 0 {
+		cfg.MaxAdds = 0
+	}
+	return cfg
+}
+
+func loadFundsManagerConfig() fundsManagerConfig {
+	cfg := fundsManagerConfig{
+		Enable:                    envBool("LIVE_FUNDS_MANAGER_ENABLE", false),
+		PerpTargetUSDT:            envFloat("LIVE_PERP_BAL_TARGET_USDT", 100),
+		PerpFloorUSDT:             envFloat("LIVE_PERP_BAL_FLOOR_USDT", 50),
+		TopupMinUSDT:              envFloat("LIVE_TOPUP_MIN_USDT", 10),
+		SweepProfitEnable:         envBool("LIVE_SWEEP_PROFIT_ENABLE", true),
+		SweepExcessOverTargetOnly: envBool("LIVE_SWEEP_EXCESS_OVER_TARGET_ONLY", false),
+	}
+	if cfg.PerpTargetUSDT < 0 {
+		cfg.PerpTargetUSDT = 0
+	}
+	if cfg.PerpFloorUSDT < 0 {
+		cfg.PerpFloorUSDT = 0
+	}
+	if cfg.PerpTargetUSDT < cfg.PerpFloorUSDT {
+		cfg.PerpTargetUSDT = cfg.PerpFloorUSDT
+	}
+	if cfg.TopupMinUSDT < 0 {
+		cfg.TopupMinUSDT = 0
+	}
+	return cfg
+}
+
+func loadReentryConfig(defaultSize float64) reentryConfig {
+	cfg := reentryConfig{
+		Enable:       envBool("LIVE_REENTRY_ENABLE", true),
+		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 20)),
+		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 1),
+		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
+	}
+	if cfg.SizeUSDT <= 0 {
+		cfg.SizeUSDT = maxFloat(defaultSize, 20)
+	}
+	if cfg.MaxPerSymbol < 0 {
+		cfg.MaxPerSymbol = 0
+	}
+	if cfg.Cooldown < 0 {
+		cfg.Cooldown = 0
+	}
+	return cfg
+}
+
+func loadPostWinCooldownConfig() postWinCooldownConfig {
+	cfg := postWinCooldownConfig{
+		Enable:       envBool("LIVE_POST_WIN_COOLDOWN_ENABLE", true),
+		ThresholdPct: envFloat("LIVE_POST_WIN_THRESHOLD_PCT", 50),
+		Cooldown:     time.Duration(envInt("LIVE_POST_WIN_COOLDOWN_SEC", 1800)) * time.Second,
+	}
+	if cfg.ThresholdPct < 0 {
+		cfg.ThresholdPct = 0
+	}
+	if cfg.Cooldown < 0 {
+		cfg.Cooldown = 0
+	}
+	return cfg
+}
+
+func newTransferManager(_ *aster.RESTAuth) TransferManager {
+	return noopTransferManager{}
+}
+
+func (noopTransferManager) Supported() bool { return false }
+
+func (noopTransferManager) SpotAvailableUSDT() (float64, error) {
+	return 0, fmt.Errorf("spot<->perp internal transfers are not supported by the current aster adapter")
+}
+
+func (noopTransferManager) TransferSpotToPerp(amount float64) error {
+	return fmt.Errorf("spot->perp transfer unavailable for amount %.2f: adapter support not implemented", amount)
+}
+
+func (noopTransferManager) TransferPerpToSpot(amount float64) error {
+	return fmt.Errorf("perp->spot transfer unavailable for amount %.2f: adapter support not implemented", amount)
 }
 
 func copySymbolMetaMap(in map[string]symbolMeta) map[string]symbolMeta {
@@ -4467,6 +4728,58 @@ func copySymbolMetaMap(in map[string]symbolMeta) map[string]symbolMeta {
 		out[k] = v
 	}
 	return out
+}
+
+func qualifiesEarlyDevWatchEntry(e inplay.Entry) bool {
+	if gradeValue(e.CurrentGrade) < gradeValue("A") {
+		return false
+	}
+	if !(e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping) {
+		return false
+	}
+	if e.ScoreSlope < envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02) {
+		return false
+	}
+	if e.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
+		return false
+	}
+	if e.Rank > 4.0 {
+		return false
+	}
+	if e.LongDemotionFlag || e.ShortDemotionFlag {
+		return false
+	}
+	return true
+}
+
+func buildSessionPrioritySuggestions(now time.Time, longInPlay, shortInPlay []inplay.Entry) []operatorSuggestion {
+	if sessionPhaseUTC(now) != sessionAsiaDev {
+		return nil
+	}
+	rows := make([]operatorSuggestion, 0, 4)
+	add := func(side string, entries []inplay.Entry) {
+		for _, e := range entries {
+			if !qualifiesEarlyDevWatchEntry(e) {
+				continue
+			}
+			rows = append(rows, operatorSuggestion{
+				Symbol:       strings.ToUpper(aster.RawSymbol(e.Symbol)),
+				Side:         side,
+				Source:       "asia_dev_watchlist",
+				PreferredLev: 0,
+				CreatedAt:    now,
+				ExpiresAt:    now.Add(20 * time.Minute),
+			})
+			if len(rows) >= 4 {
+				return
+			}
+		}
+	}
+	add("BUY", longInPlay)
+	if len(rows) < 4 {
+		add("SELL", shortInPlay)
+	}
+	return rows
 }
 
 func buildWatchSymbols(longInPlay, shortInPlay []inplay.Entry, extra []string, maxN int) []string {
@@ -5350,6 +5663,11 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if rest == nil {
 		return nil
 	}
+	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 20)
+	ladderCfg := loadLadderConfig(tradeMargin)
+	fundsCfg := loadFundsManagerConfig()
+	reentryCfg := loadReentryConfig(ladderCfg.StarterUSDT)
+	postWinCooldownCfg := loadPostWinCooldownConfig()
 	stopPct := envFloat("LIVE_STOP_PCT", 3.0)
 	if stopPct <= 0 {
 		stopPct = 3.0
@@ -5431,6 +5749,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		riskMarginPct = 0
 	}
 	hybridStopCfg := loadHybridStopConfig()
+	accountReportCfg := loadAccountReportConfig()
 	marginType := strings.ToUpper(envStr("LIVE_MARGIN_TYPE", "ISOLATED"))
 	enforceIsolated := envBool("LIVE_ENFORCE_MARGIN_TYPE", true)
 	multiAssetMode := envBool("LIVE_MULTI_ASSET_MODE", false)
@@ -5466,7 +5785,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	}
 	stopTriggerRef := strings.ToLower(envStr("LIVE_STOP_TRIGGER_REF", "mark"))
 	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "mark"))
-	snapshotPoll := time.Duration(envInt("LIVE_ACCOUNT_SNAPSHOT_SEC", 2)) * time.Second
+	snapshotPoll := accountReportCfg.RefreshEvery
 	if snapshotPoll <= 0 {
 		snapshotPoll = 2 * time.Second
 	}
@@ -5536,6 +5855,12 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		marketCancels:        map[string]context.CancelFunc{},
 		manualConfirm:        envBool("LIVE_MANUAL_CONFIRM_ENABLE", true),
 		manualRequests:       map[string]manualManageRequest{},
+		ladderCfg:            ladderCfg,
+		fundsCfg:             fundsCfg,
+		reentryCfg:           reentryCfg,
+		postWinCooldownCfg:   postWinCooldownCfg,
+		transferManager:      newTransferManager(rest),
+		accountReportCfg:     accountReportCfg,
 		exitManager: exitmgr.NewManager(exitmgr.Config{
 			FrontRunPct:            envFloat("LIVE_TP_FRONT_RUN_PCT", 0.001),
 			NoFollowThroughBars:    envInt("LIVE_EXIT_NO_FT_BARS", 36),
@@ -5569,7 +5894,19 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		m.recoverATRMult = 1.5
 	}
 	_ = m.load()
+	for _, p := range m.positions {
+		if p == nil {
+			continue
+		}
+		if p.DeployedMargin <= 0 {
+			p.DeployedMargin = maxFloat(p.Margin, p.DeployedMargin)
+		}
+		if p.EntrySource == "" {
+			p.EntrySource = "BOT"
+		}
+	}
 	go m.runLiveAccountSnapshotLoop()
+	go m.runAccountReportingLoop()
 	return m
 }
 
@@ -5732,6 +6069,182 @@ func (m *liveExecManager) save() error {
 		return err
 	}
 	return os.WriteFile(m.path, b, 0o644)
+}
+
+func (m *liveExecManager) trackedPosition(symbol string) (*livePosition, bool) {
+	if m == nil {
+		return nil, false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return nil, false
+	}
+	p, ok := m.positions[raw]
+	if !ok || p == nil {
+		return nil, false
+	}
+	return p, true
+}
+
+func (m *liveExecManager) EnsureEntryFunds(required, currentAvail float64) (float64, bool) {
+	if m == nil || !m.fundsCfg.Enable || required <= 0 || currentAvail >= required {
+		return currentAvail, false
+	}
+	if m.transferManager == nil || !m.transferManager.Supported() {
+		m.recordTransferStatus(fmt.Sprintf("topup unavailable required=%.2f avail=%.2f", required, currentAvail))
+		fmt.Printf("live-lite: funds manager top-up unavailable required=%.2f avail=%.2f reason=transfer_unsupported\n", required, currentAvail)
+		return currentAvail, false
+	}
+	shortfall := required - currentAvail
+	if shortfall <= 0 {
+		return currentAvail, false
+	}
+	transferAmt := shortfall
+	if targetGap := m.fundsCfg.PerpTargetUSDT - currentAvail; targetGap > transferAmt {
+		transferAmt = targetGap
+	}
+	if transferAmt < m.fundsCfg.TopupMinUSDT {
+		m.recordTransferStatus(fmt.Sprintf("topup skipped amount=%.2f min=%.2f", transferAmt, m.fundsCfg.TopupMinUSDT))
+		fmt.Printf("live-lite: funds manager top-up skipped amount=%.2f below_min=%.2f\n", transferAmt, m.fundsCfg.TopupMinUSDT)
+		return currentAvail, false
+	}
+	spotAvail, err := m.transferManager.SpotAvailableUSDT()
+	if err != nil {
+		m.recordTransferStatus(fmt.Sprintf("topup spot balance unavailable: %v", err))
+		fmt.Printf("live-lite: funds manager spot balance unavailable: %v\n", err)
+		return currentAvail, false
+	}
+	if transferAmt > spotAvail {
+		transferAmt = spotAvail
+	}
+	if transferAmt < m.fundsCfg.TopupMinUSDT {
+		m.recordTransferStatus(fmt.Sprintf("topup skipped spot=%.2f amount=%.2f min=%.2f", spotAvail, transferAmt, m.fundsCfg.TopupMinUSDT))
+		fmt.Printf("live-lite: funds manager top-up skipped spot_available=%.2f amount=%.2f min=%.2f\n", spotAvail, transferAmt, m.fundsCfg.TopupMinUSDT)
+		return currentAvail, false
+	}
+	if err := m.transferManager.TransferSpotToPerp(transferAmt); err != nil {
+		m.recordTransferStatus(fmt.Sprintf("topup failed %.2f: %v", transferAmt, err))
+		fmt.Printf("live-lite: funds manager top-up failed amount=%.2f err=%v\n", transferAmt, err)
+		return currentAvail, false
+	}
+	refreshed, err := availableUSDT(m.rest)
+	if err != nil {
+		m.recordTransferStatus(fmt.Sprintf("topup refresh failed %.2f: %v", transferAmt, err))
+		fmt.Printf("live-lite: funds manager top-up refresh failed after amount=%.2f err=%v\n", transferAmt, err)
+		return currentAvail, false
+	}
+	m.recordTransferStatus(fmt.Sprintf("topup %.2f to perp (%.2f -> %.2f)", transferAmt, currentAvail, refreshed))
+	fmt.Printf("live-lite: funds manager top-up amount=%.2f avail_before=%.2f avail_after=%.2f\n", transferAmt, currentAvail, refreshed)
+	return refreshed, true
+}
+
+func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) {
+	if m == nil || p == nil || !m.fundsCfg.Enable || !m.fundsCfg.SweepProfitEnable {
+		return
+	}
+	if p.RealizedPnL <= p.ProfitSweptUSDT || p.RealizedPnL <= 0 {
+		return
+	}
+	if m.transferManager == nil || !m.transferManager.Supported() {
+		m.recordTransferStatus(fmt.Sprintf("sweep unavailable %s realized=%.2f", p.Symbol, p.RealizedPnL))
+		fmt.Printf("live-lite: profit sweep unavailable symbol=%s realized=%.2f reason=transfer_unsupported\n", p.Symbol, p.RealizedPnL)
+		return
+	}
+	avail, err := availableUSDT(m.rest)
+	if err != nil {
+		m.recordTransferStatus(fmt.Sprintf("sweep refresh failed %s: %v", p.Symbol, err))
+		fmt.Printf("live-lite: profit sweep balance refresh failed symbol=%s err=%v\n", p.Symbol, err)
+		return
+	}
+	sweepable := maxFloat(0, avail-m.fundsCfg.PerpFloorUSDT)
+	if m.fundsCfg.SweepExcessOverTargetOnly {
+		sweepable = min(sweepable, maxFloat(0, avail-m.fundsCfg.PerpTargetUSDT))
+	}
+	profitLeft := p.RealizedPnL - p.ProfitSweptUSDT
+	amount := min(profitLeft, sweepable)
+	if amount <= 0 {
+		m.recordTransferStatus(fmt.Sprintf("sweep skipped %s profit_left=%.2f avail=%.2f", p.Symbol, profitLeft, avail))
+		return
+	}
+	if err := m.transferManager.TransferPerpToSpot(amount); err != nil {
+		m.recordTransferStatus(fmt.Sprintf("sweep failed %s %.2f: %v", p.Symbol, amount, err))
+		fmt.Printf("live-lite: profit sweep failed symbol=%s amount=%.2f err=%v\n", p.Symbol, amount, err)
+		return
+	}
+	p.ProfitSweptUSDT += amount
+	m.recordTransferStatus(fmt.Sprintf("sweep %.2f from %s to spot", amount, p.Symbol))
+	fmt.Printf("live-lite: profit sweep symbol=%s amount=%.2f realized=%.2f closed=%s\n",
+		p.Symbol, amount, p.RealizedPnL, now.UTC().Format(time.RFC3339))
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PROFIT SWEPT",
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>Amount:</b> %.2f USDT", amount),
+			fmt.Sprintf("<b>Trade Realized:</b> %+.2f", p.RealizedPnL),
+		))
+	}
+}
+
+func (m *liveExecManager) clearPendingAdd(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.PendingAddOrderID = 0
+	p.PendingAddPrice = 0
+	p.PendingAddQty = 0
+	p.PendingAddFilledQty = 0
+	p.PendingAddMargin = 0
+	p.PendingAddCreatedAt = time.Time{}
+	p.PendingAddEntryReason = ""
+}
+
+func (m *liveExecManager) applyAddFill(now time.Time, p *livePosition, deltaQty, fillPx, deltaMargin float64, reason string) error {
+	if m == nil || p == nil || deltaQty <= 0 {
+		return nil
+	}
+	if fillPx <= 0 {
+		fillPx = p.EntryPrice
+	}
+	if deltaMargin <= 0 && fillPx > 0 && p.Leverage > 0 {
+		deltaMargin = (fillPx * deltaQty) / float64(maxInt(1, p.Leverage))
+	}
+	oldQty := maxFloat(p.RemainingQty, 0)
+	totalQty := oldQty + deltaQty
+	if oldQty > 0 && totalQty > 0 {
+		p.EntryPrice = ((p.EntryPrice * oldQty) + (fillPx * deltaQty)) / totalQty
+	} else if fillPx > 0 {
+		p.EntryPrice = fillPx
+	}
+	p.Qty += deltaQty
+	p.FilledQty += deltaQty
+	p.RemainingQty = totalQty
+	p.Margin += deltaMargin
+	p.DeployedMargin += deltaMargin
+	if p.PendingAddFilledQty <= fillEpsilon(p.PendingAddQty) {
+		p.AddCount++
+	}
+	if strings.EqualFold(strings.TrimSpace(reason), "CONFIRMED_ADD") {
+		p.StarterOnly = false
+		p.AddLockedUntilConfirm = false
+		p.EntryReason = "continuation_fast"
+	}
+	p.State = execOpen
+	p.UpdatedAt = now
+	p.TP1FilledQty = 0
+	p.TP2FilledQty = 0
+	p.TP3FilledQty = 0
+	p.StopFilledQty = 0
+	p.HitTP1 = false
+	p.HitTP2 = false
+	p.HitTP3 = false
+	p.UnknownExitChecks = 0
+	p.ProtectedStop = 0
+	_ = m.cancelRemainingExits(p)
+	if err := m.placeInitialBrackets(p); err != nil {
+		return err
+	}
+	_ = m.logFill(now, p, "ADD", reason, deltaQty, fillPx, 0, 0)
+	m.sendFillReceipt(now, p, "ADD", reason, deltaQty, fillPx, 0, 0)
+	return nil
 }
 
 func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason string, qty, fillPx, pnl, pct float64) error {
@@ -6038,10 +6551,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			continue
 		}
 		_ = m.cancelRemainingExits(p)
-		p.State = execClosed
-		p.CloseReason = "POSITION_FLAT_RECOVERED"
-		p.ClosedAt = now
-		p.UpdatedAt = now
+		markLivePositionClosed(p, now, "POSITION_FLAT_RECOVERED")
 		closedLocal++
 	}
 	for sym, rp := range remote {
@@ -6078,10 +6588,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		}
 		if attachErr != nil && m.recoverForceFlatFail {
 			if errClose := m.forceFlatRecovered(p); errClose == nil {
-				p.State = execClosed
-				p.CloseReason = "RECOVERY_FORCE_FLAT"
-				p.ClosedAt = now
-				p.UpdatedAt = now
+				markLivePositionClosed(p, now, "RECOVERY_FORCE_FLAT")
 				if m.tg != nil {
 					m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "RECOVERY FORCE FLAT",
 						fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
@@ -6103,20 +6610,21 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 
 func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, entry, margin float64, lev int, now time.Time, source string) *livePosition {
 	p := &livePosition{
-		Symbol:       symbol,
-		Side:         side,
-		State:        execOpen,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		EntryPrice:   entry,
-		Qty:          qty,
-		FilledQty:    qty,
-		RemainingQty: qty,
-		Margin:       margin,
-		Leverage:     maxInt(1, lev),
-		EntryReason:  "MANUAL_IMPORT",
-		EntrySource:  source,
-		CloseReason:  "RECOVERED_POSITION",
+		Symbol:         symbol,
+		Side:           side,
+		State:          execOpen,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		EntryPrice:     entry,
+		Qty:            qty,
+		FilledQty:      qty,
+		RemainingQty:   qty,
+		Margin:         margin,
+		DeployedMargin: margin,
+		Leverage:       maxInt(1, lev),
+		EntryReason:    "MANUAL_IMPORT",
+		EntrySource:    source,
+		CloseReason:    "RECOVERED_POSITION",
 	}
 	if p.Margin <= 0 && p.EntryPrice > 0 && p.Leverage > 0 {
 		p.Margin = (p.EntryPrice * p.FilledQty) / float64(p.Leverage)
@@ -6449,13 +6957,22 @@ func (m *liveExecManager) HadRecentStopLoss(symbol, side string, now time.Time, 
 	return false
 }
 
-func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int) error {
+func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
 	if m == nil || m.rest == nil {
 		return fmt.Errorf("execution manager not ready")
 	}
 	rawSym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
-	if m.HasActiveSymbol(rawSym) {
-		return fmt.Errorf("active state already exists for %s", rawSym)
+	existing, hasExisting := m.trackedPosition(rawSym)
+	if hasExisting && m.isActive(existing) {
+		if !strings.EqualFold(existing.Side, c.Side) {
+			return fmt.Errorf("active opposite-side state already exists for %s", rawSym)
+		}
+		if !strings.EqualFold(strings.TrimSpace(existing.EntrySource), "BOT") {
+			return fmt.Errorf("manual position already active for %s", rawSym)
+		}
+		if existing.PendingAddOrderID > 0 {
+			return fmt.Errorf("pending add already exists for %s", rawSym)
+		}
 	}
 	bid, ask, err := m.rest.BookTicker(rawSym)
 	if err != nil {
@@ -6487,6 +7004,26 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	if qty <= 0 {
 		return fmt.Errorf("qty <= 0 after rounding")
 	}
+	stopReason := ""
+	stopDistancePct := 0.0
+	starterOnly := strings.EqualFold(c.Strat, "continuation_fast_starter") || strings.EqualFold(c.Strat, "early_dev_entry") || strings.EqualFold(c.Strat, "persistence_entry")
+	if m.hybridStopCfg.Enabled {
+		stopRes := exitmgr.ComputeHybridStop(m.hybridStopCfg, hybridStopInputForCandidate(c, price, c.Sig.TP1))
+		if stopRes.Rejected {
+			return fmt.Errorf("%s", stopRes.RejectReason)
+		}
+		if stopRes.StarterOnly {
+			starterOnly = true
+			if strings.EqualFold(c.Strat, "continuation_fast") {
+				c.Strat = "continuation_fast_starter"
+				c.Conf = min(c.Conf, 0.55)
+			}
+		}
+		if stopRes.StopPrice > 0 {
+			stopReason = stopRes.StopReason
+			stopDistancePct = stopRes.StopDistancePct
+		}
+	}
 	if lev <= 0 {
 		lev = 1
 	}
@@ -6513,6 +7050,11 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
 	vals.Set("price", formatFloat(price, meta.PricePrecision))
 
+	now := time.Now().UTC()
+	if hasExisting && m.isActive(existing) && starterOnly {
+		return fmt.Errorf("starter-only setup still needs confirmation before add")
+	}
+
 	out, err := m.rest.PlaceOrder(vals)
 	if err != nil {
 		return err
@@ -6521,53 +7063,86 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	if orderID == 0 {
 		return fmt.Errorf("missing orderId from place response")
 	}
-	now := time.Now().UTC()
-	stopReason := ""
-	stopDistancePct := 0.0
-	if m.hybridStopCfg.Enabled {
-		stopRes := exitmgr.ComputeHybridStop(m.hybridStopCfg, hybridStopInputForCandidate(c, price, c.Sig.TP1))
-		if stopRes.Rejected {
-			return fmt.Errorf("%s", stopRes.RejectReason)
+	if hasExisting && m.isActive(existing) {
+		existing.PendingAddOrderID = orderID
+		existing.PendingAddPrice = price
+		existing.PendingAddQty = qty
+		existing.PendingAddMargin = margin
+		existing.PendingAddCreatedAt = now
+		existing.PendingAddEntryReason = c.Strat
+		existing.UpdatedAt = now
+		_ = m.save()
+		fmt.Printf("live-lite: add submitted %s %s qty=%s px=%s orderId=%d add_count=%d deployed=%.2f\n",
+			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
+		if m.tg != nil {
+			m.tg.Sendf("%s", notify.BuildEventHTML("➕", "ADD SUBMITTED",
+				fmt.Sprintf("<b>%s %s</b>", rawSym, existing.Side),
+				fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
+				fmt.Sprintf("<b>Deployed:</b> %.2f -> %.2f USDT", existing.DeployedMargin, existing.DeployedMargin+margin),
+			))
 		}
-		if stopRes.StopPrice > 0 {
-			stopReason = stopRes.StopReason
-			stopDistancePct = stopRes.StopDistancePct
+		return nil
+	}
+	entryReason := c.Strat
+	if starterOnly && !strings.EqualFold(entryReason, "continuation_fast_starter") {
+		if strings.EqualFold(c.Strat, "early_dev_entry") {
+			entryReason = "early_dev_entry"
+		} else if strings.EqualFold(c.Strat, "persistence_entry") {
+			entryReason = "persistence_entry"
+		} else {
+			entryReason = "continuation_fast_starter"
+		}
+	}
+	entryTags := append([]string{}, c.Sig.Tags...)
+	entryReasons := append([]string{}, c.Sig.Reasons...)
+	reentryCount := 0
+	if plan.IsReentry {
+		entryTags = append(entryTags, "reentry")
+		entryReasons = append(entryReasons, "structured_reentry")
+		if plan.Previous != nil {
+			reentryCount = plan.Previous.ReentryCount + 1
+		} else {
+			reentryCount = 1
 		}
 	}
 	p := &livePosition{
-		Symbol:          rawSym,
-		Side:            strings.ToUpper(c.Side),
-		State:           execPendingEntry,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		EntryOrderID:    orderID,
-		EntryPrice:      price,
-		Qty:             qty,
-		Margin:          margin,
-		Leverage:        lev,
-		VPSetup:         c.Sig.VPSetup,
-		VPLevel:         c.Sig.VPLevel,
-		VPTargetLevel:   c.Sig.VPTargetLevel,
-		VPStopMode:      c.Sig.StopMode,
-		VPTargetMode:    c.Sig.TargetMode,
-		RejectReason:    c.RejectReason,
-		EntryReason:     c.Strat,
-		EntrySource:     "BOT",
-		EntryGrade:      c.Entry.CurrentGrade,
-		EntryState:      string(c.Entry.State),
-		EntryTrigger:    c.TriggerState,
-		ExitProfile:     c.ExitProfile,
-		EntryConf:       c.Conf,
-		DiscoveryScore:  c.DiscoveryScore,
-		TriggerScore:    c.TriggerScore,
-		ExecutionScore:  c.ExecutionScore,
-		CombinedScore:   c.CombinedScore,
-		EntryTags:       append([]string{}, c.Sig.Tags...),
-		EntryReasons:    append([]string{}, c.Sig.Reasons...),
-		EntryVolumeUSD:  c.VolumeUSD,
-		StopReason:      stopReason,
-		StopDistancePct: stopDistancePct,
-		RegimeTag:       c.Sig.RegimeTag,
+		Symbol:                rawSym,
+		Side:                  strings.ToUpper(c.Side),
+		State:                 execPendingEntry,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+		EntryOrderID:          orderID,
+		EntryPrice:            price,
+		Qty:                   qty,
+		Margin:                margin,
+		DeployedMargin:        margin,
+		Leverage:              lev,
+		VPSetup:               c.Sig.VPSetup,
+		VPLevel:               c.Sig.VPLevel,
+		VPTargetLevel:         c.Sig.VPTargetLevel,
+		VPStopMode:            c.Sig.StopMode,
+		VPTargetMode:          c.Sig.TargetMode,
+		RejectReason:          c.RejectReason,
+		EntryReason:           entryReason,
+		EntrySource:           "BOT",
+		EntryGrade:            c.Entry.CurrentGrade,
+		EntryState:            string(c.Entry.State),
+		EntryTrigger:          c.TriggerState,
+		ExitProfile:           c.ExitProfile,
+		EntryConf:             c.Conf,
+		DiscoveryScore:        c.DiscoveryScore,
+		TriggerScore:          c.TriggerScore,
+		ExecutionScore:        c.ExecutionScore,
+		CombinedScore:         c.CombinedScore,
+		EntryTags:             entryTags,
+		EntryReasons:          entryReasons,
+		EntryVolumeUSD:        c.VolumeUSD,
+		StopReason:            stopReason,
+		StopDistancePct:       stopDistancePct,
+		RegimeTag:             c.Sig.RegimeTag,
+		StarterOnly:           starterOnly,
+		AddLockedUntilConfirm: starterOnly,
+		ReentryCount:          reentryCount,
 	}
 	if stopDistancePct > 0 {
 		p.CustomRiskPct = stopDistancePct / 100.0
@@ -6586,10 +7161,16 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	m.positions[rawSym] = p
 	_ = m.save()
-	fmt.Printf("live-lite: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f stop_reason=%s\n",
-		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("live-lite: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v stop_reason=%s\n",
+		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(stopReason, "generic"))
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("📨", "ENTRY SUBMITTED",
+		title := "ENTRY SUBMITTED"
+		if plan.IsReentry {
+			title = "RE-ENTRY SUBMITTED"
+		} else if starterOnly {
+			title = "STARTER SUBMITTED"
+		}
+		m.tg.Sendf("%s", notify.BuildEventHTML("📨", title,
 			fmt.Sprintf("<b>%s %s</b>", rawSym, p.Side),
 			fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
 			fmt.Sprintf("<b>Order ID:</b> %d", orderID),
@@ -6700,6 +7281,63 @@ func (m *liveExecManager) reconcilePendingEntry(now time.Time, p *livePosition) 
 	return false, nil
 }
 
+func (m *liveExecManager) reconcilePendingAdd(now time.Time, p *livePosition) (bool, error) {
+	if m == nil || p == nil || p.PendingAddOrderID == 0 {
+		return false, nil
+	}
+	order, err := m.rest.GetOrder(p.Symbol, p.PendingAddOrderID)
+	if err != nil {
+		if rows, syncErr := m.rest.PositionRisk(p.Symbol); syncErr == nil {
+			changed, _, applyErr := m.syncOpenFromRemote(now, p, rows)
+			if applyErr == nil && changed {
+				return true, nil
+			}
+		}
+		if !p.PendingAddCreatedAt.IsZero() && now.Sub(p.PendingAddCreatedAt) >= m.entryTimeout {
+			_, _ = m.rest.CancelOrder(p.Symbol, p.PendingAddOrderID)
+			m.clearPendingAdd(p)
+			return true, nil
+		}
+		return false, err
+	}
+	prog := parseOrderProgress(order)
+	changed := false
+	if delta := maxFloat(0, prog.ExecQty-p.PendingAddFilledQty); delta > fillEpsilon(p.PendingAddQty) {
+		reason := "ADD_PARTIAL"
+		if prog.Filled && strings.EqualFold(strings.TrimSpace(p.PendingAddEntryReason), "continuation_fast") {
+			reason = "CONFIRMED_ADD"
+		}
+		deltaMargin := p.PendingAddMargin
+		if p.PendingAddQty > 0 {
+			deltaMargin = p.PendingAddMargin * (delta / p.PendingAddQty)
+		}
+		if err := m.applyAddFill(now, p, delta, prog.AvgPx, deltaMargin, reason); err != nil {
+			return true, err
+		}
+		p.PendingAddFilledQty = prog.ExecQty
+		changed = true
+	}
+	if prog.Filled {
+		if strings.EqualFold(strings.TrimSpace(p.PendingAddEntryReason), "continuation_fast") {
+			p.StarterOnly = false
+			p.AddLockedUntilConfirm = false
+			p.EntryReason = "continuation_fast"
+		}
+		m.clearPendingAdd(p)
+		return true, nil
+	}
+	if prog.Terminal {
+		m.clearPendingAdd(p)
+		return true, nil
+	}
+	if !p.PendingAddCreatedAt.IsZero() && now.Sub(p.PendingAddCreatedAt) >= m.entryTimeout {
+		_, _ = m.rest.CancelOrder(p.Symbol, p.PendingAddOrderID)
+		m.clearPendingAdd(p)
+		return true, nil
+	}
+	return changed, nil
+}
+
 func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[string]momentumView, flow map[string]flowMetrics, meta map[string]symbolMeta) (bool, error) {
 	changed := false
 	closedByStop, err := m.reconcileExitOrders(now, p)
@@ -6725,6 +7363,11 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 		if closed || p.State == execClosed {
 			return true, nil
 		}
+	}
+	if addChanged, err := m.reconcilePendingAdd(now, p); err != nil {
+		return changed, err
+	} else if addChanged {
+		changed = true
 	}
 	if p.RemainingQty > 0 {
 		mark, err := m.currentMark(p.Symbol)
@@ -6799,6 +7442,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					HitTP3:            p.HitTP3,
 					WeakSponsorStreak: p.WeakSponsorStreak,
 				})
+				runnerState := evaluateRunnerExitState(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
 				if mv.MoveStopToBE {
 					be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -6814,14 +7458,29 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 						changed = true
 					}
 				}
-				if mv.FullExit {
-					_ = m.cancelRemainingExits(p)
-					if err := m.closeSymbolMarket(p.Symbol); err == nil {
-						p.State = execClosed
-						p.CloseReason = mv.Reason
-						p.ClosedAt = now
-						p.UpdatedAt = now
+				if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+					if m.tightenRunnerStop(p, runnerState.TightenReason) {
 						changed = true
+					}
+				}
+				if mv.FullExit {
+					if !runnerState.StructureBroken {
+						if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
+							changed = true
+						}
+					} else {
+						reason := firstNonEmpty(runnerState.FullExitReason, mv.Reason)
+						pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+						_ = m.addDayRealized(now, pnl)
+						_ = m.cancelRemainingExits(p)
+						if err := m.closeSymbolMarket(p.Symbol); err == nil {
+							p.RealizedPnL += pnl
+							_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+							m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+							markLivePositionClosed(p, now, reason)
+							m.maybeSweepTradeProfit(now, p)
+							changed = true
+						}
 					}
 				}
 			}
@@ -6960,10 +7619,8 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 	}
 	if p.RemainingQty <= 1e-10 {
 		_ = m.cancelRemainingExits(p)
-		p.State = execClosed
-		p.CloseReason = "TP_DONE"
-		p.ClosedAt = now
-		p.UpdatedAt = now
+		markLivePositionClosed(p, now, "TP_DONE")
+		m.maybeSweepTradeProfit(now, p)
 		return true, nil
 	}
 	if err := m.ensureExitOrders(p); err != nil {
@@ -7139,6 +7796,54 @@ func (m *liveExecManager) placeReduceLimit(p *livePosition, qty, price float64) 
 	return mapInt64(out["orderId"]), nil
 }
 
+func protectiveStopValid(side string, entry, mark, stop float64) bool {
+	if entry <= 0 || mark <= 0 || stop <= 0 {
+		return false
+	}
+	if strings.EqualFold(side, "BUY") {
+		return stop < mark && stop < entry
+	}
+	return stop > mark && stop > entry
+}
+
+func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
+	ref := maxFloat(entry, mark)
+	if strings.EqualFold(side, "BUY") {
+		ref = min(entry, mark)
+	}
+	bufferPct := 0.0025
+	if tickSize > 0 && ref > 0 {
+		bufferPct = maxFloat(bufferPct, (tickSize*2)/ref)
+	}
+	if strings.EqualFold(side, "BUY") {
+		return ref * (1 - bufferPct)
+	}
+	return ref * (1 + bufferPct)
+}
+
+func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedStop, normalizedStop float64, cause string) {
+	if p == nil {
+		return
+	}
+	fmt.Printf("live-lite: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
+		p.Symbol,
+		p.Side,
+		fmtPrice(mark),
+		fmtPrice(p.EntryPrice),
+		fmtPrice(computedStop),
+		fmtPrice(normalizedStop),
+		cause,
+	)
+	if m != nil && m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE FAILED SAFE",
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
+			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
+			fmt.Sprintf("<b>Cause:</b> %s", cause),
+		))
+	}
+}
+
 func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if p.RemainingQty <= 0 {
 		return nil
@@ -7159,13 +7864,36 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if err != nil {
 		return err
 	}
-	stopPx, _, err := m.rest.RoundPrice(p.Symbol, p.StopPrice)
+	computedStop := p.StopPrice
+	stopPx, _, err := m.rest.RoundPrice(p.Symbol, computedStop)
 	if err != nil {
 		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
+		mark, err := m.currentMark(p.Symbol)
+		if err != nil || mark <= 0 {
+			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
+			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
+		}
+		if !protectiveStopValid(p.Side, p.EntryPrice, mark, stopPx) {
+			retryStop := widenedProtectiveStop(p.Side, p.EntryPrice, mark, meta.TickSize)
+			retryStop, _, err = m.rest.RoundPrice(p.Symbol, retryStop)
+			if err != nil {
+				m.logManageFailedSafe(p, mark, computedStop, stopPx, "retry_round_failed")
+				return err
+			}
+			if !protectiveStopValid(p.Side, p.EntryPrice, mark, retryStop) {
+				m.logManageFailedSafe(p, mark, computedStop, stopPx, "invalid_after_retry")
+				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
+					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
+			}
+			stopPx = retryStop
+		}
 	}
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
 	}
+	p.StopPrice = stopPx
 	closeSide := "SELL"
 	if strings.EqualFold(p.Side, "SELL") {
 		closeSide = "BUY"
@@ -7371,6 +8099,26 @@ func evaluateSwingHold(side string, mv momentumView, sponsored bool, refreshed b
 	return score, "hold_score_too_low", false
 }
 
+func (m *liveExecManager) tightenRunnerStop(p *livePosition, reason string) bool {
+	if m == nil || p == nil {
+		return false
+	}
+	nextStop := lockToRPrice(p.Side, p.EntryPrice, p.StopPrice, envFloat("LIVE_PROFIT_LOCK_TIGHTEN_R", 0.35))
+	if strings.EqualFold(p.Side, "BUY") {
+		if nextStop <= p.StopPrice {
+			return false
+		}
+	} else if nextStop >= p.StopPrice {
+		return false
+	}
+	p.StopReason = reason
+	p.StopPrice = nextStop
+	if err := m.placeOrReplaceStop(p); err != nil {
+		return false
+	}
+	return true
+}
+
 func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (bool, error) {
 	if p == nil || !p.TrailOn || p.RemainingQty <= 0 || mark <= 0 {
 		return false, nil
@@ -7567,10 +8315,9 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 		}
 		_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		p.State = execClosed
-		p.CloseReason = reason
-		p.ClosedAt = now
-		p.UpdatedAt = now
+		p.RealizedPnL += pnl
+		markLivePositionClosed(p, now, reason)
+		m.maybeSweepTradeProfit(now, p)
 	}
 	_ = m.save()
 	return nil
@@ -7608,10 +8355,9 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 	}
 	_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 	m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-	p.State = execClosed
-	p.CloseReason = reason
-	p.ClosedAt = now
-	p.UpdatedAt = now
+	p.RealizedPnL += pnl
+	markLivePositionClosed(p, now, reason)
+	m.maybeSweepTradeProfit(now, p)
 	_ = m.save()
 	return true, nil
 }
@@ -7672,6 +8418,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		if upct < minUpnlPct {
 			continue
 		}
+		runnerState := evaluateRunnerExitState(p.Side, mv, ext[sym])
 		if m.exitManager != nil {
 			dec := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:              p.Side,
@@ -7714,29 +8461,46 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 					changed = true
 				}
 			}
+			if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+				if m.tightenRunnerStop(p, runnerState.TightenReason) {
+					changed = true
+				}
+			}
 			if dec.FullExit {
+				if !runnerState.StructureBroken {
+					if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
+						changed = true
+					}
+					continue
+				}
+				reason := firstNonEmpty(runnerState.FullExitReason, dec.Reason)
 				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 				dayRealized := m.addDayRealized(now, pnl)
 				_ = m.cancelRemainingExits(p)
 				if err := m.closeSymbolMarket(sym); err != nil {
 					continue
 				}
-				p.State = execClosed
-				p.CloseReason = dec.Reason
-				p.ClosedAt = now
-				p.UpdatedAt = now
+				p.RealizedPnL += pnl
 				if m.tg != nil {
-					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(dec.Reason), "MOMENTUM EXIT",
+					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
 						fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
 						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 						fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 					))
 				}
-				_ = m.logFill(now, p, "CLOSE", dec.Reason, p.RemainingQty, mark, pnl, pct)
-				m.sendFillReceipt(now, p, "CLOSE", dec.Reason, p.RemainingQty, mark, pnl, pct)
+				_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+				m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+				markLivePositionClosed(p, now, reason)
+				m.maybeSweepTradeProfit(now, p)
 				changed = true
 				continue
 			}
+		}
+		if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+			if m.tightenRunnerStop(p, runnerState.TightenReason) {
+				changed = true
+			}
+			continue
 		}
 		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed) {
 			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (p.Sponsored || confluenceRefreshActive(now, p.LastConfluenceRefresh))) {
@@ -7749,25 +8513,28 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			}
 			continue
 		}
+		if !runnerState.StructureBroken {
+			continue
+		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 		dayRealized := m.addDayRealized(now, pnl)
 		_ = m.cancelRemainingExits(p)
 		if err := m.closeSymbolMarket(sym); err != nil {
 			continue
 		}
-		p.State = execClosed
-		p.CloseReason = "MOMENTUM_FADE"
-		p.ClosedAt = now
-		p.UpdatedAt = now
+		p.RealizedPnL += pnl
+		reason := firstNonEmpty(runnerState.FullExitReason, "MOMENTUM_FADE")
+		markLivePositionClosed(p, now, reason)
 		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji("MOMENTUM_FADE"), "MOMENTUM EXIT",
+			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
 				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 			))
 		}
-		_ = m.logFill(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
-		m.sendFillReceipt(now, p, "CLOSE", "MOMENTUM_FADE", p.RemainingQty, mark, pnl, pct)
+		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -7829,10 +8596,9 @@ func (m *liveExecManager) ApplyFundingExit(now time.Time, meta map[string]symbol
 		}
 		_ = m.logFill(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
-		p.State = execClosed
-		p.CloseReason = "FUNDING"
-		p.ClosedAt = now
-		p.UpdatedAt = now
+		p.RealizedPnL += pnl
+		markLivePositionClosed(p, now, "FUNDING")
+		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -7872,10 +8638,6 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 		if err := m.closeSymbolMarket(sym); err != nil {
 			continue
 		}
-		p.State = execClosed
-		p.CloseReason = reason
-		p.ClosedAt = now
-		p.UpdatedAt = now
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT",
 				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
@@ -7886,6 +8648,9 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 		}
 		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
 		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
+		p.RealizedPnL += pnl
+		markLivePositionClosed(p, now, reason)
+		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -11155,6 +11920,10 @@ func activeWinnerRejectReason(now time.Time, c candidate, execMgr *liveExecManag
 	bestStrength := 0.0
 	checkPos := func(symbol, side, source string, entry, lastMark float64, sponsored bool, refreshAt time.Time) {
 		raw := strings.ToUpper(aster.RawSymbol(symbol))
+		candidateRaw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+		if raw == candidateRaw && strings.EqualFold(strings.TrimSpace(side), strings.TrimSpace(c.Side)) {
+			return
+		}
 		px := lastMark
 		if m, ok := meta[raw]; ok && m.LastPrice > 0 {
 			px = m.LastPrice
@@ -11201,6 +11970,395 @@ func activeWinnerRejectReason(now time.Time, c candidate, execMgr *liveExecManag
 		}
 	}
 	return bestReason
+}
+
+func continuationStateTrending(st inplay.State) bool {
+	switch st {
+	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
+		return true
+	default:
+		return false
+	}
+}
+
+func continuationFastOFIAgrees(c candidate, minOFIZ float64) bool {
+	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
+	ofiMinSamples := envInt("LIVE_OFI_MIN_SAMPLES", 8)
+	if ofiMinSamples < 1 {
+		ofiMinSamples = 1
+	}
+	if !ofiEnabled || c.OFISamples < ofiMinSamples {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.OFIZ >= minOFIZ
+	}
+	return c.OFIZ <= -minOFIZ
+}
+
+func qualifiesEliteStarterCandidate(c candidate) bool {
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue("A") {
+		return false
+	}
+	if c.CombinedScore < envFloat("LIVE_STARTER_FINAL_RANK_MIN", 0.72) {
+		return false
+	}
+	if !continuationStateTrending(c.Entry.State) {
+		return false
+	}
+	fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
+	fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+	fastMinOFIZ := envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35)
+	if c.Entry.CurrentScore < fastMinScore || c.Entry.ScoreSlope < fastMinSlope {
+		return false
+	}
+	return continuationFastOFIAgrees(c, fastMinOFIZ)
+}
+
+func candidatePriceConfirmsDirection(c candidate) bool {
+	if strings.EqualFold(c.Side, "BUY") {
+		aboveVWAP := c.SessionVWAP <= 0 || c.LastClose >= c.SessionVWAP
+		aboveEMA := c.EMA9 <= 0 || c.LastClose >= c.EMA9
+		return aboveVWAP && aboveEMA
+	}
+	belowVWAP := c.SessionVWAP <= 0 || c.LastClose <= c.SessionVWAP
+	belowEMA := c.EMA9 <= 0 || c.LastClose <= c.EMA9
+	return belowVWAP && belowEMA
+}
+
+func candidateExhaustionActive(c candidate) bool {
+	if c.Entry.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
+		return true
+	}
+	metaState := strings.ToLower(strings.TrimSpace(c.Entry.MetaState))
+	if strings.Contains(metaState, "exhaust") {
+		return true
+	}
+	if c.Entry.ReversalWatchFlag && !hasFreshStructureReset(c) {
+		return true
+	}
+	return false
+}
+
+func candidateRapidExpansion(c candidate) bool {
+	chasePct := envFloat("LIVE_MAX_CHASE_PCT", 8)
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.Entry.State == inplay.StatePumping && c.Entry.BarsSinceTrough <= 2 && c.DayUTC24h >= chasePct
+	}
+	return c.Entry.State == inplay.StatePumping && c.Entry.BarsSincePeak <= 2 && -c.DayUTC24h >= chasePct
+}
+
+func candidateSpikeCandle(c candidate) bool {
+	return c.VolumeRatio >= 2.50 && c.ExtensionATR >= 1.60
+}
+
+func candidateDirectionalMovePct(c candidate) float64 {
+	if strings.EqualFold(c.Side, "BUY") {
+		return maxFloat(c.DayUTC24h, maxFloat(c.UTC4hPct, c.UTC1hPct))
+	}
+	return maxFloat(-c.DayUTC24h, maxFloat(-c.UTC4hPct, -c.UTC1hPct))
+}
+
+func qualifiesStructuredReentry(c candidate) bool {
+	if !continuationStateTrending(c.Entry.State) || candidateExhaustionActive(c) || !candidatePriceConfirmsDirection(c) {
+		return false
+	}
+	if hasFreshStructureReset(c) || continuationStructureConfirmed(c) {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.Entry.EntryStyle == "pullback_long" || c.SetupFamily == "deep_pullback_reclaim"
+	}
+	return c.Entry.FailedBounceCount > 0 || c.Entry.EntryStyle == "pullback_short"
+}
+
+func qualifiesEarlyDevEntry(c candidate, now time.Time) bool {
+	if sessionPhaseUTC(now) != sessionAsiaDev {
+		return false
+	}
+	if !qualifiesEliteStarterCandidate(c) {
+		return false
+	}
+	if candidateExhaustionActive(c) || strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
+		return false
+	}
+	if strings.EqualFold(c.Side, "BUY") && c.Entry.LongDemotionFlag {
+		return false
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.Entry.ShortDemotionFlag {
+		return false
+	}
+	return c.Entry.Momentum || c.VolumeRatio >= envFloat("LIVE_STARTER_MIN_VOL_RATIO", 0.80) || hasFreshStructureReset(c)
+}
+
+func continuationFastStarterSoftRejectAllowed(c candidate, reject string) bool {
+	switch {
+	case strings.HasPrefix(reject, "vol_ratio:"):
+		return c.VolumeRatio >= envFloat("LIVE_STARTER_MIN_VOL_RATIO", 0.80)
+	case reject == "continuation_no_structure_confirm" || reject == strings.TrimSpace(c.StructureReason):
+		return envBool("LIVE_STARTER_ALLOW_STRUCTURE_SOFT", true)
+	case reject == "below_vwap_ema", reject == "above_vwap_ema":
+		return envBool("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", true)
+	case strings.HasPrefix(reject, "hybrid_stop_too_wide"), strings.HasPrefix(reject, "hybrid_stop_rr_too_low"):
+		return true
+	default:
+		return false
+	}
+}
+
+type ladderPlan struct {
+	IsAdd        bool
+	IsReentry    bool
+	MarginUSDT   float64
+	RejectReason string
+	Active       *livePosition
+	Previous     *livePosition
+}
+
+func candidateStarterOnlyByStopPlan(c candidate) bool {
+	entryPx := c.Sig.Entry
+	if entryPx <= 0 {
+		entryPx = c.LastClose
+	}
+	tp1 := c.Sig.TP1
+	if entryPx <= 0 || tp1 <= 0 {
+		return false
+	}
+	stopPlan := exitmgr.ComputeHybridStop(loadHybridStopConfig(), hybridStopInputForCandidate(c, entryPx, tp1))
+	return stopPlan.StarterOnly
+}
+
+func positionPnLPct(p *livePosition, meta map[string]symbolMeta) float64 {
+	if p == nil || p.EntryPrice <= 0 {
+		return 0
+	}
+	mark := p.LastMark
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+	if info, ok := meta[raw]; ok && info.LastPrice > 0 {
+		mark = info.LastPrice
+	}
+	if mark <= 0 {
+		mark = p.EntryPrice
+	}
+	_, pct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
+	return pct
+}
+
+func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
+	plan := ladderPlan{
+		MarginUSDT: envFloat("LIVE_ENTRY_STARTER_USDT", 20),
+	}
+	if execMgr == nil {
+		return plan
+	}
+	cfg := execMgr.ladderCfg
+	reentryCfg := execMgr.reentryCfg
+	if cfg.StarterUSDT > 0 {
+		plan.MarginUSDT = cfg.StarterUSDT
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	var activeSame *livePosition
+	var closedSame *livePosition
+	for _, p := range execMgr.positions {
+		if p == nil {
+			continue
+		}
+		pRaw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+		if cfg.OneSymbolOnly && execMgr.isActive(p) && p.RemainingQty > 0 && pRaw != raw {
+			plan.RejectReason = "one_symbol_only_active"
+			return plan
+		}
+		if pRaw == raw {
+			if execMgr.isActive(p) && p.RemainingQty > 0 {
+				activeSame = p
+			} else if p.State == execClosed {
+				closedSame = p
+			}
+		}
+	}
+	if activeSame != nil {
+		if !strings.EqualFold(activeSame.Side, c.Side) {
+			plan.RejectReason = "symbol_active_opposite_side"
+			return plan
+		}
+		if !strings.EqualFold(strings.TrimSpace(activeSame.EntrySource), "BOT") {
+			plan.RejectReason = "manual_position_active"
+			return plan
+		}
+		if activeSame.PendingAddOrderID > 0 {
+			plan.RejectReason = "pending_add_order"
+			return plan
+		}
+		if activeSame.State != execOpen || activeSame.HitTP1 || activeSame.HitTP2 || activeSame.HitTP3 {
+			plan.RejectReason = "position_not_ready_for_add"
+			return plan
+		}
+		if !strings.EqualFold(c.Strat, "continuation_fast") {
+			if activeSame.AddLockedUntilConfirm || activeSame.StarterOnly {
+				plan.RejectReason = "starter_waiting_full_confirmation"
+			} else {
+				plan.RejectReason = "pyramid_setup_not_confirmed"
+			}
+			return plan
+		}
+		if candidateStarterOnlyByStopPlan(c) {
+			plan.RejectReason = "pyramid_waiting_stop_confirmation"
+			return plan
+		}
+		if cfg.OnlyIfGreen && positionPnLPct(activeSame, meta) <= 0 {
+			plan.RejectReason = "pyramid_position_not_green"
+			return plan
+		}
+		if positionPnLPct(activeSame, meta) < cfg.MinAddPnLPct {
+			plan.RejectReason = "pyramid_min_pnl_not_met"
+			return plan
+		}
+		if !candidatePriceConfirmsDirection(c) {
+			plan.RejectReason = "pyramid_direction_unconfirmed"
+			return plan
+		}
+		if !(continuationStructureConfirmed(c) || hasFreshStructureReset(c)) {
+			plan.RejectReason = "pyramid_structure_not_intact"
+			return plan
+		}
+		if candidateExhaustionActive(c) {
+			plan.RejectReason = "pyramid_exhaustion_active"
+			return plan
+		}
+		if candidateSpikeCandle(c) {
+			plan.RejectReason = "pyramid_spike_candle"
+			return plan
+		}
+		if candidateRapidExpansion(c) {
+			plan.RejectReason = "pyramid_rapid_expansion"
+			return plan
+		}
+		if sessionLowLiquidity(sessionPhaseUTC(now)) {
+			plan.RejectReason = "pyramid_low_liquidity_window"
+			return plan
+		}
+		if activeSame.AddCount >= cfg.MaxAdds {
+			plan.RejectReason = "pyramid_add_cap"
+			return plan
+		}
+		if activeSame.DeployedMargin >= cfg.MaxTotalUSDT {
+			plan.RejectReason = "pyramid_max_total_reached"
+			return plan
+		}
+		nextMargin := cfg.StepUSDT
+		if nextMargin <= 0 {
+			nextMargin = cfg.StarterUSDT
+		}
+		nextMargin = min(nextMargin, maxFloat(0, cfg.MaxTotalUSDT-activeSame.DeployedMargin))
+		if nextMargin <= 0 {
+			plan.RejectReason = "pyramid_no_margin_left"
+			return plan
+		}
+		plan.IsAdd = true
+		plan.MarginUSDT = nextMargin
+		plan.Active = activeSame
+		return plan
+	}
+	if closedSame != nil &&
+		reentryCfg.Enable &&
+		reentryCfg.MaxPerSymbol > 0 &&
+		strings.EqualFold(closedSame.Side, c.Side) &&
+		!closedSame.ClosedAt.IsZero() &&
+		now.Sub(closedSame.ClosedAt) <= 6*time.Hour {
+		if reentryCfg.Cooldown > 0 && now.Sub(closedSame.ClosedAt) < reentryCfg.Cooldown {
+			plan.RejectReason = "reentry_cooldown_active"
+			return plan
+		}
+		if closedSame.ExhaustionExit {
+			plan.RejectReason = "reentry_blocked_after_exhaustion_exit"
+			return plan
+		}
+		if closedSame.ReentryCount >= reentryCfg.MaxPerSymbol {
+			plan.RejectReason = "reentry_limit_reached"
+			return plan
+		}
+		if isStopCloseReason(closedSame.CloseReason) && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 15*time.Minute) {
+			plan.RejectReason = "reentry_after_stop_cooldown"
+			return plan
+		}
+		if !qualifiesStructuredReentry(c) {
+			plan.RejectReason = "reentry_needs_pullback_hold"
+			return plan
+		}
+		plan.IsReentry = true
+		if reentryCfg.SizeUSDT > 0 {
+			plan.MarginUSDT = reentryCfg.SizeUSDT
+		}
+		plan.Previous = closedSame
+		return plan
+	}
+	return plan
+}
+
+func chaseRejectReason(c candidate, allowStructuredReset bool) string {
+	maxChasePct := envFloat("LIVE_MAX_CHASE_PCT", 8)
+	if maxChasePct <= 0 {
+		return ""
+	}
+	if allowStructuredReset && (hasFreshStructureReset(c) || continuationStructureConfirmed(c)) {
+		return ""
+	}
+	if candidateDirectionalMovePct(c) > maxChasePct {
+		return "max_chase_pct"
+	}
+	return ""
+}
+
+func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) string {
+	phase := sessionPhaseUTC(now)
+	if plan.IsAdd {
+		return ""
+	}
+	if plan.IsReentry {
+		if phase == sessionAsiaDev {
+			return "asia_dev_reentry_blocked"
+		}
+		return chaseRejectReason(c, true)
+	}
+	switch phase {
+	case sessionUTCOffHours:
+		return "utc_offhours_no_fresh_entry"
+	case sessionAsiaDev:
+		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
+			return "asia_dev_starter_only"
+		}
+	case sessionAsiaContinue:
+		return "asia_continue_no_fresh_entry"
+	case sessionNYOpen:
+		if strategyFamily(c) == "cont" && gradeValue(c.Entry.CurrentGrade) < gradeValue("A") && c.Conf < 0.55 {
+			return "ny_open_requires_strong_setup"
+		}
+	}
+	return chaseRejectReason(c, false)
+}
+
+func postWinCooldownRejectReason(now time.Time, c candidate, execMgr *liveExecManager) string {
+	if execMgr == nil || !execMgr.postWinCooldownCfg.Enable || execMgr.postWinCooldownCfg.Cooldown <= 0 {
+		return ""
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	p, ok := execMgr.trackedPosition(raw)
+	if !ok || p == nil || p.State != execClosed || p.ClosedAt.IsZero() {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(p.Side), strings.TrimSpace(c.Side)) {
+		return ""
+	}
+	if tradeReturnPct(p) < execMgr.postWinCooldownCfg.ThresholdPct {
+		return ""
+	}
+	if now.Sub(p.ClosedAt) >= execMgr.postWinCooldownCfg.Cooldown {
+		return ""
+	}
+	return "post_win_opposite_cooldown"
 }
 
 func lifecycleStageScore(stage string) float64 {
@@ -11480,7 +12638,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -11493,16 +12651,17 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 
 func hybridStopInputForCandidate(c candidate, entry, tp1 float64) exitmgr.HybridStopInput {
 	return exitmgr.HybridStopInput{
-		Side:          c.Side,
-		Entry:         entry,
-		SignalStop:    c.Sig.Stop,
-		StructureLow:  c.Entry.TroughPriceLookback,
-		StructureHigh: c.Entry.PeakPriceLookback,
-		SessionVWAP:   c.SessionVWAP,
-		EMA9:          c.EMA9,
-		ATR:           c.ATR,
-		TargetPrice:   tp1,
-		Template:      stopTemplateForCandidate(c),
+		Side:           c.Side,
+		Entry:          entry,
+		SignalStop:     c.Sig.Stop,
+		StructureLow:   c.Entry.TroughPriceLookback,
+		StructureHigh:  c.Entry.PeakPriceLookback,
+		SessionVWAP:    c.SessionVWAP,
+		EMA9:           c.EMA9,
+		ATR:            c.ATR,
+		TargetPrice:    tp1,
+		Template:       stopTemplateForCandidate(c),
+		EliteCandidate: qualifiesEliteStarterCandidate(c),
 	}
 }
 
@@ -11574,7 +12733,9 @@ func confidenceRejectReason(c candidate, minConf float64) string {
 }
 
 func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64, asiaMinSlope float64) bool {
-	if data.CurrentRegimeCT(now) != data.RegimeAsia {
+	switch sessionPhaseUTC(now) {
+	case sessionAsiaDev, sessionAsiaBreakout, sessionAsiaContinue:
+	default:
 		return true
 	}
 	if gradeValue(c.Entry.CurrentGrade) >= gradeValue(asiaMinGrade) {
@@ -11973,12 +13134,16 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 }
 
 func applySimpleContinuationFallback(cand candidate) candidate {
+	return applySimpleContinuationFallbackAt(cand, time.Now().UTC())
+}
+
+func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
 	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
 	ofiMinSamples := envInt("LIVE_OFI_MIN_SAMPLES", 8)
 	if ofiMinSamples < 1 {
 		ofiMinSamples = 1
 	}
-	if resetName, resetConf, resetReasons := qualifiesResetImpulse(cand, time.Now()); resetName != "" {
+	if resetName, resetConf, resetReasons := qualifiesResetImpulse(cand, now); resetName != "" {
 		cand.Strat = resetName
 		cand.Conf = resetConf
 		cand.Sig = strategies.Signal{
@@ -11994,6 +13159,27 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		cand.RejectReason = ""
 		return cand
 	}
+	if qualifiesEarlyDevEntry(cand, now) {
+		baseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
+		confBoost := min(0.08, maxFloat(0.0, cand.Entry.ScoreSlope-envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02))*0.18)
+		cand.Strat = "early_dev_entry"
+		cand.Conf = clamp(baseConf-0.10+confBoost, 0.36, 0.60)
+		cand.Sig = strategies.Signal{
+			Active:     true,
+			Name:       "early_dev_entry",
+			Side:       toFeatureSide(cand.Side),
+			Confidence: cand.Conf,
+			Tags:       []string{"starter_only", "asia_dev", "watchlist_priority"},
+			Reasons: []string{
+				fmt.Sprintf("grade=%s", cand.Entry.CurrentGrade),
+				fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
+				fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
+			},
+		}
+		cand.Sig = applySignalRiskGeometry(cand, "early_dev_entry")
+		cand.RejectReason = ""
+		return cand
+	}
 	if envBool("LIVE_ENABLE_GUERILLA_LONG_RUNNER", true) && strings.EqualFold(cand.Side, "BUY") {
 		minScore := envFloat("LIVE_GUERILLA_LONG_MIN_SCORE", 110.0)
 		minSlope := envFloat("LIVE_GUERILLA_LONG_MIN_SLOPE", 0.30)
@@ -12005,7 +13191,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		minWallConf := envFloat("LIVE_GUERILLA_LONG_MIN_WALL_CONF", 0.55)
 		baseConf := envFloat("LIVE_GUERILLA_LONG_BASE_CONF", 0.72)
 
-		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
+		stateOK := continuationStateTrending(cand.Entry.State)
 		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
 		dayOK := minDayUTC <= 0 || cand.DayUTC24h >= minDayUTC
 		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
@@ -12477,6 +13663,41 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 		if len(fails) == 0 {
 			fails = append(fails, "continuation_fast_not_ready")
 		}
+		if qualifiesEliteStarterCandidate(cand) {
+			softRejects := make([]string, 0, len(fails))
+			hardRejects := make([]string, 0, len(fails))
+			for _, fail := range fails {
+				fail = strings.TrimSpace(fail)
+				if fail == "" {
+					continue
+				}
+				if continuationFastStarterSoftRejectAllowed(cand, fail) {
+					softRejects = append(softRejects, fail)
+				} else {
+					hardRejects = append(hardRejects, fail)
+				}
+			}
+			if len(softRejects) > 0 && len(hardRejects) == 0 {
+				confBoost := min(0.10, max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.18)
+				cand.Strat = "continuation_fast_starter"
+				cand.Conf = clamp((fastBaseConf-0.12)+confBoost, 0.35, fastBaseConf-0.02)
+				if cand.Conf <= 0 {
+					cand.Conf = 0.44
+				}
+				cand.Sig = strategies.Signal{
+					Active: true,
+					Name:   "continuation_fast_starter",
+					Side:   toFeatureSide(cand.Side),
+					Tags:   []string{"starter_only", "elite_soft_override"},
+					Reasons: append([]string{},
+						softRejects...,
+					),
+				}
+				cand.Sig = applySignalRiskGeometry(cand, "continuation_fast_starter")
+				cand.RejectReason = strings.Join(softRejects, ",")
+				return cand
+			}
+		}
 		cand.Strat = "none"
 		cand.Conf = 0
 		cand.RejectReason = strings.Join(fails, ",")
@@ -12882,6 +14103,50 @@ func shouldExitOnMomentumFade(side string, mv momentumView, slopeMax float64) bo
 	}
 	st := mv.Short.State
 	return (st == inplay.StateCooling || st == inplay.StateDumping) && mv.Short.ScoreSlope <= slopeMax
+}
+
+type runnerExitState struct {
+	ExhaustionConfirmed bool
+	StructureBroken     bool
+	TightenReason       string
+	FullExitReason      string
+}
+
+func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.ExternalSignal) runnerExitState {
+	e := sameSideMomentumEntry(side, mv)
+	if e == nil {
+		return runnerExitState{StructureBroken: true, FullExitReason: "RUNNER_STRUCTURE_LOST"}
+	}
+	state := runnerExitState{}
+	if e.LongDemotionFlag || e.ShortDemotionFlag || e.State == inplay.StateExhausted {
+		state.StructureBroken = true
+		state.FullExitReason = "RUNNER_STRUCTURE_LOST"
+	}
+	if shouldExitOnMomentumFade(side, mv, envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)) {
+		state.StructureBroken = true
+		if state.FullExitReason == "" {
+			state.FullExitReason = "RUNNER_STRUCTURE_LOST"
+		}
+	}
+	metaState := strings.ToLower(strings.TrimSpace(e.MetaState))
+	switch {
+	case (ext.LiqSpike || ext.WhaleSpike) && !e.Momentum && e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01):
+		state.ExhaustionConfirmed = true
+		state.TightenReason = "RUNNER_EXHAUST_LIQ_NO_CONT"
+	case strings.Contains(metaState, "exhaust") || e.ReversalWatchFlag:
+		state.ExhaustionConfirmed = true
+		state.TightenReason = "RUNNER_EXHAUST_WICK_REJECTION"
+	case e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01) && (e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted):
+		state.ExhaustionConfirmed = true
+		state.TightenReason = "RUNNER_EXHAUST_SLOPE_COLLAPSE"
+	}
+	if state.StructureBroken && state.FullExitReason == "" {
+		state.FullExitReason = "RUNNER_STRUCTURE_LOST"
+	}
+	if state.ExhaustionConfirmed && state.TightenReason == "" {
+		state.TightenReason = "RUNNER_EXHAUSTION_TIGHTEN"
+	}
+	return state
 }
 
 func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64) string {
@@ -13496,7 +14761,11 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 }
 
 func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
-	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", reserveUSDT+tradeMargin)
+	starterMargin := envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMargin, 20))
+	if starterMargin <= 0 {
+		starterMargin = maxFloat(tradeMargin, 20)
+	}
+	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", starterMargin)
 	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
 	if maxLev <= 0 {
 		maxLev = 3
@@ -13866,8 +15135,69 @@ func normalizePositionSide(side string) string {
 	}
 }
 
+func sessionPhaseUTC(ts time.Time) utcSessionPhase {
+	utc := ts.UTC()
+	hour, min := utc.Hour(), utc.Minute()
+	switch {
+	case inMinuteWindow(hour, min, 7, 0, 10, 0):
+		return sessionLondonOpen
+	case inMinuteWindow(hour, min, 10, 0, 13, 0):
+		return sessionLondonExpand
+	case inMinuteWindow(hour, min, 13, 0, 16, 0):
+		return sessionNYOpen
+	case inMinuteWindow(hour, min, 16, 0, 20, 0):
+		return sessionNYExpand
+	case inMinuteWindow(hour, min, 2, 0, 5, 0):
+		return sessionAsiaBreakout
+	case inMinuteWindow(hour, min, 5, 0, 8, 0):
+		return sessionAsiaContinue
+	case inMinuteWindow(hour, min, 0, 0, 2, 0):
+		return sessionAsiaDev
+	default:
+		return sessionUTCOffHours
+	}
+}
+
+func sessionLowLiquidity(phase utcSessionPhase) bool {
+	return phase == sessionAsiaDev || phase == sessionUTCOffHours
+}
+
+func isStopCloseReason(reason string) bool {
+	r := strings.ToUpper(strings.TrimSpace(reason))
+	return r == "STOP_HIT" || r == "SL" || r == "TRAIL_STOP" || strings.Contains(r, "STOP")
+}
+
+func isExhaustionCloseReason(reason string) bool {
+	r := strings.ToUpper(strings.TrimSpace(reason))
+	return strings.Contains(r, "EXHAUST") || strings.Contains(r, "RUNNER_EXHAUST") || strings.Contains(r, "LIQ_SPIKE")
+}
+
+func tradeReturnPct(p *livePosition) float64 {
+	if p == nil {
+		return 0
+	}
+	if p.DeployedMargin > 0 {
+		return (p.RealizedPnL / p.DeployedMargin) * 100.0
+	}
+	if p.Margin > 0 {
+		return (p.RealizedPnL / p.Margin) * 100.0
+	}
+	return 0
+}
+
+func markLivePositionClosed(p *livePosition, now time.Time, reason string) {
+	if p == nil {
+		return
+	}
+	p.State = execClosed
+	p.CloseReason = reason
+	p.ClosedAt = now
+	p.UpdatedAt = now
+	p.ExhaustionExit = isExhaustionCloseReason(reason)
+}
+
 func sessionTag(ts time.Time) string {
-	return string(data.CurrentRegimeCT(ts))
+	return string(sessionPhaseUTC(ts))
 }
 
 func newPayoutManager() *payoutManager {
@@ -15038,6 +16368,9 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("📘", "COMMANDS",
 			"<code>/status</code> runtime snapshot",
 			"<code>/balance</code> account holdings",
+			"<code>/acct</code> normalized account summary",
+			"<code>/growth</code> equity growth windows",
+			"<code>/summary</code> account + growth + missed opportunity review",
 			"<code>/positions</code> open trades",
 			"<code>/position SYMBOL</code> one live trade in detail",
 			"<code>/why SYMBOL</code> latest decision for a symbol",
@@ -15116,6 +16449,21 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("💼", "BALANCE",
 			fmt.Sprintf("<b>Available USDT:</b> %.4f", s.AvailableUSDT),
 		)
+	case strings.HasPrefix(cmd, "/acct"), strings.HasPrefix(cmd, "/growth"), strings.HasPrefix(cmd, "/summary"):
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("💼", "ACCOUNT SUMMARY", "Execution manager unavailable")
+		}
+		report := c.execMgr.ensureAccountReportFresh(time.Now().UTC(), 2*time.Minute)
+		includeMissed := []string(nil)
+		if strings.HasPrefix(cmd, "/summary") && c.missed != nil {
+			if rows := c.missed.ReviewLines(time.Now().UTC(), 3); len(rows) > 0 {
+				includeMissed = append(includeMissed, "<b>Missed Opportunities:</b>")
+				for _, row := range rows {
+					includeMissed = append(includeMissed, row)
+				}
+			}
+		}
+		return buildAccountHTML(report, strings.HasPrefix(cmd, "/growth"), includeMissed)
 	case strings.HasPrefix(cmd, "/positions"):
 		if c.paper != nil && c.paper.enabled {
 			meta := c.getMeta()

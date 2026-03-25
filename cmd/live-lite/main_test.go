@@ -11,6 +11,7 @@ import (
 	"go-machine/internal/features"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
+	"go-machine/internal/strategies"
 )
 
 func TestInHourWindow(t *testing.T) {
@@ -1055,5 +1056,280 @@ func TestMergeLiveAccountSnapshotMatchesBotPositionByCanonicalSymbol(t *testing.
 	}
 	if snap.Positions[0].Source != "BOT" {
 		t.Fatalf("expected BOT source, got %s", snap.Positions[0].Source)
+	}
+}
+
+func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_CONT_FAST_BASE_CONF", "0.58")
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "0")
+	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")
+	t.Setenv("LIVE_STARTER_MIN_VOL_RATIO", "0.80")
+	t.Setenv("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", "1")
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.83,
+		VolumeRatio:   0.86,
+		OFIZ:          0.42,
+		OFISamples:    12,
+		LastClose:     10.10,
+		SessionVWAP:   10.20,
+		EMA9:          10.25,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateInPlay,
+			CurrentScore: 94,
+			ScoreSlope:   0.14,
+		},
+	}
+	got := applySimpleContinuationFallback(c)
+	if got.Strat != "continuation_fast_starter" {
+		t.Fatalf("expected continuation_fast_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+	if got.Conf <= 0 {
+		t.Fatalf("expected starter confidence, got %.3f", got.Conf)
+	}
+}
+
+func TestResolveLadderPlanAllowsWinnerAdd(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:         "LYNUSDT",
+				Side:           "BUY",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryPrice:     1.00,
+				RemainingQty:   100,
+				DeployedMargin: 10,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"LYNUSDT": {LastPrice: 1.02},
+	}
+	c := candidate{
+		Side:        "BUY",
+		Strat:       "continuation_fast",
+		LastClose:   1.02,
+		SessionVWAP: 1.01,
+		EMA9:        1.01,
+		ReclaimHold: true,
+		Entry:       inplay.Entry{Symbol: "LYNUSDT", State: inplay.StateInPlay},
+		Sig: strategies.Signal{
+			Entry: 1.02,
+			TP1:   1.06,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 25, 10, 30, 0, 0, time.UTC), c, execMgr, meta)
+	if !plan.IsAdd {
+		t.Fatalf("expected winner add plan, got %+v", plan)
+	}
+	if plan.MarginUSDT != 10 {
+		t.Fatalf("expected 10 usdt add, got %.2f", plan.MarginUSDT)
+	}
+}
+
+func TestResolveLadderPlanRejectsLoserAdd(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:         "LYNUSDT",
+				Side:           "BUY",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryPrice:     1.00,
+				RemainingQty:   100,
+				DeployedMargin: 10,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"LYNUSDT": {LastPrice: 0.99},
+	}
+	c := candidate{
+		Side:        "BUY",
+		Strat:       "continuation_fast",
+		LastClose:   0.99,
+		SessionVWAP: 0.98,
+		EMA9:        0.98,
+		ReclaimHold: true,
+		Entry:       inplay.Entry{Symbol: "LYNUSDT", State: inplay.StateInPlay},
+		Sig: strategies.Signal{
+			Entry: 0.99,
+			TP1:   1.03,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 25, 10, 30, 0, 0, time.UTC), c, execMgr, meta)
+	if plan.IsAdd || plan.RejectReason == "" {
+		t.Fatalf("expected loser add reject, got %+v", plan)
+	}
+}
+
+func TestSessionPhaseUTCUsesUTCWindows(t *testing.T) {
+	if got := sessionPhaseUTC(time.Date(2026, 3, 25, 1, 30, 0, 0, time.UTC)); got != sessionAsiaDev {
+		t.Fatalf("expected asia dev, got %s", got)
+	}
+	if got := sessionPhaseUTC(time.Date(2026, 3, 25, 7, 30, 0, 0, time.UTC)); got != sessionLondonOpen {
+		t.Fatalf("expected london open precedence at 07:30 UTC, got %s", got)
+	}
+	if got := sessionPhaseUTC(time.Date(2026, 3, 25, 21, 0, 0, 0, time.UTC)); got != sessionUTCOffHours {
+		t.Fatalf("expected off hours, got %s", got)
+	}
+}
+
+func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.84,
+		VolumeRatio:   1.05,
+		OFIZ:          0.52,
+		OFISamples:    12,
+		LastClose:     10.15,
+		SessionVWAP:   10.05,
+		EMA9:          10.02,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateHeating,
+			CurrentScore: 92,
+			ScoreSlope:   0.18,
+			Momentum:     true,
+			Rank:         2.0,
+		},
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 1, 15, 0, 0, time.UTC))
+	if got.Strat != "early_dev_entry" {
+		t.Fatalf("expected early_dev_entry, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestResolveLadderPlanAllowsStructuredReentry(t *testing.T) {
+	now := time.Date(2026, 3, 25, 9, 30, 0, 0, time.UTC)
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:       "LYNUSDT",
+				Side:         "BUY",
+				State:        execClosed,
+				ClosedAt:     now.Add(-20 * time.Minute),
+				EntrySource:  "BOT",
+				ReentryCount: 0,
+			},
+		},
+		ladderCfg:  loadLadderConfig(20),
+		reentryCfg: loadReentryConfig(20),
+	}
+	c := candidate{
+		Side:  "BUY",
+		Strat: "continuation_fast",
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_long",
+			CurrentGrade: "A",
+			CurrentScore: 90,
+			ScoreSlope:   0.10,
+		},
+		LastClose:       1.02,
+		SessionVWAP:     1.00,
+		EMA9:            1.01,
+		ReclaimHold:     true,
+		ClosedBreakHold: true,
+		CombinedScore:   0.82,
+		VolumeRatio:     1.20,
+	}
+	plan := resolveLadderPlan(now, c, execMgr, map[string]symbolMeta{"LYNUSDT": {LastPrice: 1.02}})
+	if !plan.IsReentry {
+		t.Fatalf("expected structured reentry plan, got %+v", plan)
+	}
+	if plan.MarginUSDT != 20 {
+		t.Fatalf("expected 20 usdt reentry, got %.2f", plan.MarginUSDT)
+	}
+}
+
+func TestSessionEntryRejectReasonBlocksFreshAsiaContinue(t *testing.T) {
+	c := candidate{
+		Side:  "BUY",
+		Strat: "continuation_fast",
+		Entry: inplay.Entry{CurrentGrade: "A"},
+	}
+	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 5, 30, 0, 0, time.UTC), c, ladderPlan{})
+	if reason != "asia_continue_no_fresh_entry" {
+		t.Fatalf("expected asia continue fresh entry block, got %q", reason)
+	}
+}
+
+func TestPostWinCooldownRejectReasonBlocksOppositeAfterBigWin(t *testing.T) {
+	now := time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:         "LYNUSDT",
+				Side:           "BUY",
+				State:          execClosed,
+				ClosedAt:       now.Add(-10 * time.Minute),
+				EntrySource:    "BOT",
+				DeployedMargin: 20,
+				RealizedPnL:    12,
+			},
+		},
+		postWinCooldownCfg: loadPostWinCooldownConfig(),
+	}
+	c := candidate{
+		Side:  "SELL",
+		Entry: inplay.Entry{Symbol: "LYNUSDT"},
+	}
+	if got := postWinCooldownRejectReason(now, c, execMgr); got != "post_win_opposite_cooldown" {
+		t.Fatalf("expected post-win opposite cooldown, got %q", got)
+	}
+}
+
+func TestLoadSafetyConfigUsesStarterMarginForMinAvailable(t *testing.T) {
+	t.Setenv("LIVE_MIN_AVAILABLE_USDT", "")
+	t.Setenv("LIVE_ENTRY_STARTER_USDT", "10")
+	cfg := loadSafetyConfig(0, 25)
+	if cfg.minAvailUSDT != 10 {
+		t.Fatalf("expected starter-based min available of 10, got %.2f", cfg.minAvailUSDT)
+	}
+}
+
+func TestLoadWatchConfigDefaultsToOneSecond(t *testing.T) {
+	t.Setenv("LIVE_WATCHER_SEC", "")
+	t.Setenv("LIVE_WATCH_SEC", "")
+	t.Setenv("LIVE_PRIORITY_WATCH_EVERY_SEC", "")
+	cfg := loadWatchConfig()
+	if cfg.Every != time.Second {
+		t.Fatalf("expected watcher every 1s, got %v", cfg.Every)
+	}
+	if cfg.PriorityEvery != time.Second {
+		t.Fatalf("expected priority watcher every 1s, got %v", cfg.PriorityEvery)
+	}
+}
+
+func TestProtectiveStopValid(t *testing.T) {
+	if !protectiveStopValid("BUY", 100, 101, 99.5) {
+		t.Fatalf("expected long protective stop to be valid")
+	}
+	if protectiveStopValid("BUY", 100, 101, 100.5) {
+		t.Fatalf("expected long protective stop above entry to be invalid")
+	}
+	if !protectiveStopValid("SELL", 100, 99, 101) {
+		t.Fatalf("expected short protective stop to be valid")
+	}
+	if protectiveStopValid("SELL", 100, 99, 98.5) {
+		t.Fatalf("expected short protective stop below mark to be invalid")
 	}
 }

@@ -65,3 +65,78 @@ func TestComputeHybridStopRejectsPoorRR(t *testing.T) {
 		t.Fatalf("expected rr rejection, got %+v", res)
 	}
 }
+
+func TestComputeHybridStopSoftRejectsWideEliteStarter(t *testing.T) {
+	cfg := DefaultHybridStopConfig()
+	cfg.Enabled = true
+	cfg.MaxWidthPct = 8.0
+	cfg.SoftRejectEnable = true
+	cfg.SoftRejectMaxWidthPct = 12.0
+	in := HybridStopInput{
+		Side:           "SELL",
+		Entry:          100,
+		SignalStop:     109.0,
+		StructureHigh:  110.0,
+		ATR:            0.2,
+		TargetPrice:    86.0,
+		Template:       StopTemplateReversalExhaustion,
+		EliteCandidate: true,
+	}
+	res := ComputeHybridStop(cfg, in)
+	if res.Rejected {
+		t.Fatalf("expected starter-only soft reject, got %+v", res)
+	}
+	if !res.StarterOnly || res.RejectReason != "hybrid_stop_too_wide" {
+		t.Fatalf("expected starter-only wide-stop downgrade, got %+v", res)
+	}
+	if res.StopPrice <= 0 {
+		t.Fatalf("expected usable stop price, got %+v", res)
+	}
+}
+
+func TestComputeHybridStopSoftRejectsElitePoorRR(t *testing.T) {
+	cfg := DefaultHybridStopConfig()
+	cfg.Enabled = true
+	cfg.MinRRToTP1 = 1.5
+	cfg.SoftRejectEnable = true
+	cfg.SoftRejectMinRRToTP1 = 0.65
+	in := HybridStopInput{
+		Side:           "BUY",
+		Entry:          100,
+		SignalStop:     99.0,
+		StructureLow:   99.2,
+		ATR:            0.1,
+		TargetPrice:    100.8,
+		Template:       StopTemplateContinuationImpulse,
+		EliteCandidate: true,
+	}
+	res := ComputeHybridStop(cfg, in)
+	if res.Rejected {
+		t.Fatalf("expected starter-only rr soft reject, got %+v", res)
+	}
+	if !res.StarterOnly || res.RejectReason != "hybrid_stop_rr_too_low" {
+		t.Fatalf("expected starter-only rr downgrade, got %+v", res)
+	}
+}
+
+func TestComputeHybridStopStillRejectsAbsurdWideEliteStop(t *testing.T) {
+	cfg := DefaultHybridStopConfig()
+	cfg.Enabled = true
+	cfg.MaxWidthPct = 8.0
+	cfg.SoftRejectEnable = true
+	cfg.SoftRejectMaxWidthPct = 12.0
+	in := HybridStopInput{
+		Side:           "SELL",
+		Entry:          100,
+		SignalStop:     116.0,
+		StructureHigh:  117.0,
+		ATR:            0.2,
+		TargetPrice:    96.0,
+		Template:       StopTemplateReversalExhaustion,
+		EliteCandidate: true,
+	}
+	res := ComputeHybridStop(cfg, in)
+	if !res.Rejected || res.RejectReason != "hybrid_stop_too_wide" {
+		t.Fatalf("expected absurd width hard reject, got %+v", res)
+	}
+}

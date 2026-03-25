@@ -15,29 +15,33 @@ const (
 )
 
 type HybridStopConfig struct {
-	Enabled           bool
-	TemplateMode      string
-	ATRMultCont       float64
-	ATRMultPullback   float64
-	ATRMultReversal   float64
-	ATRMultMeanRevert float64
-	SweepBufferBps    float64
-	MinWidthPct       float64
-	MaxWidthPct       float64
-	MinRRToTP1        float64
+	Enabled               bool
+	TemplateMode          string
+	ATRMultCont           float64
+	ATRMultPullback       float64
+	ATRMultReversal       float64
+	ATRMultMeanRevert     float64
+	SweepBufferBps        float64
+	MinWidthPct           float64
+	MaxWidthPct           float64
+	MinRRToTP1            float64
+	SoftRejectEnable      bool
+	SoftRejectMaxWidthPct float64
+	SoftRejectMinRRToTP1  float64
 }
 
 type HybridStopInput struct {
-	Side          string
-	Entry         float64
-	SignalStop    float64
-	StructureLow  float64
-	StructureHigh float64
-	SessionVWAP   float64
-	EMA9          float64
-	ATR           float64
-	TargetPrice   float64
-	Template      StopTemplate
+	Side           string
+	Entry          float64
+	SignalStop     float64
+	StructureLow   float64
+	StructureHigh  float64
+	SessionVWAP    float64
+	EMA9           float64
+	ATR            float64
+	TargetPrice    float64
+	Template       StopTemplate
+	EliteCandidate bool
 }
 
 type HybridStopResult struct {
@@ -49,20 +53,24 @@ type HybridStopResult struct {
 	StopDistanceR   float64
 	Rejected        bool
 	RejectReason    string
+	StarterOnly     bool
 }
 
 func DefaultHybridStopConfig() HybridStopConfig {
 	return HybridStopConfig{
-		Enabled:           false,
-		TemplateMode:      "off",
-		ATRMultCont:       1.35,
-		ATRMultPullback:   1.10,
-		ATRMultReversal:   1.65,
-		ATRMultMeanRevert: 1.20,
-		SweepBufferBps:    18,
-		MinWidthPct:       0.25,
-		MaxWidthPct:       8.00,
-		MinRRToTP1:        1.00,
+		Enabled:               false,
+		TemplateMode:          "off",
+		ATRMultCont:           1.35,
+		ATRMultPullback:       1.10,
+		ATRMultReversal:       1.65,
+		ATRMultMeanRevert:     1.20,
+		SweepBufferBps:        18,
+		MinWidthPct:           0.25,
+		MaxWidthPct:           8.00,
+		MinRRToTP1:            1.00,
+		SoftRejectEnable:      false,
+		SoftRejectMaxWidthPct: 12.0,
+		SoftRejectMinRRToTP1:  0.65,
 	}
 }
 
@@ -147,17 +155,28 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 		reason += "+min_width"
 	}
 	if maxWidthPct > 0 && distPct > maxWidthPct {
-		res.Rejected = true
-		res.RejectReason = "hybrid_stop_too_wide"
-		return res
+		softMaxPct := cfg.SoftRejectMaxWidthPct / 100.0
+		if cfg.SoftRejectEnable && in.EliteCandidate && softMaxPct > 0 && distPct <= softMaxPct {
+			res.StarterOnly = true
+			res.RejectReason = appendRejectReason(res.RejectReason, "hybrid_stop_too_wide")
+		} else {
+			res.Rejected = true
+			res.RejectReason = "hybrid_stop_too_wide"
+			return res
+		}
 	}
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)
 		rr := reward / maxFloat(dist, 1e-9)
 		if rr < cfg.MinRRToTP1 {
-			res.Rejected = true
-			res.RejectReason = "hybrid_stop_rr_too_low"
-			return res
+			if cfg.SoftRejectEnable && in.EliteCandidate && cfg.SoftRejectMinRRToTP1 > 0 && rr >= cfg.SoftRejectMinRRToTP1 {
+				res.StarterOnly = true
+				res.RejectReason = appendRejectReason(res.RejectReason, "hybrid_stop_rr_too_low")
+			} else {
+				res.Rejected = true
+				res.RejectReason = "hybrid_stop_rr_too_low"
+				return res
+			}
 		}
 	}
 
@@ -166,6 +185,19 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	res.StopDistanceR = dist
 	res.StopDistancePct = distPct * 100.0
 	return res
+}
+
+func appendRejectReason(cur, reason string) string {
+	if reason == "" {
+		return cur
+	}
+	if cur == "" {
+		return reason
+	}
+	if strings.Contains(cur, reason) {
+		return cur
+	}
+	return cur + "," + reason
 }
 
 func atrMultForTemplate(cfg HybridStopConfig, template StopTemplate) float64 {

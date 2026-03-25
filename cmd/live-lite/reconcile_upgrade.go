@@ -90,10 +90,7 @@ func (m *liveExecManager) closePendingWithoutFill(now time.Time, p *livePosition
 	if p == nil {
 		return false, nil
 	}
-	p.State = execClosed
-	p.CloseReason = reason
-	p.ClosedAt = now
-	p.UpdatedAt = now
+	markLivePositionClosed(p, now, reason)
 	_ = m.logFill(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	return true, nil
@@ -111,6 +108,7 @@ type remotePositionView struct {
 	QtyAbs     float64
 	EntryPrice float64
 	MarkPrice  float64
+	Margin     float64
 }
 
 func remotePositionForSide(rows []map[string]any, side string) remotePositionView {
@@ -131,9 +129,27 @@ func remotePositionForSide(rows []map[string]any, side string) remotePositionVie
 		view.QtyAbs = mathAbs(amt)
 		view.EntryPrice = mapFloat(row["entryPrice"])
 		view.MarkPrice = mapFloat(row["markPrice"])
+		view.Margin = maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"]))
 		return view
 	}
 	return view
+}
+
+func derivedAddFillPrice(currentEntry, currentQty float64, view remotePositionView) float64 {
+	if view.EntryPrice <= 0 || view.QtyAbs <= currentQty {
+		return view.EntryPrice
+	}
+	deltaQty := view.QtyAbs - currentQty
+	if deltaQty <= 0 {
+		return view.EntryPrice
+	}
+	totalCost := view.EntryPrice * view.QtyAbs
+	oldCost := currentEntry * currentQty
+	fillPx := (totalCost - oldCost) / deltaQty
+	if fillPx <= 0 {
+		return view.EntryPrice
+	}
+	return fillPx
 }
 
 func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition, fillPx float64, reason string) (bool, error) {
@@ -141,14 +157,11 @@ func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition
 		return false, nil
 	}
 	_ = m.cancelRemainingExits(p)
-	p.State = execClosed
 	p.CloseReason = reason
-	p.ClosedAt = now
-	p.UpdatedAt = now
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("📪", "POSITION CLOSED",
 			fmt.Sprintf("<b>%s</b>", p.Symbol),
-			fmt.Sprintf("<b>Reason:</b> %s", p.CloseReason),
+			fmt.Sprintf("<b>Reason:</b> %s", reason),
 		))
 	}
 	if fillPx <= 0 {
@@ -160,9 +173,11 @@ func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition
 	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, p.RemainingQty)
 	p.RealizedPnL += pnl
 	_ = m.addDayRealized(now, pnl)
-	_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
-	m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
+	_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
+	m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
+	markLivePositionClosed(p, now, reason)
 	p.RemainingQty = 0
+	m.maybeSweepTradeProfit(now, p)
 	return true, nil
 }
 
@@ -190,6 +205,24 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		return true, false, m.ensureExitOrders(p)
 	}
 	if view.QtyAbs > p.RemainingQty+eps {
+		if p.PendingAddOrderID > 0 {
+			deltaQty := view.QtyAbs - p.RemainingQty
+			deltaMargin := 0.0
+			if view.Margin > p.Margin {
+				deltaMargin = view.Margin - p.Margin
+			}
+			reason := "ADD_RECOVERED_REMOTE"
+			if strings.EqualFold(strings.TrimSpace(p.PendingAddEntryReason), "continuation_fast") {
+				reason = "CONFIRMED_ADD"
+			}
+			if err := m.applyAddFill(now, p, deltaQty, derivedAddFillPrice(p.EntryPrice, p.RemainingQty, view), deltaMargin, reason); err != nil {
+				return true, false, err
+			}
+			p.PendingAddFilledQty = p.PendingAddQty
+			m.clearPendingAdd(p)
+			p.UnknownExitChecks = 0
+			return true, false, nil
+		}
 		p.RemainingQty = view.QtyAbs
 		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
 		p.UpdatedAt = now
@@ -308,9 +341,7 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 		p.StopOrderID = 0
 		reason = "STOP_HIT"
 		title = "STOP HIT"
-		p.State = execClosed
-		p.CloseReason = "STOP_HIT"
-		p.ClosedAt = now
+		markLivePositionClosed(p, now, "STOP_HIT")
 	}
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("🛑", title,
@@ -324,6 +355,7 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 	if p.State != execClosed {
 		return m.placeOrReplaceStop(p)
 	}
+	m.maybeSweepTradeProfit(now, p)
 	return nil
 }
 
