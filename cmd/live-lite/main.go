@@ -806,6 +806,10 @@ type livePosition struct {
 	StallBars              int             `json:"stallBars,omitempty"`
 	LastMark               float64         `json:"lastMark,omitempty"`
 	RealizedPnL            float64         `json:"realizedPnl,omitempty"`
+	ProtectionPending      bool            `json:"protectionPending,omitempty"`
+	ProtectionRetryAfter   time.Time       `json:"protectionRetryAfter,omitempty"`
+	LastManageFailAt       time.Time       `json:"lastManageFailAt,omitempty"`
+	LastManageFailCause    string          `json:"lastManageFailCause,omitempty"`
 	UnknownEntryChecks     int             `json:"unknownEntryChecks,omitempty"`
 	UnknownExitChecks      int             `json:"unknownExitChecks,omitempty"`
 	PendingAddOrderID      int64           `json:"pendingAddOrderId,omitempty"`
@@ -6783,6 +6787,42 @@ func botManagedPosition(p *livePosition) bool {
 		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
 }
 
+func manualProtectionRetryDelay() time.Duration {
+	delay := time.Duration(envInt("LIVE_MANUAL_PROTECTION_RETRY_SEC", 120)) * time.Second
+	if delay <= 0 {
+		delay = 2 * time.Minute
+	}
+	return delay
+}
+
+func manualProtectionAlertCooldown() time.Duration {
+	delay := time.Duration(envInt("LIVE_MANUAL_PROTECTION_ALERT_COOLDOWN_SEC", 300)) * time.Second
+	if delay <= 0 {
+		delay = 5 * time.Minute
+	}
+	return delay
+}
+
+func markProtectionPending(p *livePosition, now time.Time, cause string) {
+	if p == nil {
+		return
+	}
+	p.ProtectionPending = true
+	p.ProtectionRetryAfter = now.Add(manualProtectionRetryDelay())
+	p.LastManageFailAt = now
+	p.LastManageFailCause = strings.TrimSpace(cause)
+}
+
+func clearProtectionPending(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.ProtectionPending = false
+	p.ProtectionRetryAfter = time.Time{}
+	p.LastManageFailAt = time.Time{}
+	p.LastManageFailCause = ""
+}
+
 func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) bool {
 	if p == nil || mark <= 0 || p.EntryPrice <= 0 {
 		return false
@@ -6913,16 +6953,15 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	p.StarterOnly = false
 	p.AddLockedUntilConfirm = false
 	m.positions[sym] = p
-	attachErr := m.placeInitialBrackets(p)
+	attachErr := m.initializeBracketLevels(p)
 	if currentMark > 0 {
 		m.reconstructManualManagedState(now, p, currentMark)
 	}
 	if attachErr != nil {
-		attachErr = m.placeOrReplaceStopWithRetry(p)
-	} else if currentMark > 0 {
-		if err := m.placeOrReplaceStop(p); err != nil {
-			attachErr = err
-		}
+		markProtectionPending(p, now, attachErr.Error())
+	} else {
+		markProtectionPending(p, now, "deferred_manual_protection_start")
+		p.ProtectionRetryAfter = now.Add(5 * time.Second)
 	}
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
@@ -6942,19 +6981,22 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		}
 		title := "MANUAL TRADE MANAGEMENT ENABLED"
 		icon := "🤝"
-		if attachErr != nil {
+		if p.ProtectionPending {
 			title = "MANUAL MANAGEMENT ENABLED (PROTECTION PENDING)"
 			icon = "⚠️"
-			lines = append(lines, fmt.Sprintf("<b>Protection:</b> %s", summarizeOneLine(attachErr.Error(), 140)))
+			lines = append(lines, fmt.Sprintf("<b>Protection:</b> %s", summarizeOneLine(firstNonEmpty(func() string {
+				if attachErr != nil {
+					return attachErr.Error()
+				}
+				return p.LastManageFailCause
+			}(), "deferred_manual_protection_start"), 140)))
+			lines = append(lines, fmt.Sprintf("<b>Retry After:</b> %s", p.ProtectionRetryAfter.Format(time.Kitchen)))
 		}
 		m.tg.Sendf("%s", notify.BuildEventHTML(icon, title, lines...))
 	}
 	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
-	if attachErr != nil {
-		return p, nil
-	}
 	return p, nil
 }
 
@@ -7713,7 +7755,14 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 	}
 	// Ensure there is always a protective stop while position is live.
 	if p.RemainingQty > 0 && p.StopOrderID == 0 {
+		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
+			return changed, nil
+		}
 		if err := m.placeOrReplaceStop(p); err != nil {
+			if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
+				markProtectionPending(p, now, err.Error())
+				return true, nil
+			}
 			return changed, err
 		}
 		changed = true
@@ -7862,7 +7911,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 	return changed, nil
 }
 
-func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
+func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 	sideBuy := strings.EqualFold(p.Side, "BUY")
 	anchor := p.EntryPrice
 	stopPct := m.stopPct / 100.0
@@ -7950,6 +7999,13 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
+	if err := m.initializeBracketLevels(p); err != nil {
+		return err
+	}
 	// Prevent duplicated TP levels after exchange tick rounding.
 	if p.TP3Qty > 0 {
 		tp2Rounded, _, err2 := m.rest.RoundPrice(p.Symbol, p.TP2Price)
@@ -7962,8 +8018,8 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 			}
 		}
 	}
-
 	if !m.tpRatchetOnly {
+		var err error
 		if p.TP1Qty > 0 {
 			if p.TP1OrderID, err = m.placeReduceLimit(p, p.TP1Qty, p.TP1Price); err != nil {
 				return err
@@ -8119,6 +8175,16 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		cause,
 	)
 	if m != nil && m.tg != nil {
+		notifyTelegram := true
+		now := time.Now().UTC()
+		if !p.LastManageFailAt.IsZero() &&
+			now.Sub(p.LastManageFailAt) < manualProtectionAlertCooldown() &&
+			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), strings.TrimSpace(cause)) {
+			notifyTelegram = false
+		}
+		if !notifyTelegram {
+			return
+		}
 		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE FAILED SAFE",
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
@@ -8248,6 +8314,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
 	p.ProtectedStop = stopPx
+	clearProtectionPending(p)
 	fmt.Printf("live-lite: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
 		p.Symbol,
 		p.Side,
