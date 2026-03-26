@@ -282,6 +282,8 @@ type manualManageRequest struct {
 	Entry       float64
 	Margin      float64
 	Leverage    int
+	Action      string
+	Failure     string
 	DetectedAt  time.Time
 	PromptedAt  time.Time
 	DecidedAt   time.Time
@@ -6052,6 +6054,7 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 		Entry:       entry,
 		Margin:      margin,
 		Leverage:    maxInt(1, lev),
+		Action:      "MANAGE",
 		DetectedAt:  now,
 		PromptedAt:  now,
 		Status:      "PENDING",
@@ -6062,6 +6065,9 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 	case ok && existing.Fingerprint == req.Fingerprint && (existing.Status == "PENDING" || existing.Status == "DECLINED"):
 		m.mu.Unlock()
 		return true
+	case ok && existing.Fingerprint == req.Fingerprint && existing.Status == "APPROVED":
+		m.mu.Unlock()
+		return false
 	default:
 		m.manualRequests[key] = req
 		m.mu.Unlock()
@@ -6078,10 +6084,67 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 	return true
 }
 
+func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, cause string, now time.Time) {
+	if m == nil || !m.manualConfirm {
+		return
+	}
+	req.Action = "FORCE_FLAT"
+	req.Failure = strings.TrimSpace(cause)
+	req.PromptedAt = now
+	req.DecidedAt = time.Time{}
+	req.Status = "PENDING"
+	m.mu.Lock()
+	m.manualRequests[req.Key] = req
+	m.mu.Unlock()
+	if m.tg != nil {
+		lines := []string{
+			fmt.Sprintf("<b>%s %s</b>", req.Symbol, req.Side),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s | <b>Lev:</b> %dx", req.Qty, fmtPrice(req.Entry), req.Leverage),
+			"<b>Bot management could not attach protection.</b>",
+		}
+		if req.Failure != "" {
+			lines = append(lines, fmt.Sprintf("<b>Failure:</b> %s", summarizeOneLine(req.Failure, 140)))
+		}
+		lines = append(lines,
+			"Force close this manual trade?",
+			fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", req.Symbol, req.Symbol),
+		)
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANUAL TRADE NEEDS DECISION", lines...))
+	}
+}
+
+func manualRequestTimeout(req manualManageRequest) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
+		return 2 * time.Minute
+	}
+	return 0
+}
+
+func (m *liveExecManager) expirePendingManualRequests(now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, req := range m.manualRequests {
+		if req.Status != "PENDING" || req.PromptedAt.IsZero() {
+			continue
+		}
+		timeout := manualRequestTimeout(req)
+		if timeout <= 0 || now.Sub(req.PromptedAt) < timeout {
+			continue
+		}
+		req.Status = "DECLINED"
+		req.DecidedAt = now
+		m.manualRequests[key] = req
+	}
+}
+
 func (m *liveExecManager) pendingManualRequests(limit int) []manualManageRequest {
 	if m == nil {
 		return nil
 	}
+	m.expirePendingManualRequests(time.Now().UTC())
 	m.mu.RLock()
 	out := make([]manualManageRequest, 0, len(m.manualRequests))
 	for _, req := range m.manualRequests {
@@ -6104,6 +6167,7 @@ func (m *liveExecManager) pendingManualRequest(symbol string) (manualManageReque
 	if m == nil {
 		return manualManageRequest{}, false
 	}
+	m.expirePendingManualRequests(time.Now().UTC())
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
 	base := canonicalSymbolBase(raw)
 	m.mu.RLock()
@@ -6117,6 +6181,36 @@ func (m *liveExecManager) pendingManualRequest(symbol string) (manualManageReque
 		}
 	}
 	return manualManageRequest{}, false
+}
+
+func (m *liveExecManager) approvedManualRequest(symbol, side string, qty, entry float64) (manualManageRequest, bool) {
+	if m == nil {
+		return manualManageRequest{}, false
+	}
+	key := positionLookupKey(symbol, side)
+	fp := manualManageFingerprint(symbol, side, qty, entry)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	req, ok := m.manualRequests[key]
+	if !ok || req.Status != "APPROVED" || req.Fingerprint != fp {
+		return manualManageRequest{}, false
+	}
+	return req, true
+}
+
+func (m *liveExecManager) markManualRequestApproved(req manualManageRequest, now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.manualRequests[req.Key]
+	if !ok || cur.Fingerprint != req.Fingerprint {
+		return
+	}
+	cur.Status = "APPROVED"
+	cur.DecidedAt = now
+	m.manualRequests[req.Key] = cur
 }
 
 func (m *liveExecManager) markManualRequestDeclined(req manualManageRequest, now time.Time) {
@@ -6909,6 +7003,12 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		margin := maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"]))
 		lev := int(maxFloat(1, mapFloat(row["leverage"])))
 		remoteKeys[positionLookupKey(sym, side)] = manualManageFingerprint(sym, side, qty, entry)
+		if approvedReq, ok := m.approvedManualRequest(sym, side, qty, entry); ok {
+			if _, err := m.activateManualManagement(approvedReq, now, "MANUAL_APPROVED_RETRY"); err == nil {
+				imported++
+				continue
+			}
+		}
 		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
 			continue
 		}
@@ -6945,56 +7045,22 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		return m.positions[sym], nil
 	}
 	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
-	currentMark := 0.0
-	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
-		currentMark = mark
+	if err := m.placeInitialBrackets(p); err != nil {
+		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
+			return nil, err
+		}
 	}
-	p.EntryReason = "manual_managed_live"
-	p.StarterOnly = false
-	p.AddLockedUntilConfirm = false
 	m.positions[sym] = p
-	attachErr := m.initializeBracketLevels(p)
-	if currentMark > 0 {
-		m.reconstructManualManagedState(now, p, currentMark)
-	}
-	if attachErr != nil {
-		markProtectionPending(p, now, attachErr.Error())
-	} else {
-		markProtectionPending(p, now, "deferred_manual_protection_start")
-		p.ProtectionRetryAfter = now.Add(5 * time.Second)
-	}
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
 	m.mu.Unlock()
 	if m.tg != nil {
-		lines := []string{
+		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED",
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
-		}
-		if currentMark > 0 {
-			lines = append(lines,
-				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
-				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
-				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
-			)
-		}
-		title := "MANUAL TRADE MANAGEMENT ENABLED"
-		icon := "🤝"
-		if p.ProtectionPending {
-			title = "MANUAL MANAGEMENT ENABLED (PROTECTION PENDING)"
-			icon = "⚠️"
-			lines = append(lines, fmt.Sprintf("<b>Protection:</b> %s", summarizeOneLine(firstNonEmpty(func() string {
-				if attachErr != nil {
-					return attachErr.Error()
-				}
-				return p.LastManageFailCause
-			}(), "deferred_manual_protection_start"), 140)))
-			lines = append(lines, fmt.Sprintf("<b>Retry After:</b> %s", p.ProtectionRetryAfter.Format(time.Kitchen)))
-		}
-		m.tg.Sendf("%s", notify.BuildEventHTML(icon, title, lines...))
+		))
 	}
-	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	return p, nil
@@ -7037,6 +7103,24 @@ func (m *liveExecManager) forceFlatRecovered(p *livePosition) error {
 	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
 	_, err = m.rest.PlaceOrder(vals)
 	return err
+}
+
+func (m *liveExecManager) activateManualForceFlat(req manualManageRequest, now time.Time) error {
+	if m == nil {
+		return fmt.Errorf("live execution manager unavailable")
+	}
+	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
+	if sym == "" {
+		return fmt.Errorf("invalid symbol")
+	}
+	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	if err := m.forceFlatRecovered(p); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.manualRequests, req.Key)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *liveExecManager) isActive(p *livePosition) bool {
@@ -7755,14 +7839,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 	}
 	// Ensure there is always a protective stop while position is live.
 	if p.RemainingQty > 0 && p.StopOrderID == 0 {
-		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
-			return changed, nil
-		}
 		if err := m.placeOrReplaceStop(p); err != nil {
-			if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
-				markProtectionPending(p, now, err.Error())
-				return true, nil
-			}
 			return changed, err
 		}
 		changed = true
@@ -17240,6 +17317,18 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		approve := cmd == "y" || cmd == "yes"
 		req := pending[0]
 		if approve {
+			c.execMgr.markManualRequestApproved(req, time.Now().UTC())
+			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
+				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
+					return notify.BuildEventHTML("⚠️", "FORCE CLOSE FAILED",
+						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+						fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+					)
+				}
+				return notify.BuildEventHTML("✅", "MANUAL FORCE CLOSE APPROVED",
+					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), req.Side),
+				)
+			}
 			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
 				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
 					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
@@ -17259,17 +17348,21 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
 		}
 		if len(fields) < 3 {
-			pending := c.execMgr.pendingManualRequests(5)
-			if len(pending) == 0 {
-				return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
-			}
-			lines := []string{"<code>/manage SYMBOL y|n</code>"}
-			for _, req := range pending {
-				lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | qty=%.6f | entry=%s",
-					cleanSymbol(req.Symbol), req.Side, req.Qty, fmtPrice(req.Entry)))
-			}
-			return notify.BuildEventHTML("🤝", "MANAGE", lines...)
+		pending := c.execMgr.pendingManualRequests(5)
+		if len(pending) == 0 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
 		}
+		lines := []string{"<code>/manage SYMBOL y|n</code>"}
+		for _, req := range pending {
+			action := "manage"
+			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
+				action = "force_close"
+			}
+			lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | action=%s | qty=%.6f | entry=%s",
+				cleanSymbol(req.Symbol), req.Side, action, req.Qty, fmtPrice(req.Entry)))
+		}
+		return notify.BuildEventHTML("🤝", "MANAGE", lines...)
+	}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		answer := strings.ToLower(strings.TrimSpace(fields[2]))
 		req, ok := c.execMgr.pendingManualRequest(sym)
@@ -17278,6 +17371,18 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		switch answer {
 		case "y", "yes":
+			c.execMgr.markManualRequestApproved(req, time.Now().UTC())
+			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
+				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
+					return notify.BuildEventHTML("⚠️", "FORCE CLOSE FAILED",
+						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+						fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+					)
+				}
+				return notify.BuildEventHTML("✅", "MANUAL FORCE CLOSE APPROVED",
+					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), req.Side),
+				)
+			}
 			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
 				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
 					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
