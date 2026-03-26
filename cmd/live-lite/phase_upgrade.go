@@ -431,7 +431,7 @@ func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *li
 		Reasons:    reasonsText,
 	}
 	c.Sig = applySignalRiskGeometry(c, "persistence_entry")
-	c.RejectReason = "missed_opportunity_ready"
+	c.RejectReason = ""
 	c.QualityReasons = append(c.QualityReasons, "missed_opportunity_ready")
 	c.PersistenceSeenCount = st.SeenCount
 	c.PersistenceTopNCount = st.TopNCount
@@ -1288,11 +1288,11 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 		return queueDeepPreflightResult{RejectReason: "wall_consumption_not_confirmed"}
 	}
 	if c.WallConfidence > 0 && c.WallPersistence < time.Duration(envInt("LIVE_WALL_MIN_PERSIST_MS", 3000))*time.Millisecond {
-		if persistenceStrong(c, persistCfg) && persistenceSoftBlock("wall_not_persistent") {
+		if strings.EqualFold(c.Strat, "persistence_entry") || (persistenceStrong(c, persistCfg) && persistenceSoftBlock("wall_not_persistent")) {
 			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
 				raw, c.Side, "wall_not_persistent", firstNonEmpty(c.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
 		} else {
-		return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
+			return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
 		}
 	}
 	if ctx.OBFilterEnable {

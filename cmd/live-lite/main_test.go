@@ -1030,6 +1030,12 @@ func TestPositionLookupKeyNormalizesAsterSymbols(t *testing.T) {
 	}
 }
 
+func TestClassifyRejectReasonTreatsMissedOpportunityReadyAsSoft(t *testing.T) {
+	if got := classifyRejectReason("missed_opportunity_ready"); got != rejectClassSoftConfirm {
+		t.Fatalf("expected soft classification, got %q", got)
+	}
+}
+
 func TestMergeLiveAccountSnapshotMatchesBotPositionByCanonicalSymbol(t *testing.T) {
 	m := &liveExecManager{
 		positions: map[string]*livePosition{

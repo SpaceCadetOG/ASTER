@@ -16911,6 +16911,7 @@ func classifyRejectReason(reason string) RejectClass {
 		strings.Contains(raw, "continuation_no_structure_confirm"), strings.Contains(raw, "below_vwap_ema"),
 		strings.Contains(raw, "above_vwap_ema"), strings.Contains(raw, "vol_ratio"),
 		strings.Contains(raw, "not_ready"), strings.Contains(raw, "expired"),
+		strings.Contains(raw, "missed_opportunity_ready"),
 		strings.Contains(raw, "asia_quality_gate"), strings.Contains(raw, "strategy_none_reject"),
 		strings.Contains(raw, "ny_open_requires_strong_setup"), strings.Contains(raw, "utc_offhours_requires_a_grade"),
 		strings.Contains(raw, "asia_dev_starter_only"), strings.Contains(raw, "asia_continue_no_fresh_entry"),

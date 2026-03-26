@@ -307,8 +307,37 @@ func TestDeepQueuePreflightRejectsWallSpoofRisk(t *testing.T) {
 	}
 	res := deepQueuePreflight(c, queueDeepPreflightCtx{
 		MetaBySymbol: map[string]symbolMeta{"BTCUSDT": {LastPrice: 100}},
+		PureMode:     true,
 	})
 	if res.RejectReason != "wall_spoof_risk" {
 		t.Fatalf("expected wall_spoof_risk reject, got %s", res.RejectReason)
+	}
+}
+
+func TestDeepQueuePreflightAllowsPersistenceEntryPastWallPersistence(t *testing.T) {
+	t.Setenv("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", "1")
+	t.Setenv("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", "3")
+	t.Setenv("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", "2")
+	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
+	t.Setenv("LIVE_WALL_MIN_PERSIST_MS", "3000")
+	c := candidate{
+		Strat:                 "persistence_entry",
+		Side:                  "BUY",
+		CombinedScore:         0.78,
+		PersistenceSeenCount:  4,
+		PersistenceTopNCount:  3,
+		PersistenceVolumeTrend: true,
+		PersistenceMomentum:    true,
+		PersistenceReason:     "seen=4,topn=3",
+		WallConfidence:        0.62,
+		WallPersistence:       1500 * time.Millisecond,
+		Entry:                 inplay.Entry{Symbol: "BTCUSDT"},
+	}
+	res := deepQueuePreflight(c, queueDeepPreflightCtx{
+		MetaBySymbol: map[string]symbolMeta{"BTCUSDT": {LastPrice: 100}},
+		PureMode:     true,
+	})
+	if res.RejectReason != "" {
+		t.Fatalf("expected no reject for persistence_entry wall soft override, got %s", res.RejectReason)
 	}
 }
