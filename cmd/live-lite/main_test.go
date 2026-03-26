@@ -1298,23 +1298,23 @@ func TestSessionEntryRejectReasonAllowsOffHoursAGradeEntry(t *testing.T) {
 	}
 }
 
-func TestSessionEntryRejectReasonBlocksOffHoursBGradeEntry(t *testing.T) {
+func TestSessionEntryRejectReasonAllowsOffHoursEntry(t *testing.T) {
 	c := candidate{
 		Side:          "BUY",
 		Strat:         "continuation_fast",
-		CombinedScore: 0.81,
-		Conf:          0.58,
-		VolumeRatio:   1.10,
+		CombinedScore: 0.62,
+		Conf:          0.44,
+		VolumeRatio:   0.82,
 		Entry: inplay.Entry{
 			Symbol:       "LYNUSDT",
 			CurrentGrade: "B",
-			State:        inplay.StateInPlay,
-			Momentum:     true,
+			State:        inplay.StateHeating,
+			Momentum:     false,
 		},
 	}
 	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 21, 30, 0, 0, time.UTC), c, ladderPlan{})
-	if reason != "utc_offhours_requires_a_grade" {
-		t.Fatalf("expected off-hours B-grade block, got %q", reason)
+	if reason != "" {
+		t.Fatalf("expected off-hours entry to pass, got %q", reason)
 	}
 }
 

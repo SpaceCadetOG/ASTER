@@ -12813,10 +12813,6 @@ func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) strin
 		return chaseRejectReason(c, true)
 	}
 	switch phase {
-	case sessionUTCOffHours:
-		if !qualifiesUTCOffHoursEntry(c) {
-			return "utc_offhours_requires_a_grade"
-		}
 	case sessionAsiaDev:
 		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
 			return "asia_dev_starter_only"
