@@ -397,6 +397,36 @@ type operatorDecision struct {
 	UpdatedAt    time.Time
 }
 
+type RejectClass string
+
+const (
+	rejectClassHardSafety    RejectClass = "hard_safety"
+	rejectClassSoftConfirm   RejectClass = "soft_confirmation"
+	rejectClassCapacity      RejectClass = "capacity_runtime"
+	rejectClassStateCooldown RejectClass = "state_cooldown"
+)
+
+type EntryEligibilitySummary struct {
+	Symbol           string
+	Side             string
+	Strat            string
+	Rank             float64
+	Grade            string
+	PersistenceScore float64
+
+	HardBlocks     []string
+	SoftBlocks     []string
+	CapacityBlocks []string
+	StateBlocks    []string
+
+	StarterAllowed   bool
+	FullEntryAllowed bool
+	ReentryAllowed   bool
+
+	FinalDecision string
+	FinalReason   string
+}
+
 type operatorSuggestion struct {
 	Symbol       string
 	Side         string
@@ -708,6 +738,7 @@ type livePosition struct {
 	CloseReason            string          `json:"closeReason,omitempty"`
 	EntryOrderID           int64           `json:"entryOrderId"`
 	EntryPrice             float64         `json:"entryPrice"`
+	ManageAnchorPrice      float64         `json:"manageAnchorPrice,omitempty"`
 	Qty                    float64         `json:"qty"`
 	FilledQty              float64         `json:"filledQty"`
 	RemainingQty           float64         `json:"remainingQty"`
@@ -945,6 +976,8 @@ type liveLiteStatus struct {
 	TopVPStopMode   string              `json:"top_vp_stop_mode,omitempty"`
 	TopVPTargetMode string              `json:"top_vp_target_mode,omitempty"`
 	TopRejectReason string              `json:"top_reject_reason,omitempty"`
+	TopDecision     string              `json:"top_decision,omitempty"`
+	TopDecisionWhy  string              `json:"top_decision_why,omitempty"`
 	TopRegimeTag    string              `json:"top_regime_tag,omitempty"`
 	LongInPlay      int                 `json:"long_inplay"`
 	ShortInPlay     int                 `json:"short_inplay"`
@@ -1501,24 +1534,27 @@ func main() {
 	if dryRun {
 		modeLabel = "PAPER"
 	}
-	fmt.Printf("  mode=%s | scan=%s | watch=%s | priority=%s | min_grade=%s\n",
-		modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery, strings.ToUpper(minGrade))
-	fmt.Printf("  starter=%.2f | add=%.2f | max=%.2f | reentry=%.2f | min_avail=%.2f\n",
-		ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, reentryCfg.SizeUSDT, safety.minAvailUSDT)
+	for _, line := range bootTruthLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
+		fmt.Printf("  %s\n", line)
+	}
+	fmt.Printf("  min_grade=%s | reentry_size=%.2f\n", strings.ToUpper(minGrade), reentryCfg.SizeUSDT)
 	if execMgr != nil {
-		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.AccountReportSnapshot()))
+		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
 	fmt.Println()
 	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE-LITE STARTED",
 		fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
 		fmt.Sprintf("<b>Scan / Watch:</b> %s / %s", scanEvery, watchCfg.Every),
 		fmt.Sprintf("<b>Starter / Add / Max:</b> %.2f / %.2f / %.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT),
-		fmt.Sprintf("<b>Re-entry / Min Avail:</b> %.2f / %.2f", reentryCfg.SizeUSDT, safety.minAvailUSDT),
+		fmt.Sprintf("<b>Min Avail / Re-entry:</b> %.2f / %.2f", safety.minAvailUSDT, reentryCfg.SizeUSDT),
+		fmt.Sprintf("<b>Features:</b> one_symbol=%s | reentry=%s | persistence=%s | funds=%s | snapshots=%s",
+			boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(missedOpportunitiesEnabled()),
+			boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
 		fmt.Sprintf("<b>%s</b>", compactAccountSummaryLine(func() accountReport {
 			if execMgr == nil {
 				return accountReport{}
 			}
-			return execMgr.AccountReportSnapshot()
+			return execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
 		}())),
 	))
 
@@ -2636,6 +2672,7 @@ func main() {
 		st.TopRejectReason = best.RejectReason
 		st.TopRegimeTag = best.Sig.RegimeTag
 		statusStore.Set(st)
+		eligibility := newEligibilitySummary(best)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
 		if cmdCtx != nil {
 			if s, ok := cmdCtx.getSuggestion(best.Entry.Symbol); ok && strings.EqualFold(s.Side, best.Side) && s.PreferredLev > 0 {
@@ -2654,6 +2691,8 @@ func main() {
 		if ladderCfg.StarterUSDT > 0 {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
+		eligibility.StarterAllowed = true
+		eligibility.FullEntryAllowed = !strings.EqualFold(best.Strat, "persistence_entry") && !strings.EqualFold(best.Strat, "continuation_fast_starter") && !strings.EqualFold(best.Strat, "early_dev_entry")
 		bestMeta := metaBySymbol[rawBest]
 		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
@@ -2720,7 +2759,8 @@ func main() {
 			if sig.LiqSpike {
 				if (strings.EqualFold(best.Side, "BUY") && sig.FlowDelta < 0) || (strings.EqualFold(best.Side, "SELL") && sig.FlowDelta > 0) {
 					recordCandidateDecision(cmdCtx, best, "external_liq_flow_against")
-					st.TopRejectReason = "external_liq_flow_against"
+					addEligibilityBlock(&eligibility, "external_liq_flow_against")
+					finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 					statusStore.Set(st)
 					eventLog.Emit(stats.Event{
 						Timestamp: now,
@@ -2742,7 +2782,8 @@ func main() {
 		}
 		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
 			recordCandidateDecision(cmdCtx, best, "POST_SL_COOLDOWN")
-			st.TopRejectReason = "POST_SL_COOLDOWN"
+			addEligibilityBlock(&eligibility, "POST_SL_COOLDOWN")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
@@ -2763,7 +2804,8 @@ func main() {
 		_ = allowDeadSessionTrading
 		if !pureMode && !symbolCooldownSameSide.Allow(rawBest+"|"+strings.ToUpper(strings.TrimSpace(best.Side)), now) {
 			recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
-			st.TopRejectReason = "symbol_cooldown_same_side"
+			addEligibilityBlock(&eligibility, "symbol_cooldown_same_side")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
@@ -2783,7 +2825,8 @@ func main() {
 		}
 		if !pureMode && !symbolCooldownFlipSide.Allow(rawBest, now) {
 			recordCandidateDecision(cmdCtx, best, "symbol_cooldown_flip_side")
-			st.TopRejectReason = "symbol_cooldown_flip_side"
+			addEligibilityBlock(&eligibility, "symbol_cooldown_flip_side")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
@@ -2803,7 +2846,8 @@ func main() {
 		}
 		if !pureMode && !intentDedupe.Allow(rawBest, best.Side, now) {
 			recordCandidateDecision(cmdCtx, best, "intent_dedupe")
-			st.TopRejectReason = "intent_dedupe"
+			addEligibilityBlock(&eligibility, "intent_dedupe")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
@@ -2831,7 +2875,8 @@ func main() {
 			okOB, obReason, obSpreadBps, obImb := orderbookEntryDecision(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps)
 			if !okOB {
 				recordCandidateDecision(cmdCtx, best, obReason)
-				st.TopRejectReason = obReason
+				addEligibilityBlock(&eligibility, obReason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 				statusStore.Set(st)
 				eventLog.Emit(stats.Event{
 					Timestamp: now,
@@ -2886,7 +2931,8 @@ func main() {
 			})
 			if !riskDec.Approved {
 				recordCandidateDecision(cmdCtx, best, riskDec.RejectReason)
-				st.TopRejectReason = riskDec.RejectReason
+				addEligibilityBlock(&eligibility, riskDec.RejectReason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 				statusStore.Set(st)
 				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
 				waitAndReport()
@@ -2975,7 +3021,8 @@ func main() {
 		if !pureMode {
 			if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
 				recordCandidateDecision(cmdCtx, best, reason)
-				st.TopRejectReason = reason
+				addEligibilityBlock(&eligibility, reason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 				statusStore.Set(st)
 				fmt.Println("live-lite: safety skip:", reason)
 				if tgVerbose {
@@ -2990,7 +3037,8 @@ func main() {
 		}
 		if !pureMode && inEventLockout(time.Now(), eventLockoutMin) {
 			recordCandidateDecision(cmdCtx, best, "event_lockout")
-			st.TopRejectReason = "event_lockout"
+			addEligibilityBlock(&eligibility, "event_lockout")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=event_lockout")
 			waitAndReport()
@@ -2998,7 +3046,8 @@ func main() {
 		}
 		if !pureMode && isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
 			recordCandidateDecision(cmdCtx, best, "correlated_exposure_gate")
-			st.TopRejectReason = "correlated_exposure_gate"
+			addEligibilityBlock(&eligibility, "correlated_exposure_gate")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
 			fmt.Println("live-lite: skip reason=correlated_exposure_gate")
 			waitAndReport()
@@ -3006,6 +3055,8 @@ func main() {
 		}
 		if !pureMode && requireShadowDays > 0 && !shadowReady(requireShadowDays, shadowEquityFile, now) {
 			recordCandidateDecision(cmdCtx, best, "shadow_gate_active")
+			addEligibilityBlock(&eligibility, "shadow_gate_active")
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
 				fmt.Println("live-lite:", msg)
@@ -3019,9 +3070,18 @@ func main() {
 		if ladderPlan.MarginUSDT > 0 {
 			effectiveMargin = ladderPlan.MarginUSDT
 		}
+		eligibility.ReentryAllowed = ladderPlan.IsReentry
+		if ladderPlan.IsAdd {
+			eligibility.FullEntryAllowed = true
+			eligibility.StarterAllowed = false
+		} else if ladderPlan.IsReentry {
+			eligibility.FullEntryAllowed = false
+			eligibility.StarterAllowed = false
+		}
 		if ladderPlan.RejectReason != "" {
 			recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
-			st.TopRejectReason = ladderPlan.RejectReason
+			addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
 			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
 			waitAndReport()
@@ -3029,7 +3089,8 @@ func main() {
 		}
 		if reason := sessionEntryRejectReason(now, best, ladderPlan); reason != "" {
 			recordCandidateDecision(cmdCtx, best, reason)
-			st.TopRejectReason = reason
+			addEligibilityBlock(&eligibility, reason)
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
 			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
@@ -3038,7 +3099,8 @@ func main() {
 		if !ladderPlan.IsAdd {
 			if reason := postWinCooldownRejectReason(now, best, execMgr); reason != "" {
 				recordCandidateDecision(cmdCtx, best, reason)
-				st.TopRejectReason = reason
+				addEligibilityBlock(&eligibility, reason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 				statusStore.Set(st)
 				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
 				waitAndReport()
@@ -3047,7 +3109,8 @@ func main() {
 		}
 		if reason := activeWinnerRejectReason(now, best, execMgr, paper, metaBySymbol, longCurrent, shortCurrent); reason != "" {
 			recordCandidateDecision(cmdCtx, best, reason)
-			st.TopRejectReason = reason
+			addEligibilityBlock(&eligibility, reason)
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
 			eventAllow := false
 			eventLog.Emit(stats.Event{
@@ -3075,6 +3138,9 @@ func main() {
 			var err error
 			avail, err = availableUSDT(rest)
 			if err != nil {
+				addEligibilityBlock(&eligibility, "account_balance_fetch")
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
 				fmt.Println("live-lite: balance error:", err)
 				waitAndReport()
 				continue
@@ -3087,6 +3153,9 @@ func main() {
 		}
 		if avail < safety.minAvailUSDT {
 			recordCandidateDecision(cmdCtx, best, "min_available_usdt")
+			addEligibilityBlock(&eligibility, "min_available_usdt")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
@@ -3108,6 +3177,9 @@ func main() {
 		}
 		if usable < effectiveMargin {
 			recordCandidateDecision(cmdCtx, best, "insufficient_usable")
+			addEligibilityBlock(&eligibility, "insufficient_usable")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
@@ -3120,6 +3192,9 @@ func main() {
 		}
 		if !pureMode && reserveGate != nil && reserveGate.block(baseBal) {
 			recordCandidateDecision(cmdCtx, best, "reserve_lock_active")
+			addEligibilityBlock(&eligibility, "reserve_lock_active")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🔒", "RESERVE LOCK ACTIVE",
@@ -3136,6 +3211,9 @@ func main() {
 			var err error
 			openCount, err = countOpenPositions(rest)
 			if err != nil {
+				addEligibilityBlock(&eligibility, "position_check_error")
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
 				fmt.Println("live-lite: position check error:", err)
 				waitAndReport()
 				continue
@@ -3143,6 +3221,9 @@ func main() {
 		}
 		if !ladderPlan.IsAdd && openCount >= maxOpenPos {
 			recordCandidateDecision(cmdCtx, best, "max_open_positions")
+			addEligibilityBlock(&eligibility, "max_open_positions")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Printf("live-lite: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
@@ -3160,6 +3241,9 @@ func main() {
 			}
 			if openSideCount >= maxOpenPerSide {
 				recordCandidateDecision(cmdCtx, best, "max_open_positions_side")
+				addEligibilityBlock(&eligibility, "max_open_positions_side")
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
 				fmt.Printf("live-lite: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
 				if tgVerbose {
 					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: SIDE FULL",
@@ -3173,6 +3257,9 @@ func main() {
 		}
 		if !ladderPlan.IsAdd && execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
 			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
+			addEligibilityBlock(&eligibility, "max_tracked_entries")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Printf("live-lite: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
 			waitAndReport()
 			continue
@@ -3180,10 +3267,22 @@ func main() {
 
 		if execMgr == nil {
 			recordCandidateDecision(cmdCtx, best, "exec_manager_unavailable")
+			addEligibilityBlock(&eligibility, "exec_manager_unavailable")
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
 			fmt.Println("live-lite: execution manager unavailable")
 			waitAndReport()
 			continue
 		}
+		chooseFinalDecision(&eligibility, ladderPlan)
+		if eligibility.FinalDecision != "full_entry" && eligibility.FinalDecision != "starter_entry" && eligibility.FinalDecision != "reentry_entry" {
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
+			waitAndReport()
+			continue
+		}
+		finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+		statusStore.Set(st)
 		intentReason := "live_intent"
 		submitType := "ORDER_SUBMIT"
 		if ladderPlan.IsAdd {
@@ -6662,6 +6761,28 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 	return p
 }
 
+func manageAnchorPrice(p *livePosition) float64 {
+	if p == nil {
+		return 0
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && p.ManageAnchorPrice > 0 {
+		return p.ManageAnchorPrice
+	}
+	return p.EntryPrice
+}
+
+func botManagedPosition(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
+		p.ManageAnchorPrice > 0 &&
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
+}
+
 func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	if m == nil || m.rest == nil {
 		return 0, nil
@@ -6730,11 +6851,15 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		return m.positions[sym], nil
 	}
 	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+		p.ManageAnchorPrice = mark
+		p.LastMark = mark
+	}
+	p.EntryReason = "manual_managed_live"
+	p.StarterOnly = false
+	p.AddLockedUntilConfirm = false
 	if err := m.placeInitialBrackets(p); err != nil {
 		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
-			if m.recoverForceFlatFail {
-				_ = m.forceFlatRecovered(p)
-			}
 			return nil, err
 		}
 	}
@@ -6988,7 +7113,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		if !strings.EqualFold(existing.Side, c.Side) {
 			return fmt.Errorf("active opposite-side state already exists for %s", rawSym)
 		}
-		if !strings.EqualFold(strings.TrimSpace(existing.EntrySource), "BOT") {
+		if !botManagedPosition(existing) {
 			return fmt.Errorf("manual position already active for %s", rawSym)
 		}
 		if existing.PendingAddOrderID > 0 {
@@ -7660,6 +7785,10 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 
 func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	sideBuy := strings.EqualFold(p.Side, "BUY")
+	anchor := manageAnchorPrice(p)
+	if anchor <= 0 {
+		anchor = p.EntryPrice
+	}
 	stopPct := m.stopPct / 100.0
 	if stopPct <= 0 {
 		stopPct = 0.02
@@ -7696,15 +7825,15 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		m.maxStopPct/100.0,
 	)
 	if sideBuy {
-		p.StopPrice = p.EntryPrice * (1 - stopPct)
-		p.TP1Price = p.EntryPrice * (1 + stopPct*tp1R)
-		p.TP2Price = p.EntryPrice * (1 + stopPct*tp2R)
-		p.TP3Price = p.EntryPrice * (1 + stopPct*tp3R)
+		p.StopPrice = anchor * (1 - stopPct)
+		p.TP1Price = anchor * (1 + stopPct*tp1R)
+		p.TP2Price = anchor * (1 + stopPct*tp2R)
+		p.TP3Price = anchor * (1 + stopPct*tp3R)
 	} else {
-		p.StopPrice = p.EntryPrice * (1 + stopPct)
-		p.TP1Price = p.EntryPrice * (1 - stopPct*tp1R)
-		p.TP2Price = p.EntryPrice * (1 - stopPct*tp2R)
-		p.TP3Price = p.EntryPrice * (1 - stopPct*tp3R)
+		p.StopPrice = anchor * (1 + stopPct)
+		p.TP1Price = anchor * (1 - stopPct*tp1R)
+		p.TP2Price = anchor * (1 - stopPct*tp2R)
+		p.TP3Price = anchor * (1 - stopPct*tp3R)
 	}
 	if m.exitManager != nil {
 		p.TP1Price = m.exitManager.FrontRunTarget(p.Side, p.TP1Price, p.VPTargetLevel)
@@ -7712,17 +7841,17 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 		p.TP3Price = m.exitManager.FrontRunTarget(p.Side, p.TP3Price, p.VPTargetLevel)
 	}
 	p.TP1Price, p.TP2Price, p.TP3Price = enforceTPProgression(p.Side, p.TP1Price, p.TP2Price, p.TP3Price)
-	p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price = sanitizeBracketGeometry(p.EntryPrice, p.Side, p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
+	p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price = sanitizeBracketGeometry(anchor, p.Side, p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
 	if p.StopPrice <= 0 || p.TP1Price <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
 		return fmt.Errorf("invalid bracket levels stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f",
 			p.StopPrice, p.TP1Price, p.TP2Price, p.TP3Price)
 	}
-	risk := abs(p.EntryPrice - p.StopPrice)
-	reward := abs(p.TP1Price - p.EntryPrice)
+	risk := abs(anchor - p.StopPrice)
+	reward := abs(p.TP1Price - anchor)
 	if risk <= 0 || reward/risk < m.minTP1RR {
 		return fmt.Errorf("tp1 rr below minimum: rr=%.3f min=%.3f", reward/maxFloat(risk, 1e-9), m.minTP1RR)
 	}
-	p.TrailRef = p.EntryPrice
+	p.TrailRef = anchor
 	p.TrailStop = p.StopPrice
 	q1 := p.FilledQty * m.tp1Frac
 	q2 := p.FilledQty * m.tp2Frac
@@ -7843,11 +7972,15 @@ func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
 }
 
 func widenedImmediateTriggerStop(side string, entry, mark, tickSize float64) float64 {
+	return widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0050)
+}
+
+func widenedImmediateTriggerStopPct(side string, entry, mark, tickSize, basePct float64) float64 {
 	ref := maxFloat(entry, mark)
 	if strings.EqualFold(side, "BUY") {
 		ref = min(entry, mark)
 	}
-	bufferPct := 0.0050
+	bufferPct := basePct
 	if tickSize > 0 && ref > 0 {
 		bufferPct = maxFloat(bufferPct, (tickSize*4)/ref)
 	}
@@ -7855,6 +7988,32 @@ func widenedImmediateTriggerStop(side string, entry, mark, tickSize float64) flo
 		return ref * (1 - bufferPct)
 	}
 	return ref * (1 + bufferPct)
+}
+
+func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []float64 {
+	base := []float64{
+		widenedProtectiveStop(side, entry, mark, tickSize),
+		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0050),
+		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0100),
+		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0150),
+	}
+	out := make([]float64, 0, len(base))
+	for _, px := range base {
+		if px <= 0 {
+			continue
+		}
+		dup := false
+		for _, seen := range out {
+			if math.Abs(seen-px) <= 1e-9 {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, px)
+		}
+	}
+	return out
 }
 
 func immediateTriggerAPIError(err error) bool {
@@ -7914,6 +8073,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		return err
 	}
 	computedStop := p.StopPrice
+	protectiveEntry := manageAnchorPrice(p)
+	if protectiveEntry <= 0 {
+		protectiveEntry = p.EntryPrice
+	}
 	stopPx, _, err := m.rest.RoundPrice(p.Symbol, computedStop)
 	if err != nil {
 		return err
@@ -7924,19 +8087,24 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
 			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 		}
-		if !protectiveStopValid(p.Side, p.EntryPrice, mark, stopPx) {
-			retryStop := widenedProtectiveStop(p.Side, p.EntryPrice, mark, meta.TickSize)
-			retryStop, _, err = m.rest.RoundPrice(p.Symbol, retryStop)
-			if err != nil {
-				m.logManageFailedSafe(p, mark, computedStop, stopPx, "retry_round_failed")
-				return err
+		if !protectiveStopValid(p.Side, protectiveEntry, mark, stopPx) {
+			validRetry := 0.0
+			for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
+				retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
+				if roundErr != nil {
+					continue
+				}
+				if protectiveStopValid(p.Side, protectiveEntry, mark, retryStop) {
+					validRetry = retryStop
+					break
+				}
 			}
-			if !protectiveStopValid(p.Side, p.EntryPrice, mark, retryStop) {
+			if validRetry <= 0 {
 				m.logManageFailedSafe(p, mark, computedStop, stopPx, "invalid_after_retry")
 				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
 					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
 			}
-			stopPx = retryStop
+			stopPx = validRetry
 		}
 	}
 	if qty <= 0 || stopPx <= 0 {
@@ -7963,32 +8131,41 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
 				return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 			}
-			retryStop := widenedImmediateTriggerStop(p.Side, p.EntryPrice, mark, meta.TickSize)
-			retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, retryStop)
-			if roundErr != nil {
-				m.logManageFailedSafe(p, mark, computedStop, stopPx, "exchange_immediate_trigger_retry_round_failed")
-				return roundErr
+			retryPlaced := false
+			lastRetryStop := stopPx
+			for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
+				retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
+				if roundErr != nil {
+					continue
+				}
+				if !protectiveStopValid(p.Side, protectiveEntry, mark, retryStop) {
+					lastRetryStop = retryStop
+					continue
+				}
+				lastRetryStop = retryStop
+				out, err = m.rest.ReplaceStopOrder(
+					p.Symbol,
+					closeSide,
+					p.StopOrderID,
+					qty,
+					retryStop,
+					meta.QtyPrecision,
+					meta.PricePrecision,
+				)
+				if err == nil {
+					stopPx = retryStop
+					retryPlaced = true
+					break
+				}
+				if !immediateTriggerAPIError(err) {
+					break
+				}
 			}
-			if !protectiveStopValid(p.Side, p.EntryPrice, mark, retryStop) {
-				m.logManageFailedSafe(p, mark, computedStop, retryStop, "exchange_immediate_trigger_invalid_after_retry")
-				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
-					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(retryStop))
-			}
-			out, err = m.rest.ReplaceStopOrder(
-				p.Symbol,
-				closeSide,
-				p.StopOrderID,
-				qty,
-				retryStop,
-				meta.QtyPrecision,
-				meta.PricePrecision,
-			)
-			if err != nil {
-				m.logManageFailedSafe(p, mark, computedStop, retryStop, "exchange_immediate_trigger_retry_failed")
+			if !retryPlaced {
+				m.logManageFailedSafe(p, mark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
 				return fmt.Errorf("manage-failed-safe: stop placement retry failed symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s err=%v",
-					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(retryStop), err)
+					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
 			}
-			stopPx = retryStop
 		} else {
 		return err
 		}
@@ -12286,7 +12463,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "symbol_active_opposite_side"
 			return plan
 		}
-		if !strings.EqualFold(strings.TrimSpace(activeSame.EntrySource), "BOT") {
+		if !botManagedPosition(activeSame) {
 			plan.RejectReason = "manual_position_active"
 			return plan
 		}
@@ -16488,6 +16665,198 @@ func firstNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+func classifyRejectReason(reason string) RejectClass {
+	raw := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case raw == "":
+		return ""
+	case strings.Contains(raw, "min_available"), strings.Contains(raw, "insufficient_usable"),
+		strings.Contains(raw, "reserve_lock"), strings.Contains(raw, "exec_manager_unavailable"),
+		strings.Contains(raw, "account"), strings.Contains(raw, "balance"), strings.Contains(raw, "transfer"),
+		strings.Contains(raw, "position_check_error"), strings.Contains(raw, "order_error"):
+		return rejectClassCapacity
+	case strings.Contains(raw, "cooldown"), strings.Contains(raw, "one_symbol_only"),
+		strings.Contains(raw, "max_open"), strings.Contains(raw, "manual_position_active"),
+		strings.Contains(raw, "pending_add_order"), strings.Contains(raw, "position_not_ready_for_add"),
+		strings.Contains(raw, "starter_waiting"), strings.Contains(raw, "reentry_"),
+		strings.Contains(raw, "pyramid_"), strings.Contains(raw, "symbol_active_opposite_side"),
+		strings.Contains(raw, "intent_dedupe"), strings.Contains(raw, "shadow_gate_active"),
+		strings.Contains(raw, "event_lockout"), strings.Contains(raw, "correlated_exposure_gate"),
+		strings.Contains(raw, "throttle_"), strings.Contains(raw, "post_sl_cooldown"),
+		strings.Contains(raw, "max_tracked_entries"):
+		return rejectClassStateCooldown
+	case strings.Contains(raw, "wall_not_persistent"), strings.Contains(raw, "meta_quality"),
+		strings.Contains(raw, "continuation_no_structure_confirm"), strings.Contains(raw, "below_vwap_ema"),
+		strings.Contains(raw, "above_vwap_ema"), strings.Contains(raw, "vol_ratio"),
+		strings.Contains(raw, "not_ready"), strings.Contains(raw, "expired"),
+		strings.Contains(raw, "asia_quality_gate"), strings.Contains(raw, "strategy_none_reject"),
+		strings.Contains(raw, "ny_open_requires_strong_setup"), strings.Contains(raw, "utc_offhours_requires_a_grade"),
+		strings.Contains(raw, "asia_dev_starter_only"), strings.Contains(raw, "asia_continue_no_fresh_entry"),
+		strings.Contains(raw, "conf_"), strings.Contains(raw, "quality"), strings.Contains(raw, "signal:none"),
+		strings.Contains(raw, "first_green_candle_no_structure"):
+		return rejectClassSoftConfirm
+	default:
+		return rejectClassHardSafety
+	}
+}
+
+func isHardReject(reason string) bool     { return classifyRejectReason(reason) == rejectClassHardSafety }
+func isSoftReject(reason string) bool     { return classifyRejectReason(reason) == rejectClassSoftConfirm }
+func isCapacityReject(reason string) bool { return classifyRejectReason(reason) == rejectClassCapacity }
+func isStateReject(reason string) bool    { return classifyRejectReason(reason) == rejectClassStateCooldown }
+
+func persistenceEligibilityScore(c candidate) float64 {
+	score := clamp(c.CombinedScore, 0, 1)
+	if c.PersistenceSeenCount > 0 {
+		score += clamp(float64(c.PersistenceSeenCount)/5.0, 0, 0.25)
+	}
+	if c.PersistenceTopNCount > 0 {
+		score += clamp(float64(c.PersistenceTopNCount)/3.0, 0, 0.25)
+	}
+	if c.PersistenceVolumeTrend {
+		score += 0.10
+	}
+	if c.PersistenceMomentum {
+		score += 0.10
+	}
+	return clamp(score, 0, 1)
+}
+
+func newEligibilitySummary(c candidate) EntryEligibilitySummary {
+	summary := EntryEligibilitySummary{
+		Symbol:           strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
+		Side:             c.Side,
+		Strat:            c.Strat,
+		Rank:             c.FinalRank,
+		Grade:            c.Entry.CurrentGrade,
+		PersistenceScore: persistenceEligibilityScore(c),
+	}
+	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
+		addEligibilityBlock(&summary, rr)
+	}
+	return summary
+}
+
+func appendUniqueDecisionReason(dst []string, reason string) []string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || containsString(dst, reason) {
+		return dst
+	}
+	return append(dst, reason)
+}
+
+func addEligibilityBlock(summary *EntryEligibilitySummary, reason string) {
+	if summary == nil {
+		return
+	}
+	switch classifyRejectReason(reason) {
+	case rejectClassCapacity:
+		summary.CapacityBlocks = appendUniqueDecisionReason(summary.CapacityBlocks, reason)
+	case rejectClassStateCooldown:
+		summary.StateBlocks = appendUniqueDecisionReason(summary.StateBlocks, reason)
+	case rejectClassSoftConfirm:
+		summary.SoftBlocks = appendUniqueDecisionReason(summary.SoftBlocks, reason)
+	case rejectClassHardSafety:
+		summary.HardBlocks = appendUniqueDecisionReason(summary.HardBlocks, reason)
+	}
+}
+
+func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
+	if summary == nil {
+		return
+	}
+	switch {
+	case len(summary.HardBlocks) > 0:
+		summary.FinalDecision = "reject"
+		summary.FinalReason = summary.HardBlocks[0]
+	case len(summary.CapacityBlocks) > 0:
+		summary.FinalDecision = "reject"
+		summary.FinalReason = summary.CapacityBlocks[0]
+	case len(summary.StateBlocks) > 0:
+		summary.FinalDecision = "reject"
+		summary.FinalReason = summary.StateBlocks[0]
+	case len(summary.SoftBlocks) > 0:
+		if summary.StarterAllowed {
+			summary.FinalDecision = "starter_entry"
+			summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.SoftBlocks[0], "soft_confirmation_only")
+		} else {
+			summary.FinalDecision = "watch_only"
+			summary.FinalReason = summary.SoftBlocks[0]
+		}
+	case plan.IsReentry && summary.ReentryAllowed:
+		summary.FinalDecision = "reentry_entry"
+		summary.FinalReason = firstNonEmpty(summary.FinalReason, "structured_reentry")
+	case summary.FullEntryAllowed:
+		summary.FinalDecision = "full_entry"
+		summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.Strat)
+	case summary.StarterAllowed:
+		summary.FinalDecision = "starter_entry"
+		summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.Strat)
+	default:
+		summary.FinalDecision = "reject"
+		summary.FinalReason = firstNonEmpty(summary.FinalReason, "not_eligible")
+	}
+}
+
+func logEligibilitySummary(summary EntryEligibilitySummary) {
+	fmt.Printf("ELIGIBILITY_SUMMARY symbol=%s side=%s strat=%s grade=%s rank=%.2f persistence=%.2f hard=%q soft=%q capacity=%q state=%q starter_allowed=%v full_entry_allowed=%v reentry_allowed=%v final_decision=%s final_reason=%s\n",
+		summary.Symbol, summary.Side, summary.Strat, summary.Grade, summary.Rank, summary.PersistenceScore,
+		strings.Join(summary.HardBlocks, ","), strings.Join(summary.SoftBlocks, ","), strings.Join(summary.CapacityBlocks, ","), strings.Join(summary.StateBlocks, ","),
+		summary.StarterAllowed, summary.FullEntryAllowed, summary.ReentryAllowed, summary.FinalDecision, summary.FinalReason)
+}
+
+func logFinalDecision(summary EntryEligibilitySummary) {
+	rejectClass := ""
+	if summary.FinalDecision == "reject" || summary.FinalDecision == "watch_only" {
+		rejectClass = string(classifyRejectReason(summary.FinalReason))
+	}
+	fmt.Printf("FINAL_DECISION symbol=%s action=%s reason=%s reject_class=%s\n",
+		summary.Symbol, summary.FinalDecision, summary.FinalReason, rejectClass)
+}
+
+func applyDecisionToStatus(st *liveLiteStatus, summary EntryEligibilitySummary) {
+	if st == nil {
+		return
+	}
+	st.TopDecision = summary.FinalDecision
+	st.TopDecisionWhy = summary.FinalReason
+	if summary.FinalDecision == "reject" || summary.FinalDecision == "watch_only" {
+		st.TopRejectReason = summary.FinalReason
+	}
+}
+
+func finalizeEligibilityDecision(summary *EntryEligibilitySummary, plan ladderPlan, status *liveLiteStatus) {
+	chooseFinalDecision(summary, plan)
+	logEligibilitySummary(*summary)
+	logFinalDecision(*summary)
+	applyDecisionToStatus(status, *summary)
+}
+
+func boolState(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func bootTruthLines(modeLabel string, scanEvery time.Duration, watchCfg watchConfig, ladderCfg ladderConfig, reentryCfg reentryConfig, safety safetyConfig, execMgr *liveExecManager) []string {
+	lines := []string{
+		fmt.Sprintf("BOOT_TRUTH mode=%s scan=%s watch=%s priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
+		fmt.Sprintf("BOOT_TRUTH starter=%.2f add=%.2f max_total=%.2f min_available=%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, safety.minAvailUSDT),
+		fmt.Sprintf("BOOT_TRUTH one_symbol_only=%s reentry=%s post_win_cooldown=%s persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
+		fmt.Sprintf("BOOT_TRUTH funds_manager=%s account_snapshots=%s session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
+	}
+	if execMgr != nil {
+		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
+		lines = append(lines, fmt.Sprintf("BOOT_TRUTH account_health=%s detail=%s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")))
+	}
+	return lines
+}
+
+func missedOpportunitiesEnabled() bool {
+	return envBool("LIVE_OPP_TRACK_ENABLE", true) || envBool("LIVE_PERSISTENCE_ENTRY_ENABLE", true)
 }
 
 func allowedOperatorLeverage(raw string) (int, bool) {

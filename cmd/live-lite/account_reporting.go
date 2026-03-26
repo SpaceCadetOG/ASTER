@@ -59,6 +59,8 @@ type accountReport struct {
 	TotalGrowth  []GrowthWindow      `json:"totalGrowth,omitempty"`
 	Funds        accountFundsSummary `json:"funds"`
 	SnapshotPath string              `json:"snapshotPath,omitempty"`
+	Health       string              `json:"health,omitempty"`
+	HealthDetail string              `json:"healthDetail,omitempty"`
 }
 
 type accountReportConfig struct {
@@ -475,7 +477,26 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 	}
 	summary, err := fetchNormalizedAccountSummary(m.rest, m.transferManager)
 	if err != nil {
-		fmt.Printf("live-lite: account report refresh error: %v\n", err)
+		m.mu.Lock()
+		if m.accountReport.Generated.IsZero() {
+			m.accountReport = accountReport{
+				Generated:    now.UTC(),
+				SnapshotPath: m.accountReportCfg.SnapshotPath,
+				Health:       "failed",
+				HealthDetail: err.Error(),
+			}
+		} else {
+			m.accountReport.Generated = now.UTC()
+			m.accountReport.Health = "degraded"
+			m.accountReport.HealthDetail = err.Error()
+		}
+		m.mu.Unlock()
+		fmt.Printf("ACCOUNT_HEALTH state=%s reason=%q\n", func() string {
+			if m.AccountReportSnapshot().Summary.Timestamp.IsZero() {
+				return "failed"
+			}
+			return "degraded"
+		}(), err.Error())
 		return
 	}
 	summary.Timestamp = now.UTC()
@@ -501,6 +522,12 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 		Funds:        rec.Funds,
 		SnapshotPath: m.accountReportCfg.SnapshotPath,
 	}
+	if len(summary.MissingFields) > 0 {
+		report.Health = "partial"
+		report.HealthDetail = strings.Join(summary.MissingFields, ",")
+	} else {
+		report.Health = "healthy"
+	}
 	if m.accountReportCfg.GrowthEnable {
 		report.PerpGrowth = computeGrowthWindows(now.UTC(), records, rec, func(r accountSnapshotRecord) float64 {
 			return r.PerpEquity
@@ -515,7 +542,7 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 	m.accountReport = report
 	m.mu.Unlock()
 	if len(summary.MissingFields) > 0 {
-		fmt.Printf("live-lite: account summary missing=%s\n", strings.Join(summary.MissingFields, ","))
+		fmt.Printf("ACCOUNT_HEALTH state=partial missing=%s\n", strings.Join(summary.MissingFields, ","))
 	}
 }
 
@@ -548,6 +575,7 @@ func buildAccountSummaryText(report accountReport, includeGrowth bool) string {
 	}
 	lines := []string{
 		"ACCOUNT SUMMARY",
+		fmt.Sprintf("- Health: %s", firstNonEmpty(report.Health, "failed")),
 		fmt.Sprintf("- Perp Equity: %s", formatAccountValue(report.Summary.PerpEquity, hasMissingField(report.Summary, "perp_equity"))),
 		fmt.Sprintf("- Perp Available: %s", formatAccountValue(report.Summary.PerpAvailable, hasMissingField(report.Summary, "perp_available"))),
 		fmt.Sprintf("- Perp Wallet: %s", formatAccountValue(report.Summary.PerpWalletBalance, hasMissingField(report.Summary, "perp_wallet_balance"))),
@@ -555,6 +583,9 @@ func buildAccountSummaryText(report accountReport, includeGrowth bool) string {
 		fmt.Sprintf("- Margin Used: %s", formatAccountValue(report.Summary.MarginUsed, hasMissingField(report.Summary, "margin_used"))),
 		fmt.Sprintf("- Open Positions: %d", report.Summary.OpenPositions),
 		fmt.Sprintf("- Open Orders: %d", report.Summary.OpenOrders),
+	}
+	if strings.TrimSpace(report.HealthDetail) != "" && report.Health != "healthy" {
+		lines = append(lines, fmt.Sprintf("- Health Detail: %s", report.HealthDetail))
 	}
 	if report.Funds.Enabled {
 		lines = append(lines,
@@ -593,6 +624,7 @@ func buildAccountHTML(report accountReport, growthOnly bool, includeMissed []str
 	lines := []string{}
 	if !growthOnly {
 		lines = append(lines,
+			fmt.Sprintf("<b>Health:</b> %s", firstNonEmpty(report.Health, "failed")),
 			fmt.Sprintf("<b>Perp Equity:</b> %s", formatAccountValue(report.Summary.PerpEquity, hasMissingField(report.Summary, "perp_equity"))),
 			fmt.Sprintf("<b>Perp Wallet:</b> %s", formatAccountValue(report.Summary.PerpWalletBalance, hasMissingField(report.Summary, "perp_wallet_balance"))),
 			fmt.Sprintf("<b>Perp Available:</b> %s", formatAccountValue(report.Summary.PerpAvailable, hasMissingField(report.Summary, "perp_available"))),
@@ -615,6 +647,9 @@ func buildAccountHTML(report accountReport, growthOnly bool, includeMissed []str
 			if strings.TrimSpace(report.Funds.LastTransferStatus) != "" {
 				lines = append(lines, fmt.Sprintf("<b>Last Transfer:</b> %s", report.Funds.LastTransferStatus))
 			}
+		}
+		if strings.TrimSpace(report.HealthDetail) != "" && report.Health != "healthy" {
+			lines = append(lines, fmt.Sprintf("<b>Health Detail:</b> %s", report.HealthDetail))
 		}
 	}
 	lines = append(lines, "<b>Growth:</b>")
@@ -641,7 +676,7 @@ func buildAccountHTML(report accountReport, growthOnly bool, includeMissed []str
 
 func compactAccountSummaryLine(report accountReport) string {
 	if report.Generated.IsZero() {
-		return "Account: unavailable"
+		return "Account[failed]: unavailable"
 	}
 	fields := []string{}
 	if !hasMissingField(report.Summary, "perp_equity") {
@@ -656,9 +691,9 @@ func compactAccountSummaryLine(report accountReport) string {
 	fields = append(fields, fmt.Sprintf("Pos %d", report.Summary.OpenPositions))
 	fields = append(fields, fmt.Sprintf("Ord %d", report.Summary.OpenOrders))
 	if len(fields) == 0 {
-		return "Account: unavailable"
+		return fmt.Sprintf("Account[%s]: unavailable", firstNonEmpty(report.Health, "failed"))
 	}
-	return "Account: " + strings.Join(fields, " | ")
+	return fmt.Sprintf("Account[%s]: %s", firstNonEmpty(report.Health, "healthy"), strings.Join(fields, " | "))
 }
 
 func (m *liveExecManager) AccountDigestSection() string {
