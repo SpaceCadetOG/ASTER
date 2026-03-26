@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -7841,6 +7842,34 @@ func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
 	return ref * (1 + bufferPct)
 }
 
+func widenedImmediateTriggerStop(side string, entry, mark, tickSize float64) float64 {
+	ref := maxFloat(entry, mark)
+	if strings.EqualFold(side, "BUY") {
+		ref = min(entry, mark)
+	}
+	bufferPct := 0.0050
+	if tickSize > 0 && ref > 0 {
+		bufferPct = maxFloat(bufferPct, (tickSize*4)/ref)
+	}
+	if strings.EqualFold(side, "BUY") {
+		return ref * (1 - bufferPct)
+	}
+	return ref * (1 + bufferPct)
+}
+
+func immediateTriggerAPIError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *aster.APIError
+	if errors.As(err, &apiErr) {
+		body := strings.ToLower(strings.TrimSpace(apiErr.Body))
+		return strings.Contains(body, "\"code\":-2021") || strings.Contains(body, "immediately trigger")
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "-2021") || strings.Contains(msg, "immediately trigger")
+}
+
 func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedStop, normalizedStop float64, cause string) {
 	if p == nil {
 		return
@@ -7928,7 +7957,41 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		meta.PricePrecision,
 	)
 	if err != nil {
+		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && immediateTriggerAPIError(err) {
+			mark, markErr := m.currentMark(p.Symbol)
+			if markErr != nil || mark <= 0 {
+				m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
+				return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
+			}
+			retryStop := widenedImmediateTriggerStop(p.Side, p.EntryPrice, mark, meta.TickSize)
+			retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, retryStop)
+			if roundErr != nil {
+				m.logManageFailedSafe(p, mark, computedStop, stopPx, "exchange_immediate_trigger_retry_round_failed")
+				return roundErr
+			}
+			if !protectiveStopValid(p.Side, p.EntryPrice, mark, retryStop) {
+				m.logManageFailedSafe(p, mark, computedStop, retryStop, "exchange_immediate_trigger_invalid_after_retry")
+				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
+					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(retryStop))
+			}
+			out, err = m.rest.ReplaceStopOrder(
+				p.Symbol,
+				closeSide,
+				p.StopOrderID,
+				qty,
+				retryStop,
+				meta.QtyPrecision,
+				meta.PricePrecision,
+			)
+			if err != nil {
+				m.logManageFailedSafe(p, mark, computedStop, retryStop, "exchange_immediate_trigger_retry_failed")
+				return fmt.Errorf("manage-failed-safe: stop placement retry failed symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s err=%v",
+					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(retryStop), err)
+			}
+			stopPx = retryStop
+		} else {
 		return err
+		}
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
 	p.ProtectedStop = stopPx
