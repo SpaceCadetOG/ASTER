@@ -12338,16 +12338,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 }
 
 func chaseRejectReason(c candidate, allowStructuredReset bool) string {
-	maxChasePct := envFloat("LIVE_MAX_CHASE_PCT", 8)
-	if maxChasePct <= 0 {
-		return ""
-	}
-	if allowStructuredReset && (hasFreshStructureReset(c) || continuationStructureConfirmed(c)) {
-		return ""
-	}
-	if candidateDirectionalMovePct(c) > maxChasePct {
-		return "max_chase_pct"
-	}
 	return ""
 }
 
