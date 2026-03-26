@@ -6783,6 +6783,60 @@ func botManagedPosition(p *livePosition) bool {
 		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
 }
 
+func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) bool {
+	if p == nil || mark <= 0 || p.EntryPrice <= 0 {
+		return false
+	}
+	_, pnlPct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
+	return pnlPct >= minAddPnLPct && !p.HitTP3
+}
+
+func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePosition, mark float64) {
+	if m == nil || p == nil || mark <= 0 || p.EntryPrice <= 0 {
+		return
+	}
+	p.ManageAnchorPrice = mark
+	p.LastMark = mark
+	updateFavorableRLive(p, mark)
+	if targetHit(p.Side, mark, p.TP1Price) {
+		p.HitTP1 = true
+	}
+	if targetHit(p.Side, mark, p.TP2Price) {
+		p.HitTP2 = true
+	}
+	if targetHit(p.Side, mark, p.TP3Price) {
+		p.HitTP3 = true
+	}
+	if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+		p.StopPrice = newStop
+	}
+	tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
+	beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
+	if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
+		if be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps); be > 0 {
+			if stop, improved := improvedStopPrice(p.Side, p.StopPrice, be); improved {
+				p.StopPrice = stop
+				p.ProtectedStop = stop
+				if p.ProtectionStage < protectionStageArmed {
+					p.ProtectionStage = protectionStageArmed
+				}
+				if p.FirstProtectAt.IsZero() {
+					p.FirstProtectAt = now
+				}
+			}
+		}
+	}
+	updateGivebackMetrics(p.MaxFavorableR, unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, mark), &p.CaptureRatio, &p.MaxGivebackR)
+	fmt.Printf("live-lite: manual-stage symbol=%s side=%s entry=%s mark=%s pnl=%+.2f%% mfe_r=%.2f stage=%d hit_tp1=%v hit_tp2=%v hit_tp3=%v would_add=%v\n",
+		p.Symbol, p.Side, fmtPrice(p.EntryPrice), fmtPrice(mark),
+		func() float64 {
+			_, pct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
+			return pct
+		}(),
+		p.MaxFavorableR, p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3,
+		manualWouldAddCapital(p, mark, m.ladderCfg.MinAddPnLPct))
+}
+
 func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	if m == nil || m.rest == nil {
 		return 0, nil
@@ -6851,31 +6905,56 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		return m.positions[sym], nil
 	}
 	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	currentMark := 0.0
 	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
-		p.ManageAnchorPrice = mark
-		p.LastMark = mark
+		currentMark = mark
 	}
 	p.EntryReason = "manual_managed_live"
 	p.StarterOnly = false
 	p.AddLockedUntilConfirm = false
-	if err := m.placeInitialBrackets(p); err != nil {
-		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
-			return nil, err
+	m.positions[sym] = p
+	attachErr := m.placeInitialBrackets(p)
+	if currentMark > 0 {
+		m.reconstructManualManagedState(now, p, currentMark)
+	}
+	if attachErr != nil {
+		attachErr = m.placeOrReplaceStopWithRetry(p)
+	} else if currentMark > 0 {
+		if err := m.placeOrReplaceStop(p); err != nil {
+			attachErr = err
 		}
 	}
-	m.positions[sym] = p
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
 	m.mu.Unlock()
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED",
+		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
-		))
+		}
+		if currentMark > 0 {
+			lines = append(lines,
+				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
+				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
+				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
+			)
+		}
+		title := "MANUAL TRADE MANAGEMENT ENABLED"
+		icon := "🤝"
+		if attachErr != nil {
+			title = "MANUAL MANAGEMENT ENABLED (PROTECTION PENDING)"
+			icon = "⚠️"
+			lines = append(lines, fmt.Sprintf("<b>Protection:</b> %s", summarizeOneLine(attachErr.Error(), 140)))
+		}
+		m.tg.Sendf("%s", notify.BuildEventHTML(icon, title, lines...))
 	}
+	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
+	if attachErr != nil {
+		return p, nil
+	}
 	return p, nil
 }
 
@@ -7785,10 +7864,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 
 func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 	sideBuy := strings.EqualFold(p.Side, "BUY")
-	anchor := manageAnchorPrice(p)
-	if anchor <= 0 {
-		anchor = p.EntryPrice
-	}
+	anchor := p.EntryPrice
 	stopPct := m.stopPct / 100.0
 	if stopPct <= 0 {
 		stopPct = 0.02
@@ -17104,7 +17180,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				)
 			}
 			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
-				fmt.Sprintf("<b>%s %s</b> is now bot-managed", cleanSymbol(req.Symbol), req.Side),
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), req.Side),
 			)
 		}
 		c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
@@ -17142,7 +17218,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				)
 			}
 			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
-				fmt.Sprintf("<b>%s %s</b> is now bot-managed", cleanSymbol(req.Symbol), req.Side),
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), req.Side),
 			)
 		case "n", "no":
 			c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
