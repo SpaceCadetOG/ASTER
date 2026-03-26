@@ -433,6 +433,12 @@ func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *li
 	c.Sig = applySignalRiskGeometry(c, "persistence_entry")
 	c.RejectReason = "missed_opportunity_ready"
 	c.QualityReasons = append(c.QualityReasons, "missed_opportunity_ready")
+	c.PersistenceSeenCount = st.SeenCount
+	c.PersistenceTopNCount = st.TopNCount
+	c.PersistenceBestRank = st.BestRank
+	c.PersistenceVolumeTrend = st.VolumeTrendUp
+	c.PersistenceMomentum = st.MomentumStableOrUp
+	c.PersistenceReason = st.ReadyReason
 	st.HadStarterSignal = true
 	st.HadEntrySignal = true
 	st.ReadyAt = now
@@ -1260,6 +1266,11 @@ type queueDeepPreflightResult struct {
 func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflightResult {
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	meta := ctx.MetaBySymbol[raw]
+	persistCfg := entryQualityConfig{
+		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
+		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
+		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
+	}
 	if raw == "" {
 		return queueDeepPreflightResult{RejectReason: "empty_symbol"}
 	}
@@ -1277,7 +1288,12 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 		return queueDeepPreflightResult{RejectReason: "wall_consumption_not_confirmed"}
 	}
 	if c.WallConfidence > 0 && c.WallPersistence < time.Duration(envInt("LIVE_WALL_MIN_PERSIST_MS", 3000))*time.Millisecond {
+		if persistenceStrong(c, persistCfg) && persistenceSoftBlock("wall_not_persistent") {
+			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
+				raw, c.Side, "wall_not_persistent", firstNonEmpty(c.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
+		} else {
 		return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
+		}
 	}
 	if ctx.OBFilterEnable {
 		ob := ctx.EntryDepth[raw]

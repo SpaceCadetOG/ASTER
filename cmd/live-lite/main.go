@@ -106,6 +106,12 @@ type candidate struct {
 	WallPrice       float64
 	WallSide        string
 	WallReasons     []string
+	PersistenceSeenCount   int
+	PersistenceTopNCount   int
+	PersistenceBestRank    float64
+	PersistenceVolumeTrend bool
+	PersistenceMomentum    bool
+	PersistenceReason      string
 }
 
 type entryQualityConfig struct {
@@ -138,6 +144,10 @@ type entryQualityConfig struct {
 	DayUTCMaturityBrake  bool
 	DayUTCMaturityPct    float64
 	RequireFreshPullback bool
+	PersistenceSoftOverride bool
+	PersistSoftMetaMin      float64
+	PersistSoftMinSeen      int
+	PersistSoftMinTopN      int
 }
 
 type sessionChurn struct {
@@ -1149,6 +1159,10 @@ func main() {
 		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
 		DayUTCMaturityPct:    envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
 		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
+		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
+		PersistSoftMetaMin:      envFloat("LIVE_PERSISTENCE_META_QUALITY_MIN", 0.45),
+		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
+		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
 	}
 	acceptanceCfg := acceptanceQueueConfig{
 		TopN:                  envInt("LIVE_ACCEPTANCE_TOPN", 4),
@@ -2285,6 +2299,14 @@ func main() {
 					}
 				}
 				if c.TradeQuality < minQuality && !persistOverride {
+					if persistenceStrong(c, entryQualityCfg) && c.TradeQuality >= entryQualityCfg.PersistSoftMetaMin {
+						oldReject := fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)
+						c.QualityReasons = append(c.QualityReasons, "persistence_override")
+						c.QualityReasons = append(c.QualityReasons, "persistence_soft_override:"+oldReject)
+						c.Conf = maxFloat(c.Conf, 0.58)
+						fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
+							rawCandidate, c.Side, oldReject, firstNonEmpty(c.PersistenceReason, "strong_persistence"), ladderCfg.StarterUSDT)
+					} else {
 					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
 					rememberRecentReject(recentRejects, now, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality), acceptanceCfg)
 					f := false
@@ -2304,6 +2326,7 @@ func main() {
 						GateReasons: append([]string{fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)}, c.QualityReasons...),
 					})
 					continue
+					}
 				}
 				if (c.TradeQuality < minQuality || c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && persistOverride {
 					c.QualityReasons = append(c.QualityReasons, "persistence_override")
@@ -12714,6 +12737,61 @@ func qualifiesPersistenceOverride(c candidate, cfg entryQualityConfig) bool {
 	}
 }
 
+func persistenceStrong(c candidate, cfg entryQualityConfig) bool {
+	if !cfg.PersistenceSoftOverride || !strings.EqualFold(c.Strat, "persistence_entry") {
+		return false
+	}
+	if candidateExhaustionActive(c) || candidateRapidExpansion(c) || candidateSpikeCandle(c) {
+		return false
+	}
+	if c.PersistenceSeenCount < maxInt(1, cfg.PersistSoftMinSeen) {
+		return false
+	}
+	if c.PersistenceTopNCount < maxInt(1, cfg.PersistSoftMinTopN) {
+		return false
+	}
+	if c.CombinedScore < envFloat("LIVE_PERSISTENCE_MIN_RANK", 0.70) {
+		return false
+	}
+	if !c.PersistenceVolumeTrend && !envBool("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", true) {
+		return false
+	}
+	if !c.PersistenceMomentum && !envBool("LIVE_PERSISTENCE_ALLOW_STABLE_MOMENTUM", true) {
+		return false
+	}
+	return true
+}
+
+func persistenceSoftBlock(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(reason, "wall_not_persistent"):
+		return true
+	case strings.Contains(reason, "meta_quality"):
+		return true
+	case strings.Contains(reason, "continuation_no_structure_confirm"):
+		return true
+	case strings.Contains(reason, "below_vwap_ema"):
+		return true
+	case strings.Contains(reason, "above_vwap_ema"):
+		return true
+	default:
+		return false
+	}
+}
+
+func persistenceSoftBlocksOnly(reasons []string) bool {
+	if len(reasons) == 0 {
+		return false
+	}
+	for _, reason := range reasons {
+		if !persistenceSoftBlock(reason) {
+			return false
+		}
+	}
+	return true
+}
+
 func qualifiesConfOverride(c candidate, cfg entryQualityConfig) bool {
 	if c.Conf > 0 || !qualifiesPersistenceOverride(c, cfg) {
 		return false
@@ -13678,6 +13756,29 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			}
 		}
 		fails = append(fails, lateRejects...)
+		persistCfg := entryQualityConfig{
+			PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
+			PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
+			PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
+		}
+		if persistenceStrong(cand, persistCfg) && persistenceSoftBlocksOnly(fails) {
+			cand.Strat = "persistence_entry"
+			cand.Conf = maxFloat(cand.Conf, 0.58)
+			cand.Sig = strategies.Signal{
+				Active:     true,
+				Name:       "persistence_entry",
+				Side:       toFeatureSide(cand.Side),
+				Confidence: cand.Conf,
+				Tags:       []string{"starter_only", "persistence_soft_override"},
+				Reasons:    append([]string(nil), fails...),
+			}
+			cand.Sig = applySignalRiskGeometry(cand, "persistence_entry")
+			cand.RejectReason = ""
+			cand.QualityReasons = append(cand.QualityReasons, "persistence_override")
+			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
+				strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol)), cand.Side, strings.Join(fails, ","), firstNonEmpty(cand.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
+			return cand
+		}
 		if len(fails) == 0 {
 			fails = append(fails, "continuation_fast_not_ready")
 		}

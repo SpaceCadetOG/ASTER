@@ -1354,6 +1354,56 @@ func TestLoadLadderConfigDefaultsStarterToTen(t *testing.T) {
 	}
 }
 
+func TestPersistenceSoftBlockMatchesExpectedReasons(t *testing.T) {
+	if !persistenceSoftBlock("wall_not_persistent") {
+		t.Fatalf("expected wall_not_persistent to be soft")
+	}
+	if !persistenceSoftBlock("meta_quality:0.45<0.52") {
+		t.Fatalf("expected meta_quality to be soft")
+	}
+	if !persistenceSoftBlock("continuation_no_structure_confirm") {
+		t.Fatalf("expected continuation_no_structure_confirm to be soft")
+	}
+	if persistenceSoftBlock("min_available_usdt") {
+		t.Fatalf("expected min_available_usdt to remain hard")
+	}
+}
+
+func TestPersistenceStrongRequiresEvidence(t *testing.T) {
+	cfg := entryQualityConfig{
+		PersistenceSoftOverride: true,
+		PersistSoftMinSeen:      3,
+		PersistSoftMinTopN:      2,
+	}
+	c := candidate{
+		Strat:                  "persistence_entry",
+		CombinedScore:          0.82,
+		PersistenceSeenCount:   3,
+		PersistenceTopNCount:   2,
+		PersistenceVolumeTrend: true,
+		PersistenceMomentum:    true,
+		Entry: inplay.Entry{
+			State: inplay.StateHeating,
+		},
+	}
+	if !persistenceStrong(c, cfg) {
+		t.Fatalf("expected strong persistence candidate to qualify")
+	}
+	c.PersistenceTopNCount = 1
+	if persistenceStrong(c, cfg) {
+		t.Fatalf("expected insufficient topN evidence to fail")
+	}
+}
+
+func TestPersistenceSoftBlocksOnly(t *testing.T) {
+	if !persistenceSoftBlocksOnly([]string{"continuation_no_structure_confirm", "below_vwap_ema"}) {
+		t.Fatalf("expected pure soft blockers to pass")
+	}
+	if persistenceSoftBlocksOnly([]string{"continuation_no_structure_confirm", "min_available_usdt"}) {
+		t.Fatalf("expected mixed soft/hard blockers to fail")
+	}
+}
+
 func TestLoadWatchConfigDefaultsToOneSecond(t *testing.T) {
 	t.Setenv("LIVE_WATCHER_SEC", "")
 	t.Setenv("LIVE_WATCH_SEC", "")
