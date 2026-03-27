@@ -983,6 +983,9 @@ type liveLiteStatus struct {
 	Generated       time.Time           `json:"generated"`
 	DryRun          bool                `json:"dry_run"`
 	LiveEnabled     bool                `json:"live_enabled"`
+	ScannerBias     string              `json:"scanner_bias,omitempty"`
+	ScannerLongs    []notify.ScanItem   `json:"scanner_longs,omitempty"`
+	ScannerShorts   []notify.ScanItem   `json:"scanner_shorts,omitempty"`
 	TopSymbol       string              `json:"top_symbol,omitempty"`
 	TopSide         string              `json:"top_side,omitempty"`
 	TopGrade        string              `json:"top_grade,omitempty"`
@@ -2506,6 +2509,7 @@ func main() {
 			Exec:          liveExecSnapshot{},
 			Live:          liveAccountSnapshot{},
 		}
+		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, 5)
 		if execMgr != nil {
 			st.Exec = execMgr.Snapshot(10)
 			st.Live = execMgr.LiveAccountSnapshot(10)
@@ -3531,6 +3535,17 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 	b.WriteString("\n\nIn-Play Scanner\n")
 	appendUnifiedInPlayRows(&b, longInPlay, shortInPlay, meta, 10_000)
 	return tgPre(strings.TrimSpace(b.String()))
+}
+
+func scannerItemsForCommand(s liveLiteStatus, which string) ([]notify.ScanItem, []notify.ScanItem, string) {
+	switch strings.ToLower(strings.TrimSpace(which)) {
+	case "long", "longs":
+		return s.ScannerLongs, nil, "long"
+	case "short", "shorts":
+		return nil, s.ScannerShorts, "short"
+	default:
+		return s.ScannerLongs, s.ScannerShorts, s.ScannerBias
+	}
 }
 
 func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (notify.PulseSnapshot, []notify.PositionCard) {
@@ -17940,6 +17955,9 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		return notify.BuildEventHTML("📘", "COMMANDS",
 			"<code>/status</code> runtime snapshot",
+			"<code>/scanner</code> top long/short scanner snapshot",
+			"<code>/longs</code> top long scanner snapshot",
+			"<code>/shorts</code> top short scanner snapshot",
 			"<code>/balance</code> account holdings",
 			"<code>/acct</code> normalized account summary",
 			"<code>/growth</code> equity growth windows",
@@ -17977,6 +17995,28 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			fmt.Sprintf("<b>Exec:</b> open=%d pending=%d partial1=%d partial2=%d", s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2),
 			fmt.Sprintf("<b>Live:</b> %s", liveSummary),
 			fmt.Sprintf("<b>Manual approvals pending:</b> %d", pendingManual),
+		)
+	case strings.HasPrefix(cmd, "/scanner"), strings.HasPrefix(cmd, "/longs"), strings.HasPrefix(cmd, "/shorts"):
+		s := c.status.Snapshot()
+		which := "scanner"
+		if strings.HasPrefix(cmd, "/longs") {
+			which = "longs"
+		} else if strings.HasPrefix(cmd, "/shorts") {
+			which = "shorts"
+		}
+		longs, shorts, bias := scannerItemsForCommand(s, which)
+		if len(longs) == 0 && len(shorts) == 0 {
+			return notify.BuildEventHTML("📡", "SCANNER", "No current scanner snapshot is available yet")
+		}
+		title := "SCANNER"
+		if which == "longs" {
+			title = "LONG SCANS"
+		} else if which == "shorts" {
+			title = "SHORT SCANS"
+		}
+		return notify.BuildEventHTML("📡", title,
+			fmt.Sprintf("<b>Session:</b> %s | <b>Updated:</b> %s", sessionTag(s.Generated), s.Generated.In(time.Local).Format("15:04:05 MST")),
+			notify.BuildScannerSnapshotHTML(longs, shorts, bias),
 		)
 	case strings.HasPrefix(cmd, "/balance"):
 		if c.execMgr != nil {

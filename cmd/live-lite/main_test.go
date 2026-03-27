@@ -12,6 +12,7 @@ import (
 	flowfeed "go-machine/internal/flow"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
+	"go-machine/internal/notify"
 	"go-machine/internal/strategies"
 	"go-machine/internal/types"
 )
@@ -1001,6 +1002,62 @@ func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing
 	}
 	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err != nil {
 		t.Fatalf("expected passive short import to promote cleanly, got %v", err)
+	}
+}
+
+func TestHandleCommandScannerSnapshot(t *testing.T) {
+	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
+	ctx.status.Set(liveLiteStatus{
+		Generated:   time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
+		ScannerBias: "short",
+		ScannerLongs: []notify.ScanItem{
+			{Symbol: "ETHUSDT", Grade: "B", Score: 88},
+		},
+		ScannerShorts: []notify.ScanItem{
+			{Symbol: "SIRENUSDT", Grade: "A+", Score: 118},
+			{Symbol: "BLUAIUSDT", Grade: "C", Score: 81},
+		},
+	})
+
+	resp := ctx.handleCommand("", "/scanner")
+	if !strings.Contains(resp, "SCANNER") || !strings.Contains(resp, "SIREN") || !strings.Contains(resp, "ETH") {
+		t.Fatalf("expected combined scanner snapshot, got: %s", resp)
+	}
+}
+
+func TestHandleCommandLongsSnapshot(t *testing.T) {
+	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
+	ctx.status.Set(liveLiteStatus{
+		Generated: time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
+		ScannerLongs: []notify.ScanItem{
+			{Symbol: "ETHUSDT", Grade: "B", Score: 88},
+		},
+		ScannerShorts: []notify.ScanItem{
+			{Symbol: "SIRENUSDT", Grade: "A+", Score: 118},
+		},
+	})
+
+	resp := ctx.handleCommand("", "/longs")
+	if !strings.Contains(resp, "LONG SCANS") || !strings.Contains(resp, "ETH") || strings.Contains(resp, "SIREN") {
+		t.Fatalf("expected longs-only snapshot, got: %s", resp)
+	}
+}
+
+func TestHandleCommandShortsSnapshot(t *testing.T) {
+	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
+	ctx.status.Set(liveLiteStatus{
+		Generated: time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
+		ScannerLongs: []notify.ScanItem{
+			{Symbol: "ETHUSDT", Grade: "B", Score: 88},
+		},
+		ScannerShorts: []notify.ScanItem{
+			{Symbol: "SIRENUSDT", Grade: "A+", Score: 118},
+		},
+	})
+
+	resp := ctx.handleCommand("", "/shorts")
+	if !strings.Contains(resp, "SHORT SCANS") || !strings.Contains(resp, "SIREN") || strings.Contains(resp, "ETH") {
+		t.Fatalf("expected shorts-only snapshot, got: %s", resp)
 	}
 }
 
