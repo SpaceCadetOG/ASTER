@@ -6111,7 +6111,7 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 	}
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("✍️", "MANUAL TRADE DETECTED",
-			fmt.Sprintf("<b>%s %s</b>", req.Symbol, req.Side),
+			fmt.Sprintf("<b>%s %s</b>", req.Symbol, displayPositionSide(req.Side)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s | <b>Lev:</b> %dx", req.Qty, fmtPrice(req.Entry), req.Leverage),
 			"Let the bot manage this trade?",
 			fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", req.Symbol, req.Symbol),
@@ -6135,7 +6135,7 @@ func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, c
 	m.mu.Unlock()
 	if m.tg != nil {
 		lines := []string{
-			fmt.Sprintf("<b>%s %s</b>", req.Symbol, req.Side),
+			fmt.Sprintf("<b>%s %s</b>", req.Symbol, displayPositionSide(req.Side)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s | <b>Lev:</b> %dx", req.Qty, fmtPrice(req.Entry), req.Leverage),
 			"<b>Bot management could not attach protection.</b>",
 		}
@@ -6470,7 +6470,7 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 		p.Symbol, amount, p.RealizedPnL, now.UTC().Format(time.RFC3339))
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PROFIT SWEPT",
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Amount:</b> %.2f USDT", amount),
 			fmt.Sprintf("<b>Trade Realized:</b> %+.2f", p.RealizedPnL),
 		))
@@ -6631,7 +6631,7 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 	m.tg.Sendf("%s <b>FILL %s %s</b>\n• <b>Action:</b> %s | <b>Reason:</b> %s\n• <b>Qty:</b> %.6f | <b>Fill:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Hold:</b> %.1fm | <b>Day Realized:</b> %+.2f\n• <b>Session:</b> %s%s",
 		exitAlertEmoji(reasonU),
 		p.Symbol,
-		p.Side,
+		displayPositionSide(p.Side),
 		strings.ToUpper(strings.TrimSpace(action)),
 		reasonU,
 		qty,
@@ -6903,7 +6903,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		m.positions[sym] = p
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("🧩", "REMOTE POSITION IMPORTED",
-				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+				fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 				fmt.Sprintf("<b>Source:</b> %s", p.EntrySource),
 			))
@@ -7286,7 +7286,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	m.mu.Unlock()
 	if m.tg != nil {
 		lines := []string{
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
 		}
@@ -7706,7 +7706,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("➕", "ADD SUBMITTED",
-				fmt.Sprintf("<b>%s %s</b>", rawSym, existing.Side),
+			fmt.Sprintf("<b>%s %s</b>", rawSym, displayPositionSide(existing.Side)),
 				fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
 				fmt.Sprintf("<b>Deployed:</b> %.2f -> %.2f USDT", existing.DeployedMargin, existing.DeployedMargin+margin),
 			))
@@ -7805,7 +7805,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			title = "STARTER SUBMITTED"
 		}
 		m.tg.Sendf("%s", notify.BuildEventHTML("📨", title,
-			fmt.Sprintf("<b>%s %s</b>", rawSym, p.Side),
+			fmt.Sprintf("<b>%s %s</b>", rawSym, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
 			fmt.Sprintf("<b>Order ID:</b> %d", orderID),
 		))
@@ -8566,7 +8566,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		p.LastManageFailAt = now
 		p.LastManageFailCause = cause
 		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE FAILED SAFE",
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
 			fmt.Sprintf("<b>Cause:</b> %s", cause),
@@ -9240,7 +9240,7 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 		_ = m.closeSymbolMarket(sym)
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
-				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
@@ -9280,7 +9280,7 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 	_ = m.closeSymbolMarket(raw)
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
-			fmt.Sprintf("<b>%s %s</b>", raw, p.Side),
+			fmt.Sprintf("<b>%s %s</b>", raw, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 			fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
@@ -9416,7 +9416,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				p.RealizedPnL += pnl
 				if m.tg != nil {
 					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
-						fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+						fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
 						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 						fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 					))
@@ -9460,7 +9460,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		markLivePositionClosed(p, now, reason)
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
-				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 			))
@@ -9522,7 +9522,7 @@ func (m *liveExecManager) ApplyFundingExit(now time.Time, meta map[string]symbol
 		}
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PRE-FUNDING EXIT",
-				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 			))
@@ -9573,7 +9573,7 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 		}
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT",
-				fmt.Sprintf("<b>%s %s</b>", sym, p.Side),
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
@@ -16413,6 +16413,10 @@ func normalizePositionSide(side string) string {
 	}
 }
 
+func displayPositionSide(side string) string {
+	return normalizePositionSide(side)
+}
+
 func sessionPhaseUTC(ts time.Time) utcSessionPhase {
 	utc := ts.UTC()
 	hour, min := utc.Hour(), utc.Minute()
@@ -17971,7 +17975,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				lines := []string{"No active live positions"}
 				for _, req := range pending {
 					lines = append(lines, fmt.Sprintf("<b>Pending manual:</b> %s %s | qty=%.6f | entry=%s",
-						cleanSymbol(req.Symbol), req.Side, req.Qty, fmtPrice(req.Entry)))
+						cleanSymbol(req.Symbol), displayPositionSide(req.Side), req.Qty, fmtPrice(req.Entry)))
 				}
 				lines = append(lines, "Reply <code>/manage SYMBOL y</code> to let the bot manage one.")
 				return notify.BuildEventHTML("📦", "POSITIONS", lines...)
@@ -18002,7 +18006,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if !ok {
 			if req, pending := c.execMgr.pendingManualRequest(sym); pending {
 				return notify.BuildEventHTML("📍", "POSITION DETAIL",
-					fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> MANUAL", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> MANUAL", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 					fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", req.Qty, maxInt(1, req.Leverage), req.Margin),
 					fmt.Sprintf("<b>Entry:</b> %s", fmtPrice(req.Entry)),
 					"<b>Bot Management:</b> pending approval",
@@ -18012,7 +18016,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("📍", "POSITION", fmt.Sprintf("%s is not an active live position", cleanSymbol(sym)))
 		}
 		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), strings.ToUpper(strings.TrimSpace(p.Side)), nonEmpty(strings.ToUpper(strings.TrimSpace(p.Source)), "BOT")),
+			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side), nonEmpty(strings.ToUpper(strings.TrimSpace(p.Source)), "BOT")),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", p.Qty, maxInt(1, p.Leverage), p.Margin),
 			fmt.Sprintf("<b>Entry:</b> %s | <b>Mark:</b> %s | <b>Last:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.MarkPrice), fmtPrice(p.LastPrice)),
 			fmt.Sprintf("<b>uPnL:</b> %+.2f (%+.2f%%) | <b>Exchange uPnL:</b> %+.2f", p.UnrealizedPnL, p.UnrealizedPnLPct, p.ExchangeUnreal),
@@ -18041,27 +18045,27 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
 				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
 					return notify.BuildEventHTML("⚠️", "FORCE CLOSE FAILED",
-						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 						fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 					)
 				}
 				return notify.BuildEventHTML("✅", "MANUAL FORCE CLOSE APPROVED",
-					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 				)
 			}
 			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
 				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
-					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 				)
 			}
 			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
-				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), req.Side),
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 			)
 		}
 		c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
 		return notify.BuildEventHTML("🟡", "MANAGE DECLINED",
-			fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), req.Side),
+			fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 		)
 	case strings.HasPrefix(cmd, "/manage"):
 		if c.execMgr == nil {
@@ -18079,7 +18083,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					action = "force_close"
 				}
 				lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | action=%s | qty=%.6f | entry=%s",
-					cleanSymbol(req.Symbol), req.Side, action, req.Qty, fmtPrice(req.Entry)))
+					cleanSymbol(req.Symbol), displayPositionSide(req.Side), action, req.Qty, fmtPrice(req.Entry)))
 			}
 			return notify.BuildEventHTML("🤝", "MANAGE", lines...)
 		}
@@ -18095,27 +18099,27 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
 				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
 					return notify.BuildEventHTML("⚠️", "FORCE CLOSE FAILED",
-						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+						fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 						fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 					)
 				}
 				return notify.BuildEventHTML("✅", "MANUAL FORCE CLOSE APPROVED",
-					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>%s %s</b> was force-closed after protection attach failed", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 				)
 			}
 			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
 				return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
-					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), req.Side),
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 				)
 			}
 			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
-				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), req.Side),
+				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 			)
 		case "n", "no":
 			c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
 			return notify.BuildEventHTML("🟡", "MANAGE DECLINED",
-				fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), req.Side),
+				fmt.Sprintf("<b>%s %s</b> will stay manual-only", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 			)
 		default:
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
