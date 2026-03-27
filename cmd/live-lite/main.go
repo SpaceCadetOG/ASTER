@@ -1544,7 +1544,7 @@ func main() {
 	if dryRun {
 		modeLabel = "PAPER"
 	}
-	for _, line := range bootTruthLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
+	for _, line := range startupSummaryLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
 	fmt.Printf("  min_grade=%s | reentry_size=%.2f\n", strings.ToUpper(minGrade), reentryCfg.SizeUSDT)
@@ -1686,7 +1686,7 @@ func main() {
 				CacheEvictions:    cacheDelta.Evictions,
 				CacheEntries:      cacheStatsEnd.CandleKeys + cacheStatsEnd.MicroKeys + cacheStatsEnd.EMAKeys,
 			})
-			if envBool("LIVE_PERF_LOG_ENABLE", true) {
+			if envBool("LIVE_PERF_LOG_ENABLE", false) {
 				fmt.Printf("live-lite: perf mode=%s wake=%s loop_ms=%.1f cache_hits=%d cache_misses=%d candle=%d/%d micro=%d/%d ema=%d/%d entries=%d evictions=%d\n",
 					cycleMode,
 					liveLiteWakeReason,
@@ -2520,10 +2520,12 @@ func main() {
 					}
 				}
 			}
-			if topReject != "" {
-				fmt.Printf("signal: none (%s)\n", topReject)
-			} else {
-				fmt.Println("signal: none")
+			if verboseRejectLogging() {
+				if topReject != "" {
+					fmt.Printf("signal: none (%s)\n", topReject)
+				} else {
+					fmt.Println("signal: none")
+				}
 			}
 			waitAndReport()
 			continue
@@ -2531,7 +2533,9 @@ func main() {
 		if acceptanceCfg.MaxNewPositionsWindow > 0 && len(recentEntryAttempts) >= acceptanceCfg.MaxNewPositionsWindow {
 			st.TopRejectReason = "entry_window_limit"
 			statusStore.Set(st)
-			fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
+			if verboseRejectLogging() {
+				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
+			}
 			waitAndReport()
 			continue
 		}
@@ -2651,7 +2655,9 @@ func main() {
 		if !selected {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
 			statusStore.Set(st)
-			fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
+			if verboseRejectLogging() {
+				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
+			}
 			waitAndReport()
 			continue
 		}
@@ -7703,7 +7709,9 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 		case execOpen, execPartialTP1, execPartialTP2:
 			ch, err := m.reconcileOpen(now, p, mom, flow, meta)
 			if err != nil {
-				fmt.Printf("live-lite: reconcile open %s error: %v\n", sym, err)
+				if !strings.Contains(strings.ToLower(err.Error()), "manage-failed-safe") {
+					fmt.Printf("live-lite: reconcile open %s error: %v\n", sym, err)
+				}
 			}
 			changed = changed || ch
 		}
@@ -8386,15 +8394,17 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		return
 	}
 	cause = strings.TrimSpace(cause)
-	fmt.Printf("live-lite: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
-		p.Symbol,
-		p.Side,
-		fmtPrice(mark),
-		fmtPrice(p.EntryPrice),
-		fmtPrice(computedStop),
-		fmtPrice(normalizedStop),
-		cause,
-	)
+	if manageDebugLogging() {
+		fmt.Printf("live-lite: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
+			p.Symbol,
+			p.Side,
+			fmtPrice(mark),
+			fmtPrice(p.EntryPrice),
+			fmtPrice(computedStop),
+			fmtPrice(normalizedStop),
+			cause,
+		)
+	}
 	if m != nil && m.tg != nil {
 		notifyTelegram := true
 		now := time.Now().UTC()
@@ -8564,16 +8574,19 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	p.StopOrderID = mapInt64(out["orderId"])
 	p.ProtectedStop = stopPx
 	clearProtectionPending(p)
-	fmt.Printf("live-lite: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
-		p.Symbol,
-		p.Side,
-		fmtPrice(prevStop),
-		fmtPrice(stopPx),
-		strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
-		nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
-		nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
-	)
-	if m.eventLog != nil {
+	stopChanged := prevStop <= 0 || math.Abs(prevStop-stopPx) > 1e-9
+	if stopChanged && manageDebugLogging() {
+		fmt.Printf("live-lite: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
+			p.Symbol,
+			p.Side,
+			fmtPrice(prevStop),
+			fmtPrice(stopPx),
+			strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
+			nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
+			nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
+		)
+	}
+	if stopChanged && m.eventLog != nil {
 		m.eventLog.Emit(stats.Event{
 			Timestamp:  time.Now().UTC(),
 			Type:       "STOP_UPDATE",
@@ -17610,16 +17623,24 @@ func boolState(enabled bool) string {
 	return "disabled"
 }
 
-func bootTruthLines(modeLabel string, scanEvery time.Duration, watchCfg watchConfig, ladderCfg ladderConfig, reentryCfg reentryConfig, safety safetyConfig, execMgr *liveExecManager) []string {
+func verboseRejectLogging() bool {
+	return envBool("LIVE_VERBOSE_REJECT_LOGS", false)
+}
+
+func manageDebugLogging() bool {
+	return envBool("LIVE_MANAGE_DEBUG_LOGS", false)
+}
+
+func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg watchConfig, ladderCfg ladderConfig, reentryCfg reentryConfig, safety safetyConfig, execMgr *liveExecManager) []string {
 	lines := []string{
-		fmt.Sprintf("BOOT_TRUTH mode=%s scan=%s watch=%s priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
-		fmt.Sprintf("BOOT_TRUTH starter=%.2f add=%.2f max_total=%.2f min_available=%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, safety.minAvailUSDT),
-		fmt.Sprintf("BOOT_TRUTH one_symbol_only=%s reentry=%s post_win_cooldown=%s persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
-		fmt.Sprintf("BOOT_TRUTH funds_manager=%s account_snapshots=%s session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
+		fmt.Sprintf("mode=%s | scan=%s | watch=%s | priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
+		fmt.Sprintf("starter=%.2f | add=%.2f | max_total=%.2f | min_available=%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, safety.minAvailUSDT),
+		fmt.Sprintf("one_symbol_only=%s | reentry=%s | post_win_cooldown=%s | persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
+		fmt.Sprintf("funds_manager=%s | account_snapshots=%s | session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
 	}
 	if execMgr != nil {
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
-		lines = append(lines, fmt.Sprintf("BOOT_TRUTH account_health=%s detail=%s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")))
+		lines = append(lines, fmt.Sprintf("account_health=%s | detail=%s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")))
 	}
 	return lines
 }

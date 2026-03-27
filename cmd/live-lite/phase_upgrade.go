@@ -331,7 +331,7 @@ func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) 
 	st.LastSlope = c.Entry.ScoreSlope
 	st.LastScore = c.Entry.CurrentScore
 	st.LastOFIZ = c.OFIZ
-	if prevSeen != st.SeenCount && (topN || st.SeenCount >= maxInt(2, cfg.MinSeenCount-1) || strings.TrimSpace(st.LastRejectReason) != "") {
+	if envBool("LIVE_OPP_TRACK_VERBOSE", false) && prevSeen != st.SeenCount && (topN || st.SeenCount >= maxInt(2, cfg.MinSeenCount-1) || strings.TrimSpace(st.LastRejectReason) != "") {
 		fmt.Printf("MISSED_OPP_TRACK symbol=%s side=%s rank=%.2f volume_trend=%v momentum_trend=%v seen=%d topn=%d last_reject=%s\n",
 			st.Symbol, st.Side, maxFloat(c.CombinedScore, c.Entry.Rank), st.VolumeTrendUp, st.MomentumStableOrUp, st.SeenCount, st.TopNCount, firstNonEmpty(st.LastRejectReason, "none"))
 	}
