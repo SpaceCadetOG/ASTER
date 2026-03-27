@@ -9,6 +9,7 @@ import (
 
 	"go-machine/adapters/aster"
 	"go-machine/internal/features"
+	flowfeed "go-machine/internal/flow"
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 	"go-machine/internal/strategies"
@@ -1129,6 +1130,84 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 	}
 }
 
+func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterWhenImpulseStrong(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	c := candidate{
+		Side:        "SELL",
+		VolumeRatio: 0.07,
+		VolumeUSD:   13_700_000,
+		OFIZ:        -0.02,
+		OFISamples:  12,
+		LastClose:   1.1196,
+		SessionVWAP: 1.1500,
+		EMA9:        1.1450,
+		DayUTC24h:   -31.9,
+		Entry: inplay.Entry{
+			Symbol:         "SIRENUSDT",
+			CurrentGrade:   "B",
+			Rank:           1.2,
+			State:          inplay.StateInPlay,
+			TimeInStateMin: 12,
+			CurrentScore:   113.5,
+			ScoreSlope:     0.15,
+			EntryStyle:     "pullback_short",
+			Momentum:       true,
+		},
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 27, 3, 37, 0, 0, time.UTC))
+	if got.Strat != "impulsive_short_starter" {
+		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+	if got.Conf <= 0 {
+		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	}
+}
+
+func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStrong(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	c := candidate{
+		Side:        "BUY",
+		VolumeRatio: 0.09,
+		VolumeUSD:   14_500_000,
+		OFIZ:        0.03,
+		OFISamples:  12,
+		LastClose:   1.6441,
+		SessionVWAP: 1.60,
+		EMA9:        1.59,
+		DayUTC24h:   31.9,
+		Entry: inplay.Entry{
+			Symbol:         "SIRENUSDT",
+			CurrentGrade:   "B",
+			Rank:           1.2,
+			State:          inplay.StateInPlay,
+			TimeInStateMin: 12,
+			CurrentScore:   113.5,
+			ScoreSlope:     0.15,
+			EntryStyle:     "pullback_long",
+			Momentum:       true,
+		},
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 27, 3, 37, 0, 0, time.UTC))
+	if got.Strat != "impulsive_long_starter" {
+		t.Fatalf("expected impulsive_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+	if got.Conf <= 0 {
+		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	}
+}
+
 func TestResolveLadderPlanAllowsWinnerAdd(t *testing.T) {
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
@@ -1259,6 +1338,84 @@ func TestResolveLadderPlanAllowsManualManagedCatchUpAddAfterReconstructedTPHits(
 	}
 }
 
+func TestResolveLadderPlanAllowsAddForImpulsiveShortStarter(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:         "SIRENUSDT",
+				Side:           "SELL",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryReason:    "impulsive_short_starter",
+				EntryPrice:     1.20,
+				RemainingQty:   100,
+				DeployedMargin: 10,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"SIRENUSDT": {LastPrice: 1.08},
+	}
+	c := candidate{
+		Side:        "SELL",
+		Strat:       "impulsive_short_starter",
+		Conf:        0.62,
+		LastClose:   1.08,
+		SessionVWAP: 1.15,
+		EMA9:        1.12,
+		RetestHold:  true,
+		Entry:       inplay.Entry{Symbol: "SIRENUSDT", State: inplay.StateInPlay},
+		Sig: strategies.Signal{
+			Entry: 1.08,
+			TP1:   1.02,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 27, 3, 45, 0, 0, time.UTC), c, execMgr, meta)
+	if !plan.IsAdd {
+		t.Fatalf("expected impulsive short add plan, got %+v", plan)
+	}
+}
+
+func TestResolveLadderPlanAllowsAddForImpulsiveLongStarter(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:         "LYNUSDT",
+				Side:           "BUY",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryReason:    "impulsive_long_starter",
+				EntryPrice:     1.20,
+				RemainingQty:   100,
+				DeployedMargin: 10,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"LYNUSDT": {LastPrice: 1.32},
+	}
+	c := candidate{
+		Side:        "BUY",
+		Strat:       "impulsive_long_starter",
+		Conf:        0.62,
+		LastClose:   1.32,
+		SessionVWAP: 1.25,
+		EMA9:        1.27,
+		ReclaimHold: true,
+		Entry:       inplay.Entry{Symbol: "LYNUSDT", State: inplay.StateInPlay},
+		Sig: strategies.Signal{
+			Entry: 1.32,
+			TP1:   1.38,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 27, 3, 45, 0, 0, time.UTC), c, execMgr, meta)
+	if !plan.IsAdd {
+		t.Fatalf("expected impulsive long add plan, got %+v", plan)
+	}
+}
+
 func TestManualWouldAddCapitalAllowsManualManagedCatchUpDespiteTP3(t *testing.T) {
 	p := &livePosition{
 		Symbol:                "SIRENUSDT",
@@ -1300,6 +1457,25 @@ func TestTrailCandidateConfirmedFromBarsShortRejectsFailedCloseBelowLevel(t *tes
 	}
 	if trailCandidateConfirmedFromBars(false, bars, candidateAt, 1.15) {
 		t.Fatalf("expected no short trail confirmation when close reclaims level")
+	}
+}
+
+func TestEvaluateRunnerExitStateDoesNotTightenHealthyShortRunnerOnReversalWatchAlone(t *testing.T) {
+	mv := momentumView{
+		Short: &inplay.Entry{
+			State:             inplay.StateInPlay,
+			ScoreSlope:        0.18,
+			Momentum:          true,
+			ReversalWatchFlag: true,
+			MetaState:         "exhaust_watch",
+		},
+	}
+	got := evaluateRunnerExitState("SELL", mv, flowfeed.ExternalSignal{})
+	if got.ExhaustionConfirmed {
+		t.Fatalf("expected healthy runner to avoid premature tighten, got %+v", got)
+	}
+	if got.StructureBroken {
+		t.Fatalf("expected healthy runner to remain intact, got %+v", got)
 	}
 }
 

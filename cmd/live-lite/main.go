@@ -7458,7 +7458,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	stopReason := ""
 	stopDistancePct := 0.0
-	starterOnly := strings.EqualFold(c.Strat, "continuation_fast_starter") || strings.EqualFold(c.Strat, "early_dev_entry") || strings.EqualFold(c.Strat, "persistence_entry")
+	starterOnly := isStarterOnlyStrategyName(c.Strat)
 	if m.hybridStopCfg.Enabled {
 		stopRes := exitmgr.ComputeHybridStop(m.hybridStopCfg, hybridStopInputForCandidate(c, price, c.Sig.TP1))
 		if stopRes.Rejected {
@@ -7541,6 +7541,10 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			entryReason = "early_dev_entry"
 		} else if strings.EqualFold(c.Strat, "persistence_entry") {
 			entryReason = "persistence_entry"
+		} else if strings.EqualFold(c.Strat, "impulsive_short_starter") {
+			entryReason = "impulsive_short_starter"
+		} else if strings.EqualFold(c.Strat, "impulsive_long_starter") {
+			entryReason = "impulsive_long_starter"
 		} else {
 			entryReason = "continuation_fast_starter"
 		}
@@ -11960,6 +11964,199 @@ func strategyFamily(c candidate) string {
 	}
 }
 
+func isStarterOnlyStrategyName(strat string) bool {
+	switch strings.ToLower(strings.TrimSpace(strat)) {
+	case "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter":
+		return true
+	default:
+		return false
+	}
+}
+
+func qualifiesImpulsiveLongStarter(c candidate, fails []string) (float64, []string, bool) {
+	if !envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true) || !strings.EqualFold(c.Side, "BUY") {
+		return 0, nil, false
+	}
+	if c.Entry.LongDemotionFlag || candidateExhaustionActive(c) {
+		return 0, nil, false
+	}
+	allowedFails := 0
+	for _, fail := range fails {
+		fail = strings.TrimSpace(fail)
+		if fail == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(fail, "vol_ratio:"),
+			fail == "continuation_no_structure_confirm",
+			fail == "below_vwap_ema",
+			strings.HasPrefix(fail, "ofi_z:"):
+			allowedFails++
+		default:
+			return 0, nil, false
+		}
+	}
+	if allowedFails == 0 {
+		return 0, nil, false
+	}
+	minScore := envFloat("LIVE_IMPULSIVE_LONG_MIN_SCORE", 90.0)
+	minSlope := envFloat("LIVE_IMPULSIVE_LONG_MIN_SLOPE", 0.08)
+	maxRank := envFloat("LIVE_IMPULSIVE_LONG_MAX_RANK", 2.5)
+	minDayUTC := envFloat("LIVE_IMPULSIVE_LONG_MIN_DAYUTC_PCT", 18.0)
+	minVolumeUSD := envFloat("LIVE_IMPULSIVE_LONG_MIN_VOL_USD", 8000000.0)
+	minVolRatioFallback := envFloat("LIVE_IMPULSIVE_LONG_MIN_VOL_RATIO_FALLBACK", 0.55)
+	minAbsOFI := envFloat("LIVE_IMPULSIVE_LONG_MIN_ABS_OFI_Z", 0.05)
+	maxStateMin := envFloat("LIVE_IMPULSIVE_LONG_MAX_STATE_MIN", 40.0)
+	minConf := envFloat("LIVE_IMPULSIVE_LONG_BASE_CONF", 0.57)
+	stateOK := c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping || c.Entry.State == inplay.StateCooling
+	if !stateOK || c.Entry.TimeInStateMin > maxStateMin {
+		return 0, nil, false
+	}
+	if c.Entry.CurrentScore < minScore || c.Entry.ScoreSlope < minSlope {
+		return 0, nil, false
+	}
+	if maxRank > 0 && c.Entry.Rank > maxRank {
+		return 0, nil, false
+	}
+	if minDayUTC > 0 && c.DayUTC24h < minDayUTC {
+		return 0, nil, false
+	}
+	volumeOK := c.VolumeUSD >= minVolumeUSD || c.VolumeRatio >= minVolRatioFallback
+	if !volumeOK {
+		return 0, nil, false
+	}
+	structureOK := (c.SessionVWAP > 0 && c.LastClose >= c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose >= c.EMA9) || c.ReclaimHold || c.ClosedBreakHold
+	if !structureOK {
+		return 0, nil, false
+	}
+	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ < -minAbsOFI {
+		return 0, nil, false
+	}
+	styleOK := c.Entry.Momentum ||
+		c.Entry.EntryStyle == "pullback_long" ||
+		c.Entry.EntryStyle == "breakout_hold_long" ||
+		c.Entry.EntryStyle == "momentum_ignite_long"
+	if !styleOK {
+		return 0, nil, false
+	}
+	confBoost := min(0.16,
+		maxFloat(0.0, c.Entry.ScoreSlope-minSlope)*0.30+
+			maxFloat(0.0, c.DayUTC24h-minDayUTC)*0.003+
+			maxFloat(0.0, c.VolumeRatio-minVolRatioFallback)*0.06)
+	conf := clamp(minConf+confBoost, 0.45, 0.76)
+	reasons := []string{
+		fmt.Sprintf("score=%.2f", c.Entry.CurrentScore),
+		fmt.Sprintf("slope=%.3f", c.Entry.ScoreSlope),
+		fmt.Sprintf("dayutc=%.1f", c.DayUTC24h),
+		fmt.Sprintf("vol_usd=%.2fM", c.VolumeUSD/1_000_000.0),
+		fmt.Sprintf("rank=%.2f", c.Entry.Rank),
+		"impulsive_long_scanner_move",
+	}
+	return conf, reasons, true
+}
+
+func qualifiesImpulsiveShortStarter(c candidate, fails []string) (float64, []string, bool) {
+	if !envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true) || !strings.EqualFold(c.Side, "SELL") {
+		return 0, nil, false
+	}
+	if c.Entry.ShortDemotionFlag || candidateExhaustionActive(c) {
+		return 0, nil, false
+	}
+	allowedFails := 0
+	for _, fail := range fails {
+		fail = strings.TrimSpace(fail)
+		if fail == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(fail, "vol_ratio:"),
+			fail == "continuation_no_structure_confirm",
+			fail == "above_vwap_ema",
+			strings.HasPrefix(fail, "ofi_z:"):
+			allowedFails++
+		default:
+			return 0, nil, false
+		}
+	}
+	if allowedFails == 0 {
+		return 0, nil, false
+	}
+	minScore := envFloat("LIVE_IMPULSIVE_SHORT_MIN_SCORE", 90.0)
+	minSlope := envFloat("LIVE_IMPULSIVE_SHORT_MIN_SLOPE", 0.08)
+	maxRank := envFloat("LIVE_IMPULSIVE_SHORT_MAX_RANK", 2.5)
+	minDayUTC := envFloat("LIVE_IMPULSIVE_SHORT_MIN_DAYUTC_PCT", 18.0)
+	minVolumeUSD := envFloat("LIVE_IMPULSIVE_SHORT_MIN_VOL_USD", 8000000.0)
+	minVolRatioFallback := envFloat("LIVE_IMPULSIVE_SHORT_MIN_VOL_RATIO_FALLBACK", 0.55)
+	minAbsOFI := envFloat("LIVE_IMPULSIVE_SHORT_MIN_ABS_OFI_Z", 0.05)
+	maxStateMin := envFloat("LIVE_IMPULSIVE_SHORT_MAX_STATE_MIN", 40.0)
+	minConf := envFloat("LIVE_IMPULSIVE_SHORT_BASE_CONF", 0.57)
+	stateOK := c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping || c.Entry.State == inplay.StateCooling
+	if !stateOK || c.Entry.TimeInStateMin > maxStateMin {
+		return 0, nil, false
+	}
+	if c.Entry.CurrentScore < minScore || c.Entry.ScoreSlope < minSlope {
+		return 0, nil, false
+	}
+	if maxRank > 0 && c.Entry.Rank > maxRank {
+		return 0, nil, false
+	}
+	if minDayUTC > 0 && c.DayUTC24h > -minDayUTC {
+		return 0, nil, false
+	}
+	volumeOK := c.VolumeUSD >= minVolumeUSD || c.VolumeRatio >= minVolRatioFallback
+	if !volumeOK {
+		return 0, nil, false
+	}
+	structureOK := (c.SessionVWAP > 0 && c.LastClose <= c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose <= c.EMA9) || c.RetestHold || c.ClosedBreakHold
+	if !structureOK {
+		return 0, nil, false
+	}
+	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ > minAbsOFI {
+		return 0, nil, false
+	}
+	styleOK := c.Entry.Momentum ||
+		c.Entry.EntryStyle == "pullback_short" ||
+		c.Entry.EntryStyle == "breakout_hold_short" ||
+		c.Entry.EntryStyle == "momentum_ignite_short" ||
+		c.Entry.EntryStyle == "leader_unwind_short"
+	if !styleOK {
+		return 0, nil, false
+	}
+	confBoost := min(0.16,
+		maxFloat(0.0, c.Entry.ScoreSlope-minSlope)*0.30+
+			maxFloat(0.0, math.Abs(c.DayUTC24h)-minDayUTC)*0.003+
+			maxFloat(0.0, c.VolumeRatio-minVolRatioFallback)*0.06)
+	conf := clamp(minConf+confBoost, 0.45, 0.76)
+	reasons := []string{
+		fmt.Sprintf("score=%.2f", c.Entry.CurrentScore),
+		fmt.Sprintf("slope=%.3f", c.Entry.ScoreSlope),
+		fmt.Sprintf("dayutc=%.1f", c.DayUTC24h),
+		fmt.Sprintf("vol_usd=%.2fM", c.VolumeUSD/1_000_000.0),
+		fmt.Sprintf("rank=%.2f", c.Entry.Rank),
+		"impulsive_short_scanner_move",
+	}
+	return conf, reasons, true
+}
+
+func winnerAddStrategyReady(c candidate, manualCatchUp bool) bool {
+	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
+	case "continuation_fast", "guerilla_short_runner", "guerilla_long_runner", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+		return true
+	case "impulsive_short_starter":
+		if manualCatchUp {
+			return true
+		}
+		return c.Conf >= envFloat("LIVE_IMPULSIVE_SHORT_ADD_MIN_CONF", 0.56)
+	case "impulsive_long_starter":
+		if manualCatchUp {
+			return true
+		}
+		return c.Conf >= envFloat("LIVE_IMPULSIVE_LONG_ADD_MIN_CONF", 0.56)
+	default:
+		return false
+	}
+}
+
 func minQualityForStrategy(c candidate, cfg entryQualityConfig) float64 {
 	switch strategyFamily(c) {
 	case "ignite":
@@ -12941,7 +13138,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "position_not_ready_for_add"
 			return plan
 		}
-		if !strings.EqualFold(c.Strat, "continuation_fast") {
+		if !winnerAddStrategyReady(c, manualCatchUp) {
 			if activeSame.AddLockedUntilConfirm || activeSame.StarterOnly {
 				plan.RejectReason = "starter_waiting_full_confirmation"
 			} else {
@@ -13060,7 +13257,7 @@ func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) strin
 	}
 	switch phase {
 	case sessionAsiaDev:
-		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
+		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") && !strings.EqualFold(c.Strat, "impulsive_short_starter") && !strings.EqualFold(c.Strat, "impulsive_long_starter") {
 			return "asia_dev_starter_only"
 		}
 	case sessionAsiaContinue:
@@ -13371,7 +13568,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -14453,6 +14650,36 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
 			PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
 		}
+		if conf, reasons, ok := qualifiesImpulsiveShortStarter(cand, fails); ok {
+			cand.Strat = "impulsive_short_starter"
+			cand.Conf = conf
+			cand.Sig = strategies.Signal{
+				Active:     true,
+				Name:       "impulsive_short_starter",
+				Side:       toFeatureSide(cand.Side),
+				Confidence: cand.Conf,
+				Tags:       []string{"starter_only", "impulse_short", "scanner_confidence"},
+				Reasons:    reasons,
+			}
+			cand.Sig = applySignalRiskGeometry(cand, "impulsive_short_starter")
+			cand.RejectReason = ""
+			return cand
+		}
+		if conf, reasons, ok := qualifiesImpulsiveLongStarter(cand, fails); ok {
+			cand.Strat = "impulsive_long_starter"
+			cand.Conf = conf
+			cand.Sig = strategies.Signal{
+				Active:     true,
+				Name:       "impulsive_long_starter",
+				Side:       toFeatureSide(cand.Side),
+				Confidence: cand.Conf,
+				Tags:       []string{"starter_only", "impulse_long", "scanner_confidence"},
+				Reasons:    reasons,
+			}
+			cand.Sig = applySignalRiskGeometry(cand, "impulsive_long_starter")
+			cand.RejectReason = ""
+			return cand
+		}
 		if persistenceStrong(cand, persistCfg) && persistenceSoftBlocksOnly(fails) {
 			cand.Strat = "persistence_entry"
 			cand.Conf = maxFloat(cand.Conf, 0.58)
@@ -14945,8 +15172,14 @@ func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.External
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_LIQ_NO_CONT"
 	case strings.Contains(metaState, "exhaust") || e.ReversalWatchFlag:
-		state.ExhaustionConfirmed = true
-		state.TightenReason = "RUNNER_EXHAUST_WICK_REJECTION"
+		if !e.Momentum ||
+			e.ScoreSlope <= envFloat("LIVE_RUNNER_EXHAUST_TIGHTEN_SLOPE_MAX", 0.04) ||
+			e.State == inplay.StateCooling ||
+			e.State == inplay.StateDumping ||
+			e.State == inplay.StateExhausted {
+			state.ExhaustionConfirmed = true
+			state.TightenReason = "RUNNER_EXHAUST_WICK_REJECTION"
+		}
 	case e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01) && (e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted):
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_SLOPE_COLLAPSE"
