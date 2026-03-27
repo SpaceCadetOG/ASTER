@@ -41,72 +41,72 @@ import (
 )
 
 type candidate struct {
-	Entry           inplay.Entry
-	Side            string // BUY/SELL
-	Strat           string
-	SetupFamily     string
-	Conf            float64
-	FinalRank       float64
-	TriggerState    string
-	TriggerStateN   float64
-	TriggerStage    string
-	TriggerScans    int
-	ExitProfile     string
-	VolumeUSD       float64
-	FundingRate     float64
-	DayUTC24h       float64
-	UTC4hPct        float64
-	UTC1hPct        float64
-	VolumeRatio     float64
-	OFIRaw          float64
-	OFIZ            float64
-	OFISamples      int
-	SpreadBps       float64
-	DepthBid        float64
-	DepthAsk        float64
-	BookImbalance   float64
-	ATR             float64
-	ATRPct          float64
-	Sig             strategies.Signal
-	RejectReason    string
-	LastClose       float64
-	SessionVWAP     float64
-	EMA9            float64
-	FastSlope       float64
-	SlowSlope       float64
-	ReliabilityAdj  float64
-	DiscoveryScore  float64
-	TriggerScore    float64
-	ExecutionScore  float64
-	CombinedScore   float64
-	TradeQuality    float64
-	QualityReasons  []string
-	LifecycleStage  string
-	LifecycleScans  int
-	StopPlan        exitmgr.HybridStopResult
-	StructureFresh  bool
-	ClosedBreakHold bool
-	ReclaimHold     bool
-	RetestHold      bool
-	ResetRebreak    bool
-	ExtensionATR    float64
-	StructureReason string
-	PatternBias     float64
-	PatternReasons  []string
-	WallMode        string
-	WallStatus      string
-	WallConfidence  float64
-	WallBiasScore   float64
-	WallSpoofRisk   float64
-	WallDistanceBps float64
-	WallSizeRatio   float64
-	WallPersistence time.Duration
-	WallPullRate    float64
-	WallAddRate     float64
-	WallRefillCount int
-	WallPrice       float64
-	WallSide        string
-	WallReasons     []string
+	Entry                  inplay.Entry
+	Side                   string // BUY/SELL
+	Strat                  string
+	SetupFamily            string
+	Conf                   float64
+	FinalRank              float64
+	TriggerState           string
+	TriggerStateN          float64
+	TriggerStage           string
+	TriggerScans           int
+	ExitProfile            string
+	VolumeUSD              float64
+	FundingRate            float64
+	DayUTC24h              float64
+	UTC4hPct               float64
+	UTC1hPct               float64
+	VolumeRatio            float64
+	OFIRaw                 float64
+	OFIZ                   float64
+	OFISamples             int
+	SpreadBps              float64
+	DepthBid               float64
+	DepthAsk               float64
+	BookImbalance          float64
+	ATR                    float64
+	ATRPct                 float64
+	Sig                    strategies.Signal
+	RejectReason           string
+	LastClose              float64
+	SessionVWAP            float64
+	EMA9                   float64
+	FastSlope              float64
+	SlowSlope              float64
+	ReliabilityAdj         float64
+	DiscoveryScore         float64
+	TriggerScore           float64
+	ExecutionScore         float64
+	CombinedScore          float64
+	TradeQuality           float64
+	QualityReasons         []string
+	LifecycleStage         string
+	LifecycleScans         int
+	StopPlan               exitmgr.HybridStopResult
+	StructureFresh         bool
+	ClosedBreakHold        bool
+	ReclaimHold            bool
+	RetestHold             bool
+	ResetRebreak           bool
+	ExtensionATR           float64
+	StructureReason        string
+	PatternBias            float64
+	PatternReasons         []string
+	WallMode               string
+	WallStatus             string
+	WallConfidence         float64
+	WallBiasScore          float64
+	WallSpoofRisk          float64
+	WallDistanceBps        float64
+	WallSizeRatio          float64
+	WallPersistence        time.Duration
+	WallPullRate           float64
+	WallAddRate            float64
+	WallRefillCount        int
+	WallPrice              float64
+	WallSide               string
+	WallReasons            []string
 	PersistenceSeenCount   int
 	PersistenceTopNCount   int
 	PersistenceBestRank    float64
@@ -116,35 +116,35 @@ type candidate struct {
 }
 
 type entryQualityConfig struct {
-	EnableMetaGate       bool
-	MinQuality           float64
-	MinQualityCont       float64
-	MinQualityIgnite     float64
-	MinQualityRev        float64
-	RequireStrategyMatch bool
-	MinEntryConf         float64
-	MinEntryConfCont     float64
-	MinEntryConfIgnite   float64
-	MinEntryConfRev      float64
-	PersistenceOverride  bool
-	PersistMinQuality    float64
-	PersistMinScans      int
-	PersistMinScore      float64
-	PersistMinGrade      string
-	EnableScoreGate      bool
-	MinDiscovery         float64
-	MinTrigger           float64
-	MinExecution         float64
-	ScoreWeightDiscovery float64
-	ScoreWeightTrigger   float64
-	ScoreWeightExecution float64
-	DayUTCWeight         float64
-	DayUTCMinAbsPct      float64
-	DayUTCScalePct       float64
-	BlockContExhaustion  bool
-	DayUTCMaturityBrake  bool
-	DayUTCMaturityPct    float64
-	RequireFreshPullback bool
+	EnableMetaGate          bool
+	MinQuality              float64
+	MinQualityCont          float64
+	MinQualityIgnite        float64
+	MinQualityRev           float64
+	RequireStrategyMatch    bool
+	MinEntryConf            float64
+	MinEntryConfCont        float64
+	MinEntryConfIgnite      float64
+	MinEntryConfRev         float64
+	PersistenceOverride     bool
+	PersistMinQuality       float64
+	PersistMinScans         int
+	PersistMinScore         float64
+	PersistMinGrade         string
+	EnableScoreGate         bool
+	MinDiscovery            float64
+	MinTrigger              float64
+	MinExecution            float64
+	ScoreWeightDiscovery    float64
+	ScoreWeightTrigger      float64
+	ScoreWeightExecution    float64
+	DayUTCWeight            float64
+	DayUTCMinAbsPct         float64
+	DayUTCScalePct          float64
+	BlockContExhaustion     bool
+	DayUTCMaturityBrake     bool
+	DayUTCMaturityPct       float64
+	RequireFreshPullback    bool
 	PersistenceSoftOverride bool
 	PersistSoftMetaMin      float64
 	PersistSoftMinSeen      int
@@ -771,6 +771,10 @@ type livePosition struct {
 	TrailOn                bool            `json:"trailOn"`
 	TrailRef               float64         `json:"trailRef"`
 	TrailStop              float64         `json:"trailStop"`
+	TrailCandidateRef      float64         `json:"trailCandidateRef,omitempty"`
+	TrailCandidateStop     float64         `json:"trailCandidateStop,omitempty"`
+	TrailCandidateLevel    float64         `json:"trailCandidateLevel,omitempty"`
+	TrailCandidateAt       time.Time       `json:"trailCandidateAt,omitempty"`
 	VPSetup                string          `json:"vpSetup,omitempty"`
 	VPLevel                float64         `json:"vpLevel,omitempty"`
 	VPTargetLevel          float64         `json:"vpTargetLevel,omitempty"`
@@ -1170,35 +1174,35 @@ func main() {
 		ReversalShortMinSlope:   envFloat("LIVE_REVERSAL_SHORT_MIN_SLOPE", 0.25),
 	}
 	entryQualityCfg := entryQualityConfig{
-		EnableMetaGate:       envBool("LIVE_META_GATE_ENABLE", true),
-		MinQuality:           envFloat("LIVE_META_MIN_QUALITY", 0.52),
-		MinQualityCont:       envFloat("LIVE_META_MIN_QUALITY_CONT", envFloat("LIVE_META_MIN_QUALITY", 0.52)),
-		MinQualityIgnite:     envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.50)),
-		MinQualityRev:        envFloat("LIVE_META_MIN_QUALITY_REV", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.48)),
-		RequireStrategyMatch: envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
-		MinEntryConf:         envFloat("LIVE_MIN_ENTRY_CONF", 0.48),
-		MinEntryConfCont:     envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.48)),
-		MinEntryConfIgnite:   envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.45)),
-		MinEntryConfRev:      envFloat("LIVE_MIN_ENTRY_CONF_REV", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.40)),
-		PersistenceOverride:  envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", true),
-		PersistMinQuality:    envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.50),
-		PersistMinScans:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SCANS", 3),
-		PersistMinScore:      envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 80.0),
-		PersistMinGrade:      envStr("LIVE_PERSISTENCE_OVERRIDE_MIN_GRADE", "B"),
-		EnableScoreGate:      envBool("LIVE_ENTRY_SCORE_ENABLE", false),
-		MinDiscovery:         envFloat("LIVE_DISCOVERY_MIN_SCORE", 0.0),
-		MinTrigger:           envFloat("LIVE_TRIGGER_MIN_SCORE", 0.0),
-		MinExecution:         envFloat("LIVE_EXECUTION_MIN_SCORE", 0.0),
-		ScoreWeightDiscovery: envFloat("LIVE_DISCOVERY_WEIGHT", 0.35),
-		ScoreWeightTrigger:   envFloat("LIVE_TRIGGER_WEIGHT", 0.40),
-		ScoreWeightExecution: envFloat("LIVE_EXECUTION_WEIGHT", 0.25),
-		DayUTCWeight:         envFloat("LIVE_DAYUTC_WEIGHT", 0.30),
-		DayUTCMinAbsPct:      envFloat("LIVE_DAYUTC_MIN_ABS_PCT", 5.0),
-		DayUTCScalePct:       envFloat("LIVE_DAYUTC_SCALE_PCT", 20.0),
-		BlockContExhaustion:  envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", false),
-		DayUTCMaturityBrake:  envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
-		DayUTCMaturityPct:    envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
-		RequireFreshPullback: envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
+		EnableMetaGate:          envBool("LIVE_META_GATE_ENABLE", true),
+		MinQuality:              envFloat("LIVE_META_MIN_QUALITY", 0.52),
+		MinQualityCont:          envFloat("LIVE_META_MIN_QUALITY_CONT", envFloat("LIVE_META_MIN_QUALITY", 0.52)),
+		MinQualityIgnite:        envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.50)),
+		MinQualityRev:           envFloat("LIVE_META_MIN_QUALITY_REV", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.48)),
+		RequireStrategyMatch:    envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
+		MinEntryConf:            envFloat("LIVE_MIN_ENTRY_CONF", 0.48),
+		MinEntryConfCont:        envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.48)),
+		MinEntryConfIgnite:      envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.45)),
+		MinEntryConfRev:         envFloat("LIVE_MIN_ENTRY_CONF_REV", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.40)),
+		PersistenceOverride:     envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", true),
+		PersistMinQuality:       envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.50),
+		PersistMinScans:         envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SCANS", 3),
+		PersistMinScore:         envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 80.0),
+		PersistMinGrade:         envStr("LIVE_PERSISTENCE_OVERRIDE_MIN_GRADE", "B"),
+		EnableScoreGate:         envBool("LIVE_ENTRY_SCORE_ENABLE", false),
+		MinDiscovery:            envFloat("LIVE_DISCOVERY_MIN_SCORE", 0.0),
+		MinTrigger:              envFloat("LIVE_TRIGGER_MIN_SCORE", 0.0),
+		MinExecution:            envFloat("LIVE_EXECUTION_MIN_SCORE", 0.0),
+		ScoreWeightDiscovery:    envFloat("LIVE_DISCOVERY_WEIGHT", 0.35),
+		ScoreWeightTrigger:      envFloat("LIVE_TRIGGER_WEIGHT", 0.40),
+		ScoreWeightExecution:    envFloat("LIVE_EXECUTION_WEIGHT", 0.25),
+		DayUTCWeight:            envFloat("LIVE_DAYUTC_WEIGHT", 0.30),
+		DayUTCMinAbsPct:         envFloat("LIVE_DAYUTC_MIN_ABS_PCT", 5.0),
+		DayUTCScalePct:          envFloat("LIVE_DAYUTC_SCALE_PCT", 20.0),
+		BlockContExhaustion:     envBool("LIVE_BLOCK_CONTINUATION_ON_EXHAUSTION", false),
+		DayUTCMaturityBrake:     envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
+		DayUTCMaturityPct:       envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
+		RequireFreshPullback:    envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
 		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
 		PersistSoftMetaMin:      envFloat("LIVE_PERSISTENCE_META_QUALITY_MIN", 0.45),
 		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
@@ -2350,25 +2354,25 @@ func main() {
 						fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
 							rawCandidate, c.Side, oldReject, firstNonEmpty(c.PersistenceReason, "strong_persistence"), ladderCfg.StarterUSDT)
 					} else {
-					recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
-					rememberRecentReject(recentRejects, now, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality), acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: append([]string{fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)}, c.QualityReasons...),
-					})
-					continue
+						recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
+						rememberRecentReject(recentRejects, now, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality), acceptanceCfg)
+						f := false
+						eventLog.Emit(stats.Event{
+							Timestamp:   now,
+							Type:        "GATE_DECISION",
+							Symbol:      rawCandidate,
+							Side:        c.Side,
+							Strategy:    c.Strat,
+							Score:       c.Entry.CurrentScore,
+							Slope:       c.Entry.ScoreSlope,
+							Discovery:   c.DiscoveryScore,
+							Trigger:     c.TriggerScore,
+							Execution:   c.ExecutionScore,
+							Combined:    c.CombinedScore,
+							GateAllow:   &f,
+							GateReasons: append([]string{fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)}, c.QualityReasons...),
+						})
+						continue
 					}
 				}
 				if (c.TradeQuality < minQuality || c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && persistOverride {
@@ -6940,8 +6944,9 @@ func markProtectionPending(p *livePosition, now time.Time, cause string) {
 	}
 	p.ProtectionPending = true
 	p.ProtectionRetryAfter = now.Add(manualProtectionRetryDelay())
-	p.LastManageFailAt = now
-	p.LastManageFailCause = strings.TrimSpace(cause)
+	if strings.TrimSpace(cause) != "" && strings.TrimSpace(p.LastManageFailCause) == "" {
+		p.LastManageFailCause = strings.TrimSpace(cause)
+	}
 }
 
 func clearProtectionPending(p *livePosition) {
@@ -6959,7 +6964,13 @@ func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) 
 		return false
 	}
 	_, pnlPct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
-	return pnlPct >= minAddPnLPct && !p.HitTP3
+	if pnlPct < minAddPnLPct {
+		return false
+	}
+	if p.HitTP3 && !manualCatchUpAddAllowed(p) {
+		return false
+	}
+	return true
 }
 
 func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePosition, mark float64) {
@@ -8332,6 +8343,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 	if p == nil {
 		return
 	}
+	cause = strings.TrimSpace(cause)
 	fmt.Printf("live-lite: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
 		p.Symbol,
 		p.Side,
@@ -8346,12 +8358,14 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		now := time.Now().UTC()
 		if !p.LastManageFailAt.IsZero() &&
 			now.Sub(p.LastManageFailAt) < manualProtectionAlertCooldown() &&
-			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), strings.TrimSpace(cause)) {
+			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), cause) {
 			notifyTelegram = false
 		}
 		if !notifyTelegram {
 			return
 		}
+		p.LastManageFailAt = now
+		p.LastManageFailCause = cause
 		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE FAILED SAFE",
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
@@ -8476,7 +8490,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
 			}
 		} else {
-		return err
+			return err
 		}
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
@@ -8721,12 +8735,31 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 	if !improved {
 		return false, nil
 	}
+	if trailNeedsConfirmation() {
+		level := p.TrailRef
+		if level <= 0 {
+			level = p.EntryPrice
+		}
+		if p.TrailCandidateAt.IsZero() || (sideBuy && newStop > p.TrailCandidateStop) || (!sideBuy && newStop < p.TrailCandidateStop) {
+			p.TrailCandidateRef = newRef
+			p.TrailCandidateStop = newStop
+			p.TrailCandidateLevel = level
+			p.TrailCandidateAt = time.Now().UTC()
+		}
+		confirmed, err := m.trailCandidateConfirmed(p, sideBuy)
+		if err != nil || !confirmed {
+			return false, err
+		}
+		newRef = p.TrailCandidateRef
+		newStop = p.TrailCandidateStop
+	}
 	p.TrailRef = newRef
 	p.TrailStop = newStop
 	p.StopPrice = newStop
 	if err := m.placeOrReplaceStop(p); err != nil {
 		return false, err
 	}
+	clearTrailCandidate(p)
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("📈", "TRAIL MOVE",
 			fmt.Sprintf("<b>%s</b>", p.Symbol),
@@ -8734,6 +8767,105 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 		))
 	}
 	return true, nil
+}
+
+func trailNeedsConfirmation() bool {
+	return envBool("LIVE_TRAIL_CONFIRM_ON_CLOSE", true)
+}
+
+func trailConfirmBars() int {
+	n := envInt("LIVE_TRAIL_CONFIRM_BARS", 1)
+	if n <= 0 {
+		n = 1
+	}
+	if n > 3 {
+		n = 3
+	}
+	return n
+}
+
+func trailRetestEnabled() bool {
+	return envBool("LIVE_TRAIL_RETEST_ENABLE", true)
+}
+
+func clearTrailCandidate(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.TrailCandidateRef = 0
+	p.TrailCandidateStop = 0
+	p.TrailCandidateLevel = 0
+	p.TrailCandidateAt = time.Time{}
+}
+
+func (m *liveExecManager) trailCandidateConfirmed(p *livePosition, sideBuy bool) (bool, error) {
+	if p == nil || p.Symbol == "" || p.TrailCandidateAt.IsZero() {
+		return false, nil
+	}
+	bars, err := trailingClosedBars(m.featureCache, p.Symbol, 8)
+	if err != nil {
+		return false, err
+	}
+	return trailCandidateConfirmedFromBars(sideBuy, bars, p.TrailCandidateAt, p.TrailCandidateLevel), nil
+}
+
+func trailingClosedBars(cache *featureRuntimeCache, symbol string, limit int) ([]types.Candle, error) {
+	if cache == nil {
+		return nil, fmt.Errorf("feature cache unavailable")
+	}
+	if limit < 3 {
+		limit = 3
+	}
+	bars, err := cache.candleSeries(symbol, types.TF1m, limit)
+	if err != nil {
+		return nil, err
+	}
+	bars = types.EnsureSorted(append([]types.Candle(nil), bars...))
+	if len(bars) <= 1 {
+		return nil, nil
+	}
+	return bars[:len(bars)-1], nil
+}
+
+func trailCandidateConfirmedFromBars(sideBuy bool, bars []types.Candle, candidateAt time.Time, level float64) bool {
+	if len(bars) == 0 || level <= 0 || candidateAt.IsZero() {
+		return false
+	}
+	candidateMinute := candidateAt.Truncate(time.Minute)
+	eligible := make([]types.Candle, 0, len(bars))
+	for _, b := range bars {
+		if b.T.After(candidateMinute) {
+			eligible = append(eligible, b)
+		}
+	}
+	if len(eligible) < trailConfirmBars() {
+		return false
+	}
+	checkBars := eligible[len(eligible)-trailConfirmBars():]
+	bufferBps := envFloat("LIVE_TRAIL_CONFIRM_LEVEL_BUFFER_BPS", 5.0) / 10000.0
+	if bufferBps < 0 {
+		bufferBps = 0
+	}
+	levelUp := level * (1 + bufferBps)
+	levelDown := level * (1 - bufferBps)
+	for _, b := range checkBars {
+		if sideBuy {
+			if b.C <= levelUp {
+				return false
+			}
+			if trailRetestEnabled() && b.L <= levelUp && b.C <= levelUp {
+				return false
+			}
+		} else {
+			if b.C >= levelDown {
+				return false
+			}
+			if trailRetestEnabled() && b.H >= levelDown && b.C >= levelDown {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (m *liveExecManager) calcTrailStop(sideBuy bool, ref float64) float64 {
@@ -12707,6 +12839,25 @@ type ladderPlan struct {
 	Previous     *livePosition
 }
 
+func manualCatchUpAddAllowed(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	if !botManagedPosition(p) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live") {
+		return false
+	}
+	if p.State != execOpen || p.PendingAddOrderID > 0 {
+		return false
+	}
+	if p.StarterOnly || p.AddLockedUntilConfirm {
+		return false
+	}
+	return true
+}
+
 func candidateStarterOnlyByStopPlan(c candidate) bool {
 	entryPx := c.Sig.Entry
 	if entryPx <= 0 {
@@ -12769,6 +12920,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		}
 	}
 	if activeSame != nil {
+		manualCatchUp := manualCatchUpAddAllowed(activeSame)
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
 			return plan
@@ -12781,7 +12933,11 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "pending_add_order"
 			return plan
 		}
-		if activeSame.State != execOpen || activeSame.HitTP1 || activeSame.HitTP2 || activeSame.HitTP3 {
+		if activeSame.State != execOpen {
+			plan.RejectReason = "position_not_ready_for_add"
+			return plan
+		}
+		if (activeSame.HitTP1 || activeSame.HitTP2 || activeSame.HitTP3) && !manualCatchUp {
 			plan.RejectReason = "position_not_ready_for_add"
 			return plan
 		}
@@ -12817,11 +12973,11 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "pyramid_exhaustion_active"
 			return plan
 		}
-		if candidateSpikeCandle(c) {
+		if candidateSpikeCandle(c) && !manualCatchUp {
 			plan.RejectReason = "pyramid_spike_candle"
 			return plan
 		}
-		if candidateRapidExpansion(c) {
+		if candidateRapidExpansion(c) && !manualCatchUp {
 			plan.RejectReason = "pyramid_rapid_expansion"
 			return plan
 		}
@@ -17012,7 +17168,9 @@ func classifyRejectReason(reason string) RejectClass {
 func isHardReject(reason string) bool     { return classifyRejectReason(reason) == rejectClassHardSafety }
 func isSoftReject(reason string) bool     { return classifyRejectReason(reason) == rejectClassSoftConfirm }
 func isCapacityReject(reason string) bool { return classifyRejectReason(reason) == rejectClassCapacity }
-func isStateReject(reason string) bool    { return classifyRejectReason(reason) == rejectClassStateCooldown }
+func isStateReject(reason string) bool {
+	return classifyRejectReason(reason) == rejectClassStateCooldown
+}
 
 func persistenceEligibilityScore(c candidate) float64 {
 	score := clamp(c.CombinedScore, 0, 1)
@@ -17435,21 +17593,21 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
 		}
 		if len(fields) < 3 {
-		pending := c.execMgr.pendingManualRequests(5)
-		if len(pending) == 0 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
-		}
-		lines := []string{"<code>/manage SYMBOL y|n</code>"}
-		for _, req := range pending {
-			action := "manage"
-			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
-				action = "force_close"
+			pending := c.execMgr.pendingManualRequests(5)
+			if len(pending) == 0 {
+				return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
 			}
-			lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | action=%s | qty=%.6f | entry=%s",
-				cleanSymbol(req.Symbol), req.Side, action, req.Qty, fmtPrice(req.Entry)))
+			lines := []string{"<code>/manage SYMBOL y|n</code>"}
+			for _, req := range pending {
+				action := "manage"
+				if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
+					action = "force_close"
+				}
+				lines = append(lines, fmt.Sprintf("<b>Pending:</b> %s %s | action=%s | qty=%.6f | entry=%s",
+					cleanSymbol(req.Symbol), req.Side, action, req.Qty, fmtPrice(req.Entry)))
+			}
+			return notify.BuildEventHTML("🤝", "MANAGE", lines...)
 		}
-		return notify.BuildEventHTML("🤝", "MANAGE", lines...)
-	}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		answer := strings.ToLower(strings.TrimSpace(fields[2]))
 		req, ok := c.execMgr.pendingManualRequest(sym)

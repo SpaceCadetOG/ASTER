@@ -12,6 +12,7 @@ import (
 	"go-machine/internal/inplay"
 	"go-machine/internal/market"
 	"go-machine/internal/strategies"
+	"go-machine/internal/types"
 )
 
 func TestInHourWindow(t *testing.T) {
@@ -256,6 +257,32 @@ func TestDirectionalConflictRejectReasonBlocksContradictoryContinuation(t *testi
 	}
 	if got := directionalConflictRejectReason(c); got != "directional_dayutc_conflict" {
 		t.Fatalf("expected directional_dayutc_conflict, got %q", got)
+	}
+}
+
+func TestMarkProtectionPendingDoesNotResetManageAlertCooldown(t *testing.T) {
+	now := time.Date(2026, 3, 26, 22, 1, 0, 0, time.UTC)
+	prev := now.Add(-1 * time.Minute)
+	p := &livePosition{
+		Symbol:              "SIRENUSDT",
+		Side:                "SHORT",
+		LastManageFailAt:    prev,
+		LastManageFailCause: "exchange_immediate_trigger_retry_failed",
+	}
+
+	markProtectionPending(p, now, "exchange_immediate_trigger_retry_failed")
+
+	if !p.ProtectionPending {
+		t.Fatalf("expected protection pending")
+	}
+	if !p.LastManageFailAt.Equal(prev) {
+		t.Fatalf("expected manage alert timestamp to stay unchanged, got=%v want=%v", p.LastManageFailAt, prev)
+	}
+	if p.LastManageFailCause != "exchange_immediate_trigger_retry_failed" {
+		t.Fatalf("expected manage fail cause preserved, got %q", p.LastManageFailCause)
+	}
+	if !p.ProtectionRetryAfter.After(now) {
+		t.Fatalf("expected retry-after to be scheduled after now")
 	}
 }
 
@@ -763,7 +790,7 @@ func TestLivePositionBySymbolNormalizesRawSymbol(t *testing.T) {
 }
 
 func TestPendingManualRequestNormalizesSymbol(t *testing.T) {
-	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	m := &liveExecManager{
 		manualConfirm:  true,
 		manualRequests: map[string]manualManageRequest{},
@@ -781,7 +808,7 @@ func TestPendingManualRequestNormalizesSymbol(t *testing.T) {
 }
 
 func TestHandleCommandManageDecline(t *testing.T) {
-	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	m := &liveExecManager{
 		manualConfirm:  true,
 		manualRequests: map[string]manualManageRequest{},
@@ -799,7 +826,7 @@ func TestHandleCommandManageDecline(t *testing.T) {
 }
 
 func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T) {
-	now := time.Date(2026, 3, 21, 2, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	m := &liveExecManager{
 		manualConfirm:  true,
 		manualRequests: map[string]manualManageRequest{},
@@ -1012,7 +1039,7 @@ func TestPullbackContinuationGetsConfidenceWithStructure(t *testing.T) {
 			ScoreSlope:   0.14,
 		},
 	}
-	got := applySimpleContinuationFallback(c)
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
 	if got.Strat != "continuation_fast" {
 		t.Fatalf("expected continuation_fast, got %q reject=%q", got.Strat, got.RejectReason)
 	}
@@ -1093,7 +1120,7 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 			ScoreSlope:   0.14,
 		},
 	}
-	got := applySimpleContinuationFallback(c)
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
 	if got.Strat != "continuation_fast_starter" {
 		t.Fatalf("expected continuation_fast_starter, got %q reject=%q", got.Strat, got.RejectReason)
 	}
@@ -1176,6 +1203,103 @@ func TestResolveLadderPlanRejectsLoserAdd(t *testing.T) {
 	plan := resolveLadderPlan(time.Date(2026, 3, 25, 10, 30, 0, 0, time.UTC), c, execMgr, meta)
 	if plan.IsAdd || plan.RejectReason == "" {
 		t.Fatalf("expected loser add reject, got %+v", plan)
+	}
+}
+
+func TestResolveLadderPlanAllowsManualManagedCatchUpAddAfterReconstructedTPHits(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:            "SIRENUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       "MANUAL",
+				EntryReason:       "manual_managed_live",
+				ManageAnchorPrice: 1.0825,
+				EntryPrice:        1.2437,
+				RemainingQty:      180,
+				DeployedMargin:    20,
+				HitTP1:            true,
+				HitTP2:            true,
+				HitTP3:            true,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"SIRENUSDT": {LastPrice: 1.0825},
+	}
+	c := candidate{
+		Side:        "SELL",
+		Strat:       "continuation_fast",
+		LastClose:   1.0825,
+		SessionVWAP: 1.18,
+		EMA9:        1.12,
+		DayUTC24h:   -43.0,
+		RetestHold:  true,
+		Entry: inplay.Entry{
+			Symbol:       "SIRENUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_short",
+			CurrentScore: 98,
+			ScoreSlope:   0.22,
+			Momentum:     true,
+		},
+		Sig: strategies.Signal{
+			Entry: 1.0825,
+			TP1:   1.03,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 26, 16, 22, 0, 0, time.UTC), c, execMgr, meta)
+	if !plan.IsAdd {
+		t.Fatalf("expected manual catch-up add plan, got %+v", plan)
+	}
+	if plan.MarginUSDT != 10 {
+		t.Fatalf("expected 10 usdt add, got %.2f", plan.MarginUSDT)
+	}
+}
+
+func TestManualWouldAddCapitalAllowsManualManagedCatchUpDespiteTP3(t *testing.T) {
+	p := &livePosition{
+		Symbol:                "SIRENUSDT",
+		Side:                  "SELL",
+		State:                 execOpen,
+		EntrySource:           "MANUAL",
+		EntryReason:           "manual_managed_live",
+		ManageAnchorPrice:     1.0825,
+		EntryPrice:            1.2437,
+		RemainingQty:          180,
+		HitTP3:                true,
+		AddLockedUntilConfirm: false,
+		StarterOnly:           false,
+	}
+	if !manualWouldAddCapital(p, 1.0825, 0.75) {
+		t.Fatalf("expected manual catch-up add eligibility despite TP3")
+	}
+}
+
+func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
+	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
+	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")
+	candidateAt := time.Date(2026, 3, 26, 22, 10, 20, 0, time.UTC)
+	bars := []types.Candle{
+		{T: time.Date(2026, 3, 26, 22, 10, 0, 0, time.UTC), O: 1.18, H: 1.19, L: 1.15, C: 1.16},
+		{T: time.Date(2026, 3, 26, 22, 11, 0, 0, time.UTC), O: 1.16, H: 1.17, L: 1.12, C: 1.13},
+	}
+	if !trailCandidateConfirmedFromBars(false, bars, candidateAt, 1.15) {
+		t.Fatalf("expected short trail confirmation on close below level")
+	}
+}
+
+func TestTrailCandidateConfirmedFromBarsShortRejectsFailedCloseBelowLevel(t *testing.T) {
+	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
+	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")
+	candidateAt := time.Date(2026, 3, 26, 22, 10, 20, 0, time.UTC)
+	bars := []types.Candle{
+		{T: time.Date(2026, 3, 26, 22, 11, 0, 0, time.UTC), O: 1.14, H: 1.18, L: 1.13, C: 1.155},
+	}
+	if trailCandidateConfirmedFromBars(false, bars, candidateAt, 1.15) {
+		t.Fatalf("expected no short trail confirmation when close reclaims level")
 	}
 }
 
