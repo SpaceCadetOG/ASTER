@@ -318,6 +318,7 @@ type safetyConfig struct {
 	pauseFile              string
 	allowSymbols           map[string]struct{}
 	blockSymbols           map[string]struct{}
+	contextOnlySymbols     map[string]struct{}
 	allowShorts            bool
 	maxDailyLossPct        float64
 	killClose              bool
@@ -6227,6 +6228,45 @@ func (m *liveExecManager) pendingManualRequest(symbol string) (manualManageReque
 	return manualManageRequest{}, false
 }
 
+func (m *liveExecManager) passiveManualPositionBySymbol(symbol string) (*livePosition, bool) {
+	if m == nil {
+		return nil, false
+	}
+	base := canonicalSymbolBase(strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))))
+	if base == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !manualPassivePosition(p) {
+			continue
+		}
+		if canonicalSymbolBase(p.Symbol) == base {
+			return p, true
+		}
+	}
+	return nil, false
+}
+
+func manualManageRequestFromPosition(p *livePosition) manualManageRequest {
+	if p == nil {
+		return manualManageRequest{}
+	}
+	return manualManageRequest{
+		Key:         positionLookupKey(p.Symbol, p.Side),
+		Fingerprint: manualManageFingerprint(p.Symbol, p.Side, p.RemainingQty, p.EntryPrice),
+		Symbol:      strings.ToUpper(strings.TrimSpace(p.Symbol)),
+		Side:        normalizePositionSide(p.Side),
+		Qty:         maxFloat(p.RemainingQty, p.FilledQty),
+		Entry:       p.EntryPrice,
+		Margin:      p.Margin,
+		Leverage:    maxInt(1, p.Leverage),
+		Action:      "MANAGE",
+		Status:      manualRequestApproved,
+	}
+}
+
 func (m *liveExecManager) approvedManualRequest(symbol, side string, qty, entry float64) (manualManageRequest, bool) {
 	if m == nil {
 		return manualManageRequest{}, false
@@ -7125,6 +7165,21 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 		}
 	}
 	updateGivebackMetrics(p.MaxFavorableR, unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, mark), &p.CaptureRatio, &p.MaxGivebackR)
+	if p.HitTP3 {
+		m.maybeEnableTrail(p, 3)
+	} else if p.HitTP2 {
+		m.maybeEnableTrail(p, 2)
+	}
+	if p.TrailOn {
+		sideBuy := strings.EqualFold(p.Side, "BUY")
+		if p.TrailRef <= 0 || (sideBuy && mark > p.TrailRef) || (!sideBuy && mark < p.TrailRef) {
+			p.TrailRef = mark
+			p.TrailStop = m.calcTrailStopForPosition(p, sideBuy, mark, p.HitTP3)
+			if stop, improved := improvedStopPrice(p.Side, p.StopPrice, p.TrailStop); improved {
+				p.StopPrice = stop
+			}
+		}
+	}
 	fmt.Printf("live-lite: manual-stage symbol=%s side=%s entry=%s mark=%s pnl=%+.2f%% mfe_r=%.2f stage=%d hit_tp1=%v hit_tp2=%v hit_tp3=%v would_add=%v\n",
 		p.Symbol, p.Side, fmtPrice(p.EntryPrice), fmtPrice(mark),
 		func() float64 {
@@ -7133,6 +7188,19 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 		}(),
 		p.MaxFavorableR, p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3,
 		manualWouldAddCapital(p, mark, m.ladderCfg.MinAddPnLPct))
+}
+
+func armManualProtectionAfterReconstruct(now time.Time, p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.ProtectionPending = true
+	if manualProtectionConvictionReady(p) {
+		p.ProtectionRetryAfter = now.Add(5 * time.Second)
+		p.LastManageFailCause = ""
+		return
+	}
+	markProtectionPending(p, now, "manage_awaiting_conviction")
 }
 
 func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
@@ -7248,7 +7316,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 			if currentMark > 0 {
 				m.reconstructManualManagedState(now, p, currentMark)
 			}
-			markProtectionPending(p, now, "manage_awaiting_conviction")
+			armManualProtectionAfterReconstruct(now, p)
 			m.mu.Lock()
 			delete(m.manualRequests, req.Key)
 			m.mu.Unlock()
@@ -7279,7 +7347,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	if currentMark > 0 {
 		m.reconstructManualManagedState(now, p, currentMark)
 	}
-	markProtectionPending(p, now, "manage_awaiting_conviction")
+	armManualProtectionAfterReconstruct(now, p)
 	m.positions[sym] = p
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
@@ -16100,6 +16168,14 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 			blockMap[raw] = struct{}{}
 		}
 	}
+	contextOnly := envCSV("LIVE_CONTEXT_ONLY_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
+	contextOnlyMap := make(map[string]struct{}, len(contextOnly))
+	for _, s := range contextOnly {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))
+		if raw != "" {
+			contextOnlyMap[raw] = struct{}{}
+		}
+	}
 	return safetyConfig{
 		enableLiveTrading:      envBool("LIVE_ENABLE_LIVE_TRADING", false),
 		maxLeverage:            maxLev,
@@ -16115,6 +16191,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 		pauseFile:              envStr("LIVE_PAUSE_FILE", "/tmp/live-lite.pause"),
 		allowSymbols:           allowMap,
 		blockSymbols:           blockMap,
+		contextOnlySymbols:     contextOnlyMap,
 		allowShorts:            envBool("LIVE_ALLOW_SHORTS", true),
 		maxDailyLossPct:        maxDailyLossPct,
 		killClose:              envBool("LIVE_KILL_CLOSE_POSITIONS", false),
@@ -16133,6 +16210,9 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	if _, blocked := cfg.blockSymbols[sym]; blocked {
 		return "symbol blocked"
+	}
+	if _, contextOnly := cfg.contextOnlySymbols[sym]; contextOnly {
+		return "context_only_symbol"
 	}
 	if len(cfg.allowSymbols) > 0 {
 		if _, ok := cfg.allowSymbols[sym]; !ok {
@@ -17792,6 +17872,14 @@ func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg wat
 		fmt.Sprintf("one_symbol_only=%s | reentry=%s | post_win_cooldown=%s | persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
 		fmt.Sprintf("funds_manager=%s | account_snapshots=%s | session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
 	}
+	if len(safety.contextOnlySymbols) > 0 {
+		syms := make([]string, 0, len(safety.contextOnlySymbols))
+		for sym := range safety.contextOnlySymbols {
+			syms = append(syms, sym)
+		}
+		sort.Strings(syms)
+		lines = append(lines, fmt.Sprintf("context_only=%s", strings.Join(syms, ",")))
+	}
 	if execMgr != nil {
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
 		lines = append(lines, fmt.Sprintf("account_health=%s | detail=%s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")))
@@ -18091,6 +18179,20 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		answer := strings.ToLower(strings.TrimSpace(fields[2]))
 		req, ok := c.execMgr.pendingManualRequest(sym)
 		if !ok {
+			if answer == "y" || answer == "yes" {
+				if passive, passiveOK := c.execMgr.passiveManualPositionBySymbol(sym); passiveOK {
+					req = manualManageRequestFromPosition(passive)
+					if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED_EXISTING_PASSIVE"); err != nil {
+						return notify.BuildEventHTML("⚠️", "MANAGE FAILED",
+							fmt.Sprintf("<b>%s %s</b>", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
+							fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+						)
+					}
+					return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+						fmt.Sprintf("<b>%s %s</b> is now bot-managed from existing passive import", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
+					)
+				}
+			}
 			return notify.BuildEventHTML("ℹ️", "MANAGE", fmt.Sprintf("No pending manual trade for %s", cleanSymbol(sym)))
 		}
 		switch answer {

@@ -495,6 +495,23 @@ func TestCloseFromRemoteSnapshotClosesWithoutREST(t *testing.T) {
 	}
 }
 
+func TestRemotePositionForSideMatchesNormalizedLongShortSides(t *testing.T) {
+	rows := []map[string]any{
+		{
+			"positionAmt": 537.0,
+			"entryPrice":  0.09393,
+			"markPrice":   0.09410,
+		},
+	}
+	view := remotePositionForSide(rows, "LONG")
+	if view.QtyAbs != 537.0 {
+		t.Fatalf("expected normalized LONG side match, got %+v", view)
+	}
+	if view.EntryPrice != 0.09393 {
+		t.Fatalf("unexpected entry price: %+v", view)
+	}
+}
+
 func TestActiveRecentRejectSymbolsPrunesExpired(t *testing.T) {
 	now := time.Now().UTC()
 	mem := map[string]recentRejectMemory{
@@ -987,6 +1004,78 @@ func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing
 	}
 }
 
+func TestPassiveManualPositionBySymbolFindsActivePassiveImport(t *testing.T) {
+	now := time.Now().UTC()
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:       "SIRENUSDT",
+				Side:         "SHORT",
+				State:        execOpen,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+				EntryReason:  manualEntryReasonPassive,
+				EntrySource:  manualEntrySourcePassive,
+				RemainingQty: 10,
+			},
+		},
+	}
+	if _, ok := m.passiveManualPositionBySymbol("SIREN"); !ok {
+		t.Fatalf("expected passive manual position lookup by raw symbol")
+	}
+}
+
+func TestArmManualProtectionAfterReconstructExpeditesReadyManualTrade(t *testing.T) {
+	now := time.Now().UTC()
+	p := &livePosition{
+		EntryReason:     manualEntryReasonManaged,
+		EntrySource:     manualEntrySourceManaged,
+		Side:            "SHORT",
+		EntryPrice:      1.2437,
+		RemainingQty:    165,
+		LastMark:        1.0825,
+		MaxFavorableR:   1.2,
+		ProtectionStage: protectionStageArmed,
+	}
+	armManualProtectionAfterReconstruct(now, p)
+	if !p.ProtectionPending {
+		t.Fatalf("expected protection pending")
+	}
+	if p.ProtectionRetryAfter.Sub(now) > 6*time.Second {
+		t.Fatalf("expected ready manual trade to retry quickly, got %s", p.ProtectionRetryAfter.Sub(now))
+	}
+}
+
+func TestReconstructManualManagedStateEnablesTrailForLateStageWinner(t *testing.T) {
+	m := &liveExecManager{
+		trailAfterTP: 2,
+		trailStopPct: 1.5,
+		trailPctMin:  1.0,
+	}
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:        "SIRENUSDT",
+		Side:          "SHORT",
+		EntryReason:   manualEntryReasonManaged,
+		EntrySource:   manualEntrySourceManaged,
+		EntryPrice:    1.2437,
+		RemainingQty:  165,
+		FilledQty:     165,
+		StopPrice:     1.2444,
+		TP1Price:      1.20,
+		TP2Price:      1.14,
+		TP3Price:      1.08,
+		MaxFavorableR: 1.8,
+	}
+	m.reconstructManualManagedState(now, p, 1.07)
+	if !p.TrailOn {
+		t.Fatalf("expected reconstructed late-stage winner to enable trail")
+	}
+	if p.TrailRef <= 0 || p.TrailStop <= 0 {
+		t.Fatalf("expected trail state initialized, got ref=%.6f stop=%.6f", p.TrailRef, p.TrailStop)
+	}
+}
+
 func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T) {
 	now := time.Now().UTC()
 	m := &liveExecManager{
@@ -999,6 +1088,26 @@ func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T
 	resp := ctx.handleCommand("", "y")
 	if !strings.Contains(resp, "/manage SYMBOL y") {
 		t.Fatalf("expected explicit /manage guidance, got %s", resp)
+	}
+}
+
+func TestSafetyRejectBlocksContextOnlySymbolsFromTrading(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := safetyConfig{
+		contextOnlySymbols: map[string]struct{}{
+			"BTCUSDT": {},
+			"ETHUSDT": {},
+			"SOLUSDT": {},
+		},
+	}
+	c := candidate{
+		Side: "BUY",
+		Entry: inplay.Entry{
+			Symbol: "BTCUSDT",
+		},
+	}
+	if got := safetyReject(cfg, c, now, time.Time{}, map[string]time.Time{}, map[string]time.Time{}, map[string]int{}, map[string]int{}, map[string]time.Time{}); got != "context_only_symbol" {
+		t.Fatalf("expected context_only_symbol reject, got %q", got)
 	}
 }
 

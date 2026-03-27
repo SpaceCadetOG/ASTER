@@ -73,7 +73,7 @@ func (m *liveExecManager) syncPendingEntryFromRemote(p *livePosition) (float64, 
 		if amt < 0 {
 			side = "SELL"
 		}
-		if !strings.EqualFold(side, p.Side) {
+		if !strings.EqualFold(normalizePositionSide(side), normalizePositionSide(p.Side)) {
 			continue
 		}
 		entry := mapFloat(row["entryPrice"])
@@ -113,7 +113,7 @@ type remotePositionView struct {
 
 func remotePositionForSide(rows []map[string]any, side string) remotePositionView {
 	view := remotePositionView{}
-	side = strings.ToUpper(strings.TrimSpace(side))
+	side = normalizePositionSide(side)
 	for _, row := range rows {
 		amt := mapFloat(row["positionAmt"])
 		if mathAbs(amt) <= 1e-10 {
@@ -123,7 +123,7 @@ func remotePositionForSide(rows []map[string]any, side string) remotePositionVie
 		if amt < 0 {
 			rowSide = "SELL"
 		}
-		if side != "" && !strings.EqualFold(rowSide, side) {
+		if side != "" && !strings.EqualFold(normalizePositionSide(rowSide), side) {
 			continue
 		}
 		view.QtyAbs = mathAbs(amt)
