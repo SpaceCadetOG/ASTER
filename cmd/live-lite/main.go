@@ -3555,7 +3555,7 @@ func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (no
 		cards = append(cards, notify.PositionCard{
 			Symbol:           p.Symbol,
 			Side:             p.Side,
-			Source:           p.Source,
+			Source:           displayEntrySource(p.Source),
 			Qty:              p.Qty,
 			EntryPrice:       p.EntryPrice,
 			MarkPrice:        p.MarkPrice,
@@ -3564,7 +3564,7 @@ func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (no
 			UnrealizedPnL:    p.UnrealizedPnL,
 			UnrealizedPnLPct: p.UnrealizedPnLPct,
 			Leverage:         p.Leverage,
-			Setup:            p.EntryReason,
+			Setup:            displayEntryReason(p.EntryReason),
 			Confluence:       0,
 			AgeMin:           int(p.HoldMin),
 			StopLoss:         p.StopPrice,
@@ -6680,7 +6680,7 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 	holdMin := now.Sub(p.CreatedAt).Minutes()
 	reasonU := strings.ToUpper(strings.TrimSpace(reason))
 	sourceLine := ""
-	if src := strings.ToUpper(strings.TrimSpace(p.EntrySource)); src != "" && src != "BOT" {
+	if src := displayEntrySource(p.EntrySource); src != "" && src != "BOT" {
 		sourceLine = fmt.Sprintf("\n• <b>Source:</b> %s", src)
 	}
 	m.tg.Sendf("%s <b>FILL %s %s</b>\n• <b>Action:</b> %s | <b>Reason:</b> %s\n• <b>Qty:</b> %.6f | <b>Fill:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Hold:</b> %.1fm | <b>Day Realized:</b> %+.2f\n• <b>Session:</b> %s%s",
@@ -15806,13 +15806,13 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		holdMin := 0.0
 		entryReason := ""
 		if lp != nil {
-			src = nonEmpty(strings.ToUpper(strings.TrimSpace(lp.EntrySource)), "BOT")
+			src = displayEntrySource(lp.EntrySource)
 			stop = lp.StopPrice
 			holdMin = now.Sub(lp.CreatedAt).Minutes()
 			if holdMin < 0 {
 				holdMin = 0
 			}
-			entryReason = lp.EntryReason
+			entryReason = displayEntryReason(lp.EntryReason)
 		}
 		quote := m.priceQuoteForSymbol(raw, rp.Mark)
 		markPx := rp.Mark
@@ -16510,6 +16510,30 @@ func normalizePositionSide(side string) string {
 
 func displayPositionSide(side string) string {
 	return normalizePositionSide(side)
+}
+
+func displayEntrySource(source string) string {
+	switch strings.ToUpper(strings.TrimSpace(source)) {
+	case "", "BOT":
+		return "BOT"
+	case manualEntrySourcePassive:
+		return "MANUAL"
+	case manualEntrySourceManaged:
+		return "MANUAL_MANAGED"
+	default:
+		return strings.ToUpper(strings.TrimSpace(source))
+	}
+}
+
+func displayEntryReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "":
+		return "none"
+	case manualEntryReasonManaged:
+		return "MANUAL_MANAGED"
+	default:
+		return strings.TrimSpace(reason)
+	}
 }
 
 func sessionPhaseUTC(ts time.Time) utcSessionPhase {
@@ -18144,12 +18168,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("📍", "POSITION", fmt.Sprintf("%s is not an active live position", cleanSymbol(sym)))
 		}
 		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side), nonEmpty(strings.ToUpper(strings.TrimSpace(p.Source)), "BOT")),
+			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side), displayEntrySource(p.Source)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", p.Qty, maxInt(1, p.Leverage), p.Margin),
 			fmt.Sprintf("<b>Entry:</b> %s | <b>Mark:</b> %s | <b>Last:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.MarkPrice), fmtPrice(p.LastPrice)),
 			fmt.Sprintf("<b>uPnL:</b> %+.2f (%+.2f%%) | <b>Exchange uPnL:</b> %+.2f", p.UnrealizedPnL, p.UnrealizedPnLPct, p.ExchangeUnreal),
 			fmt.Sprintf("<b>Stop:</b> %s | <b>Spread:</b> %.1fbps | <b>Hold:</b> %.1fm", fmtPrice(p.StopPrice), p.SpreadBps, p.HoldMin),
-			fmt.Sprintf("<b>Reason:</b> <code>%s</code>", nonEmpty(strings.TrimSpace(p.EntryReason), "none")),
+			fmt.Sprintf("<b>Reason:</b> <code>%s</code>", displayEntryReason(p.EntryReason)),
 		}
 		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
 	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no":

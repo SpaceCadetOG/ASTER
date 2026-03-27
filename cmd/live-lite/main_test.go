@@ -1061,6 +1061,21 @@ func TestHandleCommandShortsSnapshot(t *testing.T) {
 	}
 }
 
+func TestDisplayEntrySourceAndReason(t *testing.T) {
+	if got := displayEntrySource("MANUAL_PASSIVE"); got != "MANUAL" {
+		t.Fatalf("expected MANUAL for passive source, got %q", got)
+	}
+	if got := displayEntrySource("MANUAL_MANAGED"); got != "MANUAL_MANAGED" {
+		t.Fatalf("expected MANUAL_MANAGED for managed source, got %q", got)
+	}
+	if got := displayEntryReason("manual_managed_live"); got != "MANUAL_MANAGED" {
+		t.Fatalf("expected MANUAL_MANAGED display reason, got %q", got)
+	}
+	if got := displayEntryReason("MANUAL_IMPORT"); got != "MANUAL_IMPORT" {
+		t.Fatalf("expected MANUAL_IMPORT to stay visible, got %q", got)
+	}
+}
+
 func TestPassiveManualPositionBySymbolFindsActivePassiveImport(t *testing.T) {
 	now := time.Now().UTC()
 	m := &liveExecManager{
