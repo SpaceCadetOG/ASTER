@@ -6114,6 +6114,9 @@ func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, c
 }
 
 func manualRequestTimeout(req manualManageRequest) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(req.Action), "MANAGE") {
+		return 2 * time.Minute
+	}
 	if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
 		return 2 * time.Minute
 	}
@@ -6134,7 +6137,11 @@ func (m *liveExecManager) expirePendingManualRequests(now time.Time) {
 		if timeout <= 0 || now.Sub(req.PromptedAt) < timeout {
 			continue
 		}
-		req.Status = "DECLINED"
+		if strings.EqualFold(strings.TrimSpace(req.Action), "MANAGE") {
+			req.Status = "PASSIVE"
+		} else {
+			req.Status = "DECLINED"
+		}
 		req.DecidedAt = now
 		m.manualRequests[key] = req
 	}
@@ -6198,6 +6205,21 @@ func (m *liveExecManager) approvedManualRequest(symbol, side string, qty, entry 
 	return req, true
 }
 
+func (m *liveExecManager) passiveManualRequest(symbol, side string, qty, entry float64) (manualManageRequest, bool) {
+	if m == nil {
+		return manualManageRequest{}, false
+	}
+	key := positionLookupKey(symbol, side)
+	fp := manualManageFingerprint(symbol, side, qty, entry)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	req, ok := m.manualRequests[key]
+	if !ok || req.Status != "PASSIVE" || req.Fingerprint != fp {
+		return manualManageRequest{}, false
+	}
+	return req, true
+}
+
 func (m *liveExecManager) markManualRequestApproved(req manualManageRequest, now time.Time) {
 	if m == nil {
 		return
@@ -6209,6 +6231,21 @@ func (m *liveExecManager) markManualRequestApproved(req manualManageRequest, now
 		return
 	}
 	cur.Status = "APPROVED"
+	cur.DecidedAt = now
+	m.manualRequests[req.Key] = cur
+}
+
+func (m *liveExecManager) markManualRequestPassive(req manualManageRequest, now time.Time) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.manualRequests[req.Key]
+	if !ok || cur.Fingerprint != req.Fingerprint {
+		return
+	}
+	cur.Status = "PASSIVE"
 	cur.DecidedAt = now
 	m.manualRequests[req.Key] = cur
 }
@@ -7009,6 +7046,12 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 				continue
 			}
 		}
+		if passiveReq, ok := m.passiveManualRequest(sym, side, qty, entry); ok {
+			if _, err := m.activatePassiveManualImport(passiveReq, now, "MANUAL_TIMEOUT_IMPORT"); err == nil {
+				imported++
+				continue
+			}
+		}
 		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
 			continue
 		}
@@ -7045,22 +7088,69 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		return m.positions[sym], nil
 	}
 	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	currentMark := 0.0
+	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+		currentMark = mark
+	}
+	p.EntryReason = "manual_managed_live"
+	p.StarterOnly = false
+	p.AddLockedUntilConfirm = false
+	if currentMark > 0 {
+		p.ManageAnchorPrice = currentMark
+	}
 	if err := m.placeInitialBrackets(p); err != nil {
 		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
 			return nil, err
 		}
+	}
+	if currentMark > 0 {
+		m.reconstructManualManagedState(now, p, currentMark)
 	}
 	m.positions[sym] = p
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
 	m.mu.Unlock()
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED",
+		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
-		))
+		}
+		if currentMark > 0 {
+			lines = append(lines,
+				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
+				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
+				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
+			)
+		}
+		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED", lines...))
 	}
+	_ = m.save()
+	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
+	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
+	return p, nil
+}
+
+func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
+	if m == nil {
+		return nil, fmt.Errorf("live execution manager unavailable")
+	}
+	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
+	if sym == "" {
+		return nil, fmt.Errorf("invalid symbol")
+	}
+	if m.isActive(m.positions[sym]) {
+		m.mu.Lock()
+		delete(m.manualRequests, req.Key)
+		m.mu.Unlock()
+		return m.positions[sym], nil
+	}
+	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	m.positions[sym] = p
+	m.mu.Lock()
+	delete(m.manualRequests, req.Key)
+	m.mu.Unlock()
+	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	return p, nil
