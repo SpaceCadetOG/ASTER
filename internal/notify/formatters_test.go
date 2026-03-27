@@ -33,8 +33,23 @@ func TestBuildPositionCard(t *testing.T) {
 }
 
 func TestBuildScannerSnapshotHTML(t *testing.T) {
-	msg := BuildScannerSnapshotHTML([]ScanItem{{Symbol: "BTCUSDT", Grade: "A", Score: 82}}, nil, "neutral")
+	msg := BuildScannerSnapshotHTML([]ScanItem{{
+		Symbol:    "BTCUSDT",
+		Side:      "LONG",
+		Grade:     "A",
+		Score:     82,
+		Slope:     0.15,
+		State:     "heating",
+		Price:     68123.45,
+		DayUTC:    3.2,
+		UTC4h:     1.4,
+		UTC1h:     0.5,
+		VolumeUSD: 18_500_000,
+	}}, nil, "neutral")
 	if msg == "" {
 		t.Fatal("expected scanner snapshot")
+	}
+	if !strings.Contains(msg, "score") || !strings.Contains(msg, "vol=") || !strings.Contains(msg, "heating") {
+		t.Fatalf("expected richer scanner details, got %q", msg)
 	}
 }

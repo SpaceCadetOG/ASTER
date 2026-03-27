@@ -39,9 +39,17 @@ type PositionCard struct {
 }
 
 type ScanItem struct {
-	Symbol string
-	Grade  string
-	Score  float64
+	Symbol   string
+	Side     string
+	Grade    string
+	Score    float64
+	Slope    float64
+	State    string
+	Price    float64
+	DayUTC   float64
+	UTC4h    float64
+	UTC1h    float64
+	VolumeUSD float64
 }
 
 func BuildSessionPulseHTML(p PulseSnapshot) string {
@@ -112,8 +120,8 @@ func BuildScannerSnapshotHTML(longs, shorts []ScanItem, bias string) string {
 			"• <b>LONG:</b> %s\n"+
 			"• <b>SHORT:</b> %s\n"+
 			"⚡ <b>Bias:</b> %s",
-		renderScanLine(longs),
-		renderScanLine(shorts),
+		renderScanSection(longs),
+		renderScanSection(shorts),
 		biasLabel(bias),
 	))
 }
@@ -125,15 +133,57 @@ func pnlEmoji(v float64) string {
 	return "🟢 "
 }
 
-func renderScanLine(items []ScanItem) string {
+func renderScanSection(items []ScanItem) string {
 	if len(items) == 0 {
 		return "(none)"
 	}
 	parts := make([]string, 0, len(items))
-	for _, it := range items {
-		parts = append(parts, fmt.Sprintf("%s (<b>%s</b> · <b>%.0f</b>)", shortSymbol(it.Symbol), strings.TrimSpace(it.Grade), it.Score))
+	for i, it := range items {
+		side := strings.ToUpper(strings.TrimSpace(it.Side))
+		if side == "" {
+			side = "?"
+		}
+		state := strings.ToLower(strings.TrimSpace(it.State))
+		if state == "" {
+			state = "n/a"
+		}
+		price := "n/a"
+		if it.Price > 0 {
+			price = formatScanPrice(it.Price)
+		}
+		dayUTC := "n/a"
+		if it.DayUTC != 0 {
+			dayUTC = fmt.Sprintf("%+.1f%%", it.DayUTC)
+		}
+		utc4h := "n/a"
+		if it.UTC4h != 0 {
+			utc4h = fmt.Sprintf("%+.1f%%", it.UTC4h)
+		}
+		utc1h := "n/a"
+		if it.UTC1h != 0 {
+			utc1h = fmt.Sprintf("%+.1f%%", it.UTC1h)
+		}
+		vol := "n/a"
+		if it.VolumeUSD > 0 {
+			vol = humanUSD(it.VolumeUSD)
+		}
+		parts = append(parts, fmt.Sprintf(
+			"%d) <b>%s</b> [%s] g=<b>%s</b> score=<b>%.0f</b> slope=%+.3f state=%s px=%s day=%s 4h=%s 1h=%s vol=%s",
+			i+1,
+			shortSymbol(it.Symbol),
+			side,
+			strings.TrimSpace(it.Grade),
+			it.Score,
+			it.Slope,
+			state,
+			price,
+			dayUTC,
+			utc4h,
+			utc1h,
+			vol,
+		))
 	}
-	return strings.Join(parts, " | ")
+	return strings.Join(parts, "\n")
 }
 
 func openPosLabel(openCount, openCap int) string {
@@ -161,6 +211,34 @@ func biasLabel(b string) string {
 		return "🔴 SHORT"
 	default:
 		return "🟡 NEUTRAL"
+	}
+}
+
+func formatScanPrice(v float64) string {
+	switch {
+	case v >= 1000:
+		return fmt.Sprintf("%.2f", v)
+	case v >= 1:
+		return fmt.Sprintf("%.4f", v)
+	default:
+		return fmt.Sprintf("%.6f", v)
+	}
+}
+
+func humanUSD(v float64) string {
+	av := v
+	if av < 0 {
+		av = -av
+	}
+	switch {
+	case av >= 1_000_000_000:
+		return fmt.Sprintf("%.2fB", v/1_000_000_000)
+	case av >= 1_000_000:
+		return fmt.Sprintf("%.2fM", v/1_000_000)
+	case av >= 1_000:
+		return fmt.Sprintf("%.2fK", v/1_000)
+	default:
+		return fmt.Sprintf("%.0f", v)
 	}
 }
 

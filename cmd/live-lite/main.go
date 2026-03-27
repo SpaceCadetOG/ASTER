@@ -2509,7 +2509,7 @@ func main() {
 			Exec:          liveExecSnapshot{},
 			Live:          liveAccountSnapshot{},
 		}
-		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, 5)
+		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
 		if execMgr != nil {
 			st.Exec = execMgr.Snapshot(10)
 			st.Live = execMgr.LiveAccountSnapshot(10)
@@ -3441,7 +3441,7 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 	if dryRun {
 		mode = "DRY_RUN"
 	}
-	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, maxInt(1, limit))
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, maxInt(1, limit))
 	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE-LITE DIGEST",
 		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
 		fmt.Sprintf("<b>Session:</b> %s", sessionTag(now)),
@@ -3644,7 +3644,7 @@ func buildPaperPulseAndCards(title string, now time.Time, p *paperTrader, meta m
 	}, cards
 }
 
-func topScanSnapshot(longInPlay, shortInPlay []inplay.Entry, topN int) ([]notify.ScanItem, []notify.ScanItem, string) {
+func topScanSnapshot(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta, topN int) ([]notify.ScanItem, []notify.ScanItem, string) {
 	if topN <= 0 {
 		topN = 2
 	}
@@ -3655,10 +3655,20 @@ func topScanSnapshot(longInPlay, shortInPlay []inplay.Entry, topN int) ([]notify
 		}
 		out := make([]notify.ScanItem, 0, n)
 		for i := 0; i < n; i++ {
+			raw := strings.ToUpper(aster.RawSymbol(rows[i].Symbol))
+			m := meta[raw]
 			out = append(out, notify.ScanItem{
-				Symbol: strings.ToUpper(aster.RawSymbol(rows[i].Symbol)),
-				Grade:  rows[i].CurrentGrade,
-				Score:  rows[i].CurrentScore,
+				Symbol:    raw,
+				Side:      normalizePositionSide(rows[i].SideBias),
+				Grade:     rows[i].CurrentGrade,
+				Score:     rows[i].CurrentScore,
+				Slope:     rows[i].ScoreSlope,
+				State:     displayState(rows[i].SideBias, rows[i].State),
+				Price:     m.LastPrice,
+				DayUTC:    m.DayUTC24h,
+				UTC4h:     m.UTC4hPct,
+				UTC1h:     m.UTC1hPct,
+				VolumeUSD: m.VolumeUSD,
 			})
 		}
 		return out
