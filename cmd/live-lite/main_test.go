@@ -940,6 +940,53 @@ func TestActivateManualManagementPromotesExistingPassiveImport(t *testing.T) {
 	}
 }
 
+func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing.T) {
+	now := time.Now().UTC()
+	req := manualManageRequest{
+		Key:         positionLookupKey("SIRENUSDT", "SELL"),
+		Fingerprint: manualManageFingerprint("SIRENUSDT", "SELL", 128, 0.80622),
+		Symbol:      "SIRENUSDT",
+		Side:        "SHORT",
+		Qty:         128,
+		Entry:       0.80622,
+		Margin:      20.5,
+		Leverage:    5,
+		Status:      manualRequestApproved,
+	}
+	passive := &livePosition{
+		Symbol:       "SIRENUSDT",
+		Side:         "SHORT",
+		State:        execOpen,
+		CreatedAt:    now.Add(-time.Minute),
+		UpdatedAt:    now.Add(-time.Minute),
+		EntryPrice:   0.80622,
+		Qty:          128,
+		FilledQty:    128,
+		RemainingQty: 128,
+		Margin:       20.5,
+		Leverage:     5,
+		EntryReason:  manualEntryReasonPassive,
+		EntrySource:  manualEntrySourcePassive,
+	}
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{req.Key: req},
+		positions:      map[string]*livePosition{"SIRENUSDT": passive},
+		stopPct:        2,
+		minStopPct:     1,
+		maxStopPct:     5,
+		tp1R:           1,
+		tp2R:           2,
+		tp3R:           3,
+		tp1Frac:        0.33,
+		tp2Frac:        0.33,
+		tp3Frac:        0.34,
+	}
+	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err != nil {
+		t.Fatalf("expected passive short import to promote cleanly, got %v", err)
+	}
+}
+
 func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T) {
 	now := time.Now().UTC()
 	m := &liveExecManager{

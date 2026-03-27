@@ -6875,7 +6875,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			Key:         positionLookupKey(sym, side),
 			Fingerprint: manualManageFingerprint(sym, side, qty, entry),
 			Symbol:      sym,
-			Side:        side,
+			Side:        normalizePositionSide(side),
 			Qty:         qty,
 			Entry:       entry,
 			Margin:      rp.margin,
@@ -6917,7 +6917,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, entry, margin float64, lev int, now time.Time, source string) *livePosition {
 	p := &livePosition{
 		Symbol:         symbol,
-		Side:           side,
+		Side:           normalizePositionSide(side),
 		State:          execOpen,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -7193,7 +7193,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 			Key:         positionLookupKey(sym, side),
 			Fingerprint: manualManageFingerprint(sym, side, qty, entry),
 			Symbol:      sym,
-			Side:        side,
+			Side:        normalizePositionSide(side),
 			Qty:         qty,
 			Entry:       entry,
 			Margin:      margin,
