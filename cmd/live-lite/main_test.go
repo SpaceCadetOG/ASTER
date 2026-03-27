@@ -808,6 +808,30 @@ func TestPendingManualRequestNormalizesSymbol(t *testing.T) {
 	}
 }
 
+func TestQueueManualManagementRequestKeepsSingleRequestAcrossEntryDrift(t *testing.T) {
+	now := time.Now().UTC()
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{},
+	}
+	if !m.queueManualManagementRequest("SIRENUSDT", "SELL", 165, 1.2437, 20.5, 10, now) {
+		t.Fatalf("expected initial manual request")
+	}
+	if !m.queueManualManagementRequest("SIRENUSDT", "SELL", 165.2, 1.2441, 20.7, 10, now.Add(30*time.Second)) {
+		t.Fatalf("expected drifted manual request to reuse same pending slot")
+	}
+	if len(m.manualRequests) != 1 {
+		t.Fatalf("expected one manual request after drift, got %d", len(m.manualRequests))
+	}
+	req := m.manualRequests[positionLookupKey("SIRENUSDT", "SELL")]
+	if req.Status != manualRequestPending {
+		t.Fatalf("expected pending request, got %+v", req)
+	}
+	if req.Entry != 1.2441 || req.Qty != 165.2 {
+		t.Fatalf("expected request metadata to refresh, got %+v", req)
+	}
+}
+
 func TestHandleCommandManageDecline(t *testing.T) {
 	now := time.Now().UTC()
 	m := &liveExecManager{
@@ -823,6 +847,96 @@ func TestHandleCommandManageDecline(t *testing.T) {
 	req, ok := m.manualRequests[positionLookupKey("LYNUSDT", "BUY")]
 	if !ok || req.Status != "DECLINED" {
 		t.Fatalf("expected declined request persisted, got %+v", req)
+	}
+}
+
+func TestActivatePassiveManualImportKeepsPendingRequestAndCreatesPassiveLocal(t *testing.T) {
+	now := time.Now().UTC()
+	req := manualManageRequest{
+		Key:         positionLookupKey("SIRENUSDT", "SELL"),
+		Fingerprint: manualManageFingerprint("SIRENUSDT", "SELL", 165, 1.2437),
+		Symbol:      "SIRENUSDT",
+		Side:        "SELL",
+		Qty:         165,
+		Entry:       1.2437,
+		Margin:      20.5,
+		Leverage:    10,
+		Status:      manualRequestPending,
+	}
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{req.Key: req},
+		positions:      map[string]*livePosition{},
+	}
+	p, err := m.activatePassiveManualImport(req, now, "MANUAL_PENDING_IMPORT", true)
+	if err != nil {
+		t.Fatalf("unexpected passive import error: %v", err)
+	}
+	if !manualPassivePosition(p) {
+		t.Fatalf("expected passive manual import, got %+v", p)
+	}
+	if _, ok := m.manualRequests[req.Key]; !ok {
+		t.Fatalf("expected pending request to remain for approval")
+	}
+}
+
+func TestActivateManualManagementPromotesExistingPassiveImport(t *testing.T) {
+	now := time.Now().UTC()
+	req := manualManageRequest{
+		Key:         positionLookupKey("SIRENUSDT", "SELL"),
+		Fingerprint: manualManageFingerprint("SIRENUSDT", "SELL", 165, 1.2437),
+		Symbol:      "SIRENUSDT",
+		Side:        "SELL",
+		Qty:         165,
+		Entry:       1.2437,
+		Margin:      20.5,
+		Leverage:    10,
+		Status:      manualRequestApproved,
+	}
+	passive := &livePosition{
+		Symbol:       "SIRENUSDT",
+		Side:         "SELL",
+		State:        execOpen,
+		CreatedAt:    now.Add(-time.Minute),
+		UpdatedAt:    now.Add(-time.Minute),
+		EntryPrice:   1.2437,
+		Qty:          165,
+		FilledQty:    165,
+		RemainingQty: 165,
+		Margin:       20.5,
+		Leverage:     10,
+		EntryReason:  manualEntryReasonPassive,
+		EntrySource:  manualEntrySourcePassive,
+	}
+	m := &liveExecManager{
+		manualConfirm:  true,
+		manualRequests: map[string]manualManageRequest{req.Key: req},
+		positions:      map[string]*livePosition{"SIRENUSDT": passive},
+		stopPct:        2,
+		minStopPct:     1,
+		maxStopPct:     5,
+		tp1R:           1,
+		tp2R:           2,
+		tp3R:           3,
+		tp1Frac:        0.33,
+		tp2Frac:        0.33,
+		tp3Frac:        0.34,
+	}
+	p, err := m.activateManualManagement(req, now, "MANUAL_APPROVED")
+	if err != nil {
+		t.Fatalf("unexpected manual manage error: %v", err)
+	}
+	if p != passive {
+		t.Fatalf("expected in-place promotion of passive position")
+	}
+	if !manualManagedTrade(p) {
+		t.Fatalf("expected manual-managed position, got %+v", p)
+	}
+	if _, ok := m.manualRequests[req.Key]; ok {
+		t.Fatalf("expected manual request to be cleared after promotion")
+	}
+	if !p.ProtectionPending {
+		t.Fatalf("expected promoted manual trade to enter protection-pending state")
 	}
 }
 

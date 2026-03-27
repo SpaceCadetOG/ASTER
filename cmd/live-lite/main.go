@@ -290,6 +290,19 @@ type manualManageRequest struct {
 	Status      string
 }
 
+const (
+	manualRequestPending  = "PENDING"
+	manualRequestApproved = "APPROVED"
+	manualRequestPassive  = "PASSIVE"
+	manualRequestDeclined = "DECLINED"
+
+	manualEntryReasonPassive = "MANUAL_IMPORT"
+	manualEntryReasonManaged = "manual_managed_live"
+
+	manualEntrySourcePassive = "MANUAL_PASSIVE"
+	manualEntrySourceManaged = "MANUAL_MANAGED"
+)
+
 type safetyConfig struct {
 	enableLiveTrading      bool
 	maxLeverage            int
@@ -6047,7 +6060,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 }
 
 func manualManageFingerprint(symbol, side string, qty, entry float64) string {
-	return fmt.Sprintf("%s|%.6f|%.8f", positionLookupKey(symbol, side), qty, entry)
+	return positionLookupKey(symbol, side)
 }
 
 func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty, entry, margin float64, lev int, now time.Time) bool {
@@ -6067,15 +6080,29 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 		Action:      "MANAGE",
 		DetectedAt:  now,
 		PromptedAt:  now,
-		Status:      "PENDING",
+		Status:      manualRequestPending,
 	}
 	m.mu.Lock()
 	existing, ok := m.manualRequests[key]
 	switch {
-	case ok && existing.Fingerprint == req.Fingerprint && (existing.Status == "PENDING" || existing.Status == "DECLINED"):
+	case ok && (existing.Status == manualRequestPending || existing.Status == manualRequestDeclined):
+		existing.Fingerprint = req.Fingerprint
+		existing.Qty = req.Qty
+		existing.Entry = req.Entry
+		existing.Margin = req.Margin
+		existing.Leverage = req.Leverage
+		existing.DetectedAt = now
+		m.manualRequests[key] = existing
 		m.mu.Unlock()
 		return true
-	case ok && existing.Fingerprint == req.Fingerprint && existing.Status == "APPROVED":
+	case ok && (existing.Status == manualRequestApproved || existing.Status == manualRequestPassive):
+		existing.Fingerprint = req.Fingerprint
+		existing.Qty = req.Qty
+		existing.Entry = req.Entry
+		existing.Margin = req.Margin
+		existing.Leverage = req.Leverage
+		existing.DetectedAt = now
+		m.manualRequests[key] = existing
 		m.mu.Unlock()
 		return false
 	default:
@@ -6102,7 +6129,7 @@ func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, c
 	req.Failure = strings.TrimSpace(cause)
 	req.PromptedAt = now
 	req.DecidedAt = time.Time{}
-	req.Status = "PENDING"
+		req.Status = manualRequestPending
 	m.mu.Lock()
 	m.manualRequests[req.Key] = req
 	m.mu.Unlock()
@@ -6140,7 +6167,7 @@ func (m *liveExecManager) expirePendingManualRequests(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for key, req := range m.manualRequests {
-		if req.Status != "PENDING" || req.PromptedAt.IsZero() {
+		if req.Status != manualRequestPending || req.PromptedAt.IsZero() {
 			continue
 		}
 		timeout := manualRequestTimeout(req)
@@ -6148,9 +6175,9 @@ func (m *liveExecManager) expirePendingManualRequests(now time.Time) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(req.Action), "MANAGE") {
-			req.Status = "PASSIVE"
+			req.Status = manualRequestPassive
 		} else {
-			req.Status = "DECLINED"
+			req.Status = manualRequestDeclined
 		}
 		req.DecidedAt = now
 		m.manualRequests[key] = req
@@ -6165,7 +6192,7 @@ func (m *liveExecManager) pendingManualRequests(limit int) []manualManageRequest
 	m.mu.RLock()
 	out := make([]manualManageRequest, 0, len(m.manualRequests))
 	for _, req := range m.manualRequests {
-		if req.Status != "PENDING" {
+		if req.Status != manualRequestPending {
 			continue
 		}
 		out = append(out, req)
@@ -6190,7 +6217,7 @@ func (m *liveExecManager) pendingManualRequest(symbol string) (manualManageReque
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, req := range m.manualRequests {
-		if req.Status != "PENDING" {
+		if req.Status != manualRequestPending {
 			continue
 		}
 		if canonicalSymbolBase(req.Symbol) == base {
@@ -6205,11 +6232,10 @@ func (m *liveExecManager) approvedManualRequest(symbol, side string, qty, entry 
 		return manualManageRequest{}, false
 	}
 	key := positionLookupKey(symbol, side)
-	fp := manualManageFingerprint(symbol, side, qty, entry)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	req, ok := m.manualRequests[key]
-	if !ok || req.Status != "APPROVED" || req.Fingerprint != fp {
+	if !ok || req.Status != manualRequestApproved {
 		return manualManageRequest{}, false
 	}
 	return req, true
@@ -6220,11 +6246,10 @@ func (m *liveExecManager) passiveManualRequest(symbol, side string, qty, entry f
 		return manualManageRequest{}, false
 	}
 	key := positionLookupKey(symbol, side)
-	fp := manualManageFingerprint(symbol, side, qty, entry)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	req, ok := m.manualRequests[key]
-	if !ok || req.Status != "PASSIVE" || req.Fingerprint != fp {
+	if !ok || req.Status != manualRequestPassive {
 		return manualManageRequest{}, false
 	}
 	return req, true
@@ -6237,10 +6262,10 @@ func (m *liveExecManager) markManualRequestApproved(req manualManageRequest, now
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, ok := m.manualRequests[req.Key]
-	if !ok || cur.Fingerprint != req.Fingerprint {
+	if !ok {
 		return
 	}
-	cur.Status = "APPROVED"
+	cur.Status = manualRequestApproved
 	cur.DecidedAt = now
 	m.manualRequests[req.Key] = cur
 }
@@ -6252,10 +6277,10 @@ func (m *liveExecManager) markManualRequestPassive(req manualManageRequest, now 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, ok := m.manualRequests[req.Key]
-	if !ok || cur.Fingerprint != req.Fingerprint {
+	if !ok {
 		return
 	}
-	cur.Status = "PASSIVE"
+	cur.Status = manualRequestPassive
 	cur.DecidedAt = now
 	m.manualRequests[req.Key] = cur
 }
@@ -6267,10 +6292,10 @@ func (m *liveExecManager) markManualRequestDeclined(req manualManageRequest, now
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, ok := m.manualRequests[req.Key]
-	if !ok || cur.Fingerprint != req.Fingerprint {
+	if !ok {
 		return
 	}
-	cur.Status = "DECLINED"
+	cur.Status = manualRequestDeclined
 	cur.DecidedAt = now
 	m.manualRequests[req.Key] = cur
 }
@@ -6281,14 +6306,17 @@ func (m *liveExecManager) pruneManualRequests(remoteKeys map[string]string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	activeKeys := map[string]struct{}{}
+	activeKeys := map[string]*livePosition{}
 	for sym, pos := range m.positions {
 		if m.isActive(pos) {
-			activeKeys[positionLookupKey(sym, pos.Side)] = struct{}{}
+			activeKeys[positionLookupKey(sym, pos.Side)] = pos
 		}
 	}
 	for key, req := range m.manualRequests {
-		if _, ok := activeKeys[positionLookupKey(req.Symbol, req.Side)]; ok {
+		if pos, ok := activeKeys[positionLookupKey(req.Symbol, req.Side)]; ok {
+			if manualPassivePosition(pos) && req.Status == manualRequestPending {
+				continue
+			}
 			delete(m.manualRequests, key)
 			continue
 		}
@@ -6820,7 +6848,15 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		closedLocal++
 	}
 	for sym, rp := range remote {
-		if m.isActive(m.positions[sym]) {
+		existing := m.positions[sym]
+		if m.isActive(existing) {
+			side := "BUY"
+			if rp.amt < 0 {
+				side = "SELL"
+			}
+			if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(side)) {
+				syncImportedRemotePosition(existing, abs(rp.amt), rp.entry, rp.margin, rp.lev, now)
+			}
 			continue
 		}
 		side := "BUY"
@@ -6835,36 +6871,41 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 		if entry <= 0 || qty <= 0 {
 			continue
 		}
+		req := manualManageRequest{
+			Key:         positionLookupKey(sym, side),
+			Fingerprint: manualManageFingerprint(sym, side, qty, entry),
+			Symbol:      sym,
+			Side:        side,
+			Qty:         qty,
+			Entry:       entry,
+			Margin:      rp.margin,
+			Leverage:    rp.lev,
+		}
+		if approvedReq, ok := m.approvedManualRequest(sym, side, qty, entry); ok {
+			if _, err := m.activateManualManagement(approvedReq, now, "MANUAL_APPROVED_RETRY"); err == nil {
+				importedRemote++
+				continue
+			}
+		}
+		if passiveReq, ok := m.passiveManualRequest(sym, side, qty, entry); ok {
+			if _, err := m.activatePassiveManualImport(passiveReq, now, "MANUAL_TIMEOUT_IMPORT", false); err == nil {
+				importedRemote++
+				continue
+			}
+		}
 		if m.queueManualManagementRequest(sym, side, qty, entry, rp.margin, rp.lev, now) {
+			if _, err := m.activatePassiveManualImport(req, now, "MANUAL_PENDING_IMPORT", true); err == nil {
+				importedRemote++
+			}
 			continue
 		}
-		p := m.newImportedRemotePosition(sym, side, qty, entry, rp.margin, rp.lev, now, "MANUAL")
+		p := m.newImportedRemotePosition(sym, side, qty, entry, rp.margin, rp.lev, now, manualEntrySourcePassive)
 		m.positions[sym] = p
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("🧩", "REMOTE POSITION IMPORTED",
 				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
 				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
 				fmt.Sprintf("<b>Source:</b> %s", p.EntrySource),
-			))
-		}
-		attachErr := m.placeInitialBrackets(p)
-		if attachErr != nil {
-			attachErr = m.placeOrReplaceStopWithRetry(p)
-		}
-		if attachErr != nil && m.recoverForceFlatFail {
-			if errClose := m.forceFlatRecovered(p); errClose == nil {
-				markLivePositionClosed(p, now, "RECOVERY_FORCE_FLAT")
-				if m.tg != nil {
-					m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "RECOVERY FORCE FLAT",
-						fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-						"<b>Reason:</b> stop_attach_failed",
-					))
-				}
-			}
-		} else if attachErr == nil && m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("🛟", "EMERGENCY STOP ATTACHED",
-				fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-				fmt.Sprintf("<b>Stop:</b> %s", fmtPrice(p.StopPrice)),
 			))
 		}
 		importedRemote++
@@ -6887,7 +6928,7 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 		Margin:         margin,
 		DeployedMargin: margin,
 		Leverage:       maxInt(1, lev),
-		EntryReason:    "MANUAL_IMPORT",
+		EntryReason:    manualEntryReasonPassive,
 		EntrySource:    source,
 		CloseReason:    "RECOVERED_POSITION",
 	}
@@ -6925,7 +6966,38 @@ func botManagedPosition(p *livePosition) bool {
 	}
 	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
 		p.ManageAnchorPrice > 0 &&
-		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged)
+}
+
+func manualPassivePosition(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonPassive) &&
+		strings.EqualFold(strings.TrimSpace(p.EntrySource), manualEntrySourcePassive)
+}
+
+func syncImportedRemotePosition(p *livePosition, qty, entry, margin float64, lev int, now time.Time) {
+	if p == nil {
+		return
+	}
+	if qty > 0 {
+		p.Qty = qty
+		p.FilledQty = qty
+		p.RemainingQty = qty
+	}
+	if entry > 0 {
+		p.EntryPrice = entry
+	}
+	if margin > 0 {
+		p.Margin = margin
+		p.DeployedMargin = margin
+	}
+	if lev > 0 {
+		p.Leverage = maxInt(1, lev)
+	}
+	p.UpdatedAt = now
 }
 
 func manualProtectionRetryDelay(cause string) time.Duration {
@@ -6996,7 +7068,7 @@ func manualManagedTrade(p *livePosition) bool {
 		return false
 	}
 	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
-		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged)
 }
 
 func manualProtectionConvictionReady(p *livePosition) bool {
@@ -7076,7 +7148,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	for _, row := range rows {
 		sym := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
 		amt := mapFloat(row["positionAmt"])
-		if sym == "" || abs(amt) <= 1e-10 || m.isActive(m.positions[sym]) {
+		if sym == "" || abs(amt) <= 1e-10 {
 			continue
 		}
 		side := "BUY"
@@ -7095,6 +7167,16 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		margin := maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"]))
 		lev := int(maxFloat(1, mapFloat(row["leverage"])))
 		remoteKeys[positionLookupKey(sym, side)] = manualManageFingerprint(sym, side, qty, entry)
+		existing := m.positions[sym]
+		if m.isActive(existing) {
+			if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(side)) {
+				syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
+				if manualManagedTrade(existing) || manualPassivePosition(existing) {
+					continue
+				}
+			}
+			continue
+		}
 		if approvedReq, ok := m.approvedManualRequest(sym, side, qty, entry); ok {
 			if _, err := m.activateManualManagement(approvedReq, now, "MANUAL_APPROVED_RETRY"); err == nil {
 				imported++
@@ -7102,15 +7184,12 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 			}
 		}
 		if passiveReq, ok := m.passiveManualRequest(sym, side, qty, entry); ok {
-			if _, err := m.activatePassiveManualImport(passiveReq, now, "MANUAL_TIMEOUT_IMPORT"); err == nil {
+			if _, err := m.activatePassiveManualImport(passiveReq, now, "MANUAL_TIMEOUT_IMPORT", false); err == nil {
 				imported++
 				continue
 			}
 		}
-		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
-			continue
-		}
-		if _, err := m.activateManualManagement(manualManageRequest{
+		req := manualManageRequest{
 			Key:         positionLookupKey(sym, side),
 			Fingerprint: manualManageFingerprint(sym, side, qty, entry),
 			Symbol:      sym,
@@ -7119,7 +7198,14 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 			Entry:       entry,
 			Margin:      margin,
 			Leverage:    lev,
-		}, now, "MANUAL_DETECTED"); err != nil {
+		}
+		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
+			if _, err := m.activatePassiveManualImport(req, now, "MANUAL_PENDING_IMPORT", true); err == nil {
+				imported++
+			}
+			continue
+		}
+		if _, err := m.activateManualManagement(req, now, "MANUAL_DETECTED"); err != nil {
 			continue
 		}
 		imported++
@@ -7136,18 +7222,52 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	if sym == "" {
 		return nil, fmt.Errorf("invalid symbol")
 	}
-	if m.isActive(m.positions[sym]) {
+	if existing := m.positions[sym]; m.isActive(existing) {
+		if !strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(req.Side)) {
+			return nil, fmt.Errorf("active opposite-side state already exists for %s", sym)
+		}
+		if manualPassivePosition(existing) {
+			syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
+			p := existing
+			currentMark := 0.0
+			if m.rest != nil {
+				if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+					currentMark = mark
+				}
+			}
+			p.EntrySource = manualEntrySourceManaged
+			p.EntryReason = manualEntryReasonManaged
+			p.StarterOnly = false
+			p.AddLockedUntilConfirm = false
+			if currentMark > 0 {
+				p.ManageAnchorPrice = currentMark
+			}
+			if err := m.initializeBracketLevels(p); err != nil {
+				return nil, err
+			}
+			if currentMark > 0 {
+				m.reconstructManualManagedState(now, p, currentMark)
+			}
+			markProtectionPending(p, now, "manage_awaiting_conviction")
+			m.mu.Lock()
+			delete(m.manualRequests, req.Key)
+			m.mu.Unlock()
+			_ = m.save()
+			return p, nil
+		}
 		m.mu.Lock()
 		delete(m.manualRequests, req.Key)
 		m.mu.Unlock()
-		return m.positions[sym], nil
+		return existing, nil
 	}
-	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
+	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, manualEntrySourceManaged)
 	currentMark := 0.0
-	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
-		currentMark = mark
+	if m.rest != nil {
+		if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+			currentMark = mark
+		}
 	}
-	p.EntryReason = "manual_managed_live"
+	p.EntryReason = manualEntryReasonManaged
 	p.StarterOnly = false
 	p.AddLockedUntilConfirm = false
 	if currentMark > 0 {
@@ -7186,7 +7306,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	return p, nil
 }
 
-func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
+func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, now time.Time, reason string, keepRequest bool) (*livePosition, error) {
 	if m == nil {
 		return nil, fmt.Errorf("live execution manager unavailable")
 	}
@@ -7194,17 +7314,31 @@ func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, n
 	if sym == "" {
 		return nil, fmt.Errorf("invalid symbol")
 	}
-	if m.isActive(m.positions[sym]) {
+	if existing := m.positions[sym]; m.isActive(existing) {
+		if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(req.Side)) && manualPassivePosition(existing) {
+			syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
+			if !keepRequest {
+				m.mu.Lock()
+				delete(m.manualRequests, req.Key)
+				m.mu.Unlock()
+			}
+			_ = m.save()
+			return existing, nil
+		}
+		if !keepRequest {
+			m.mu.Lock()
+			delete(m.manualRequests, req.Key)
+			m.mu.Unlock()
+		}
+		return existing, nil
+	}
+	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, manualEntrySourcePassive)
+	m.positions[sym] = p
+	if !keepRequest {
 		m.mu.Lock()
 		delete(m.manualRequests, req.Key)
 		m.mu.Unlock()
-		return m.positions[sym], nil
 	}
-	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, "MANUAL")
-	m.positions[sym] = p
-	m.mu.Lock()
-	delete(m.manualRequests, req.Key)
-	m.mu.Unlock()
 	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
@@ -7886,6 +8020,10 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				p.StallBars = 0
 			}
 			p.LastMark = mark
+			if manualPassivePosition(p) {
+				p.UpdatedAt = now
+				return true, nil
+			}
 			updateFavorableRLive(p, mark)
 			if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
 				p.StopPrice = newStop
@@ -7989,7 +8127,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 		}
 	}
 	// Ensure there is always a protective stop while position is live.
-	if p.RemainingQty > 0 && p.StopOrderID == 0 {
+	if p.RemainingQty > 0 && p.StopOrderID == 0 && !manualPassivePosition(p) {
 		if err := m.placeOrReplaceStop(p); err != nil {
 			return changed, err
 		}
@@ -8208,24 +8346,33 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 	p.TrailStop = p.StopPrice
 	q1 := p.FilledQty * m.tp1Frac
 	q2 := p.FilledQty * m.tp2Frac
-
-	var err error
-	p.TP1Qty, err = m.roundQty(p.Symbol, q1)
-	if err != nil {
-		return err
-	}
-	p.TP2Qty, err = m.roundQty(p.Symbol, q2)
-	if err != nil {
-		return err
-	}
 	q3 := p.FilledQty * m.tp3Frac
-	maxTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
-	if q3 <= 0 || q3 > maxTP3 {
-		q3 = maxTP3
-	}
-	p.TP3Qty, err = m.roundQty(p.Symbol, q3)
-	if err != nil {
-		return err
+	if m.rest == nil {
+		p.TP1Qty = q1
+		p.TP2Qty = q2
+		maxTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
+		if q3 <= 0 || q3 > maxTP3 {
+			q3 = maxTP3
+		}
+		p.TP3Qty = q3
+	} else {
+		var err error
+		p.TP1Qty, err = m.roundQty(p.Symbol, q1)
+		if err != nil {
+			return err
+		}
+		p.TP2Qty, err = m.roundQty(p.Symbol, q2)
+		if err != nil {
+			return err
+		}
+		maxTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
+		if q3 <= 0 || q3 > maxTP3 {
+			q3 = maxTP3
+		}
+		p.TP3Qty, err = m.roundQty(p.Symbol, q3)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -8429,6 +8576,9 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 
 func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if p.RemainingQty <= 0 {
+		return nil
+	}
+	if manualPassivePosition(p) {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -13120,7 +13270,7 @@ func manualCatchUpAddAllowed(p *livePosition) bool {
 	if !botManagedPosition(p) {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live") {
+	if !strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged) {
 		return false
 	}
 	if p.State != execOpen || p.PendingAddOrderID > 0 {
