@@ -1435,6 +1435,36 @@ func TestManualWouldAddCapitalAllowsManualManagedCatchUpDespiteTP3(t *testing.T)
 	}
 }
 
+func TestManualProtectionConvictionReadyRequiresProgressForManualManagedTrade(t *testing.T) {
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		EntrySource:       "MANUAL",
+		EntryReason:       "manual_managed_live",
+		EntryPrice:        1.2437,
+		ManageAnchorPrice: 1.2415,
+		LastMark:          1.2415,
+	}
+	if manualProtectionConvictionReady(p) {
+		t.Fatalf("expected no conviction before meaningful progress")
+	}
+	p.HitTP1 = true
+	if !manualProtectionConvictionReady(p) {
+		t.Fatalf("expected conviction once TP1-equivalent is reached")
+	}
+}
+
+func TestMarkProtectionPendingBacksOffSameCause(t *testing.T) {
+	p := &livePosition{}
+	now := time.Date(2026, 3, 26, 22, 0, 0, 0, time.UTC)
+	markProtectionPending(p, now, "exchange_immediate_trigger_retry_failed")
+	first := p.ProtectionRetryAfter
+	markProtectionPending(p, now.Add(30*time.Second), "exchange_immediate_trigger_retry_failed")
+	if !p.ProtectionRetryAfter.After(first) {
+		t.Fatalf("expected retry backoff to extend on same cause")
+	}
+}
+
 func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
 	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
 	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")

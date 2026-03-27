@@ -6922,10 +6922,18 @@ func botManagedPosition(p *livePosition) bool {
 		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
 }
 
-func manualProtectionRetryDelay() time.Duration {
-	delay := time.Duration(envInt("LIVE_MANUAL_PROTECTION_RETRY_SEC", 120)) * time.Second
+func manualProtectionRetryDelay(cause string) time.Duration {
+	delay := time.Duration(envInt("LIVE_MANUAL_PROTECTION_RETRY_SEC", 300)) * time.Second
 	if delay <= 0 {
-		delay = 2 * time.Minute
+		delay = 5 * time.Minute
+	}
+	switch strings.TrimSpace(strings.ToLower(cause)) {
+	case "awaiting_conviction", "manage_awaiting_conviction":
+		delay = minDuration(delay, 90*time.Second)
+	case "mark_unavailable":
+		delay = maxDuration(delay, 3*time.Minute)
+	case "exchange_immediate_trigger_mark_unavailable", "exchange_immediate_trigger_retry_failed":
+		delay = maxDuration(delay, 5*time.Minute)
 	}
 	return delay
 }
@@ -6943,7 +6951,11 @@ func markProtectionPending(p *livePosition, now time.Time, cause string) {
 		return
 	}
 	p.ProtectionPending = true
-	p.ProtectionRetryAfter = now.Add(manualProtectionRetryDelay())
+	retryDelay := manualProtectionRetryDelay(cause)
+	if strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), strings.TrimSpace(cause)) && !p.ProtectionRetryAfter.IsZero() && p.ProtectionRetryAfter.After(now) {
+		retryDelay = minDuration(maxDuration(retryDelay, 2*time.Duration(p.ProtectionRetryAfter.Sub(now))), 30*time.Minute)
+	}
+	p.ProtectionRetryAfter = now.Add(retryDelay)
 	if strings.TrimSpace(cause) != "" && strings.TrimSpace(p.LastManageFailCause) == "" {
 		p.LastManageFailCause = strings.TrimSpace(cause)
 	}
@@ -6971,6 +6983,32 @@ func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) 
 		return false
 	}
 	return true
+}
+
+func manualManagedTrade(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), "manual_managed_live")
+}
+
+func manualProtectionConvictionReady(p *livePosition) bool {
+	if !manualManagedTrade(p) {
+		return true
+	}
+	if p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed {
+		return true
+	}
+	minR := envFloat("LIVE_MANUAL_PROTECTION_MIN_R", 0.35)
+	if minR > 0 && p.MaxFavorableR >= minR {
+		return true
+	}
+	minPnL := envFloat("LIVE_MANUAL_PROTECTION_MIN_PNL_PCT", 1.0)
+	if p.LastMark > 0 && manualWouldAddCapital(p, p.LastMark, minPnL) {
+		return true
+	}
+	return false
 }
 
 func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePosition, mark float64) {
@@ -7109,14 +7147,13 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	if currentMark > 0 {
 		p.ManageAnchorPrice = currentMark
 	}
-	if err := m.placeInitialBrackets(p); err != nil {
-		if err := m.placeOrReplaceStopWithRetry(p); err != nil {
-			return nil, err
-		}
+	if err := m.initializeBracketLevels(p); err != nil {
+		return nil, err
 	}
 	if currentMark > 0 {
 		m.reconstructManualManagedState(now, p, currentMark)
 	}
+	markProtectionPending(p, now, "manage_awaiting_conviction")
 	m.positions[sym] = p
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
@@ -7132,6 +7169,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
 				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
 				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
+				fmt.Sprintf("<b>Protection:</b> pending until conviction / retry window"),
 			)
 		}
 		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED", lines...))
@@ -8383,6 +8421,16 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if p.RemainingQty <= 0 {
 		return nil
 	}
+	now := time.Now().UTC()
+	if manualManagedTrade(p) {
+		if p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
+			return nil
+		}
+		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !manualProtectionConvictionReady(p) {
+			markProtectionPending(p, now, "awaiting_conviction")
+			return nil
+		}
+	}
 	prevStop := p.ProtectedStop
 	if prevStop <= 0 {
 		prevStop = p.StopPrice
@@ -8412,6 +8460,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		mark, err := m.currentMark(p.Symbol)
 		if err != nil || mark <= 0 {
 			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
+			markProtectionPending(p, now, "mark_unavailable")
+			if manualManagedTrade(p) {
+				return nil
+			}
 			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 		}
 		if !protectiveStopValid(p.Side, protectiveEntry, mark, stopPx) {
@@ -8428,6 +8480,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			}
 			if validRetry <= 0 {
 				m.logManageFailedSafe(p, mark, computedStop, stopPx, "invalid_after_retry")
+				markProtectionPending(p, now, "invalid_after_retry")
+				if manualManagedTrade(p) {
+					return nil
+				}
 				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
 					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
 			}
@@ -8456,6 +8512,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			mark, markErr := m.currentMark(p.Symbol)
 			if markErr != nil || mark <= 0 {
 				m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
+				markProtectionPending(p, now, "exchange_immediate_trigger_mark_unavailable")
+				if manualManagedTrade(p) {
+					return nil
+				}
 				return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 			}
 			retryPlaced := false
@@ -8490,6 +8550,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			}
 			if !retryPlaced {
 				m.logManageFailedSafe(p, mark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
+				markProtectionPending(p, now, "exchange_immediate_trigger_retry_failed")
+				if manualManagedTrade(p) {
+					return nil
+				}
 				return fmt.Errorf("manage-failed-safe: stop placement retry failed symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s err=%v",
 					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
 			}
@@ -14763,6 +14827,13 @@ func min(a, b float64) float64 {
 
 func maxDuration(a, b time.Duration) time.Duration {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
 		return a
 	}
 	return b
