@@ -23,6 +23,11 @@ type PositionCard struct {
 	Symbol           string
 	Side             string
 	Source           string
+	Status           string
+	ManageState      string
+	Managed          bool
+	Protected        bool
+	NextAction       string
 	Qty              float64
 	EntryPrice       float64
 	MarkPrice        float64
@@ -73,9 +78,9 @@ func BuildSessionPulseHTML(p PulseSnapshot) string {
 }
 
 func BuildPositionCard(p PositionCard) string {
-	direction := "🟢 BUY"
-	if strings.EqualFold(strings.TrimSpace(p.Side), "SELL") {
-		direction = "🔴 SELL"
+	direction := "🟢 LONG"
+	if strings.EqualFold(strings.TrimSpace(p.Side), "SELL") || strings.EqualFold(strings.TrimSpace(p.Side), "SHORT") {
+		direction = "🔴 SHORT"
 	}
 	setup := strings.TrimSpace(p.Setup)
 	if setup == "" {
@@ -92,16 +97,35 @@ func BuildPositionCard(p PositionCard) string {
 	if p.Qty > 0 {
 		pnlLine = fmt.Sprintf("• <b>PnL:</b> %s$%.2f | <b>Qty:</b> %.6f | <b>Lev:</b> %dx", pnlEmoji(p.UnrealizedPnL), p.UnrealizedPnL, p.Qty, p.Leverage)
 	}
-	setupLine := fmt.Sprintf("• <b>Setup:</b> <code>%s</code> (Conf: %.0f%%) | <b>Age:</b> %dm", setup, p.Confluence*100.0, p.AgeMin)
-	if strings.TrimSpace(p.Source) != "" || p.SpreadBps > 0 {
-		parts := make([]string, 0, 2)
+	setupLine := fmt.Sprintf("• <b>Setup:</b> <code>%s</code> | <b>Age:</b> %dm", setup, p.AgeMin)
+	if strings.TrimSpace(p.Source) != "" || strings.TrimSpace(p.Status) != "" || p.SpreadBps > 0 {
+		parts := make([]string, 0, 5)
+		managed := "NO"
+		if p.Managed {
+			managed = "YES"
+		}
+		protected := "NO"
+		if p.Protected {
+			protected = "YES"
+		}
 		if strings.TrimSpace(p.Source) != "" {
 			parts = append(parts, fmt.Sprintf("<b>Src:</b> %s", strings.ToUpper(strings.TrimSpace(p.Source))))
+		}
+		if strings.TrimSpace(p.ManageState) != "" {
+			parts = append(parts, fmt.Sprintf("<b>State:</b> %s", strings.ToUpper(strings.TrimSpace(p.ManageState))))
+		}
+		parts = append(parts, fmt.Sprintf("<b>Managed:</b> %s", managed))
+		parts = append(parts, fmt.Sprintf("<b>Protected:</b> %s", protected))
+		if strings.TrimSpace(p.Status) != "" {
+			parts = append(parts, fmt.Sprintf("<b>Protect:</b> %s", strings.ToUpper(strings.TrimSpace(p.Status))))
 		}
 		if p.SpreadBps > 0 {
 			parts = append(parts, fmt.Sprintf("<b>Spread:</b> %.1fbps", p.SpreadBps))
 		}
 		setupLine = setupLine + " | " + strings.Join(parts, " | ")
+	}
+	if strings.TrimSpace(p.NextAction) != "" {
+		setupLine = setupLine + " | " + fmt.Sprintf("<b>Next:</b> %s", p.NextAction)
 	}
 	return strings.TrimSpace(fmt.Sprintf(
 		"<b>📦 ACTIVE: %s (%s)</b>\n"+

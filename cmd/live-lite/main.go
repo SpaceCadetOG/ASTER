@@ -246,6 +246,10 @@ type liveAccountPosition struct {
 	Symbol           string
 	Side             string
 	Source           string
+	ManageState      string
+	ProtectionState  string
+	Managed          bool
+	Protected        bool
 	Qty              float64
 	EntryPrice       float64
 	MarkPrice        float64
@@ -263,6 +267,8 @@ type liveAccountPosition struct {
 
 type liveAccountSnapshot struct {
 	Generated     time.Time
+	Health        string
+	HealthDetail  string
 	AvailableUSDT float64
 	Equity        float64
 	RealizedDay   float64
@@ -301,6 +307,12 @@ const (
 
 	manualEntrySourcePassive = "MANUAL_PASSIVE"
 	manualEntrySourceManaged = "MANUAL_MANAGED"
+
+	manualManageStatePassive           = "manual_import_passive"
+	manualManageStatePendingProtection = "manual_managed_pending_protection"
+	manualManageStateDegraded          = "manual_managed_degraded"
+	manualManageStateLive              = "manual_managed_live"
+	manualManageStateConflict          = "manual_state_conflict"
 )
 
 type safetyConfig struct {
@@ -408,7 +420,13 @@ type operatorDecision struct {
 	Slope        float64
 	Strategy     string
 	Confidence   float64
+	RawConfidence float64
+	AdjustedConfidence float64
 	RejectReason string
+	BlockerClass string
+	TopBlockers  []string
+	StarterAllowed bool
+	PersistenceStatus string
 	State        string
 	UpdatedAt    time.Time
 }
@@ -441,6 +459,8 @@ type EntryEligibilitySummary struct {
 
 	FinalDecision string
 	FinalReason   string
+	AdjustedConfidence float64
+	ConfidencePenaltyReasons []string
 }
 
 type operatorSuggestion struct {
@@ -828,8 +848,14 @@ type livePosition struct {
 	RealizedPnL            float64         `json:"realizedPnl,omitempty"`
 	ProtectionPending      bool            `json:"protectionPending,omitempty"`
 	ProtectionRetryAfter   time.Time       `json:"protectionRetryAfter,omitempty"`
+	ProtectionRetryCount   int             `json:"protectionRetryCount,omitempty"`
+	ProtectionFailCount    int             `json:"protectionFailCount,omitempty"`
+	ManageFailSuppressCount int            `json:"manageFailSuppressCount,omitempty"`
 	LastManageFailAt       time.Time       `json:"lastManageFailAt,omitempty"`
 	LastManageFailCause    string          `json:"lastManageFailCause,omitempty"`
+	ManualManageState      string          `json:"manualManageState,omitempty"`
+	Managed                bool            `json:"managed,omitempty"`
+	Protected              bool            `json:"protected,omitempty"`
 	UnknownEntryChecks     int             `json:"unknownEntryChecks,omitempty"`
 	UnknownExitChecks      int             `json:"unknownExitChecks,omitempty"`
 	PendingAddOrderID      int64           `json:"pendingAddOrderId,omitempty"`
@@ -1017,6 +1043,7 @@ type liveLiteStatus struct {
 	PayoutLastType  string              `json:"payout_last_action,omitempty"`
 	Exec            liveExecSnapshot    `json:"exec"`
 	Live            liveAccountSnapshot `json:"live"`
+	BlockedStrong   []string            `json:"blocked_strong,omitempty"`
 }
 
 type liveLiteStatusStore struct {
@@ -1392,7 +1419,7 @@ func main() {
 	if digestLimit <= 0 {
 		digestLimit = 12
 	}
-	tradeUpdateEvery := time.Duration(envInt("LIVE_TG_TRADE_UPDATE_MIN", 60)) * time.Minute
+	tradeUpdateEvery := time.Duration(envInt("LIVE_TG_TRADE_UPDATE_MIN", 10)) * time.Minute
 	if tradeUpdateEvery < time.Minute {
 		tradeUpdateEvery = 60 * time.Minute
 	}
@@ -1564,6 +1591,9 @@ func main() {
 	for _, line := range startupSummaryLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
+	for _, line := range startupWarningLines(ladderCfg, safety, execMgr) {
+		fmt.Printf("  %s\n", line)
+	}
 	fmt.Printf("  min_grade=%s | reentry_size=%.2f\n", strings.ToUpper(minGrade), reentryCfg.SizeUSDT)
 	if execMgr != nil {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
@@ -1577,6 +1607,13 @@ func main() {
 		fmt.Sprintf("<b>Features:</b> one_symbol=%s | reentry=%s | persistence=%s | funds=%s | snapshots=%s",
 			boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(missedOpportunitiesEnabled()),
 			boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
+		func() string {
+			warnings := startupWarningLines(ladderCfg, safety, execMgr)
+			if len(warnings) == 0 {
+				return "<b>Boot warnings:</b> none"
+			}
+			return fmt.Sprintf("<b>Boot warnings:</b> %s", strings.Join(warnings, " | "))
+		}(),
 		fmt.Sprintf("<b>%s</b>", compactAccountSummaryLine(func() accountReport {
 			if execMgr == nil {
 				return accountReport{}
@@ -1855,7 +1892,7 @@ func main() {
 			paper.CheckExit(now, metaBySymbol, paperDepth, longCurrent, shortCurrent, momBySymbol, flowMetricsBySymbol)
 		}
 		if paper.enabled && tg != nil && tg.Enabled() {
-			if !hourlyEnable && now.After(nextTradeUpdateAt) {
+			if now.After(nextTradeUpdateAt) {
 				if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
 					tg.Sendf("%s", tgPre(msg))
 				}
@@ -1889,6 +1926,14 @@ func main() {
 						lastSODReportDay = dayKey
 					}
 				}
+			}
+		}
+		if tg != nil && tg.Enabled() && execMgr != nil {
+			if now.After(nextTradeUpdateAt) {
+				if msg := execMgr.liveTradeUpdateMessage(metaBySymbol); msg != "" {
+					tg.Sendf("%s", tgPre(msg))
+				}
+				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
 		}
 		if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
@@ -3519,7 +3564,32 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 		b.WriteString("\n\n")
 		b.WriteString(acct)
 	}
+	degraded := []string{}
+	if snap := m.LiveAccountSnapshot(32); len(snap.Positions) > 0 {
+		for _, pos := range snap.Positions {
+			if strings.EqualFold(strings.TrimSpace(pos.ProtectionState), "DEGRADED") {
+				degraded = append(degraded, fmt.Sprintf("%s %s protection degraded (managed=%s protected=%s)",
+					pos.Symbol, pos.Side, boolLabel(pos.Managed), boolLabel(pos.Protected)))
+			}
+		}
+	}
+	if len(degraded) > 0 {
+		b.WriteString("\n\nProtection Degraded\n")
+		for _, row := range degraded {
+			b.WriteString("- ")
+			b.WriteString(row)
+			b.WriteByte('\n')
+		}
+	}
 	if missed != nil {
+		if rows := missed.ReviewLines(now.UTC(), 4); len(rows) > 0 {
+			b.WriteString("\n\nBlocked but Strong\n")
+			for _, row := range rows {
+				b.WriteString("- ")
+				b.WriteString(row)
+				b.WriteByte('\n')
+			}
+		}
 		if rows := missed.ReviewLines(now.UTC(), 4); len(rows) > 0 {
 			b.WriteString("\n\nMissed Opportunities\n")
 			for _, row := range rows {
@@ -3552,10 +3622,23 @@ func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (no
 	snap := m.LiveAccountSnapshot(32)
 	cards := make([]notify.PositionCard, 0, len(snap.Positions))
 	for _, p := range snap.Positions {
+		nextAction := "monitor"
+		if strings.EqualFold(strings.TrimSpace(p.ProtectionState), "PENDING_PROTECTION") {
+			nextAction = "await stop attach"
+		} else if strings.EqualFold(strings.TrimSpace(p.ProtectionState), "DEGRADED") {
+			nextAction = "operator review /protect"
+		} else if strings.EqualFold(strings.TrimSpace(p.ProtectionState), "CONFLICT") {
+			nextAction = "resolve live/manual mismatch"
+		}
 		cards = append(cards, notify.PositionCard{
 			Symbol:           p.Symbol,
 			Side:             p.Side,
 			Source:           displayEntrySource(p.Source),
+			Status:           p.ProtectionState,
+			ManageState:      displayManageState(p.ManageState),
+			Managed:          p.Managed,
+			Protected:        p.Protected,
+			NextAction:       nextAction,
 			Qty:              p.Qty,
 			EntryPrice:       p.EntryPrice,
 			MarkPrice:        p.MarkPrice,
@@ -4359,7 +4442,7 @@ func realizedFromFill(side string, entry, fillPx, qty float64) (float64, float64
 	}
 	pnl := 0.0
 	pct := 0.0
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		pnl = (fillPx - entry) * qty
 		pct = ((fillPx - entry) / entry) * 100
 	} else {
@@ -6919,7 +7002,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			if rp.amt < 0 {
 				side = "SELL"
 			}
-			if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(side)) {
+			if samePositionSide(existing.Side, side) {
 				syncImportedRemotePosition(existing, abs(rp.amt), rp.entry, rp.margin, rp.lev, now)
 			}
 			continue
@@ -6997,6 +7080,16 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 		EntrySource:    source,
 		CloseReason:    "RECOVERED_POSITION",
 	}
+	switch strings.ToUpper(strings.TrimSpace(source)) {
+	case manualEntrySourcePassive:
+		p.ManualManageState = manualManageStatePassive
+		p.Managed = false
+		p.Protected = false
+	case manualEntrySourceManaged:
+		p.ManualManageState = manualManageStatePendingProtection
+		p.Managed = true
+		p.Protected = false
+	}
 	if p.Margin <= 0 && p.EntryPrice > 0 && p.Leverage > 0 {
 		p.Margin = (p.EntryPrice * p.FilledQty) / float64(p.Leverage)
 	}
@@ -7004,7 +7097,7 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 	if atrPct := estimateATRPctWithCache(m.featureCache, symbol, 64, 14); atrPct > 0 {
 		stopPct = clamp(atrPct*m.recoverATRMult, m.minStopPct/100.0, m.maxStopPct/100.0)
 	}
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		p.StopPrice = entry * (1 - stopPct)
 	} else {
 		p.StopPrice = entry * (1 + stopPct)
@@ -7082,7 +7175,7 @@ func manualProtectionRetryDelay(cause string) time.Duration {
 }
 
 func manualProtectionAlertCooldown() time.Duration {
-	delay := time.Duration(envInt("LIVE_MANUAL_PROTECTION_ALERT_COOLDOWN_SEC", 300)) * time.Second
+	delay := time.Duration(envInt("LIVE_ALERT_SUPPRESSION_WINDOW_SEC", envInt("LIVE_MANUAL_PROTECTION_ALERT_COOLDOWN_SEC", 300))) * time.Second
 	if delay <= 0 {
 		delay = 5 * time.Minute
 	}
@@ -7094,6 +7187,9 @@ func markProtectionPending(p *livePosition, now time.Time, cause string) {
 		return
 	}
 	p.ProtectionPending = true
+	if manualManagedTrade(p) && strings.TrimSpace(p.ManualManageState) == "" {
+		p.ManualManageState = manualManageStatePendingProtection
+	}
 	retryDelay := manualProtectionRetryDelay(cause)
 	if strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), strings.TrimSpace(cause)) && !p.ProtectionRetryAfter.IsZero() && p.ProtectionRetryAfter.After(now) {
 		retryDelay = minDuration(maxDuration(retryDelay, 2*time.Duration(p.ProtectionRetryAfter.Sub(now))), 30*time.Minute)
@@ -7110,8 +7206,110 @@ func clearProtectionPending(p *livePosition) {
 	}
 	p.ProtectionPending = false
 	p.ProtectionRetryAfter = time.Time{}
+	p.ProtectionRetryCount = 0
+	p.ProtectionFailCount = 0
+	p.ManageFailSuppressCount = 0
 	p.LastManageFailAt = time.Time{}
 	p.LastManageFailCause = ""
+	if manualManagedTrade(p) {
+		p.ManualManageState = manualManageStateLive
+		p.Managed = true
+		p.Protected = true
+	}
+}
+
+func manualProtectionRetryBudget() int {
+	n := envInt("LIVE_MANUAL_PROTECT_RETRY_MAX", envInt("LIVE_MANUAL_PROTECTION_RETRY_BUDGET", 4))
+	if n < 1 {
+		n = 4
+	}
+	return n
+}
+
+func manualProtectionRetryBackoff(attempt int) time.Duration {
+	if raw := strings.TrimSpace(envStr("LIVE_MANUAL_PROTECT_RETRY_SCHEDULE_SEC", "")); raw != "" {
+		parts := strings.Split(raw, ",")
+		if attempt >= 1 && attempt <= len(parts) {
+			if sec, err := strconv.Atoi(strings.TrimSpace(parts[attempt-1])); err == nil && sec >= 0 {
+				return time.Duration(sec) * time.Second
+			}
+		}
+	}
+	switch attempt {
+	case 1:
+		return 0
+	case 2:
+		return 30 * time.Second
+	case 3:
+		return 2 * time.Minute
+	default:
+		return 5 * time.Minute
+	}
+}
+
+func manualProtectionRetryEnabled() bool {
+	return envBool("LIVE_MANUAL_PROTECT_RETRY_ENABLE", true)
+}
+
+func degradedReminderInterval() time.Duration {
+	sec := envInt("LIVE_MANUAL_PROTECT_DEGRADED_REMINDER_SEC", 1800)
+	if sec <= 0 {
+		sec = 1800
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func manualProtectionStatus(p *livePosition) string {
+	if p == nil {
+		return ""
+	}
+	if manualPassivePosition(p) {
+		return "UNMANAGED"
+	}
+	if strings.TrimSpace(p.ManualManageState) == manualManageStateConflict {
+		return "CONFLICT"
+	}
+	if !manualManagedTrade(p) {
+		if p.Protected || p.StopOrderID > 0 {
+			return "PROTECTED"
+		}
+		return "UNPROTECTED"
+	}
+	switch strings.TrimSpace(p.ManualManageState) {
+	case manualManageStateDegraded:
+		return "DEGRADED"
+	case manualManageStateLive:
+		return "PROTECTED"
+	default:
+		return "PENDING_PROTECTION"
+	}
+}
+
+func recordManualProtectionFailure(p *livePosition, now time.Time, cause string) bool {
+	if p == nil {
+		return false
+	}
+	cause = strings.TrimSpace(cause)
+	p.ProtectionPending = true
+	p.LastManageFailAt = now
+	p.LastManageFailCause = cause
+	p.ProtectionFailCount++
+	p.ProtectionRetryCount++
+	p.Managed = true
+	p.Protected = false
+	if !manualProtectionRetryEnabled() {
+		p.ManualManageState = manualManageStateDegraded
+		p.ProtectionRetryAfter = time.Time{}
+		return true
+	}
+	if p.ProtectionRetryCount >= manualProtectionRetryBudget() {
+		p.ManualManageState = manualManageStateDegraded
+		p.ProtectionRetryAfter = time.Time{}
+		return true
+	}
+	p.ManualManageState = manualManageStatePendingProtection
+	p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(p.ProtectionRetryCount))
+	return false
 }
 
 func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) bool {
@@ -7132,8 +7330,8 @@ func manualManagedTrade(p *livePosition) bool {
 	if p == nil {
 		return false
 	}
-	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
-		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged)
+	return p.Managed || (!strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
+		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged))
 }
 
 func manualProtectionConvictionReady(p *livePosition) bool {
@@ -7196,7 +7394,7 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 		m.maybeEnableTrail(p, 2)
 	}
 	if p.TrailOn {
-		sideBuy := strings.EqualFold(p.Side, "BUY")
+		sideBuy := isLongSide(p.Side)
 		if p.TrailRef <= 0 || (sideBuy && mark > p.TrailRef) || (!sideBuy && mark < p.TrailRef) {
 			p.TrailRef = mark
 			p.TrailStop = m.calcTrailStopForPosition(p, sideBuy, mark, p.HitTP3)
@@ -7220,6 +7418,9 @@ func armManualProtectionAfterReconstruct(now time.Time, p *livePosition) {
 		return
 	}
 	p.ProtectionPending = true
+	p.ManualManageState = manualManageStatePendingProtection
+	p.Managed = true
+	p.Protected = false
 	if manualProtectionConvictionReady(p) {
 		p.ProtectionRetryAfter = now.Add(5 * time.Second)
 		p.LastManageFailCause = ""
@@ -7262,7 +7463,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		remoteKeys[positionLookupKey(sym, side)] = manualManageFingerprint(sym, side, qty, entry)
 		existing := m.positions[sym]
 		if m.isActive(existing) {
-			if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(side)) {
+			if samePositionSide(existing.Side, side) {
 				syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
 				if manualManagedTrade(existing) || manualPassivePosition(existing) {
 					continue
@@ -7307,6 +7508,70 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	return imported, nil
 }
 
+func qtyWithinTolerance(expect, actual float64) bool {
+	if expect <= 0 || actual <= 0 {
+		return false
+	}
+	tol := clamp(envFloat("LIVE_MANUAL_QTY_TOLERANCE_PCT", 5.0), 0.1, 100.0) / 100.0
+	diff := math.Abs(expect-actual) / maxFloat(expect, actual)
+	return diff <= tol
+}
+
+func entryWithinTolerance(expect, actual float64) bool {
+	if expect <= 0 || actual <= 0 {
+		return false
+	}
+	tol := clamp(envFloat("LIVE_MANUAL_ENTRY_TOLERANCE_PCT", 1.0), 0.1, 25.0) / 100.0
+	diff := math.Abs(expect-actual) / maxFloat(expect, actual)
+	return diff <= tol
+}
+
+func (m *liveExecManager) setManualConflict(sym, side, cause string, now time.Time) {
+	if m == nil {
+		return
+	}
+	p, ok := m.trackedPosition(sym)
+	if !ok || p == nil {
+		p = m.newImportedRemotePosition(sym, side, 0, 0, 0, 1, now, manualEntrySourceManaged)
+		m.positions[sym] = p
+	}
+	p.ManualManageState = manualManageStateConflict
+	p.Managed = false
+	p.Protected = false
+	p.ProtectionPending = false
+	p.LastManageFailCause = strings.TrimSpace(cause)
+	p.LastManageFailAt = now
+}
+
+func (m *liveExecManager) validateManualManageRequest(req manualManageRequest, now time.Time) error {
+	if m == nil || m.rest == nil {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
+	rows, err := m.rest.PositionRisk(sym)
+	if err != nil {
+		return err
+	}
+	view := remotePositionForSide(rows, req.Side)
+	if view.QtyAbs <= 1e-10 {
+		m.setManualConflict(sym, req.Side, "remote_position_missing", now)
+		return fmt.Errorf("manual_state_conflict: remote position missing")
+	}
+	if req.Qty > 0 && !qtyWithinTolerance(req.Qty, view.QtyAbs) {
+		m.setManualConflict(sym, req.Side, "remote_qty_mismatch", now)
+		return fmt.Errorf("manual_state_conflict: remote qty mismatch")
+	}
+	if req.Entry > 0 && !entryWithinTolerance(req.Entry, view.EntryPrice) {
+		m.setManualConflict(sym, req.Side, "remote_entry_mismatch", now)
+		return fmt.Errorf("manual_state_conflict: remote entry mismatch")
+	}
+	if existing := m.positions[sym]; m.isActive(existing) && !samePositionSide(existing.Side, req.Side) {
+		m.setManualConflict(sym, req.Side, "local_conflicting_position", now)
+		return fmt.Errorf("manual_state_conflict: local conflicting position")
+	}
+	return nil
+}
+
 func (m *liveExecManager) activateManualManagement(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
 	if m == nil {
 		return nil, fmt.Errorf("live execution manager unavailable")
@@ -7314,6 +7579,17 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
 	if sym == "" {
 		return nil, fmt.Errorf("invalid symbol")
+	}
+	if err := m.validateManualManageRequest(req, now); err != nil {
+		if m.tg != nil {
+			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANUAL STATE CONFLICT",
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(req.Side)),
+				fmt.Sprintf("<b>Cause:</b> %s", summarizeOneLine(err.Error(), 140)),
+				"Bot management paused until the live/manual state matches again.",
+			))
+		}
+		_ = m.save()
+		return nil, err
 	}
 	if existing := m.positions[sym]; m.isActive(existing) {
 		if !strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(req.Side)) {
@@ -7330,6 +7606,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 			}
 			p.EntrySource = manualEntrySourceManaged
 			p.EntryReason = manualEntryReasonManaged
+			p.ManualManageState = manualManageStatePendingProtection
 			p.StarterOnly = false
 			p.AddLockedUntilConfirm = false
 			if currentMark > 0 {
@@ -7361,6 +7638,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 		}
 	}
 	p.EntryReason = manualEntryReasonManaged
+	p.ManualManageState = manualManageStatePendingProtection
 	p.StarterOnly = false
 	p.AddLockedUntilConfirm = false
 	if currentMark > 0 {
@@ -7388,7 +7666,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
 				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
 				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
-				fmt.Sprintf("<b>Protection:</b> pending until conviction / retry window"),
+				fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(p)),
 			)
 		}
 		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED", lines...))
@@ -7604,13 +7882,25 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 	}
 	snap := m.LiveAccountSnapshot(32)
 	rows := make([]string, 0, len(snap.Positions)+5)
-	rows = append(rows, "| Sym | Side | Src | Qty | Entry | Mark | Last | Lev | uPnL | uPnL% | Age(m) |")
-	rows = append(rows, "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+	localNow := time.Now().In(m.reportLoc)
+	assets := make([]string, 0, len(snap.Positions))
 	for _, pos := range snap.Positions {
-		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %.6f | %.6f | %.6f | %.6f | %dx | %+.2f | %+.2f%% | %.1f |",
+		assets = append(assets, pos.Symbol)
+	}
+	sort.Strings(assets)
+	rows = append(rows, fmt.Sprintf("Live Update (%s) session=%s", localNow.Format("15:04 MST"), sessionTag(localNow)))
+	if len(assets) > 0 {
+		rows = append(rows, fmt.Sprintf("Assets: %s", strings.Join(assets, ", ")))
+	}
+	rows = append(rows, "| Sym | Side | Src | Manage | Protect | Qty | Entry | Mark | Last | Lev | uPnL | uPnL% | Age(m) |")
+	rows = append(rows, "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+	for _, pos := range snap.Positions {
+		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %s | %s | %.6f | %.6f | %.6f | %.6f | %dx | %+.2f | %+.2f%% | %.1f |",
 			pos.Symbol,
 			pos.Side,
 			pos.Source,
+			nonEmpty(displayManageState(pos.ManageState), "-"),
+			nonEmpty(pos.ProtectionState, "-"),
 			pos.Qty,
 			pos.EntryPrice,
 			pos.MarkPrice,
@@ -8648,22 +8938,34 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 	if m != nil && m.tg != nil {
 		notifyTelegram := true
 		now := time.Now().UTC()
-		if !p.LastManageFailAt.IsZero() &&
+		if envBool("LIVE_ALERT_SUPPRESSION_ENABLE", true) &&
+			p.ProtectionFailCount > 1 &&
+			!p.LastManageFailAt.IsZero() &&
 			now.Sub(p.LastManageFailAt) < manualProtectionAlertCooldown() &&
 			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), cause) {
 			notifyTelegram = false
+			p.ManageFailSuppressCount++
 		}
 		if !notifyTelegram {
 			return
 		}
-		p.LastManageFailAt = now
-		p.LastManageFailCause = cause
-		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE FAILED SAFE",
+		suppressed := p.ManageFailSuppressCount
+		p.ManageFailSuppressCount = 0
+		title := "MANAGE FAILED SAFE"
+		if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
+			title = "MANAGE DEGRADED"
+		}
+		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
 			fmt.Sprintf("<b>Cause:</b> %s", cause),
-		))
+			fmt.Sprintf("<b>Protection:</b> %s | <b>Retries:</b> %d/%d", manualProtectionStatus(p), p.ProtectionRetryCount, manualProtectionRetryBudget()),
+		}
+		if suppressed > 0 {
+			lines = append(lines, fmt.Sprintf("<b>Suppressed duplicates:</b> %d", suppressed))
+		}
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", title, lines...))
 	}
 }
 
@@ -8676,10 +8978,22 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	now := time.Now().UTC()
 	if manualManagedTrade(p) {
+		if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
+			if m.tg != nil && (p.LastManageFailAt.IsZero() || now.Sub(p.LastManageFailAt) >= degradedReminderInterval()) {
+				p.LastManageFailAt = now
+				m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE DEGRADED",
+					fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
+					fmt.Sprintf("<b>Protection:</b> %s | <b>Cause:</b> %s", manualProtectionStatus(p), firstNonEmpty(p.LastManageFailCause, "retry_budget_exhausted")),
+					"Quiet degraded monitoring remains active until operator action or a later retry command.",
+				))
+			}
+			return nil
+		}
 		if p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
 			return nil
 		}
 		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !manualProtectionConvictionReady(p) {
+			p.ManualManageState = manualManageStatePendingProtection
 			markProtectionPending(p, now, "awaiting_conviction")
 			return nil
 		}
@@ -8712,8 +9026,8 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
 		mark, err := m.currentMark(p.Symbol)
 		if err != nil || mark <= 0 {
+			recordManualProtectionFailure(p, now, "mark_unavailable")
 			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
-			markProtectionPending(p, now, "mark_unavailable")
 			if manualManagedTrade(p) {
 				return nil
 			}
@@ -8732,8 +9046,8 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				}
 			}
 			if validRetry <= 0 {
+				recordManualProtectionFailure(p, now, "invalid_after_retry")
 				m.logManageFailedSafe(p, mark, computedStop, stopPx, "invalid_after_retry")
-				markProtectionPending(p, now, "invalid_after_retry")
 				if manualManagedTrade(p) {
 					return nil
 				}
@@ -8764,8 +9078,8 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && immediateTriggerAPIError(err) {
 			mark, markErr := m.currentMark(p.Symbol)
 			if markErr != nil || mark <= 0 {
+				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
 				m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
-				markProtectionPending(p, now, "exchange_immediate_trigger_mark_unavailable")
 				if manualManagedTrade(p) {
 					return nil
 				}
@@ -8802,8 +9116,8 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				}
 			}
 			if !retryPlaced {
+				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed")
 				m.logManageFailedSafe(p, mark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
-				markProtectionPending(p, now, "exchange_immediate_trigger_retry_failed")
 				if manualManagedTrade(p) {
 					return nil
 				}
@@ -11455,7 +11769,7 @@ func (p *paperTrader) feeRateBpsForReason(reason string) float64 {
 }
 
 func exitSideForPosition(posSide string) string {
-	if strings.EqualFold(strings.TrimSpace(posSide), "BUY") {
+	if isLongSide(posSide) {
 		return "SELL"
 	}
 	return "BUY"
@@ -11485,7 +11799,7 @@ func paperSimFillPrice(side string, qty float64, m symbolMeta, ob aster.OrderBoo
 		baseSpread = 0.0004
 	}
 	fill := mid
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		fill = mid * (1 + baseSpread/2.0)
 	} else {
 		fill = mid * (1 - baseSpread/2.0)
@@ -11518,7 +11832,7 @@ func applyRegimeSlip(px float64, side string, regime data.Regime, mid, volUSD fl
 		impactBps += 0.5 * mult
 	}
 	d := impactBps / 10000.0
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return px * (1 + d)
 	}
 	return px * (1 - d)
@@ -11529,7 +11843,7 @@ func applyBpsAdverse(px float64, side string, bps float64) float64 {
 		return px
 	}
 	d := bps / 10000.0
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return px * (1 + d)
 	}
 	return px * (1 - d)
@@ -11552,7 +11866,7 @@ func topOfBook(ob aster.OrderBook, fallback float64) (bid, ask float64) {
 
 func vwapFromDepth(side string, qty float64, ob aster.OrderBook) (float64, bool) {
 	levels := ob.Asks
-	if !strings.EqualFold(side, "BUY") {
+	if !isLongSide(side) {
 		levels = ob.Bids
 	}
 	if len(levels) == 0 {
@@ -15018,6 +15332,37 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 				strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol)), cand.Side, strings.Join(fails, ","), firstNonEmpty(cand.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
 			return cand
 		}
+		if envBool("LIVE_HEATING_STARTER_ENABLE", true) &&
+			cand.Entry.State == inplay.StateHeating &&
+			gradeValue(cand.Entry.CurrentGrade) >= gradeValue(envStr("LIVE_HEATING_STARTER_MIN_GRADE", "B")) &&
+			cand.Entry.CurrentScore >= envFloat("LIVE_HEATING_STARTER_MIN_SCORE", 85.0) &&
+			cand.PersistenceSeenCount >= maxInt(2, envInt("LIVE_HEATING_STARTER_MIN_SEEN", 2)) &&
+			len(lateRejects) == 0 {
+			hardFails := make([]string, 0, len(fails))
+			softFails := make([]string, 0, len(fails))
+			for _, fail := range fails {
+				if isSoftReject(fail) {
+					softFails = append(softFails, fail)
+				} else {
+					hardFails = append(hardFails, fail)
+				}
+			}
+			if len(hardFails) == 0 {
+				cand.Strat = "heating_starter_entry"
+				cand.Conf = clamp(maxFloat(cand.Conf, 0.54)+min(0.08, maxFloat(0.0, cand.Entry.ScoreSlope)*0.12), 0.52, 0.72)
+				cand.Sig = strategies.Signal{
+					Active:     true,
+					Name:       "heating_starter_entry",
+					Side:       toFeatureSide(cand.Side),
+					Confidence: cand.Conf,
+					Tags:       []string{"starter_only", "heating_fast_path"},
+					Reasons:    append([]string{}, softFails...),
+				}
+				cand.Sig = applySignalRiskGeometry(cand, "heating_starter_entry")
+				cand.RejectReason = strings.Join(softFails, ",")
+				return cand
+			}
+		}
 		if len(fails) == 0 {
 			fails = append(fails, "continuation_fast_not_ready")
 		}
@@ -15795,6 +16140,7 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		RealizedDay:   m.dayRealizedAt(now),
 		Positions:     make([]liveAccountPosition, 0, len(acct.Positions)),
 	}
+	priceGuarded := make([]string, 0)
 	localBySymbol := map[string]*livePosition{}
 	if m != nil {
 		for sym, pos := range m.positions {
@@ -15812,11 +16158,22 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		}
 		lp := localBySymbol[positionLookupKey(raw, rp.Side)]
 		src := "MANUAL"
+		manageState := ""
+		protectionState := ""
 		stop := 0.0
 		holdMin := 0.0
 		entryReason := ""
 		if lp != nil {
 			src = displayEntrySource(lp.EntrySource)
+			manageState = strings.TrimSpace(lp.ManualManageState)
+			protectionState = manualProtectionStatus(lp)
+			if protectionState == "" {
+				if lp.StopOrderID > 0 || lp.Protected {
+					protectionState = "PROTECTED"
+				} else {
+					protectionState = "UNPROTECTED"
+				}
+			}
 			stop = lp.StopPrice
 			holdMin = now.Sub(lp.CreatedAt).Minutes()
 			if holdMin < 0 {
@@ -15832,6 +16189,20 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		lastPx := quote.LastPrice
 		if lastPx <= 0 {
 			lastPx = markPx
+		}
+		refPx := firstPositive(func() float64 {
+			if lp != nil && lp.LastMark > 0 {
+				return lp.LastMark
+			}
+			return 0
+		}(), rp.Entry, markPx, lastPx)
+		if fixed, guarded := sanitizeSnapshotPrice(refPx, markPx); guarded {
+			markPx = fixed
+			priceGuarded = appendUniqueDecisionReason(priceGuarded, raw)
+		}
+		if fixed, guarded := sanitizeSnapshotPrice(refPx, lastPx); guarded {
+			lastPx = fixed
+			priceGuarded = appendUniqueDecisionReason(priceGuarded, raw)
 		}
 		unreal := rp.Unreal
 		if lastPx > 0 {
@@ -15850,6 +16221,10 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 			Symbol:           raw,
 			Side:             rp.Side,
 			Source:           src,
+			ManageState:      manageState,
+			ProtectionState:  protectionState,
+			Managed:          lp != nil && (lp.Managed || botManagedPosition(lp)),
+			Protected:        lp != nil && (lp.Protected || lp.StopOrderID > 0),
 			Qty:              rp.SizeAbs,
 			EntryPrice:       rp.Entry,
 			MarkPrice:        markPx,
@@ -15876,6 +16251,11 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 	sort.Slice(out.Positions, func(i, j int) bool {
 		return abs(out.Positions[i].UnrealizedPnL) > abs(out.Positions[j].UnrealizedPnL)
 	})
+	if len(priceGuarded) > 0 {
+		sort.Strings(priceGuarded)
+		out.Health = "partial_price_guard"
+		out.HealthDetail = strings.Join(priceGuarded, ",")
+	}
 	out.Equity = acct.AvailableUSDT + out.OpenPnL
 	return out
 }
@@ -16507,6 +16887,28 @@ func accountEquity(s accountSnapshot) float64 {
 	return eq
 }
 
+func priceSanityGuardEnabled() bool {
+	return envBool("LIVE_PRICE_SANITY_GUARD_ENABLE", true)
+}
+
+func priceSanityMaxDeviation() float64 {
+	pct := envFloat("LIVE_PRICE_SANITY_MAX_DEVIATION_PCT", 25.0)
+	if pct <= 0 {
+		pct = 25.0
+	}
+	return pct / 100.0
+}
+
+func sanitizeSnapshotPrice(ref, candidate float64) (float64, bool) {
+	if ref <= 0 || candidate <= 0 || !priceSanityGuardEnabled() {
+		return candidate, false
+	}
+	if math.Abs(candidate-ref)/maxFloat(ref, candidate) > priceSanityMaxDeviation() {
+		return ref, true
+	}
+	return candidate, false
+}
+
 func normalizePositionSide(side string) string {
 	switch strings.ToUpper(strings.TrimSpace(side)) {
 	case "BUY", "LONG":
@@ -16518,8 +16920,27 @@ func normalizePositionSide(side string) string {
 	}
 }
 
+func isLongSide(side string) bool {
+	return normalizePositionSide(side) == "LONG"
+}
+
+func samePositionSide(a, b string) bool {
+	return normalizePositionSide(a) == normalizePositionSide(b)
+}
+
 func displayPositionSide(side string) string {
 	return normalizePositionSide(side)
+}
+
+func parseUserPositionSide(side string) (string, bool) {
+	switch normalizePositionSide(side) {
+	case "LONG":
+		return "BUY", true
+	case "SHORT":
+		return "SELL", true
+	default:
+		return "", false
+	}
 }
 
 func displayEntrySource(source string) string {
@@ -16533,6 +16954,30 @@ func displayEntrySource(source string) string {
 	default:
 		return strings.ToUpper(strings.TrimSpace(source))
 	}
+}
+
+func displayManageState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case manualManageStatePassive:
+		return "PASSIVE"
+	case manualManageStatePendingProtection:
+		return "PENDING_PROTECTION"
+	case manualManageStateDegraded:
+		return "DEGRADED"
+	case manualManageStateLive:
+		return "LIVE"
+	case manualManageStateConflict:
+		return "CONFLICT"
+	default:
+		return strings.ToUpper(strings.TrimSpace(state))
+	}
+}
+
+func boolLabel(v bool) string {
+	if v {
+		return "YES"
+	}
+	return "NO"
 }
 
 func displayEntryReason(reason string) string {
@@ -17797,6 +18242,7 @@ func newEligibilitySummary(c candidate) EntryEligibilitySummary {
 		Rank:             c.FinalRank,
 		Grade:            c.Entry.CurrentGrade,
 		PersistenceScore: persistenceEligibilityScore(c),
+		AdjustedConfidence: clamp(c.Conf, 0, 1),
 	}
 	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
 		addEligibilityBlock(&summary, rr)
@@ -17828,10 +18274,41 @@ func addEligibilityBlock(summary *EntryEligibilitySummary, reason string) {
 	}
 }
 
+func compressSoftBlockConfidence(summary *EntryEligibilitySummary, c candidate) {
+	if summary == nil || !envBool("LIVE_SOFT_SCORE_COMPRESSION_ENABLE", true) {
+		return
+	}
+	adjusted := clamp(c.Conf, 0, 1)
+	penalties := make([]string, 0, len(summary.SoftBlocks))
+	for _, block := range summary.SoftBlocks {
+		raw := strings.TrimSpace(strings.ToLower(block))
+		penalty := 0.0
+		switch {
+		case strings.Contains(raw, "vol_ratio"):
+			penalty = 0.08
+		case strings.Contains(raw, "ofi_z"):
+			penalty = 0.06
+		case strings.Contains(raw, "structure"), strings.Contains(raw, "continuation_no_structure_confirm"):
+			penalty = 0.07
+		case strings.Contains(raw, "vwap_ema"):
+			penalty = 0.05
+		case strings.Contains(raw, "late_cycle"):
+			penalty = 0.10
+		default:
+			penalty = 0.04
+		}
+		adjusted -= penalty
+		penalties = append(penalties, fmt.Sprintf("%s:-%.2f", block, penalty))
+	}
+	summary.AdjustedConfidence = clamp(adjusted, 0, 1)
+	summary.ConfidencePenaltyReasons = penalties
+}
+
 func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 	if summary == nil {
 		return
 	}
+	compressSoftBlockConfidence(summary, candidate{Conf: summary.AdjustedConfidence})
 	switch {
 	case len(summary.HardBlocks) > 0:
 		summary.FinalDecision = "reject"
@@ -17843,7 +18320,7 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 		summary.FinalDecision = "reject"
 		summary.FinalReason = summary.StateBlocks[0]
 	case len(summary.SoftBlocks) > 0:
-		if summary.StarterAllowed {
+		if summary.StarterAllowed || summary.AdjustedConfidence >= envFloat("LIVE_SOFT_SCORE_STARTER_MIN", 0.52) {
 			summary.FinalDecision = "starter_entry"
 			summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.SoftBlocks[0], "soft_confirmation_only")
 		} else {
@@ -17866,8 +18343,9 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 }
 
 func logEligibilitySummary(summary EntryEligibilitySummary) {
-	fmt.Printf("ELIGIBILITY_SUMMARY symbol=%s side=%s strat=%s grade=%s rank=%.2f persistence=%.2f hard=%q soft=%q capacity=%q state=%q starter_allowed=%v full_entry_allowed=%v reentry_allowed=%v final_decision=%s final_reason=%s\n",
+	fmt.Printf("ELIGIBILITY_SUMMARY symbol=%s side=%s strat=%s grade=%s rank=%.2f persistence=%.2f adj_conf=%.2f penalties=%q hard=%q soft=%q capacity=%q state=%q starter_allowed=%v full_entry_allowed=%v reentry_allowed=%v final_decision=%s final_reason=%s\n",
 		summary.Symbol, summary.Side, summary.Strat, summary.Grade, summary.Rank, summary.PersistenceScore,
+		summary.AdjustedConfidence, strings.Join(summary.ConfidencePenaltyReasons, ","),
 		strings.Join(summary.HardBlocks, ","), strings.Join(summary.SoftBlocks, ","), strings.Join(summary.CapacityBlocks, ","), strings.Join(summary.StateBlocks, ","),
 		summary.StarterAllowed, summary.FullEntryAllowed, summary.ReentryAllowed, summary.FinalDecision, summary.FinalReason)
 }
@@ -17936,6 +18414,23 @@ func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg wat
 	return lines
 }
 
+func startupWarningLines(ladderCfg ladderConfig, safety safetyConfig, execMgr *liveExecManager) []string {
+	warnings := []string{}
+	if ladderCfg.StarterUSDT > 15 {
+		warnings = append(warnings, fmt.Sprintf("BOOT_WARNING starter_high=%.2f", ladderCfg.StarterUSDT))
+	}
+	if safety.minAvailUSDT > maxFloat(ladderCfg.StarterUSDT, 10)*1.5 {
+		warnings = append(warnings, fmt.Sprintf("BOOT_WARNING min_available_high=%.2f", safety.minAvailUSDT))
+	}
+	if !ladderCfg.OneSymbolOnly {
+		warnings = append(warnings, "BOOT_WARNING one_symbol_only_disabled")
+	}
+	if execMgr != nil && !execMgr.fundsCfg.Enable {
+		warnings = append(warnings, "BOOT_WARNING funds_manager_disabled")
+	}
+	return warnings
+}
+
 func missedOpportunitiesEnabled() bool {
 	return envBool("LIVE_OPP_TRACK_ENABLE", true) || envBool("LIVE_PERSISTENCE_ENTRY_ENABLE", true)
 }
@@ -17961,16 +18456,37 @@ func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string
 	if ctx == nil {
 		return
 	}
+	topBlockers := []string{}
+	for _, part := range strings.Split(strings.TrimSpace(reject), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		topBlockers = append(topBlockers, part)
+		if len(topBlockers) >= 3 {
+			break
+		}
+	}
+	persistenceStatus := "none"
+	if c.PersistenceSeenCount > 0 || strings.Contains(strings.ToLower(strings.TrimSpace(c.Strat)), "persistence") {
+		persistenceStatus = firstNonEmpty(c.PersistenceReason, "tracking")
+	}
 	ctx.setDecision(operatorDecision{
-		Symbol:       c.Entry.Symbol,
-		Side:         c.Side,
-		Grade:        c.Entry.CurrentGrade,
-		Score:        c.Entry.CurrentScore,
-		Slope:        c.Entry.ScoreSlope,
-		Strategy:     c.Strat,
-		Confidence:   c.Conf,
-		RejectReason: reject,
-		State:        string(c.Entry.State),
+		Symbol:             c.Entry.Symbol,
+		Side:               c.Side,
+		Grade:              c.Entry.CurrentGrade,
+		Score:              c.Entry.CurrentScore,
+		Slope:              c.Entry.ScoreSlope,
+		Strategy:           c.Strat,
+		Confidence:         c.Conf,
+		RawConfidence:      c.Conf,
+		AdjustedConfidence: c.Conf,
+		RejectReason:       reject,
+		BlockerClass:       string(classifyRejectReason(reject)),
+		TopBlockers:        topBlockers,
+		StarterAllowed:     strings.Contains(strings.ToLower(c.Strat), "starter") || strings.Contains(strings.ToLower(c.Strat), "persistence"),
+		PersistenceStatus:  persistenceStatus,
+		State:              string(c.Entry.State),
 	})
 }
 
@@ -17979,6 +18495,116 @@ func (c *telegramCommandCtx) run() {
 		return
 	}
 	c.tg.Listen(context.Background(), c.handleCommand)
+}
+
+func operatorModeEnabled() bool {
+	return envBool("LIVE_TG_OPERATOR_MODE", true)
+}
+
+func debugModeEnabled() bool {
+	return envBool("LIVE_TG_DEBUG_MODE", false)
+}
+
+func topBlocker(reason string) string {
+	for _, part := range strings.Split(strings.TrimSpace(reason), ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			return part
+		}
+	}
+	return ""
+}
+
+func manualAssistStance(d operatorDecision) string {
+	reason := strings.ToLower(strings.TrimSpace(d.RejectReason))
+	switch {
+	case d.StarterAllowed && d.BlockerClass != string(rejectClassHardSafety):
+		return "enter now small"
+	case strings.Contains(reason, "reclaim"):
+		return "wait for reclaim"
+	case strings.Contains(reason, "bounce"):
+		return "wait for failed bounce"
+	case strings.Contains(reason, "late_cycle"):
+		return "avoid / late cycle"
+	default:
+		return "wait for confirmation"
+	}
+}
+
+func manualAssistResponse(sym string, side string, d operatorDecision, meta symbolMeta) string {
+	starterNow := "NO"
+	if d.StarterAllowed || d.AdjustedConfidence >= envFloat("LIVE_SOFT_SCORE_STARTER_MIN", 0.52) {
+		starterNow = "YES"
+	}
+	softs := []string{}
+	hards := []string{}
+	for _, b := range d.TopBlockers {
+		if isSoftReject(b) {
+			softs = append(softs, b)
+		} else if b != "" {
+			hards = append(hards, b)
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("<b>MANUAL ENTRY ASSIST — %s %s</b>", cleanSymbol(sym), displayPositionSide(side)),
+		fmt.Sprintf("<b>State:</b> %s | <b>Rank:</b> %.2f | <b>Starter now:</b> %s", firstNonEmpty(strings.ToUpper(strings.TrimSpace(d.State)), "UNKNOWN"), d.Score, starterNow),
+		fmt.Sprintf("<b>Persistence:</b> %s | <b>Decision:</b> %s", firstNonEmpty(d.PersistenceStatus, "none"), firstNonEmpty(d.Strategy, "watch_only")),
+	}
+	if len(hards) > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Hard blockers:</b> %s", strings.Join(hards, ", ")))
+	} else {
+		lines = append(lines, "<b>Hard blockers:</b> none")
+	}
+	if len(softs) > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Soft blockers:</b> %s", strings.Join(softs, ", ")))
+	}
+	lines = append(lines,
+		fmt.Sprintf("<b>Best operator stance:</b> %s", manualAssistStance(d)),
+		"<b>Avoid:</b> full size chase",
+		fmt.Sprintf("<b>Bot status:</b> %s", firstNonEmpty(d.Strategy, "watch_only")),
+	)
+	if meta.LastPrice > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Last:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(meta.LastPrice), meta.Move24h, meta.VolumeUSD/1_000_000.0))
+	}
+	return notify.BuildEventHTML("🧭", "MANUAL ENTRY", lines...)
+}
+
+func (c *telegramCommandCtx) blockedStrongLines(limit int) []string {
+	if c == nil {
+		return nil
+	}
+	c.decisionMu.RLock()
+	defer c.decisionMu.RUnlock()
+	type row struct {
+		d operatorDecision
+	}
+	rows := make([]row, 0, len(c.decisions))
+	for _, d := range c.decisions {
+		if strings.TrimSpace(d.Symbol) == "" || strings.EqualFold(strings.TrimSpace(d.BlockerClass), string(rejectClassHardSafety)) {
+			continue
+		}
+		if d.Score < 70 && d.AdjustedConfidence < 0.50 {
+			continue
+		}
+		rows = append(rows, row{d: d})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].d.Score == rows[j].d.Score {
+			return rows[i].d.AdjustedConfidence > rows[j].d.AdjustedConfidence
+		}
+		return rows[i].d.Score > rows[j].d.Score
+	})
+	out := make([]string, 0, minInt(limit, len(rows)))
+	for _, r := range rows {
+		d := r.d
+		out = append(out, fmt.Sprintf("%s %s state=%s blocker_class=%s top=%s starter_override=%s",
+			cleanSymbol(d.Symbol), displayPositionSide(d.Side), strings.ToUpper(strings.TrimSpace(d.State)),
+			firstNonEmpty(d.BlockerClass, "none"), firstNonEmpty(topBlocker(d.RejectReason), "none"), boolLabel(d.StarterAllowed)))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
@@ -17995,18 +18621,24 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/balance</code> account holdings",
 			"<code>/acct</code> normalized account summary",
 			"<code>/growth</code> equity growth windows",
+			"<code>/health</code> runtime + account health",
 			"<code>/summary</code> account + growth + missed opportunity review",
+			"<code>/pos</code> alias for /positions",
 			"<code>/positions</code> open trades",
 			"<code>/position SYMBOL</code> one live trade in detail",
 			"<code>/why SYMBOL</code> latest decision for a symbol",
-			"<code>/suggest SYMBOL SIDE</code> operator watch + re-evaluate",
-			"<code>/trade SYMBOL SIDE [LEV]</code> operator-priority trade request",
-			"<code>/manage SYMBOL y|n</code> approve or decline bot management for a detected manual trade",
+			"<code>/manual SYMBOL [LONG|SHORT]</code> manual entry assist",
+			"<code>/entry SYMBOL [LONG|SHORT]</code> alias for manual entry assist",
+			"<code>/suggest SYMBOL LONG|SHORT</code> operator watch + re-evaluate",
+			"<code>/trade SYMBOL LONG|SHORT [LEV]</code> operator-priority trade request",
+			"<code>/manage SYMBOL [y|n]</code> approve or inspect manual management",
+			"<code>/protect SYMBOL</code> retry/manual-arm protection for one symbol",
 			"<code>/mode</code> show live/paper mode",
 			"<code>/mode live</code> switch new entries to live mode",
 			"<code>/mode paper</code> switch new entries to paper mode",
 			"<code>/pause</code> pause new entries",
 			"<code>/resume</code> resume entries",
+			"<code>/flatten SYMBOL</code> alias for /close SYMBOL",
 			"<code>/close SYMBOL</code> close one symbol",
 			"<code>/closeall</code> close all positions",
 		)
@@ -18023,7 +18655,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("🧭", "STATUS",
 			fmt.Sprintf("<b>Mode:</b> dry_run=%v live_enabled=%v", s.DryRun, s.LiveEnabled),
 			fmt.Sprintf("<b>In-Play:</b> long=%d short=%d", s.LongInPlay, s.ShortInPlay),
-			fmt.Sprintf("<b>Top:</b> %s %s | g=%s s=%.2f", cleanSymbol(s.TopSymbol), s.TopSide, s.TopGrade, s.TopScore),
+			fmt.Sprintf("<b>Top:</b> %s %s | g=%s s=%.2f", cleanSymbol(s.TopSymbol), displayPositionSide(s.TopSide), s.TopGrade, s.TopScore),
 			fmt.Sprintf("<b>Available USDT:</b> %.2f", s.AvailableUSDT),
 			fmt.Sprintf("<b>Paper:</b> %s", summarizeOneLine(s.PaperSummary, 120)),
 			fmt.Sprintf("<b>Exec:</b> open=%d pending=%d partial1=%d partial2=%d", s.Exec.Open, s.Exec.Pending, s.Exec.Partial1, s.Exec.Partial2),
@@ -18109,9 +18741,25 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					includeMissed = append(includeMissed, row)
 				}
 			}
+			if rows := c.blockedStrongLines(4); len(rows) > 0 {
+				includeMissed = append(includeMissed, "<b>Blocked but Strong:</b>")
+				includeMissed = append(includeMissed, rows...)
+			}
 		}
 		return buildAccountHTML(report, strings.HasPrefix(cmd, "/growth"), includeMissed)
-	case strings.HasPrefix(cmd, "/positions"):
+	case strings.HasPrefix(cmd, "/health"):
+		report := accountReport{}
+		if c.execMgr != nil {
+			report = c.execMgr.ensureAccountReportFresh(time.Now().UTC(), 2*time.Minute)
+			snap := c.execMgr.LiveAccountSnapshot(6)
+			return notify.BuildEventHTML("🩺", "HEALTH",
+				fmt.Sprintf("<b>Account:</b> %s | <b>Detail:</b> %s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")),
+				fmt.Sprintf("<b>Live snapshot:</b> %s | <b>Detail:</b> %s", firstNonEmpty(snap.Health, "healthy"), firstNonEmpty(snap.HealthDetail, "none")),
+				fmt.Sprintf("<b>Open:</b> %d | <b>Manual:</b> %d | <b>Bot:</b> %d", snap.OpenCount, snap.ManualCount, snap.BotCount),
+			)
+		}
+		return notify.BuildEventHTML("🩺", "HEALTH", "Execution manager unavailable")
+	case strings.HasPrefix(cmd, "/positions"), cmd == "/pos":
 		if c.paper != nil && c.paper.enabled {
 			meta := c.getMeta()
 			now := time.Now().In(c.paper.reportLoc)
@@ -18179,11 +18827,16 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		lines := []string{
 			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side), displayEntrySource(p.Source)),
+			fmt.Sprintf("<b>Manage:</b> %s | <b>Protection:</b> %s", nonEmpty(strings.ToUpper(strings.TrimSpace(p.ManageState)), "-"), nonEmpty(strings.ToUpper(strings.TrimSpace(p.ProtectionState)), "-")),
+			fmt.Sprintf("<b>Managed:</b> %s | <b>Protected:</b> %s", boolLabel(p.Managed), boolLabel(p.Protected)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", p.Qty, maxInt(1, p.Leverage), p.Margin),
 			fmt.Sprintf("<b>Entry:</b> %s | <b>Mark:</b> %s | <b>Last:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.MarkPrice), fmtPrice(p.LastPrice)),
 			fmt.Sprintf("<b>uPnL:</b> %+.2f (%+.2f%%) | <b>Exchange uPnL:</b> %+.2f", p.UnrealizedPnL, p.UnrealizedPnLPct, p.ExchangeUnreal),
 			fmt.Sprintf("<b>Stop:</b> %s | <b>Spread:</b> %.1fbps | <b>Hold:</b> %.1fm", fmtPrice(p.StopPrice), p.SpreadBps, p.HoldMin),
 			fmt.Sprintf("<b>Reason:</b> <code>%s</code>", displayEntryReason(p.EntryReason)),
+		}
+		if debugModeEnabled() || !operatorModeEnabled() {
+			lines = append(lines, fmt.Sprintf("<b>Debug:</b> rawSide=%s | normalized=%s | pnlDelta=%+.2f", strings.ToUpper(strings.TrimSpace(p.Side)), normalizePositionSide(p.Side), p.UnrealizedPnL-p.ExchangeUnreal))
 		}
 		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
 	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no":
@@ -18359,13 +19012,16 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			lines := []string{
 				fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
 				fmt.Sprintf("<b>Decision:</b> %s", firstNonEmpty(d.RejectReason, "eligible")),
-				fmt.Sprintf("<b>Side:</b> %s | <b>Grade:</b> %s | <b>Score:</b> %.2f", d.Side, d.Grade, d.Score),
+				fmt.Sprintf("<b>Side:</b> %s | <b>Grade:</b> %s | <b>Score:</b> %.2f", displayPositionSide(d.Side), d.Grade, d.Score),
 				fmt.Sprintf("<b>Slope:</b> %+.3f | <b>Setup:</b> <code>%s</code>", d.Slope, d.Strategy),
-				fmt.Sprintf("<b>Conf:</b> %.2f | <b>State:</b> %s", d.Confidence, d.State),
+				fmt.Sprintf("<b>Conf:</b> %.2f | <b>Adj:</b> %.2f | <b>State:</b> %s", d.Confidence, d.AdjustedConfidence, d.State),
+				fmt.Sprintf("<b>Blocker class:</b> %s | <b>Starter allowed:</b> %s", firstNonEmpty(d.BlockerClass, "none"), boolLabel(d.StarterAllowed)),
+				fmt.Sprintf("<b>Top blockers:</b> %s", firstNonEmpty(strings.Join(d.TopBlockers, ", "), "none")),
+				fmt.Sprintf("<b>Persistence:</b> %s", firstNonEmpty(d.PersistenceStatus, "none")),
 				fmt.Sprintf("<b>Updated:</b> %s", d.UpdatedAt.In(time.Local).Format("15:04:05 MST")),
 			}
 			if s, ok := c.getSuggestion(sym); ok {
-				lines = append(lines, fmt.Sprintf("<b>Operator watch:</b> %s until %s", s.Side, s.ExpiresAt.In(time.Local).Format("15:04 MST")))
+				lines = append(lines, fmt.Sprintf("<b>Operator watch:</b> %s until %s", displayPositionSide(s.Side), s.ExpiresAt.In(time.Local).Format("15:04 MST")))
 			}
 			return notify.BuildEventHTML("🔎", "WHY", lines...)
 		}
@@ -18379,18 +19035,44 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			)
 		}
 		return notify.BuildEventHTML("🔎", "WHY", fmt.Sprintf("%s is not in the current market snapshot", cleanSymbol(sym)))
-	case strings.HasPrefix(cmd, "/suggest "):
-		if len(fields) < 3 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL SIDE</code>")
+	case strings.HasPrefix(cmd, "/manual "), strings.HasPrefix(cmd, "/entry "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
-		side := strings.ToUpper(strings.TrimSpace(fields[2]))
-		if sym == "" || (side != "BUY" && side != "SELL") {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL SIDE</code>")
+		side := ""
+		if len(fields) >= 3 {
+			if parsed, ok := parseUserPositionSide(fields[2]); ok {
+				side = parsed
+			}
+		}
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
+		}
+		if d, ok := c.getDecision(sym); ok {
+			if side == "" {
+				side = d.Side
+			}
+			return manualAssistResponse(sym, firstNonEmpty(side, d.Side), d, c.getMeta()[sym])
+		}
+		meta := c.getMeta()[sym]
+		return notify.BuildEventHTML("🧭", "MANUAL ENTRY",
+			fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
+			fmt.Sprintf("<b>Last:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(meta.LastPrice), meta.Move24h, meta.VolumeUSD/1_000_000.0),
+			"Decision state not cached yet. Wait for the next scan or use /why SYMBOL.",
+		)
+	case strings.HasPrefix(cmd, "/suggest "):
+		if len(fields) < 3 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		side, ok := parseUserPositionSide(fields[2])
+		if sym == "" || !ok {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
 		}
 		s := c.addSuggestion(sym, side, "telegram", 0)
 		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), side),
+			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
 			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
 			"Candidate aging/freshness will be relaxed for this symbol only",
 			"Risk, liquidity, session, and sizing gates still apply",
@@ -18401,19 +19083,19 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
 	case strings.HasPrefix(cmd, "/trade "):
 		if len(fields) < 3 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE [LEV]</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
-		side := strings.ToUpper(strings.TrimSpace(fields[2]))
-		if sym == "" || (side != "BUY" && side != "SELL") {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL SIDE [LEV]</code>")
+		side, ok := parseUserPositionSide(fields[2])
+		if sym == "" || !ok {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
 		}
 		preferredLev := 0
 		if len(fields) >= 4 {
 			lev, ok := allowedOperatorLeverage(fields[3])
 			if !ok {
 				return notify.BuildEventHTML("❓", "LEV USAGE",
-					"<code>/trade SYMBOL SIDE [LEV]</code>",
+					"<code>/trade SYMBOL LONG|SHORT [LEV]</code>",
 					"Allowed leverage values: <code>20x</code>, <code>10x</code>, <code>5x</code>, <code>3x</code>",
 				)
 			}
@@ -18434,7 +19116,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			modeLabel = "LIVE"
 		}
 		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), side),
+			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
 			fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
 			fmt.Sprintf("<b>Priority TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
 			"Priority watch is armed for this symbol and side with elevated watcher cadence.",
@@ -18446,13 +19128,38 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		if d, ok := c.getDecision(sym); ok {
 			lines = append(lines, fmt.Sprintf("<b>Latest:</b> side=%s reason=%s grade=%s score=%.2f slope=%+.3f",
-				d.Side, firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
+				displayPositionSide(d.Side), firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
 		}
 		if meta, ok := c.getMeta()[sym]; ok {
 			lines = append(lines, fmt.Sprintf("<b>Snapshot:</b> dayUTC=%.2f%% | utc4h=%.2f%% | utc1h=%.2f%% | 24h=%.2f%% | vol=%.2fM | last=%s",
 				meta.DayUTC24h, meta.UTC4hPct, meta.UTC1hPct, meta.Move24h, meta.VolumeUSD/1_000_000.0, fmtPrice(meta.LastPrice)))
 		}
 		return notify.BuildEventHTML("🎯", "TRADE REQUEST ARMED", lines...)
+	case strings.HasPrefix(cmd, "/protect "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/protect SYMBOL</code>")
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "PROTECT", "live execution manager unavailable")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		p, ok := c.execMgr.trackedPosition(sym)
+		if !ok || p == nil || !c.execMgr.isActive(p) {
+			return notify.BuildEventHTML("ℹ️", "PROTECT", fmt.Sprintf("No active position for %s", cleanSymbol(sym)))
+		}
+		p.ProtectionPending = true
+		p.ProtectionRetryAfter = time.Now().UTC()
+		if err := c.execMgr.placeOrReplaceStop(p); err != nil {
+			return notify.BuildEventHTML("⚠️", "PROTECT",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
+				fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
+				fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+			)
+		}
+		return notify.BuildEventHTML("✅", "PROTECT",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
+			fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
+		)
 	case strings.HasPrefix(cmd, "/pause"):
 		if c.safety.pauseFile == "" {
 			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")
@@ -18465,9 +19172,9 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		_ = os.Remove(c.safety.pauseFile)
 		return notify.BuildEventHTML("▶️", "ENTRIES RESUMED", "New entries are enabled")
-	case strings.HasPrefix(cmd, "/close "):
+	case strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "):
 		if len(fields) < 2 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/flatten SYMBOL</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		if sym == "" {

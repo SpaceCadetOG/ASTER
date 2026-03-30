@@ -28,7 +28,7 @@ func TestComputeHybridStopLongUsesStructureAndBuffer(t *testing.T) {
 	}
 }
 
-func TestComputeHybridStopRejectsWideStops(t *testing.T) {
+func TestComputeHybridStopClampsWideStops(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MaxWidthPct = 1.0
@@ -42,12 +42,15 @@ func TestComputeHybridStopRejectsWideStops(t *testing.T) {
 		Template:      StopTemplateReversalExhaustion,
 	}
 	res := ComputeHybridStop(cfg, in)
-	if !res.Rejected || res.RejectReason != "hybrid_stop_too_wide" {
-		t.Fatalf("expected wide-stop rejection, got %+v", res)
+	if res.Rejected {
+		t.Fatalf("expected wide-stop clamp, got %+v", res)
+	}
+	if res.StopDistancePct > cfg.MaxWidthPct+1e-9 {
+		t.Fatalf("expected stop width <= %.2f, got %+v", cfg.MaxWidthPct, res)
 	}
 }
 
-func TestComputeHybridStopRejectsPoorRR(t *testing.T) {
+func TestComputeHybridStopAllowsPoorRR(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MinRRToTP1 = 1.5
@@ -61,12 +64,12 @@ func TestComputeHybridStopRejectsPoorRR(t *testing.T) {
 		Template:     StopTemplateContinuationImpulse,
 	}
 	res := ComputeHybridStop(cfg, in)
-	if !res.Rejected || res.RejectReason != "hybrid_stop_rr_too_low" {
-		t.Fatalf("expected rr rejection, got %+v", res)
+	if res.Rejected {
+		t.Fatalf("expected rr-low plan to continue, got %+v", res)
 	}
 }
 
-func TestComputeHybridStopSoftRejectsWideEliteStarter(t *testing.T) {
+func TestComputeHybridStopClampsWideEliteStarter(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MaxWidthPct = 8.0
@@ -84,17 +87,17 @@ func TestComputeHybridStopSoftRejectsWideEliteStarter(t *testing.T) {
 	}
 	res := ComputeHybridStop(cfg, in)
 	if res.Rejected {
-		t.Fatalf("expected starter-only soft reject, got %+v", res)
-	}
-	if !res.StarterOnly || res.RejectReason != "hybrid_stop_too_wide" {
-		t.Fatalf("expected starter-only wide-stop downgrade, got %+v", res)
+		t.Fatalf("expected usable clamped stop, got %+v", res)
 	}
 	if res.StopPrice <= 0 {
 		t.Fatalf("expected usable stop price, got %+v", res)
 	}
+	if res.StopDistancePct > cfg.MaxWidthPct+1e-9 {
+		t.Fatalf("expected stop width <= %.2f, got %+v", cfg.MaxWidthPct, res)
+	}
 }
 
-func TestComputeHybridStopSoftRejectsElitePoorRR(t *testing.T) {
+func TestComputeHybridStopAllowsElitePoorRR(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MinRRToTP1 = 1.5
@@ -112,14 +115,11 @@ func TestComputeHybridStopSoftRejectsElitePoorRR(t *testing.T) {
 	}
 	res := ComputeHybridStop(cfg, in)
 	if res.Rejected {
-		t.Fatalf("expected starter-only rr soft reject, got %+v", res)
-	}
-	if !res.StarterOnly || res.RejectReason != "hybrid_stop_rr_too_low" {
-		t.Fatalf("expected starter-only rr downgrade, got %+v", res)
+		t.Fatalf("expected rr-low elite plan to continue, got %+v", res)
 	}
 }
 
-func TestComputeHybridStopStillRejectsAbsurdWideEliteStop(t *testing.T) {
+func TestComputeHybridStopClampsAbsurdWideEliteStop(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	cfg.MaxWidthPct = 8.0
@@ -136,7 +136,10 @@ func TestComputeHybridStopStillRejectsAbsurdWideEliteStop(t *testing.T) {
 		EliteCandidate: true,
 	}
 	res := ComputeHybridStop(cfg, in)
-	if !res.Rejected || res.RejectReason != "hybrid_stop_too_wide" {
-		t.Fatalf("expected absurd width hard reject, got %+v", res)
+	if res.Rejected {
+		t.Fatalf("expected absurd width to clamp, got %+v", res)
+	}
+	if res.StopDistancePct > cfg.MaxWidthPct+1e-9 {
+		t.Fatalf("expected stop width <= %.2f, got %+v", cfg.MaxWidthPct, res)
 	}
 }

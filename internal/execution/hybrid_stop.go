@@ -155,28 +155,20 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 		reason += "+min_width"
 	}
 	if maxWidthPct > 0 && distPct > maxWidthPct {
-		softMaxPct := cfg.SoftRejectMaxWidthPct / 100.0
-		if cfg.SoftRejectEnable && in.EliteCandidate && softMaxPct > 0 && distPct <= softMaxPct {
-			res.StarterOnly = true
-			res.RejectReason = appendRejectReason(res.RejectReason, "hybrid_stop_too_wide")
+		if side == "BUY" {
+			stopPrice = in.Entry * (1 - maxWidthPct)
 		} else {
-			res.Rejected = true
-			res.RejectReason = "hybrid_stop_too_wide"
-			return res
+			stopPrice = in.Entry * (1 + maxWidthPct)
 		}
+		dist = math.Abs(in.Entry - stopPrice)
+		distPct = dist / in.Entry
+		reason += "+max_width"
 	}
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)
 		rr := reward / maxFloat(dist, 1e-9)
 		if rr < cfg.MinRRToTP1 {
-			if cfg.SoftRejectEnable && in.EliteCandidate && cfg.SoftRejectMinRRToTP1 > 0 && rr >= cfg.SoftRejectMinRRToTP1 {
-				res.StarterOnly = true
-				res.RejectReason = appendRejectReason(res.RejectReason, "hybrid_stop_rr_too_low")
-			} else {
-				res.Rejected = true
-				res.RejectReason = "hybrid_stop_rr_too_low"
-				return res
-			}
+			reason += "+rr_low"
 		}
 	}
 

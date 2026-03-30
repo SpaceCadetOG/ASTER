@@ -700,9 +700,17 @@ func (t *missedTracker) Update(now time.Time, meta map[string]symbolMeta, longCu
 			if ok {
 				if cur.State == inplay.StateExhausted {
 					expireReason = "exhaustion"
+				} else if cur.ScoreOffPeakPct > 20 || cur.FollowThroughDecayScore > 0.55 {
+					expireReason = "volume_collapsed"
+				} else if cur.Rank > 0 && opp.BestRank > 0 && cur.Rank < opp.BestRank*0.70 {
+					expireReason = "rank_faded"
+				} else if cur.TimeInStateMin > envFloat("LIVE_LATE_CYCLE_MAX_STATE_MIN", 20.0) && cur.ScoreSlope < 0.02 {
+					expireReason = "late_cycle"
 				} else if cur.ScoreSlope < -0.05 {
 					expireReason = "lost_momentum"
 				}
+			} else if len(opp.RejectedReasons) >= 3 {
+				expireReason = "soft_block_stack_too_heavy"
 			}
 		}
 		if expireReason == "" {
