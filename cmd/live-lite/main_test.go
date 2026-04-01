@@ -2022,6 +2022,21 @@ func TestSessionPhaseUTCUsesUTCWindows(t *testing.T) {
 	}
 }
 
+func TestSessionTagUsesMajorMarketLabels(t *testing.T) {
+	if got := sessionTag(time.Date(2026, 3, 25, 3, 0, 0, 0, time.UTC)); got != "ASIA_BREAK" {
+		t.Fatalf("expected ASIA_BREAK at Tokyo lunch, got %s", got)
+	}
+	if got := sessionTag(time.Date(2026, 3, 25, 8, 0, 0, 0, time.UTC)); got != "ASIA_EUROPE_OVERLAP" {
+		t.Fatalf("expected ASIA_EUROPE_OVERLAP at London open with Asia still active, got %s", got)
+	}
+	if got := sessionTag(time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)); got != "EUROPE_US_OVERLAP" {
+		t.Fatalf("expected EUROPE_US_OVERLAP during London/NY cash overlap, got %s", got)
+	}
+	if got := sessionTag(time.Date(2026, 3, 25, 22, 0, 0, 0, time.UTC)); got != "GLOBAL_OFF_HOURS" {
+		t.Fatalf("expected GLOBAL_OFF_HOURS after major cash sessions, got %s", got)
+	}
+}
+
 func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
 	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
 	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")

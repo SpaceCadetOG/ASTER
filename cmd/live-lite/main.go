@@ -183,6 +183,17 @@ const (
 	sessionNYExpand     utcSessionPhase = "NY_EXPAND"
 )
 
+type majorMarketVenue struct {
+	Name       string
+	Timezone   string
+	OpenHour   int
+	OpenMin    int
+	CloseHour  int
+	CloseMin   int
+	BreakStart int
+	BreakEnd   int
+}
+
 type candidateLifecycleConfig struct {
 	Enable        bool
 	ArmScans      int
@@ -17308,6 +17319,87 @@ func sessionPhaseUTC(ts time.Time) utcSessionPhase {
 	}
 }
 
+var majorMarketVenues = []majorMarketVenue{
+	{Name: "ASX", Timezone: "Australia/Sydney", OpenHour: 10, OpenMin: 0, CloseHour: 16, CloseMin: 0},
+	{Name: "TSE", Timezone: "Asia/Tokyo", OpenHour: 9, OpenMin: 0, CloseHour: 15, CloseMin: 0, BreakStart: 11*60 + 30, BreakEnd: 12*60 + 30},
+	{Name: "HKEX", Timezone: "Asia/Hong_Kong", OpenHour: 9, OpenMin: 30, CloseHour: 16, CloseMin: 0, BreakStart: 12 * 60, BreakEnd: 13 * 60},
+	{Name: "SSE", Timezone: "Asia/Shanghai", OpenHour: 9, OpenMin: 30, CloseHour: 15, CloseMin: 0, BreakStart: 11*60 + 30, BreakEnd: 13 * 60},
+	{Name: "SZSE", Timezone: "Asia/Shanghai", OpenHour: 9, OpenMin: 30, CloseHour: 15, CloseMin: 0, BreakStart: 11*60 + 30, BreakEnd: 13 * 60},
+	{Name: "SGX", Timezone: "Asia/Singapore", OpenHour: 9, OpenMin: 0, CloseHour: 17, CloseMin: 0},
+	{Name: "NSE", Timezone: "Asia/Kolkata", OpenHour: 9, OpenMin: 15, CloseHour: 15, CloseMin: 30},
+	{Name: "LSE", Timezone: "Europe/London", OpenHour: 8, OpenMin: 0, CloseHour: 16, CloseMin: 30},
+	{Name: "XETRA", Timezone: "Europe/Berlin", OpenHour: 9, OpenMin: 0, CloseHour: 17, CloseMin: 30},
+	{Name: "EURONEXT", Timezone: "Europe/Paris", OpenHour: 9, OpenMin: 0, CloseHour: 17, CloseMin: 30},
+	{Name: "NYSE", Timezone: "America/New_York", OpenHour: 9, OpenMin: 30, CloseHour: 16, CloseMin: 0},
+	{Name: "NASDAQ", Timezone: "America/New_York", OpenHour: 9, OpenMin: 30, CloseHour: 16, CloseMin: 0},
+	{Name: "TSX", Timezone: "America/Toronto", OpenHour: 9, OpenMin: 30, CloseHour: 16, CloseMin: 0},
+}
+
+func marketVenueStatus(ts time.Time, venue majorMarketVenue) string {
+	loc, err := time.LoadLocation(venue.Timezone)
+	if err != nil {
+		return "closed"
+	}
+	local := ts.In(loc)
+	switch local.Weekday() {
+	case time.Saturday, time.Sunday:
+		return "closed"
+	}
+	curMin := local.Hour()*60 + local.Minute()
+	openMin := venue.OpenHour*60 + venue.OpenMin
+	closeMin := venue.CloseHour*60 + venue.CloseMin
+	if venue.BreakEnd > venue.BreakStart && curMin >= venue.BreakStart && curMin < venue.BreakEnd {
+		return "break"
+	}
+	if curMin >= openMin && curMin < closeMin {
+		return "open"
+	}
+	return "closed"
+}
+
+func sessionTagFromMajorMarkets(ts time.Time) string {
+	asiaOpen := 0
+	asiaBreak := 0
+	europeOpen := 0
+	usOpen := 0
+	for _, venue := range majorMarketVenues {
+		status := marketVenueStatus(ts, venue)
+		switch venue.Name {
+		case "ASX", "TSE", "HKEX", "SSE", "SZSE", "SGX", "NSE":
+			if status == "open" {
+				asiaOpen++
+			}
+			if status == "break" {
+				asiaBreak++
+			}
+		case "LSE", "XETRA", "EURONEXT":
+			if status == "open" {
+				europeOpen++
+			}
+		case "NYSE", "NASDAQ", "TSX":
+			if status == "open" {
+				usOpen++
+			}
+		}
+	}
+	switch {
+	case europeOpen > 0 && usOpen > 0:
+		return "EUROPE_US_OVERLAP"
+	case asiaOpen > 0 && europeOpen > 0:
+		return "ASIA_EUROPE_OVERLAP"
+	case usOpen > 0:
+		return "NEW_YORK_CASH"
+	case europeOpen > 0:
+		return "EUROPE_CASH"
+	case asiaBreak > 0:
+		return "ASIA_BREAK"
+	case asiaOpen > 0:
+		return "ASIA_CASH"
+	default:
+		return "GLOBAL_OFF_HOURS"
+	}
+}
+
 func sessionLowLiquidity(phase utcSessionPhase) bool {
 	return phase == sessionAsiaDev || phase == sessionUTCOffHours
 }
@@ -17347,7 +17439,7 @@ func markLivePositionClosed(p *livePosition, now time.Time, reason string) {
 }
 
 func sessionTag(ts time.Time) string {
-	return string(sessionPhaseUTC(ts))
+	return sessionTagFromMajorMarkets(ts)
 }
 
 func newPayoutManager() *payoutManager {
