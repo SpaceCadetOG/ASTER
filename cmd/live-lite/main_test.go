@@ -114,6 +114,34 @@ func TestLoadAccountReportConfigUsesSaferRefreshDefault(t *testing.T) {
 	}
 }
 
+func TestFetchAccountSnapshotUsesFreshUserDataState(t *testing.T) {
+	state := aster.NewUserDataState()
+	state.ApplyAccountUpdateTestOnly(asterUserDataUpdateForTest())
+	snap, err := fetchAccountSnapshot(nil, state, nil)
+	if err != nil {
+		t.Fatalf("expected user-data snapshot without rest error, got %v", err)
+	}
+	if snap.AvailableUSDT <= 0 {
+		t.Fatalf("expected available usdt from user-data snapshot, got %.2f", snap.AvailableUSDT)
+	}
+	if len(snap.Positions) != 1 || snap.Positions[0].Symbol != "BTCUSDT" {
+		t.Fatalf("expected one BTCUSDT position from user-data snapshot, got %+v", snap.Positions)
+	}
+}
+
+func asterUserDataUpdateForTest() aster.UserDataAccountUpdateTestOnly {
+	return aster.UserDataAccountUpdateTestOnly{
+		Event:     "ACCOUNT_UPDATE",
+		EventTime: time.Now().UTC().UnixMilli(),
+		Balances: []aster.UserDataBalanceTestOnly{
+			{Asset: "USDT", WalletBalance: "100.00", CrossWallet: "80.00", BalanceChange: "0"},
+		},
+		Positions: []aster.UserDataPositionTestOnly{
+			{Symbol: "BTCUSDT", PositionAmt: "0.01", EntryPrice: "80000", UnrealizedPnL: "5.5", IsolatedWallet: "20", PositionSide: "LONG"},
+		},
+	}
+}
+
 func TestInHourWindow(t *testing.T) {
 	if !inHourWindow(0, 0, 1) {
 		t.Fatalf("expected 00 hour to be in 00-01")

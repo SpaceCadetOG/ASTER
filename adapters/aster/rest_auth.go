@@ -265,6 +265,10 @@ func (r *RESTAuth) doSignedPOST(path string, vals url.Values) ([]byte, error) {
 	return r.doSigned(http.MethodPost, path, vals)
 }
 
+func (r *RESTAuth) doSignedPUT(path string, vals url.Values) ([]byte, error) {
+	return r.doSigned(http.MethodPut, path, vals)
+}
+
 func (r *RESTAuth) doSignedDELETE(path string, vals url.Values) ([]byte, error) {
 	return r.doSigned(http.MethodDelete, path, vals)
 }

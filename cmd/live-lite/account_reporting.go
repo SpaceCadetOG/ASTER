@@ -131,9 +131,29 @@ func mapFromAny(v any) map[string]any {
 	return row
 }
 
-func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager TransferManager) (AccountSummary, error) {
+func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager TransferManager, userData *aster.UserDataState) (AccountSummary, error) {
 	now := time.Now().UTC()
 	out := AccountSummary{Timestamp: now}
+	if snap, ok := userDataSnapshotFresh(userData); ok {
+		if usdt, exists := snap.Balances["USDT"]; exists {
+			out.PerpWalletBalance = usdt.WalletBalance
+			out.PerpAvailable = firstPositive(usdt.CrossWallet, usdt.WalletBalance)
+			out.PerpEquity = out.PerpWalletBalance
+		}
+		for _, p := range snap.Positions {
+			if abs(p.PositionAmt) <= 1e-10 {
+				continue
+			}
+			out.OpenPositions++
+			out.PerpUnrealizedPnL += p.UnrealizedPnL
+			out.MarginUsed += maxFloat(p.IsolatedWallet, 0)
+		}
+		if out.PerpWalletBalance > 0 || out.OpenPositions > 0 {
+			out.PerpEquity += out.PerpUnrealizedPnL
+			out.MissingFields = []string{"open_orders", "perp_realized_pnl", "spot_equity", "total_equity"}
+			return out, nil
+		}
+	}
 	if err := signedUserDataBackoffCheck(now); err != nil {
 		return out, err
 	}
@@ -485,7 +505,7 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 	if m == nil || m.rest == nil {
 		return
 	}
-	summary, err := fetchNormalizedAccountSummary(m.rest, m.transferManager)
+	summary, err := fetchNormalizedAccountSummary(m.rest, m.transferManager, m.userDataState)
 	if err != nil {
 		m.mu.Lock()
 		if m.accountReport.Generated.IsZero() {

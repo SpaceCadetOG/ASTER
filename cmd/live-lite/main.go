@@ -413,22 +413,22 @@ func (m *runtimeModeController) setPaper() {
 }
 
 type operatorDecision struct {
-	Symbol       string
-	Side         string
-	Grade        string
-	Score        float64
-	Slope        float64
-	Strategy     string
-	Confidence   float64
-	RawConfidence float64
+	Symbol             string
+	Side               string
+	Grade              string
+	Score              float64
+	Slope              float64
+	Strategy           string
+	Confidence         float64
+	RawConfidence      float64
 	AdjustedConfidence float64
-	RejectReason string
-	BlockerClass string
-	TopBlockers  []string
-	StarterAllowed bool
-	PersistenceStatus string
-	State        string
-	UpdatedAt    time.Time
+	RejectReason       string
+	BlockerClass       string
+	TopBlockers        []string
+	StarterAllowed     bool
+	PersistenceStatus  string
+	State              string
+	UpdatedAt          time.Time
 }
 
 type RejectClass string
@@ -457,9 +457,9 @@ type EntryEligibilitySummary struct {
 	FullEntryAllowed bool
 	ReentryAllowed   bool
 
-	FinalDecision string
-	FinalReason   string
-	AdjustedConfidence float64
+	FinalDecision            string
+	FinalReason              string
+	AdjustedConfidence       float64
 	ConfidencePenaltyReasons []string
 }
 
@@ -765,114 +765,114 @@ const (
 )
 
 type livePosition struct {
-	Symbol                 string          `json:"symbol"`
-	Side                   string          `json:"side"`
-	State                  execState       `json:"state"`
-	CreatedAt              time.Time       `json:"createdAt"`
-	UpdatedAt              time.Time       `json:"updatedAt"`
-	ClosedAt               time.Time       `json:"closedAt,omitempty"`
-	CloseReason            string          `json:"closeReason,omitempty"`
-	EntryOrderID           int64           `json:"entryOrderId"`
-	EntryPrice             float64         `json:"entryPrice"`
-	ManageAnchorPrice      float64         `json:"manageAnchorPrice,omitempty"`
-	Qty                    float64         `json:"qty"`
-	FilledQty              float64         `json:"filledQty"`
-	RemainingQty           float64         `json:"remainingQty"`
-	Margin                 float64         `json:"margin"`
-	DeployedMargin         float64         `json:"deployedMargin,omitempty"`
-	Leverage               int             `json:"leverage"`
-	AddCount               int             `json:"addCount,omitempty"`
-	StarterOnly            bool            `json:"starterOnly,omitempty"`
-	AddLockedUntilConfirm  bool            `json:"addLockedUntilConfirm,omitempty"`
-	StopPrice              float64         `json:"stopPrice"`
-	TP1Price               float64         `json:"tp1Price"`
-	TP2Price               float64         `json:"tp2Price"`
-	TP3Price               float64         `json:"tp3Price"`
-	TP1Qty                 float64         `json:"tp1Qty"`
-	TP2Qty                 float64         `json:"tp2Qty"`
-	TP3Qty                 float64         `json:"tp3Qty"`
-	TP1FilledQty           float64         `json:"tp1FilledQty,omitempty"`
-	TP2FilledQty           float64         `json:"tp2FilledQty,omitempty"`
-	TP3FilledQty           float64         `json:"tp3FilledQty,omitempty"`
-	StopFilledQty          float64         `json:"stopFilledQty,omitempty"`
-	HitTP1                 bool            `json:"hitTp1,omitempty"`
-	HitTP2                 bool            `json:"hitTp2,omitempty"`
-	HitTP3                 bool            `json:"hitTp3,omitempty"`
-	StopOrderID            int64           `json:"stopOrderId"`
-	TP1OrderID             int64           `json:"tp1OrderId"`
-	TP2OrderID             int64           `json:"tp2OrderId"`
-	TP3OrderID             int64           `json:"tp3OrderId"`
-	TrailOn                bool            `json:"trailOn"`
-	TrailRef               float64         `json:"trailRef"`
-	TrailStop              float64         `json:"trailStop"`
-	TrailCandidateRef      float64         `json:"trailCandidateRef,omitempty"`
-	TrailCandidateStop     float64         `json:"trailCandidateStop,omitempty"`
-	TrailCandidateLevel    float64         `json:"trailCandidateLevel,omitempty"`
-	TrailCandidateAt       time.Time       `json:"trailCandidateAt,omitempty"`
-	VPSetup                string          `json:"vpSetup,omitempty"`
-	VPLevel                float64         `json:"vpLevel,omitempty"`
-	VPTargetLevel          float64         `json:"vpTargetLevel,omitempty"`
-	VPStopMode             string          `json:"vpStopMode,omitempty"`
-	VPTargetMode           string          `json:"vpTargetMode,omitempty"`
-	RejectReason           string          `json:"rejectReason,omitempty"`
-	CustomRiskPct          float64         `json:"customRiskPct,omitempty"`
-	CustomTP1R             float64         `json:"customTp1R,omitempty"`
-	CustomTP2R             float64         `json:"customTp2R,omitempty"`
-	EntryReason            string          `json:"entryReason,omitempty"`
-	EntrySource            string          `json:"entrySource,omitempty"`
-	EntryGrade             string          `json:"entryGrade,omitempty"`
-	EntryState             string          `json:"entryState,omitempty"`
-	EntryTrigger           string          `json:"entryTrigger,omitempty"`
-	ExitProfile            string          `json:"exitProfile,omitempty"`
-	EntryConf              float64         `json:"entryConf,omitempty"`
-	DiscoveryScore         float64         `json:"discoveryScore,omitempty"`
-	TriggerScore           float64         `json:"triggerScore,omitempty"`
-	ExecutionScore         float64         `json:"executionScore,omitempty"`
-	CombinedScore          float64         `json:"combinedScore,omitempty"`
-	Sponsored              bool            `json:"sponsored,omitempty"`
-	SponsorshipScore       float64         `json:"sponsorshipScore,omitempty"`
-	WeakSponsorStreak      int             `json:"weakSponsorStreak,omitempty"`
-	StrongSponsorStreak    int             `json:"strongSponsorStreak,omitempty"`
-	LastConfluenceRefresh  time.Time       `json:"lastConfluenceRefresh,omitempty"`
-	ConfluenceRefreshCount int             `json:"confluenceRefreshCount,omitempty"`
-	EntryTags              []string        `json:"entryTags,omitempty"`
-	EntryReasons           []string        `json:"entryReasons,omitempty"`
-	EntryVolumeUSD         float64         `json:"entryVolumeUsd,omitempty"`
-	StopReason             string          `json:"stopReason,omitempty"`
-	StopDistancePct        float64         `json:"stopDistancePct,omitempty"`
-	RegimeTag              string          `json:"regimeTag,omitempty"`
-	MaxFavorableR          float64         `json:"maxFavorableR,omitempty"`
-	MaxAdverseR            float64         `json:"maxAdverseR,omitempty"`
-	StallBars              int             `json:"stallBars,omitempty"`
-	LastMark               float64         `json:"lastMark,omitempty"`
-	RealizedPnL            float64         `json:"realizedPnl,omitempty"`
-	ProtectionPending      bool            `json:"protectionPending,omitempty"`
-	ProtectionRetryAfter   time.Time       `json:"protectionRetryAfter,omitempty"`
-	ProtectionRetryCount   int             `json:"protectionRetryCount,omitempty"`
-	ProtectionFailCount    int             `json:"protectionFailCount,omitempty"`
-	ManageFailSuppressCount int            `json:"manageFailSuppressCount,omitempty"`
-	LastManageFailAt       time.Time       `json:"lastManageFailAt,omitempty"`
-	LastManageFailCause    string          `json:"lastManageFailCause,omitempty"`
-	ManualManageState      string          `json:"manualManageState,omitempty"`
-	Managed                bool            `json:"managed,omitempty"`
-	Protected              bool            `json:"protected,omitempty"`
-	UnknownEntryChecks     int             `json:"unknownEntryChecks,omitempty"`
-	UnknownExitChecks      int             `json:"unknownExitChecks,omitempty"`
-	PendingAddOrderID      int64           `json:"pendingAddOrderId,omitempty"`
-	PendingAddPrice        float64         `json:"pendingAddPrice,omitempty"`
-	PendingAddQty          float64         `json:"pendingAddQty,omitempty"`
-	PendingAddFilledQty    float64         `json:"pendingAddFilledQty,omitempty"`
-	PendingAddMargin       float64         `json:"pendingAddMargin,omitempty"`
-	PendingAddCreatedAt    time.Time       `json:"pendingAddCreatedAt,omitempty"`
-	PendingAddEntryReason  string          `json:"pendingAddEntryReason,omitempty"`
-	ProfitSweptUSDT        float64         `json:"profitSweptUsdt,omitempty"`
-	ReentryCount           int             `json:"reentryCount,omitempty"`
-	ExhaustionExit         bool            `json:"exhaustionExit,omitempty"`
-	ProtectionStage        protectionStage `json:"protectionStage,omitempty"`
-	FirstProtectAt         time.Time       `json:"firstProtectAt,omitempty"`
-	ProtectedStop          float64         `json:"protectedStop,omitempty"`
-	MaxGivebackR           float64         `json:"maxGivebackR,omitempty"`
-	CaptureRatio           float64         `json:"captureRatio,omitempty"`
+	Symbol                  string          `json:"symbol"`
+	Side                    string          `json:"side"`
+	State                   execState       `json:"state"`
+	CreatedAt               time.Time       `json:"createdAt"`
+	UpdatedAt               time.Time       `json:"updatedAt"`
+	ClosedAt                time.Time       `json:"closedAt,omitempty"`
+	CloseReason             string          `json:"closeReason,omitempty"`
+	EntryOrderID            int64           `json:"entryOrderId"`
+	EntryPrice              float64         `json:"entryPrice"`
+	ManageAnchorPrice       float64         `json:"manageAnchorPrice,omitempty"`
+	Qty                     float64         `json:"qty"`
+	FilledQty               float64         `json:"filledQty"`
+	RemainingQty            float64         `json:"remainingQty"`
+	Margin                  float64         `json:"margin"`
+	DeployedMargin          float64         `json:"deployedMargin,omitempty"`
+	Leverage                int             `json:"leverage"`
+	AddCount                int             `json:"addCount,omitempty"`
+	StarterOnly             bool            `json:"starterOnly,omitempty"`
+	AddLockedUntilConfirm   bool            `json:"addLockedUntilConfirm,omitempty"`
+	StopPrice               float64         `json:"stopPrice"`
+	TP1Price                float64         `json:"tp1Price"`
+	TP2Price                float64         `json:"tp2Price"`
+	TP3Price                float64         `json:"tp3Price"`
+	TP1Qty                  float64         `json:"tp1Qty"`
+	TP2Qty                  float64         `json:"tp2Qty"`
+	TP3Qty                  float64         `json:"tp3Qty"`
+	TP1FilledQty            float64         `json:"tp1FilledQty,omitempty"`
+	TP2FilledQty            float64         `json:"tp2FilledQty,omitempty"`
+	TP3FilledQty            float64         `json:"tp3FilledQty,omitempty"`
+	StopFilledQty           float64         `json:"stopFilledQty,omitempty"`
+	HitTP1                  bool            `json:"hitTp1,omitempty"`
+	HitTP2                  bool            `json:"hitTp2,omitempty"`
+	HitTP3                  bool            `json:"hitTp3,omitempty"`
+	StopOrderID             int64           `json:"stopOrderId"`
+	TP1OrderID              int64           `json:"tp1OrderId"`
+	TP2OrderID              int64           `json:"tp2OrderId"`
+	TP3OrderID              int64           `json:"tp3OrderId"`
+	TrailOn                 bool            `json:"trailOn"`
+	TrailRef                float64         `json:"trailRef"`
+	TrailStop               float64         `json:"trailStop"`
+	TrailCandidateRef       float64         `json:"trailCandidateRef,omitempty"`
+	TrailCandidateStop      float64         `json:"trailCandidateStop,omitempty"`
+	TrailCandidateLevel     float64         `json:"trailCandidateLevel,omitempty"`
+	TrailCandidateAt        time.Time       `json:"trailCandidateAt,omitempty"`
+	VPSetup                 string          `json:"vpSetup,omitempty"`
+	VPLevel                 float64         `json:"vpLevel,omitempty"`
+	VPTargetLevel           float64         `json:"vpTargetLevel,omitempty"`
+	VPStopMode              string          `json:"vpStopMode,omitempty"`
+	VPTargetMode            string          `json:"vpTargetMode,omitempty"`
+	RejectReason            string          `json:"rejectReason,omitempty"`
+	CustomRiskPct           float64         `json:"customRiskPct,omitempty"`
+	CustomTP1R              float64         `json:"customTp1R,omitempty"`
+	CustomTP2R              float64         `json:"customTp2R,omitempty"`
+	EntryReason             string          `json:"entryReason,omitempty"`
+	EntrySource             string          `json:"entrySource,omitempty"`
+	EntryGrade              string          `json:"entryGrade,omitempty"`
+	EntryState              string          `json:"entryState,omitempty"`
+	EntryTrigger            string          `json:"entryTrigger,omitempty"`
+	ExitProfile             string          `json:"exitProfile,omitempty"`
+	EntryConf               float64         `json:"entryConf,omitempty"`
+	DiscoveryScore          float64         `json:"discoveryScore,omitempty"`
+	TriggerScore            float64         `json:"triggerScore,omitempty"`
+	ExecutionScore          float64         `json:"executionScore,omitempty"`
+	CombinedScore           float64         `json:"combinedScore,omitempty"`
+	Sponsored               bool            `json:"sponsored,omitempty"`
+	SponsorshipScore        float64         `json:"sponsorshipScore,omitempty"`
+	WeakSponsorStreak       int             `json:"weakSponsorStreak,omitempty"`
+	StrongSponsorStreak     int             `json:"strongSponsorStreak,omitempty"`
+	LastConfluenceRefresh   time.Time       `json:"lastConfluenceRefresh,omitempty"`
+	ConfluenceRefreshCount  int             `json:"confluenceRefreshCount,omitempty"`
+	EntryTags               []string        `json:"entryTags,omitempty"`
+	EntryReasons            []string        `json:"entryReasons,omitempty"`
+	EntryVolumeUSD          float64         `json:"entryVolumeUsd,omitempty"`
+	StopReason              string          `json:"stopReason,omitempty"`
+	StopDistancePct         float64         `json:"stopDistancePct,omitempty"`
+	RegimeTag               string          `json:"regimeTag,omitempty"`
+	MaxFavorableR           float64         `json:"maxFavorableR,omitempty"`
+	MaxAdverseR             float64         `json:"maxAdverseR,omitempty"`
+	StallBars               int             `json:"stallBars,omitempty"`
+	LastMark                float64         `json:"lastMark,omitempty"`
+	RealizedPnL             float64         `json:"realizedPnl,omitempty"`
+	ProtectionPending       bool            `json:"protectionPending,omitempty"`
+	ProtectionRetryAfter    time.Time       `json:"protectionRetryAfter,omitempty"`
+	ProtectionRetryCount    int             `json:"protectionRetryCount,omitempty"`
+	ProtectionFailCount     int             `json:"protectionFailCount,omitempty"`
+	ManageFailSuppressCount int             `json:"manageFailSuppressCount,omitempty"`
+	LastManageFailAt        time.Time       `json:"lastManageFailAt,omitempty"`
+	LastManageFailCause     string          `json:"lastManageFailCause,omitempty"`
+	ManualManageState       string          `json:"manualManageState,omitempty"`
+	Managed                 bool            `json:"managed,omitempty"`
+	Protected               bool            `json:"protected,omitempty"`
+	UnknownEntryChecks      int             `json:"unknownEntryChecks,omitempty"`
+	UnknownExitChecks       int             `json:"unknownExitChecks,omitempty"`
+	PendingAddOrderID       int64           `json:"pendingAddOrderId,omitempty"`
+	PendingAddPrice         float64         `json:"pendingAddPrice,omitempty"`
+	PendingAddQty           float64         `json:"pendingAddQty,omitempty"`
+	PendingAddFilledQty     float64         `json:"pendingAddFilledQty,omitempty"`
+	PendingAddMargin        float64         `json:"pendingAddMargin,omitempty"`
+	PendingAddCreatedAt     time.Time       `json:"pendingAddCreatedAt,omitempty"`
+	PendingAddEntryReason   string          `json:"pendingAddEntryReason,omitempty"`
+	ProfitSweptUSDT         float64         `json:"profitSweptUsdt,omitempty"`
+	ReentryCount            int             `json:"reentryCount,omitempty"`
+	ExhaustionExit          bool            `json:"exhaustionExit,omitempty"`
+	ProtectionStage         protectionStage `json:"protectionStage,omitempty"`
+	FirstProtectAt          time.Time       `json:"firstProtectAt,omitempty"`
+	ProtectedStop           float64         `json:"protectedStop,omitempty"`
+	MaxGivebackR            float64         `json:"maxGivebackR,omitempty"`
+	CaptureRatio            float64         `json:"captureRatio,omitempty"`
 }
 
 type liveExecStore struct {
@@ -939,6 +939,8 @@ type liveExecManager struct {
 	wsLevels             int
 	wsSpeed              string
 	liveAccount          liveAccountSnapshot
+	userDataState        *aster.UserDataState
+	userDataCancel       context.CancelFunc
 	marketStates         map[string]*aster.MarketState
 	marketCancels        map[string]context.CancelFunc
 	featureCache         *featureRuntimeCache
@@ -2021,7 +2023,12 @@ func main() {
 
 		var acct accountSnapshot
 		if rest != nil && showAccount {
-			snap, err := fetchAccountSnapshot(rest, accountAssets)
+			snap, err := fetchAccountSnapshot(rest, func() *aster.UserDataState {
+				if execMgr != nil {
+					return execMgr.userDataState
+				}
+				return nil
+			}(), accountAssets)
 			if err != nil {
 				fmt.Println("live-lite: account snapshot error:", err)
 			} else {
@@ -6077,6 +6084,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	}
 	wsSpeed := strings.TrimSpace(envStr("LIVE_ACCOUNT_WS_SPEED", "100ms"))
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
+	enableUserDataStream := envBool("LIVE_USERDATA_STREAM_ENABLE", true)
 
 	m := &liveExecManager{
 		rest:                 rest,
@@ -6188,6 +6196,16 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 			p.EntrySource = "BOT"
 		}
 	}
+	if enableUserDataStream {
+		state := aster.NewUserDataState()
+		ctx, cancel := context.WithCancel(context.Background())
+		m.userDataState = state
+		m.userDataCancel = cancel
+		client := aster.NewUserDataStreamClient(rest, state)
+		go func() {
+			_ = client.Run(ctx)
+		}()
+	}
 	go m.runLiveAccountSnapshotLoop()
 	go m.runAccountReportingLoop()
 	return m
@@ -6263,7 +6281,7 @@ func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, c
 	req.Failure = strings.TrimSpace(cause)
 	req.PromptedAt = now
 	req.DecidedAt = time.Time{}
-		req.Status = manualRequestPending
+	req.Status = manualRequestPending
 	m.mu.Lock()
 	m.manualRequests[req.Key] = req
 	m.mu.Unlock()
@@ -8155,7 +8173,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("➕", "ADD SUBMITTED",
-			fmt.Sprintf("<b>%s %s</b>", rawSym, displayPositionSide(existing.Side)),
+				fmt.Sprintf("<b>%s %s</b>", rawSym, displayPositionSide(existing.Side)),
 				fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
 				fmt.Sprintf("<b>Deployed:</b> %.2f -> %.2f USDT", existing.DeployedMargin, existing.DeployedMargin+margin),
 			))
@@ -16098,7 +16116,77 @@ func orderbookRiskMetrics(rawSymbol, side string, depth map[string]aster.OrderBo
 	return 0, 0
 }
 
-func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapshot, error) {
+func userDataSnapshotFresh(state *aster.UserDataState) (aster.UserDataSnapshot, bool) {
+	if state == nil {
+		return aster.UserDataSnapshot{}, false
+	}
+	snap := state.Snapshot()
+	if snap.UpdatedAt.IsZero() {
+		return aster.UserDataSnapshot{}, false
+	}
+	maxAge := time.Duration(envInt("LIVE_USERDATA_STREAM_MAX_STALE_SEC", 120)) * time.Second
+	if maxAge <= 0 {
+		maxAge = 120 * time.Second
+	}
+	if time.Since(snap.UpdatedAt) > maxAge {
+		return aster.UserDataSnapshot{}, false
+	}
+	if len(snap.Balances) == 0 && len(snap.Positions) == 0 {
+		return aster.UserDataSnapshot{}, false
+	}
+	return snap, true
+}
+
+func accountSnapshotFromUserData(snap aster.UserDataSnapshot, assets []string) accountSnapshot {
+	out := accountSnapshot{}
+	for _, asset := range assets {
+		_ = asset
+	}
+	if usdt, ok := snap.Balances["USDT"]; ok {
+		out.AvailableUSDT = firstPositive(usdt.CrossWallet, usdt.WalletBalance)
+		out.Balances = append(out.Balances, aster.Balance{
+			Asset:             "USDT",
+			Balance:           usdt.WalletBalance,
+			AvailableBalance:  firstPositive(usdt.CrossWallet, usdt.WalletBalance),
+			CrossUnPnl:        0,
+			MaxWithdrawAmount: firstPositive(usdt.CrossWallet, usdt.WalletBalance),
+		})
+	}
+	for _, p := range snap.Positions {
+		amt := p.PositionAmt
+		if abs(amt) <= 1e-10 {
+			continue
+		}
+		side := "LONG"
+		if amt < 0 {
+			side = "SHORT"
+		}
+		if p.PositionSide == "SHORT" {
+			side = "SHORT"
+		} else if p.PositionSide == "LONG" {
+			side = "LONG"
+		}
+		out.Positions = append(out.Positions, positionView{
+			Symbol:   strings.ToUpper(strings.TrimSpace(p.Symbol)),
+			Side:     side,
+			Margin:   maxFloat(p.IsolatedWallet, 0),
+			SizeAbs:  abs(amt),
+			Entry:    p.EntryPrice,
+			Mark:     0,
+			Unreal:   p.UnrealizedPnL,
+			Leverage: 0,
+		})
+	}
+	sort.Slice(out.Positions, func(i, j int) bool {
+		return out.Positions[i].Unreal > out.Positions[j].Unreal
+	})
+	return out
+}
+
+func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, assets []string) (accountSnapshot, error) {
+	if snap, ok := userDataSnapshotFresh(userData); ok {
+		return accountSnapshotFromUserData(snap, assets), nil
+	}
 	snap := accountSnapshot{}
 	now := time.Now().UTC()
 	if err := signedUserDataBackoffCheck(now); err != nil {
@@ -16172,7 +16260,7 @@ func (m *liveExecManager) refreshLiveAccountSnapshot(now time.Time) {
 	if m == nil || m.rest == nil {
 		return
 	}
-	snap, err := fetchAccountSnapshot(m.rest, m.accountAssets)
+	snap, err := fetchAccountSnapshot(m.rest, m.userDataState, m.accountAssets)
 	if err != nil {
 		return
 	}
@@ -18428,12 +18516,12 @@ func persistenceEligibilityScore(c candidate) float64 {
 
 func newEligibilitySummary(c candidate) EntryEligibilitySummary {
 	summary := EntryEligibilitySummary{
-		Symbol:           strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
-		Side:             c.Side,
-		Strat:            c.Strat,
-		Rank:             c.FinalRank,
-		Grade:            c.Entry.CurrentGrade,
-		PersistenceScore: persistenceEligibilityScore(c),
+		Symbol:             strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
+		Side:               c.Side,
+		Strat:              c.Strat,
+		Rank:               c.FinalRank,
+		Grade:              c.Entry.CurrentGrade,
+		PersistenceScore:   persistenceEligibilityScore(c),
 		AdjustedConfidence: clamp(c.Conf, 0, 1),
 	}
 	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
@@ -18891,7 +18979,11 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		if c.rest != nil {
 			assets := envCSV("LIVE_ACCOUNT_ASSETS", "")
-			snap, err := fetchAccountSnapshot(c.rest, assets)
+			var userData *aster.UserDataState
+			if c.execMgr != nil {
+				userData = c.execMgr.userDataState
+			}
+			snap, err := fetchAccountSnapshot(c.rest, userData, assets)
 			if err == nil {
 				eq := accountEquity(snap)
 				lines := []string{
