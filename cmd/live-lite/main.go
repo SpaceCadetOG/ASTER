@@ -194,6 +194,12 @@ type majorMarketVenue struct {
 	BreakEnd   int
 }
 
+type regionSessionStats struct {
+	OpenCount      int
+	BreakCount     int
+	RecentlyClosed bool
+}
+
 type candidateLifecycleConfig struct {
 	Enable        bool
 	ArmScans      int
@@ -17357,46 +17363,67 @@ func marketVenueStatus(ts time.Time, venue majorMarketVenue) string {
 	return "closed"
 }
 
-func sessionTagFromMajorMarkets(ts time.Time) string {
-	asiaOpen := 0
-	asiaBreak := 0
-	europeOpen := 0
-	usOpen := 0
-	for _, venue := range majorMarketVenues {
-		status := marketVenueStatus(ts, venue)
-		switch venue.Name {
-		case "ASX", "TSE", "HKEX", "SSE", "SZSE", "SGX", "NSE":
-			if status == "open" {
-				asiaOpen++
-			}
-			if status == "break" {
-				asiaBreak++
-			}
-		case "LSE", "XETRA", "EURONEXT":
-			if status == "open" {
-				europeOpen++
-			}
-		case "NYSE", "NASDAQ", "TSX":
-			if status == "open" {
-				usOpen++
-			}
+func marketVenueRecentlyClosed(ts time.Time, venue majorMarketVenue, within time.Duration) bool {
+	loc, err := time.LoadLocation(venue.Timezone)
+	if err != nil {
+		return false
+	}
+	local := ts.In(loc)
+	switch local.Weekday() {
+	case time.Saturday, time.Sunday:
+		return false
+	}
+	closeAt := time.Date(local.Year(), local.Month(), local.Day(), venue.CloseHour, venue.CloseMin, 0, 0, loc)
+	if local.Before(closeAt) {
+		return false
+	}
+	return local.Sub(closeAt) <= within
+}
+
+func regionStats(ts time.Time, venues ...majorMarketVenue) regionSessionStats {
+	stats := regionSessionStats{}
+	for _, venue := range venues {
+		switch marketVenueStatus(ts, venue) {
+		case "open":
+			stats.OpenCount++
+		case "break":
+			stats.BreakCount++
+		}
+		if marketVenueRecentlyClosed(ts, venue, 90*time.Minute) {
+			stats.RecentlyClosed = true
 		}
 	}
+	return stats
+}
+
+func sessionTagFromMajorMarkets(ts time.Time) string {
+	asia := regionStats(ts,
+		majorMarketVenues[0], majorMarketVenues[1], majorMarketVenues[2], majorMarketVenues[3],
+		majorMarketVenues[4], majorMarketVenues[5], majorMarketVenues[6],
+	)
+	london := regionStats(ts, majorMarketVenues[7], majorMarketVenues[8], majorMarketVenues[9])
+	us := regionStats(ts, majorMarketVenues[10], majorMarketVenues[11], majorMarketVenues[12])
 	switch {
-	case europeOpen > 0 && usOpen > 0:
-		return "EUROPE_US_OVERLAP"
-	case asiaOpen > 0 && europeOpen > 0:
-		return "ASIA_EUROPE_OVERLAP"
-	case usOpen > 0:
-		return "NEW_YORK_CASH"
-	case europeOpen > 0:
-		return "EUROPE_CASH"
-	case asiaBreak > 0:
+	case london.OpenCount > 0 && us.OpenCount > 0:
+		return "LONDON_US_OVERLAP"
+	case asia.OpenCount > 0 && london.OpenCount > 0:
+		return "ASIA_LONDON_OVERLAP"
+	case asia.BreakCount > 0:
 		return "ASIA_BREAK"
-	case asiaOpen > 0:
-		return "ASIA_CASH"
+	case us.OpenCount > 0:
+		return "US_OPEN"
+	case london.OpenCount > 0:
+		return "LONDON_OPEN"
+	case asia.OpenCount > 0:
+		return "ASIA_OPEN"
+	case us.RecentlyClosed:
+		return "US_CLOSE"
+	case london.RecentlyClosed:
+		return "LONDON_CLOSE"
+	case asia.RecentlyClosed:
+		return "ASIA_CLOSE"
 	default:
-		return "GLOBAL_OFF_HOURS"
+		return "OFF_HOURS"
 	}
 }
 
