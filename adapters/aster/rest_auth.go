@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	gethmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
 type RESTAuth struct {
@@ -352,7 +354,7 @@ func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
 	if base != "" {
 		msg = base + "&" + msg
 	}
-	sig, err := r.signAgentViaPython(msg, nonceStr)
+	sig, err := r.signAgent(msg)
 	if err != nil {
 		return "", err
 	}
@@ -360,51 +362,64 @@ func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
 	return vals.Encode(), nil
 }
 
-func (r *RESTAuth) signAgentViaPython(msg, nonceStr string) (string, error) {
-	scriptPath := filepath.Join("scripts", "aster_agent_sign.py")
-	if _, err := os.Stat(scriptPath); err != nil {
-		return "", fmt.Errorf("agent signer script missing at %s: %w", scriptPath, err)
+func (r *RESTAuth) signAgent(msg string) (string, error) {
+	keyHex := strings.TrimSpace(strings.TrimPrefix(r.privateKey, "0x"))
+	keyHex = strings.TrimSpace(strings.TrimPrefix(keyHex, "0X"))
+	if keyHex == "" {
+		return "", fmt.Errorf("agent auth requires private_key")
 	}
+	priv, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid agent private key: %w", err)
+	}
+	hash, err := asterAgentTypedDataHash(msg, r.chainID)
+	if err != nil {
+		return "", err
+	}
+	sig, err := crypto.Sign(hash, priv)
+	if err != nil {
+		return "", fmt.Errorf("sign agent payload: %w", err)
+	}
+	// Match eth_account output used by the previous Python helper.
+	sig[64] += 27
+	return "0x" + hex.EncodeToString(sig), nil
+}
 
-	py := strings.TrimSpace(os.Getenv("ASTER_PYTHON"))
-	candidates := []string{}
-	if py != "" {
-		candidates = append(candidates, py)
+func asterAgentTypedDataHash(msg string, chainID int64) ([]byte, error) {
+	if strings.TrimSpace(msg) == "" {
+		return nil, fmt.Errorf("agent signing message cannot be empty")
 	}
-	candidates = append(candidates, filepath.Join("venv", "bin", "python3"), "python3", "python")
-
-	var lastErr error
-	input := map[string]string{
-		"msg":         msg,
-		"user":        r.user,
-		"signer":      r.signer,
-		"private_key": r.privateKey,
-		"nonce":       nonceStr,
-		"chain_id":    strconv.FormatInt(r.chainID, 10),
+	if chainID <= 0 {
+		return nil, fmt.Errorf("agent signing chain id must be positive")
 	}
-	in, _ := json.Marshal(input)
-
-	for _, exe := range candidates {
-		cmd := exec.Command(exe, scriptPath)
-		cmd.Stdin = bytes.NewReader(in)
-		var out bytes.Buffer
-		var stderr bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			lastErr = fmt.Errorf("%s: %v (%s)", exe, err, strings.TrimSpace(stderr.String()))
-			continue
-		}
-		sig := strings.TrimSpace(out.String())
-		if strings.HasPrefix(strings.ToLower(sig), "0x") && len(sig) > 10 {
-			return sig, nil
-		}
-		lastErr = fmt.Errorf("%s returned invalid signature: %q", exe, sig)
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"Message": []apitypes.Type{
+				{Name: "msg", Type: "string"},
+			},
+		},
+		PrimaryType: "Message",
+		Domain: apitypes.TypedDataDomain{
+			Name:              "AsterSignTransaction",
+			Version:           "1",
+			ChainId:           gethmath.NewHexOrDecimal256(chainID),
+			VerifyingContract: "0x0000000000000000000000000000000000000000",
+		},
+		Message: apitypes.TypedDataMessage{
+			"msg": msg,
+		},
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no python runtime available for agent signing")
+	hash, _, err := apitypes.TypedDataAndHash(typedData)
+	if err != nil {
+		return nil, fmt.Errorf("hash agent typed data: %w", err)
 	}
-	return "", lastErr
+	return hash, nil
 }
 
 func (r *RESTAuth) doSignedAttempt(method, path string, vals url.Values, includeNonce bool) ([]byte, error) {
