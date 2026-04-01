@@ -1392,7 +1392,7 @@ func main() {
 			))
 		}
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
-		if !dryRun && firstNonEmpty(report.Health, "failed") != "healthy" && !envBool("LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH", false) {
+		if !dryRun && !accountHealthAllowsLiveBoot(report) && !envBool("LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH", false) {
 			fmt.Printf("live-lite: refusing live boot because account auth is unhealthy (health=%s detail=%s). Set LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1 to override.\n",
 				firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none"))
 			os.Exit(1)

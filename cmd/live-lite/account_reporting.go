@@ -726,6 +726,35 @@ func compactAccountSummaryLine(report accountReport) string {
 	return fmt.Sprintf("Account[%s]: %s", firstNonEmpty(report.Health, "healthy"), strings.Join(fields, " | "))
 }
 
+func accountHealthAllowsLiveBoot(report accountReport) bool {
+	if report.Generated.IsZero() {
+		return false
+	}
+	health := firstNonEmpty(report.Health, "failed")
+	if health == "healthy" {
+		return true
+	}
+	if health != "partial" {
+		return false
+	}
+	requiredMissing := map[string]struct{}{
+		"perp_equity":          {},
+		"perp_wallet_balance":  {},
+		"perp_available":       {},
+		"perp_unrealized_pnl":  {},
+		"open_orders":          {},
+		"perp_account_summary": {},
+		"perp_balance":         {},
+		"perp_positions":       {},
+	}
+	for _, field := range report.Summary.MissingFields {
+		if _, blocked := requiredMissing[strings.TrimSpace(field)]; blocked {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *liveExecManager) AccountDigestSection() string {
 	report := m.AccountReportSnapshot()
 	if report.Generated.IsZero() {

@@ -12,12 +12,12 @@ type Balance struct {
 
 type AccountSummary map[string]any
 
-func (r *RESTAuth) GetAgent() (map[string]any, error) {
+func (r *RESTAuth) GetAgent() (any, error) {
 	b, err := r.doSignedGET("/fapi/v3/agent", url.Values{})
 	if err != nil {
 		return nil, err
 	}
-	var out map[string]any
+	var out any
 	if err := decodeJSONNumbers(b, &out); err != nil {
 		return nil, err
 	}

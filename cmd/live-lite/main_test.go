@@ -1527,6 +1527,44 @@ func TestClassifyRejectReasonTreatsMissedOpportunityReadyAsSoft(t *testing.T) {
 	}
 }
 
+func TestAccountHealthAllowsLiveBoot(t *testing.T) {
+	t.Run("healthy", func(t *testing.T) {
+		report := accountReport{
+			Generated: time.Now().UTC(),
+			Health:    "healthy",
+		}
+		if !accountHealthAllowsLiveBoot(report) {
+			t.Fatal("expected healthy report to allow live boot")
+		}
+	})
+
+	t.Run("partial optional fields only", func(t *testing.T) {
+		report := accountReport{
+			Generated: time.Now().UTC(),
+			Health:    "partial",
+			Summary: AccountSummary{
+				MissingFields: []string{"perp_realized_pnl", "spot_equity", "total_equity"},
+			},
+		}
+		if !accountHealthAllowsLiveBoot(report) {
+			t.Fatal("expected partial report with optional fields to allow live boot")
+		}
+	})
+
+	t.Run("partial missing core fields", func(t *testing.T) {
+		report := accountReport{
+			Generated: time.Now().UTC(),
+			Health:    "partial",
+			Summary: AccountSummary{
+				MissingFields: []string{"perp_available", "spot_equity"},
+			},
+		}
+		if accountHealthAllowsLiveBoot(report) {
+			t.Fatal("expected partial report missing core fields to block live boot")
+		}
+	})
+}
+
 func TestMergeLiveAccountSnapshotMatchesBotPositionByCanonicalSymbol(t *testing.T) {
 	m := &liveExecManager{
 		positions: map[string]*livePosition{
