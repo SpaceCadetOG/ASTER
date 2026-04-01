@@ -17,7 +17,8 @@ import (
 // cmd/exec = single control tool for Aster.
 //
 // Credentials:
-//   - env:  ASTER_API_KEY / ASTER_API_SECRET
+//   - env/yaml: ASTER_USER / ASTER_SIGNER / ASTER_PRIVATE_KEY / ASTER_CHAIN_ID (primary)
+//   - env/yaml: ASTER_API_KEY / ASTER_API_SECRET (legacy fallback)
 //   - YAML: ASTER_CONFIG=/path/to/file.yaml or ~/.aster.yaml
 //
 // Core actions:
@@ -62,16 +63,19 @@ func main() {
 	signer := getCfg("ASTER_SIGNER", "aster_signer", "signer")
 	priv := getCfg("ASTER_PRIVATE_KEY", "aster_private_key", "private_key")
 	baseURL := getCfg("EXEC_BASE_URL", "aster_base_url", "base_url")
-	pyBin := getCfg("ASTER_PYTHON", "aster_python", "python")
-	chainID := int64EnvWithFallback("ASTER_CHAIN_ID", fileKV, "aster_chain_id", 0)
-	if pyBin != "" && strings.TrimSpace(os.Getenv("ASTER_PYTHON")) == "" {
-		_ = os.Setenv("ASTER_PYTHON", pyBin)
+	rawChainID := getCfg("ASTER_CHAIN_ID", "aster_chain_id", "chain_id")
+	chainIDSet := strings.TrimSpace(rawChainID) != ""
+	chainID := int64(0)
+	if chainIDSet {
+		if n, err := strconv.ParseInt(strings.TrimSpace(rawChainID), 10, 64); err == nil {
+			chainID = n
+		}
 	}
 
 	hasHMAC := key != "" && sec != ""
 	hasAgent := user != "" && signer != "" && priv != ""
 	if !hasHMAC && !hasAgent {
-		fmt.Println("missing credentials: set HMAC (ASTER_API_KEY/ASTER_API_SECRET) or agent wallet fields (ASTER_USER/ASTER_SIGNER/ASTER_PRIVATE_KEY), via env or ASTER_CONFIG")
+		fmt.Println("missing credentials: set agent wallet fields (ASTER_USER/ASTER_SIGNER/ASTER_PRIVATE_KEY/ASTER_CHAIN_ID) or explicit legacy fallback HMAC creds, via env or ASTER_CONFIG")
 		os.Exit(2)
 	}
 
@@ -103,8 +107,19 @@ func main() {
 		PrivateKey: priv,
 		AuthMode:   authMode,
 		ChainID:    chainID,
+		ChainIDSet: chainIDSet,
 		BaseURL:    baseURL,
 	})
+	if debug {
+		mustPrintJSON(rest.StartupAuthSummary(), rest.ConfigError())
+		if rest.ConfigError() != nil {
+			return
+		}
+	}
+	if rest.ConfigError() != nil {
+		mustPrintJSON(rest.StartupAuthSummary(), rest.ConfigError())
+		return
+	}
 	_ = rest.SyncTime() // best-effort
 
 	switch action {
@@ -505,51 +520,83 @@ func buildAccountSummary(rest *aster.RESTAuth, symbol string) (map[string]any, e
 
 func runAuthCheck(rest *aster.RESTAuth) (map[string]any, error) {
 	out := map[string]any{
-		"base_url":  rest.BaseURL(),
-		"auth_mode": rest.AuthMode(),
+		"startup_auth": rest.StartupAuthSummary(),
+	}
+	if rest.ConfigError() != nil {
+		out["classification"] = []string{classifyAuthFailure(rest, "config", rest.ConfigError())}
+		out["last_trace"] = rest.LastAgentAuthTrace()
+		return out, rest.ConfigError()
+	}
+	checks := map[string]any{}
+	classifications := []string{}
+	addCheck := func(name string, payload any, err error) {
+		entry := map[string]any{"ok": err == nil}
+		if err != nil {
+			entry["error"] = err.Error()
+			classifications = append(classifications, classifyAuthFailure(rest, name, err))
+		} else if payload != nil {
+			entry["result"] = payload
+		}
+		checks[name] = entry
 	}
 
 	if err := rest.Ping(); err != nil {
-		out["ping_ok"] = false
-		out["ping_error"] = err.Error()
+		addCheck("ping", nil, err)
 	} else {
-		out["ping_ok"] = true
+		addCheck("ping", map[string]any{"path": "/fapi/v3/ping"}, nil)
 	}
 
 	srvTime, err := rest.ServerTime()
 	if err != nil {
-		out["time_ok"] = false
-		out["time_error"] = err.Error()
+		addCheck("time", nil, err)
 	} else {
-		out["time_ok"] = true
-		out["server_time"] = srvTime
+		addCheck("time", map[string]any{"server_time": srvTime, "path": "/fapi/v3/time"}, nil)
 	}
 
-	acct, aErr := rest.GetAccountSummary()
-	if aErr != nil {
-		out["account_ok"] = false
-		out["account_error"] = aErr.Error()
-		attachAuthHints(out, aErr)
+	agent, agentErr := rest.GetAgent()
+	if agentErr != nil {
+		addCheck("agent", nil, agentErr)
 	} else {
-		out["account_ok"] = true
-		out["account_summary"] = acct
+		addCheck("agent", agent, nil)
 	}
 
-	bals, bErr := rest.GetBalance()
-	if bErr != nil {
-		out["balance_ok"] = false
-		out["balance_error"] = bErr.Error()
-		attachAuthHints(out, bErr)
+	acct, acctErr := rest.GetAccountSummary()
+	if acctErr != nil {
+		addCheck("account", nil, acctErr)
 	} else {
-		out["balance_ok"] = true
-		out["balances_count"] = len(bals)
-		out["balances"] = bals
+		addCheck("account", acct, nil)
 	}
 
-	if aErr != nil {
-		return out, aErr
+	bals, balErr := rest.GetBalance()
+	if balErr != nil {
+		addCheck("balance", nil, balErr)
+	} else {
+		addCheck("balance", map[string]any{"count": len(bals), "balances": bals}, nil)
 	}
-	return out, bErr
+
+	openOrders, openOrdersErr := rest.OpenOrders("")
+	if openOrdersErr != nil {
+		addCheck("open_orders", nil, openOrdersErr)
+	} else {
+		addCheck("open_orders", map[string]any{"count": len(openOrders), "orders": openOrders}, nil)
+	}
+
+	out["checks"] = checks
+	if len(classifications) == 0 {
+		classifications = append(classifications, "ok")
+	}
+	out["classification"] = dedupeStrings(classifications)
+	if trace := rest.LastAgentAuthTrace(); trace.Path != "" {
+		out["last_trace"] = trace
+	}
+
+	if acctErr != nil {
+		return out, acctErr
+	}
+	if balErr != nil {
+		return out, balErr
+	}
+	return out, openOrdersErr
 }
 
 func attachAuthHints(out map[string]any, err error) {
@@ -571,6 +618,55 @@ func attachAuthHints(out map[string]any, err error) {
 	if len(hints) > 0 {
 		out["auth_hints"] = hints
 	}
+}
+
+func classifyAuthFailure(rest *aster.RESTAuth, check string, err error) string {
+	if err == nil {
+		return "ok"
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(msg, "signer_private_key_mismatch") {
+		return "signer_private_key_mismatch"
+	}
+	if rest.AuthMode() == "hmac" && rest.AuthModeSource() == "auto:hmac" {
+		return "legacy_hmac_path_selected_unexpectedly"
+	}
+	if strings.Contains(msg, "signature check failed") {
+		trace := rest.LastAgentAuthTrace()
+		switch trace.Attempt {
+		case "fallback_succeeded_after_signature_check_failed":
+			return "signature_encoding_mismatch"
+		default:
+			return "canonical_querystring_mismatch"
+		}
+	}
+	if strings.Contains(msg, "not authorized") || strings.Contains(msg, "agent") && strings.Contains(msg, "invalid") {
+		return "agent_not_authorized"
+	}
+	if strings.Contains(msg, "404") || strings.Contains(msg, "405") {
+		return "route_not_supported"
+	}
+	if check == "agent" && strings.Contains(msg, "400") {
+		return "agent_not_authorized"
+	}
+	return "unknown"
+}
+
+func dedupeStrings(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 func closeMarket(rest *aster.RESTAuth, symbol string, dry bool, debug bool) {

@@ -12,7 +12,19 @@ type Balance struct {
 
 type AccountSummary map[string]any
 
-// GetBalance returns futures wallet balances from /fapi/v2/balance.
+func (r *RESTAuth) GetAgent() (map[string]any, error) {
+	b, err := r.doSignedGET("/fapi/v3/agent", url.Values{})
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := decodeJSONNumbers(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetBalance returns futures wallet balances from Futures V3, with legacy v2 fallback only in HMAC mode.
 func (r *RESTAuth) GetBalance() ([]Balance, error) {
 	paths := []string{"/fapi/v3/balance", "/fapi/v2/balance"}
 	if r.isAgentMode() {

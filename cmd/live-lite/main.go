@@ -1391,7 +1391,12 @@ func main() {
 				fmt.Sprintf("<b>Imported remote:</b> %d", nImported),
 			))
 		}
-		execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
+		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
+		if !dryRun && firstNonEmpty(report.Health, "failed") != "healthy" && !envBool("LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH", false) {
+			fmt.Printf("live-lite: refusing live boot because account auth is unhealthy (health=%s detail=%s). Set LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1 to override.\n",
+				firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none"))
+			os.Exit(1)
+		}
 	}
 	statusStore := newLiveLiteStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
@@ -16951,15 +16956,13 @@ func restAuthConfigFromConfig() (aster.RESTAuthConfig, bool) {
 	user := cfgGet(fileKV, "ASTER_USER", "aster_user", "user")
 	signer := cfgGet(fileKV, "ASTER_SIGNER", "aster_signer", "signer")
 	priv := cfgGet(fileKV, "ASTER_PRIVATE_KEY", "aster_private_key", "private_key")
-	pyBin := cfgGet(fileKV, "ASTER_PYTHON", "aster_python", "python")
 	chainID := int64(0)
-	if raw := cfgGet(fileKV, "ASTER_CHAIN_ID", "aster_chain_id", "chain_id"); raw != "" {
-		if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+	rawChainID := cfgGet(fileKV, "ASTER_CHAIN_ID", "aster_chain_id", "chain_id")
+	chainIDSet := strings.TrimSpace(rawChainID) != ""
+	if rawChainID != "" {
+		if n, err := strconv.ParseInt(strings.TrimSpace(rawChainID), 10, 64); err == nil {
 			chainID = n
 		}
-	}
-	if pyBin != "" && strings.TrimSpace(os.Getenv("ASTER_PYTHON")) == "" {
-		_ = os.Setenv("ASTER_PYTHON", pyBin)
 	}
 	hasHMAC := key != "" && sec != ""
 	hasAgent := user != "" && signer != "" && priv != ""
@@ -16975,6 +16978,7 @@ func restAuthConfigFromConfig() (aster.RESTAuthConfig, bool) {
 		PrivateKey: priv,
 		AuthMode:   authMode,
 		ChainID:    chainID,
+		ChainIDSet: chainIDSet,
 		BaseURL:    baseURL,
 	}, true
 }
@@ -16985,6 +16989,16 @@ func buildRESTFromConfig() *aster.RESTAuth {
 		return nil
 	}
 	rest := aster.NewRESTAuthWithConfig(cfg)
+	summary := rest.StartupAuthSummary()
+	fmt.Printf("live-lite auth: mode=%v source=%v explicit=%v base=%v chain=%v user=%v signer=%v\n",
+		summary["auth_mode"], summary["auth_source"], summary["auth_explicit"], summary["base_url"], summary["chain_id"], summary["user"], summary["signer"])
+	if cfgPath := resolveConfigPath(); cfgPath != "" {
+		fmt.Printf("live-lite auth: config_path=%s\n", cfgPath)
+	}
+	if err := rest.ConfigError(); err != nil {
+		fmt.Println("live-lite auth config error:", err)
+		return nil
+	}
 	_ = rest.SyncTime()
 	return rest
 }
