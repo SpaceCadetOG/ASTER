@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +91,26 @@ func TestRestAuthConfigFromConfigSupportsHMACFallback(t *testing.T) {
 	}
 	if cfg.BaseURL != "https://fapi.asterdex.com" {
 		t.Fatalf("expected mainnet base url, got %q", cfg.BaseURL)
+	}
+}
+
+func TestSignedUserDataBackoffActivatesOn429(t *testing.T) {
+	signedUserDataBackoffState.mu.Lock()
+	signedUserDataBackoffState.until = time.Time{}
+	signedUserDataBackoffState.mu.Unlock()
+	t.Setenv("LIVE_SIGNED_USERDATA_BACKOFF_SEC", "60")
+	now := time.Now().UTC()
+	signedUserDataBackoffObserve(now, fmt.Errorf("http 429 GET /fapi/v3/balance:"))
+	if err := signedUserDataBackoffCheck(now.Add(5 * time.Second)); err == nil {
+		t.Fatal("expected signed user-data backoff to activate after 429")
+	}
+}
+
+func TestLoadAccountReportConfigUsesSaferRefreshDefault(t *testing.T) {
+	t.Setenv("LIVE_ACCOUNT_REFRESH_SEC", "")
+	cfg := loadAccountReportConfig()
+	if cfg.RefreshEvery < 10*time.Second {
+		t.Fatalf("expected account refresh to be clamped, got %v", cfg.RefreshEvery)
 	}
 }
 

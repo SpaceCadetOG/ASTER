@@ -80,14 +80,17 @@ func loadAccountReportConfig() accountReportConfig {
 		GrowthEnable:   envBool("LIVE_ACCOUNT_GROWTH_ENABLE", true),
 		IncludeSpot:    envBool("LIVE_ACCOUNT_REPORT_INCLUDE_SPOT", true),
 		IncludeTotal:   envBool("LIVE_ACCOUNT_REPORT_INCLUDE_TOTAL", true),
-		RefreshEvery:   time.Duration(envInt("LIVE_ACCOUNT_REFRESH_SEC", 2)) * time.Second,
+		RefreshEvery:   time.Duration(envInt("LIVE_ACCOUNT_REFRESH_SEC", 30)) * time.Second,
 		SnapshotPath:   resolveStatePath("logs/account_snapshots.jsonl"),
 	}
 	if cfg.SnapshotEvery <= 0 {
 		cfg.SnapshotEvery = 5 * time.Minute
 	}
 	if cfg.RefreshEvery <= 0 {
-		cfg.RefreshEvery = 2 * time.Second
+		cfg.RefreshEvery = 30 * time.Second
+	}
+	if cfg.RefreshEvery < 10*time.Second {
+		cfg.RefreshEvery = 10 * time.Second
 	}
 	return cfg
 }
@@ -131,8 +134,12 @@ func mapFromAny(v any) map[string]any {
 func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager TransferManager) (AccountSummary, error) {
 	now := time.Now().UTC()
 	out := AccountSummary{Timestamp: now}
+	if err := signedUserDataBackoffCheck(now); err != nil {
+		return out, err
+	}
 	missing := map[string]struct{}{}
 	acct, acctErr := rest.GetAccountSummary()
+	signedUserDataBackoffObserve(now, acctErr)
 	if acctErr != nil {
 		missing["perp_account_summary"] = struct{}{}
 	}
@@ -164,6 +171,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	var balErr error
 	if !havePerpWallet || !havePerpAvail || !havePerpUnreal {
 		bals, balErr = rest.GetBalance()
+		signedUserDataBackoffObserve(now, balErr)
 		if balErr != nil {
 			missing["perp_balance"] = struct{}{}
 		}
@@ -194,6 +202,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	var posErr error
 	if !haveOpenPositions || !havePerpUnreal || !haveMarginUsed {
 		rows, posErr = rest.PositionRisk("")
+		signedUserDataBackoffObserve(now, posErr)
 		if posErr != nil {
 			missing["position_risk"] = struct{}{}
 		}
@@ -230,6 +239,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	}
 
 	orders, ordersErr := rest.OpenOrders("")
+	signedUserDataBackoffObserve(now, ordersErr)
 	if ordersErr != nil {
 		missing["open_orders"] = struct{}{}
 	}

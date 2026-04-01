@@ -935,6 +935,7 @@ type liveExecManager struct {
 	tpTriggerRef         string
 	accountAssets        []string
 	snapshotPoll         time.Duration
+	remoteImportEvery    time.Duration
 	wsLevels             int
 	wsSpeed              string
 	liveAccount          liveAccountSnapshot
@@ -951,6 +952,7 @@ type liveExecManager struct {
 	accountReportCfg     accountReportConfig
 	accountReport        accountReport
 	lastTransferStatus   string
+	lastRemoteImportAt   time.Time
 }
 
 type ladderConfig struct {
@@ -6063,7 +6065,11 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	tpTriggerRef := strings.ToLower(envStr("LIVE_TP_TRIGGER_REF", "mark"))
 	snapshotPoll := accountReportCfg.RefreshEvery
 	if snapshotPoll <= 0 {
-		snapshotPoll = 2 * time.Second
+		snapshotPoll = 30 * time.Second
+	}
+	remoteImportEvery := time.Duration(envInt("LIVE_REMOTE_IMPORT_SEC", 30)) * time.Second
+	if remoteImportEvery <= 0 {
+		remoteImportEvery = 30 * time.Second
 	}
 	wsLevels := envInt("LIVE_ACCOUNT_WS_LEVELS", 20)
 	if wsLevels != 5 && wsLevels != 10 && wsLevels != 20 {
@@ -6125,6 +6131,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		tpTriggerRef:         tpTriggerRef,
 		accountAssets:        accountAssets,
 		snapshotPoll:         snapshotPoll,
+		remoteImportEvery:    remoteImportEvery,
 		wsLevels:             wsLevels,
 		wsSpeed:              wsSpeed,
 		marketStates:         map[string]*aster.MarketState{},
@@ -6962,7 +6969,11 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 	if m == nil || m.rest == nil {
 		return 0, 0, nil
 	}
+	if err := signedUserDataBackoffCheck(time.Now().UTC()); err != nil {
+		return 0, 0, err
+	}
 	rows, err := m.rest.PositionRisk("")
+	signedUserDataBackoffObserve(time.Now().UTC(), err)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -7451,7 +7462,11 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	if m == nil || m.rest == nil {
 		return 0, nil
 	}
+	if err := signedUserDataBackoffCheck(now); err != nil {
+		return 0, err
+	}
 	rows, err := m.rest.PositionRisk("")
+	signedUserDataBackoffObserve(now, err)
 	if err != nil {
 		return 0, err
 	}
@@ -7565,8 +7580,12 @@ func (m *liveExecManager) validateManualManageRequest(req manualManageRequest, n
 	if m == nil || m.rest == nil {
 		return nil
 	}
+	if err := signedUserDataBackoffCheck(now); err != nil {
+		return err
+	}
 	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
 	rows, err := m.rest.PositionRisk(sym)
+	signedUserDataBackoffObserve(now, err)
 	if err != nil {
 		return err
 	}
@@ -8248,10 +8267,13 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 		return
 	}
 	changed := false
-	if nImported, err := m.importRemotePositions(now); err != nil {
-		fmt.Printf("live-lite: import remote positions error: %v\n", err)
-	} else if nImported > 0 {
-		changed = true
+	if m.lastRemoteImportAt.IsZero() || now.Sub(m.lastRemoteImportAt) >= m.remoteImportEvery {
+		m.lastRemoteImportAt = now
+		if nImported, err := m.importRemotePositions(now); err != nil {
+			fmt.Printf("live-lite: import remote positions error: %v\n", err)
+		} else if nImported > 0 {
+			changed = true
+		}
 	}
 	if len(m.positions) == 0 {
 		if changed {
@@ -16078,7 +16100,12 @@ func orderbookRiskMetrics(rawSymbol, side string, depth map[string]aster.OrderBo
 
 func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapshot, error) {
 	snap := accountSnapshot{}
+	now := time.Now().UTC()
+	if err := signedUserDataBackoffCheck(now); err != nil {
+		return snap, err
+	}
 	bals, err := rest.GetBalance()
+	signedUserDataBackoffObserve(now, err)
 	if err != nil {
 		return snap, err
 	}
@@ -16090,6 +16117,7 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, assets []string) (accountSnapsho
 		}
 	}
 	rows, err := rest.PositionRisk("")
+	signedUserDataBackoffObserve(now, err)
 	if err != nil {
 		return snap, err
 	}
@@ -16968,6 +16996,48 @@ func cfgGet(fileKV map[string]string, envName string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+var signedUserDataBackoffState struct {
+	mu    sync.Mutex
+	until time.Time
+}
+
+func signedUserDataBackoffDuration() time.Duration {
+	sec := envInt("LIVE_SIGNED_USERDATA_BACKOFF_SEC", 60)
+	if sec < 5 {
+		sec = 5
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func signedUserDataBackoffCheck(now time.Time) error {
+	signedUserDataBackoffState.mu.Lock()
+	defer signedUserDataBackoffState.mu.Unlock()
+	if now.Before(signedUserDataBackoffState.until) {
+		return fmt.Errorf("signed user-data backoff active until %s", signedUserDataBackoffState.until.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func signedUserDataBackoffObserve(now time.Time, err error) {
+	if !isSignedUserDataRateLimitErr(err) {
+		return
+	}
+	signedUserDataBackoffState.mu.Lock()
+	defer signedUserDataBackoffState.mu.Unlock()
+	until := now.Add(signedUserDataBackoffDuration())
+	if until.After(signedUserDataBackoffState.until) {
+		signedUserDataBackoffState.until = until
+	}
+}
+
+func isSignedUserDataRateLimitErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(raw, "http 429") || strings.Contains(raw, "rate limit")
 }
 
 func waitForNextCycle(cycleStart time.Time, scanEvery, reconEvery time.Duration, execMgr *liveExecManager) {
