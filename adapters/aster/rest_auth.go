@@ -293,7 +293,7 @@ func (r *RESTAuth) doSigned(method, path string, vals url.Values) ([]byte, error
 
 func (r *RESTAuth) doSignedAgent(method, path string, vals url.Values) ([]byte, error) {
 	u := r.baseURL + path
-	payload, err := r.signAndEncodeAgent(cloneValues(vals))
+	payload, err := r.signAndEncodeAgent(cloneValues(vals), true)
 	if err != nil {
 		return nil, err
 	}
@@ -314,10 +314,37 @@ func (r *RESTAuth) doSignedAgent(method, path string, vals url.Values) ([]byte, 
 	if r.userAgent != "" {
 		req.Header.Set("User-Agent", r.userAgent)
 	}
+	b, err := r.do(req, method, path)
+	if err == nil {
+		return b, nil
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok || !strings.Contains(apiErr.Body, "Signature check failed") {
+		return nil, err
+	}
+	payload, sigErr := r.signAndEncodeAgent(cloneValues(vals), false)
+	if sigErr != nil {
+		return nil, err
+	}
+	switch method {
+	case http.MethodGet, http.MethodDelete:
+		req, sigErr = http.NewRequest(method, u+"?"+payload, nil)
+	default:
+		req, sigErr = http.NewRequest(method, u, strings.NewReader(payload))
+		if sigErr == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+	}
+	if sigErr != nil {
+		return nil, err
+	}
+	if r.userAgent != "" {
+		req.Header.Set("User-Agent", r.userAgent)
+	}
 	return r.do(req, method, path)
 }
 
-func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
+func (r *RESTAuth) signAndEncodeAgent(vals url.Values, legacyV bool) (string, error) {
 	if vals == nil {
 		vals = url.Values{}
 	}
@@ -354,7 +381,7 @@ func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
 	if base != "" {
 		msg = base + "&" + msg
 	}
-	sig, err := r.signAgent(msg)
+	sig, err := r.signAgent(msg, legacyV)
 	if err != nil {
 		return "", err
 	}
@@ -362,7 +389,7 @@ func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
 	return vals.Encode(), nil
 }
 
-func (r *RESTAuth) signAgent(msg string) (string, error) {
+func (r *RESTAuth) signAgent(msg string, legacyV bool) (string, error) {
 	keyHex := strings.TrimSpace(strings.TrimPrefix(r.privateKey, "0x"))
 	keyHex = strings.TrimSpace(strings.TrimPrefix(keyHex, "0X"))
 	if keyHex == "" {
@@ -380,8 +407,10 @@ func (r *RESTAuth) signAgent(msg string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("sign agent payload: %w", err)
 	}
-	// Match eth_account output used by the previous Python helper.
-	sig[64] += 27
+	if legacyV {
+		// Match eth_account output used by the previous Python helper.
+		sig[64] += 27
+	}
 	return "0x" + hex.EncodeToString(sig), nil
 }
 
