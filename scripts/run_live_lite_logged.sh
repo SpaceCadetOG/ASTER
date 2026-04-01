@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+ENV_FILE="${ASTER_ENV_FILE:-/opt/aster/env/live-lite.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR"
 

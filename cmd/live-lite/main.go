@@ -16835,11 +16835,15 @@ func restAuthConfigFromConfig() (aster.RESTAuthConfig, bool) {
 	user := cfgGet(fileKV, "ASTER_USER", "aster_user", "user")
 	signer := cfgGet(fileKV, "ASTER_SIGNER", "aster_signer", "signer")
 	priv := cfgGet(fileKV, "ASTER_PRIVATE_KEY", "aster_private_key", "private_key")
+	pyBin := cfgGet(fileKV, "ASTER_PYTHON", "aster_python", "python")
 	chainID := int64(0)
 	if raw := cfgGet(fileKV, "ASTER_CHAIN_ID", "aster_chain_id", "chain_id"); raw != "" {
 		if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
 			chainID = n
 		}
+	}
+	if pyBin != "" && strings.TrimSpace(os.Getenv("ASTER_PYTHON")) == "" {
+		_ = os.Setenv("ASTER_PYTHON", pyBin)
 	}
 	hasHMAC := key != "" && sec != ""
 	hasAgent := user != "" && signer != "" && priv != ""

@@ -27,6 +27,7 @@ func TestRestAuthConfigFromConfigSupportsAgentWallet(t *testing.T) {
 		"aster_signer: 0x93b2137D2Fb5B34D8399956658111eAa7B4DB7b6",
 		"aster_private_key: 0xabc123",
 		"aster_chain_id: 1666",
+		"aster_python: /tmp/aster-python",
 	}, "\n")), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -59,6 +60,9 @@ func TestRestAuthConfigFromConfigSupportsAgentWallet(t *testing.T) {
 	}
 	if cfg.BaseURL != "https://fapi.asterdex.com" {
 		t.Fatalf("expected mainnet base url, got %q", cfg.BaseURL)
+	}
+	if got := os.Getenv("ASTER_PYTHON"); got != "/tmp/aster-python" {
+		t.Fatalf("expected ASTER_PYTHON to be exported from config, got %q", got)
 	}
 }
 
