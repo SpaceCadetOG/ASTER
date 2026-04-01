@@ -17,6 +17,78 @@ import (
 	"go-machine/internal/types"
 )
 
+func TestRestAuthConfigFromConfigSupportsAgentWallet(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".aster.yaml")
+	if err := os.WriteFile(cfgPath, []byte(strings.Join([]string{
+		"aster_auth_mode: agent",
+		"aster_base_url: https://fapi.asterdex.com",
+		"aster_user: 0x93b2137D2Fb5B34D8399956658111eAa7B4DB7b6",
+		"aster_signer: 0x93b2137D2Fb5B34D8399956658111eAa7B4DB7b6",
+		"aster_private_key: 0xabc123",
+		"aster_chain_id: 1666",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("ASTER_CONFIG", cfgPath)
+	t.Setenv("ASTER_API_KEY", "")
+	t.Setenv("ASTER_API_SECRET", "")
+	t.Setenv("ASTER_USER", "")
+	t.Setenv("ASTER_SIGNER", "")
+	t.Setenv("ASTER_PRIVATE_KEY", "")
+	t.Setenv("ASTER_AUTH_MODE", "")
+	t.Setenv("ASTER_CHAIN_ID", "")
+	t.Setenv("ASTER_BASE_URL", "")
+	t.Setenv("EXEC_BASE_URL", "")
+
+	cfg, ok := restAuthConfigFromConfig()
+	if !ok {
+		t.Fatal("expected config to load agent wallet auth")
+	}
+	if cfg.AuthMode != "agent" {
+		t.Fatalf("expected agent auth mode, got %q", cfg.AuthMode)
+	}
+	if cfg.User != "0x93b2137D2Fb5B34D8399956658111eAa7B4DB7b6" || cfg.Signer != cfg.User {
+		t.Fatalf("unexpected user/signer config: user=%q signer=%q", cfg.User, cfg.Signer)
+	}
+	if cfg.PrivateKey != "0xabc123" {
+		t.Fatalf("expected private key from config, got %q", cfg.PrivateKey)
+	}
+	if cfg.ChainID != 1666 {
+		t.Fatalf("expected chain id 1666, got %d", cfg.ChainID)
+	}
+	if cfg.BaseURL != "https://fapi.asterdex.com" {
+		t.Fatalf("expected mainnet base url, got %q", cfg.BaseURL)
+	}
+}
+
+func TestRestAuthConfigFromConfigSupportsHMACFallback(t *testing.T) {
+	t.Setenv("ASTER_CONFIG", "")
+	t.Setenv("ASTER_API_KEY", "key123")
+	t.Setenv("ASTER_API_SECRET", "sec456")
+	t.Setenv("ASTER_USER", "")
+	t.Setenv("ASTER_SIGNER", "")
+	t.Setenv("ASTER_PRIVATE_KEY", "")
+	t.Setenv("ASTER_AUTH_MODE", "")
+	t.Setenv("ASTER_CHAIN_ID", "")
+	t.Setenv("ASTER_BASE_URL", "")
+	t.Setenv("EXEC_BASE_URL", "")
+
+	cfg, ok := restAuthConfigFromConfig()
+	if !ok {
+		t.Fatal("expected HMAC config to load")
+	}
+	if cfg.APIKey != "key123" || cfg.APISecret != "sec456" {
+		t.Fatalf("unexpected HMAC creds: key=%q secret=%q", cfg.APIKey, cfg.APISecret)
+	}
+	if cfg.AuthMode != "auto" {
+		t.Fatalf("expected auto auth mode before adapter selection, got %q", cfg.AuthMode)
+	}
+	if cfg.BaseURL != "https://fapi.asterdex.com" {
+		t.Fatalf("expected mainnet base url, got %q", cfg.BaseURL)
+	}
+}
+
 func TestInHourWindow(t *testing.T) {
 	if !inHourWindow(0, 0, 1) {
 		t.Fatalf("expected 00 hour to be in 00-01")

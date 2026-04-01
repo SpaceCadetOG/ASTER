@@ -1523,6 +1523,8 @@ func main() {
 	lastPreUSReportDay := ""
 	lastM2ReportDay := ""
 	lastHourlyKey := ""
+	lastPaperTradeUpdateSig := ""
+	lastLiveTradeUpdateSig := ""
 	var lastPulseSentAt time.Time
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
@@ -1893,10 +1895,18 @@ func main() {
 		}
 		if paper.enabled && tg != nil && tg.Enabled() {
 			if now.After(nextTradeUpdateAt) {
-				if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
-					tg.Sendf("%s", tgPre(msg))
+				if len(paper.positions) > 0 {
+					if sig := paper.TradeUpdateSignature(metaBySymbol, tradeUpdateTop); sig != "" && sig != lastPaperTradeUpdateSig {
+						if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
+							tg.Sendf("%s", tgPre(msg))
+							lastPaperTradeUpdateSig = sig
+						}
+					}
+					nextTradeUpdateAt = now.Add(tradeUpdateEvery)
+				} else {
+					lastPaperTradeUpdateSig = ""
+					nextTradeUpdateAt = now.Add(time.Minute)
 				}
-				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
 			localNow := now.In(paper.reportLoc)
 			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
@@ -1930,10 +1940,18 @@ func main() {
 		}
 		if tg != nil && tg.Enabled() && execMgr != nil {
 			if now.After(nextTradeUpdateAt) {
-				if msg := execMgr.liveTradeUpdateMessage(metaBySymbol); msg != "" {
-					tg.Sendf("%s", tgPre(msg))
+				if execMgr.ActiveCount() > 0 {
+					if sig := execMgr.liveTradeUpdateSignature(metaBySymbol); sig != "" && sig != lastLiveTradeUpdateSig {
+						if msg := execMgr.liveTradeUpdateMessage(metaBySymbol); msg != "" {
+							tg.Sendf("%s", tgPre(msg))
+							lastLiveTradeUpdateSig = sig
+						}
+					}
+					nextTradeUpdateAt = now.Add(tradeUpdateEvery)
+				} else {
+					lastLiveTradeUpdateSig = ""
+					nextTradeUpdateAt = now.Add(time.Minute)
 				}
-				nextTradeUpdateAt = now.Add(tradeUpdateEvery)
 			}
 		}
 		if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
@@ -7921,6 +7939,35 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 	return strings.Join(rows, "\n")
 }
 
+func (m *liveExecManager) liveTradeUpdateSignature(meta map[string]symbolMeta) string {
+	if m == nil {
+		return ""
+	}
+	snap := m.LiveAccountSnapshot(32)
+	if len(snap.Positions) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(snap.Positions)+1)
+	for _, pos := range snap.Positions {
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%.6f|%.6f|%.6f|%.6f|%dx|%.2f|%.2f",
+			pos.Symbol,
+			pos.Side,
+			pos.Source,
+			nonEmpty(pos.ProtectionState, "-"),
+			pos.Qty,
+			pos.EntryPrice,
+			pos.MarkPrice,
+			pos.LastPrice,
+			maxInt(1, pos.Leverage),
+			pos.UnrealizedPnL,
+			pos.StopPrice,
+		))
+	}
+	parts = append(parts, fmt.Sprintf("totals|%d|%.2f|%.2f|%.2f", snap.OpenCount, snap.OpenPnL, snap.RealizedDay, snap.Equity))
+	sort.Strings(parts[:len(parts)-1])
+	return strings.Join(parts, ";")
+}
+
 func (m *liveExecManager) StopoutCountSince(symbol string, since time.Time) int {
 	if m == nil {
 		return 0
@@ -11535,6 +11582,51 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 	}
 	fmt.Fprintf(&b, "\nTotals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f", totalUPnL, realizedToday, realizedToday+totalUPnL)
 	return strings.TrimSpace(b.String())
+}
+
+func (p *paperTrader) TradeUpdateSignature(meta map[string]symbolMeta, topN int) string {
+	if p == nil || !p.enabled || len(p.positions) == 0 {
+		return ""
+	}
+	type row struct {
+		sym   string
+		side  string
+		entry float64
+		mark  float64
+		qty   float64
+		upnl  float64
+		lev   int
+		stop  float64
+	}
+	rows := make([]row, 0, len(p.positions))
+	totalUPnL := 0.0
+	for sym, pos := range p.positions {
+		mark := meta[sym].LastPrice
+		upnl := 0.0
+		if strings.EqualFold(pos.Side, "BUY") {
+			upnl = (mark - pos.Entry) * pos.Qty
+		} else {
+			upnl = (pos.Entry - mark) * pos.Qty
+		}
+		totalUPnL += upnl
+		rows = append(rows, row{
+			sym:   sym,
+			side:  pos.Side,
+			entry: pos.Entry,
+			mark:  mark,
+			qty:   pos.Qty,
+			upnl:  upnl,
+			lev:   maxInt(pos.Leverage, 1),
+			stop:  pos.Stop,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].sym < rows[j].sym })
+	parts := make([]string, 0, len(rows)+1)
+	for _, r := range rows {
+		parts = append(parts, fmt.Sprintf("%s|%s|%.6f|%.6f|%.6f|%dx|%.2f|%.6f", r.sym, r.side, r.entry, r.mark, r.qty, r.lev, r.upnl, r.stop))
+	}
+	parts = append(parts, fmt.Sprintf("totals|%d|%.2f|%.2f", len(rows), totalUPnL, p.balance+totalUPnL))
+	return strings.Join(parts, ";")
 }
 
 func (p *paperTrader) DailyReportMessage(dayKey string) (string, bool) {
@@ -16731,22 +16823,48 @@ func isCorrelatedExposureTooHigh(c candidate, acct accountSnapshot, groups map[s
 	return exposure >= maxExposure
 }
 
-func buildRESTFromConfig() *aster.RESTAuth {
+func restAuthConfigFromConfig() (aster.RESTAuthConfig, bool) {
 	fileKV := getConfigKV()
 
 	key := cfgGet(fileKV, "ASTER_API_KEY", "aster_api_key", "api_key", "key")
 	sec := cfgGet(fileKV, "ASTER_API_SECRET", "aster_api_secret", "api_secret", "secret")
-	if key == "" || sec == "" {
+	authMode := strings.ToLower(cfgGet(fileKV, "ASTER_AUTH_MODE", "aster_auth_mode", "auth_mode"))
+	if authMode == "" {
+		authMode = "auto"
+	}
+	user := cfgGet(fileKV, "ASTER_USER", "aster_user", "user")
+	signer := cfgGet(fileKV, "ASTER_SIGNER", "aster_signer", "signer")
+	priv := cfgGet(fileKV, "ASTER_PRIVATE_KEY", "aster_private_key", "private_key")
+	chainID := int64(0)
+	if raw := cfgGet(fileKV, "ASTER_CHAIN_ID", "aster_chain_id", "chain_id"); raw != "" {
+		if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+			chainID = n
+		}
+	}
+	hasHMAC := key != "" && sec != ""
+	hasAgent := user != "" && signer != "" && priv != ""
+	if !hasHMAC && !hasAgent {
+		return aster.RESTAuthConfig{}, false
+	}
+	baseURL := effectiveRESTBaseURL()
+	return aster.RESTAuthConfig{
+		APIKey:     key,
+		APISecret:  sec,
+		User:       user,
+		Signer:     signer,
+		PrivateKey: priv,
+		AuthMode:   authMode,
+		ChainID:    chainID,
+		BaseURL:    baseURL,
+	}, true
+}
+
+func buildRESTFromConfig() *aster.RESTAuth {
+	cfg, ok := restAuthConfigFromConfig()
+	if !ok {
 		return nil
 	}
-	// Mainnet by default. Only environment variables can override this at runtime.
-	baseURL := effectiveRESTBaseURL()
-	rest := aster.NewRESTAuthWithConfig(aster.RESTAuthConfig{
-		APIKey:    key,
-		APISecret: sec,
-		AuthMode:  "hmac",
-		BaseURL:   baseURL,
-	})
+	rest := aster.NewRESTAuthWithConfig(cfg)
 	_ = rest.SyncTime()
 	return rest
 }
