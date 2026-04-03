@@ -1786,22 +1786,19 @@ func TestResolveLadderPlanRejectsLoserAdd(t *testing.T) {
 	}
 }
 
-func TestResolveLadderPlanAllowsManualManagedCatchUpAddAfterReconstructedTPHits(t *testing.T) {
+func TestResolveLadderPlanAllowsBotAddAfterTPHitWhenFreshResetForms(t *testing.T) {
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
 			"SIRENUSDT": {
-				Symbol:            "SIRENUSDT",
-				Side:              "SELL",
-				State:             execOpen,
-				EntrySource:       "MANUAL",
-				EntryReason:       "manual_managed_live",
-				ManageAnchorPrice: 1.0825,
-				EntryPrice:        1.2437,
-				RemainingQty:      180,
-				DeployedMargin:    20,
-				HitTP1:            true,
-				HitTP2:            true,
-				HitTP3:            true,
+				Symbol:         "SIRENUSDT",
+				Side:           "SELL",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryReason:    "continuation_fast",
+				EntryPrice:     1.2437,
+				RemainingQty:   180,
+				DeployedMargin: 20,
+				HitTP1:         true,
 			},
 		},
 		ladderCfg: loadLadderConfig(10),
@@ -1810,13 +1807,14 @@ func TestResolveLadderPlanAllowsManualManagedCatchUpAddAfterReconstructedTPHits(
 		"SIRENUSDT": {LastPrice: 1.0825},
 	}
 	c := candidate{
-		Side:        "SELL",
-		Strat:       "continuation_fast",
-		LastClose:   1.0825,
-		SessionVWAP: 1.18,
-		EMA9:        1.12,
-		DayUTC24h:   -43.0,
-		RetestHold:  true,
+		Side:         "SELL",
+		Strat:        "continuation_fast",
+		LastClose:    1.0825,
+		SessionVWAP:  1.18,
+		EMA9:         1.12,
+		DayUTC24h:    -43.0,
+		RetestHold:   true,
+		ResetRebreak: true,
 		Entry: inplay.Entry{
 			Symbol:       "SIRENUSDT",
 			State:        inplay.StateInPlay,
@@ -1832,7 +1830,7 @@ func TestResolveLadderPlanAllowsManualManagedCatchUpAddAfterReconstructedTPHits(
 	}
 	plan := resolveLadderPlan(time.Date(2026, 3, 26, 16, 22, 0, 0, time.UTC), c, execMgr, meta)
 	if !plan.IsAdd {
-		t.Fatalf("expected manual catch-up add plan, got %+v", plan)
+		t.Fatalf("expected fresh-reset add plan after tp hit, got %+v", plan)
 	}
 	if plan.MarginUSDT != 10 {
 		t.Fatalf("expected 10 usdt add, got %.2f", plan.MarginUSDT)
@@ -1917,7 +1915,7 @@ func TestResolveLadderPlanAllowsAddForImpulsiveLongStarter(t *testing.T) {
 	}
 }
 
-func TestManualWouldAddCapitalAllowsManualManagedCatchUpDespiteTP3(t *testing.T) {
+func TestManualWouldAddCapitalStillAllowsGreenImportedTradeAfterTP3(t *testing.T) {
 	p := &livePosition{
 		Symbol:                "SIRENUSDT",
 		Side:                  "SELL",
@@ -1932,7 +1930,219 @@ func TestManualWouldAddCapitalAllowsManualManagedCatchUpDespiteTP3(t *testing.T)
 		StarterOnly:           false,
 	}
 	if !manualWouldAddCapital(p, 1.0825, 0.75) {
-		t.Fatalf("expected manual catch-up add eligibility despite TP3")
+		t.Fatalf("expected green imported trade to remain add-eligible despite tp3 history")
+	}
+}
+
+func TestResolveLadderPlanBlocksImportedManagedAddWhenExtendedWithoutReset(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:            "SIRENUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				ManageAnchorPrice: 1.0825,
+				EntryPrice:        1.2437,
+				LastMark:          1.0410,
+				RemainingQty:      180,
+				DeployedMargin:    20,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"SIRENUSDT": {LastPrice: 1.0410},
+	}
+	c := candidate{
+		Side:            "SELL",
+		Strat:           "continuation_fast",
+		LastClose:       1.0410,
+		SessionVWAP:     1.11,
+		EMA9:            1.09,
+		DayUTC24h:       -43.0,
+		ClosedBreakHold: true,
+		ExtensionATR:    1.35,
+		Entry: inplay.Entry{
+			Symbol:       "SIRENUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_short",
+			CurrentScore: 98,
+			ScoreSlope:   0.22,
+			Momentum:     true,
+		},
+		Sig: strategies.Signal{
+			Entry: 1.0410,
+			Stop:  1.0825,
+			TP1:   1.0200,
+			TP2:   0.9950,
+			TP3:   0.9700,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 26, 16, 22, 0, 0, time.UTC), c, execMgr, meta)
+	if plan.IsAdd || plan.RejectReason != "imported_add_extended_wait_reset" {
+		t.Fatalf("expected imported extended add rejection, got %+v", plan)
+	}
+}
+
+func TestResolveLadderPlanAllowsImportedManagedAddAfterFreshReset(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:            "SIRENUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				ManageAnchorPrice: 1.0825,
+				EntryPrice:        1.2437,
+				LastMark:          1.0640,
+				RemainingQty:      180,
+				DeployedMargin:    20,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	meta := map[string]symbolMeta{
+		"SIRENUSDT": {LastPrice: 1.0640},
+	}
+	c := candidate{
+		Side:         "SELL",
+		Strat:        "continuation_fast",
+		LastClose:    1.0640,
+		SessionVWAP:  1.10,
+		EMA9:         1.08,
+		DayUTC24h:    -43.0,
+		RetestHold:   true,
+		ResetRebreak: true,
+		ExtensionATR: 1.35,
+		Entry: inplay.Entry{
+			Symbol:       "SIRENUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_short",
+			CurrentScore: 98,
+			ScoreSlope:   0.22,
+			Momentum:     true,
+		},
+		Sig: strategies.Signal{
+			Entry: 1.0640,
+			Stop:  1.0980,
+			TP1:   1.0300,
+			TP2:   0.9900,
+			TP3:   0.9500,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 3, 26, 16, 22, 0, 0, time.UTC), c, execMgr, meta)
+	if !plan.IsAdd {
+		t.Fatalf("expected imported add after fresh reset, got %+v", plan)
+	}
+}
+
+func TestInitializeBracketLevelsUsesManageAnchorForImportedManagedTrade(t *testing.T) {
+	m := &liveExecManager{
+		stopPct:    3.0,
+		minStopPct: 1.0,
+		maxStopPct: 10.0,
+		tp1R:       1.0,
+		tp2R:       2.0,
+		tp3R:       3.0,
+	}
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		EntryPrice:        1.2437,
+		ManageAnchorPrice: 1.0825,
+		FilledQty:         100,
+	}
+	if err := m.initializeBracketLevels(p); err != nil {
+		t.Fatalf("unexpected bracket init error: %v", err)
+	}
+	if p.StopPrice <= 1.0825 {
+		t.Fatalf("expected imported stop to rebuild off manage anchor, got %.4f", p.StopPrice)
+	}
+	if p.TP1Price >= 1.0825 {
+		t.Fatalf("expected imported tp1 to rebuild below manage anchor for short, got %.4f", p.TP1Price)
+	}
+}
+
+func TestUpdateManagePhasePromotesBotTradeToContinuation(t *testing.T) {
+	p := &livePosition{
+		EntrySource:   "BOT",
+		EntryReason:   "continuation_fast",
+		MaxFavorableR: 1.4,
+	}
+	updateManagePhase(p, false)
+	if p.ManagePhase != managePhaseContinuation {
+		t.Fatalf("expected continuation phase, got %s", p.ManagePhase)
+	}
+}
+
+func TestRefreshRunnerReservationKeepsRunnerAfterSizeBuild(t *testing.T) {
+	p := &livePosition{
+		EntrySource:    "BOT",
+		EntryReason:    "continuation_fast",
+		ManagePhase:    managePhaseContinuation,
+		RemainingQty:   100,
+		DeployedMargin: 100,
+	}
+	refreshRunnerReservation(p, 25)
+	if p.RunnerMinQty <= 0 {
+		t.Fatalf("expected non-zero runner reservation, got %.4f", p.RunnerMinQty)
+	}
+}
+
+func TestMarkLivePositionClosedFlagsRunnerCaptureFailure(t *testing.T) {
+	p := &livePosition{
+		DeployedMargin: 100,
+		RealizedPnL:    0.2,
+		MaxFavorableR:  3.0,
+		CaptureRatio:   0.05,
+	}
+	markLivePositionClosed(p, time.Now().UTC(), "STOP_HIT")
+	if !p.RunnerCaptureFailed {
+		t.Fatalf("expected runner capture failure flag")
+	}
+}
+
+func TestResolveLadderPlanBlocksReentryAfterRunnerCaptureFailureWithoutReset(t *testing.T) {
+	execMgr := &liveExecManager{
+		reentryCfg: reentryConfig{
+			Enable:       true,
+			SizeUSDT:     25,
+			MaxPerSymbol: 1,
+			Cooldown:     5 * time.Minute,
+		},
+		positions: map[string]*livePosition{
+			"STOUSDT": {
+				Symbol:              "STOUSDT",
+				Side:                "SELL",
+				State:               execClosed,
+				ClosedAt:            time.Date(2026, 4, 3, 16, 0, 0, 0, time.UTC),
+				RunnerCaptureFailed: true,
+			},
+		},
+	}
+	c := candidate{
+		Side:        "SELL",
+		Strat:       "continuation_fast",
+		LastClose:   0.47,
+		SessionVWAP: 0.49,
+		EMA9:        0.48,
+		Entry: inplay.Entry{
+			Symbol:       "STOUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_short",
+			CurrentScore: 98,
+			ScoreSlope:   0.22,
+			Momentum:     true,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 4, 3, 16, 10, 0, 0, time.UTC), c, execMgr, nil)
+	if plan.RejectReason != "reentry_runner_capture_failed" {
+		t.Fatalf("expected reentry runner capture failure block, got %+v", plan)
 	}
 }
 

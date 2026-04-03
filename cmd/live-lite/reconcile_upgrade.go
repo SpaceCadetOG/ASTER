@@ -33,6 +33,8 @@ func (m *liveExecManager) transitionPendingToOpen(now time.Time, p *livePosition
 	p.RemainingQty = qty
 	p.State = execOpen
 	p.UpdatedAt = now
+	updateManagePhase(p, false)
+	refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 	if strings.TrimSpace(p.EntrySource) == "" {
 		p.EntrySource = "BOT"
 	}

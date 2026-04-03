@@ -170,6 +170,14 @@ const (
 	protectionStageLocked
 )
 
+type tradeManagePhase string
+
+const (
+	managePhaseStarter      tradeManagePhase = "starter"
+	managePhaseContinuation tradeManagePhase = "continuation"
+	managePhaseExhaustion   tradeManagePhase = "exhaustion"
+)
+
 type utcSessionPhase string
 
 const (
@@ -782,114 +790,117 @@ const (
 )
 
 type livePosition struct {
-	Symbol                  string          `json:"symbol"`
-	Side                    string          `json:"side"`
-	State                   execState       `json:"state"`
-	CreatedAt               time.Time       `json:"createdAt"`
-	UpdatedAt               time.Time       `json:"updatedAt"`
-	ClosedAt                time.Time       `json:"closedAt,omitempty"`
-	CloseReason             string          `json:"closeReason,omitempty"`
-	EntryOrderID            int64           `json:"entryOrderId"`
-	EntryPrice              float64         `json:"entryPrice"`
-	ManageAnchorPrice       float64         `json:"manageAnchorPrice,omitempty"`
-	Qty                     float64         `json:"qty"`
-	FilledQty               float64         `json:"filledQty"`
-	RemainingQty            float64         `json:"remainingQty"`
-	Margin                  float64         `json:"margin"`
-	DeployedMargin          float64         `json:"deployedMargin,omitempty"`
-	Leverage                int             `json:"leverage"`
-	AddCount                int             `json:"addCount,omitempty"`
-	StarterOnly             bool            `json:"starterOnly,omitempty"`
-	AddLockedUntilConfirm   bool            `json:"addLockedUntilConfirm,omitempty"`
-	StopPrice               float64         `json:"stopPrice"`
-	TP1Price                float64         `json:"tp1Price"`
-	TP2Price                float64         `json:"tp2Price"`
-	TP3Price                float64         `json:"tp3Price"`
-	TP1Qty                  float64         `json:"tp1Qty"`
-	TP2Qty                  float64         `json:"tp2Qty"`
-	TP3Qty                  float64         `json:"tp3Qty"`
-	TP1FilledQty            float64         `json:"tp1FilledQty,omitempty"`
-	TP2FilledQty            float64         `json:"tp2FilledQty,omitempty"`
-	TP3FilledQty            float64         `json:"tp3FilledQty,omitempty"`
-	StopFilledQty           float64         `json:"stopFilledQty,omitempty"`
-	HitTP1                  bool            `json:"hitTp1,omitempty"`
-	HitTP2                  bool            `json:"hitTp2,omitempty"`
-	HitTP3                  bool            `json:"hitTp3,omitempty"`
-	StopOrderID             int64           `json:"stopOrderId"`
-	TP1OrderID              int64           `json:"tp1OrderId"`
-	TP2OrderID              int64           `json:"tp2OrderId"`
-	TP3OrderID              int64           `json:"tp3OrderId"`
-	TrailOn                 bool            `json:"trailOn"`
-	TrailRef                float64         `json:"trailRef"`
-	TrailStop               float64         `json:"trailStop"`
-	TrailCandidateRef       float64         `json:"trailCandidateRef,omitempty"`
-	TrailCandidateStop      float64         `json:"trailCandidateStop,omitempty"`
-	TrailCandidateLevel     float64         `json:"trailCandidateLevel,omitempty"`
-	TrailCandidateAt        time.Time       `json:"trailCandidateAt,omitempty"`
-	VPSetup                 string          `json:"vpSetup,omitempty"`
-	VPLevel                 float64         `json:"vpLevel,omitempty"`
-	VPTargetLevel           float64         `json:"vpTargetLevel,omitempty"`
-	VPStopMode              string          `json:"vpStopMode,omitempty"`
-	VPTargetMode            string          `json:"vpTargetMode,omitempty"`
-	RejectReason            string          `json:"rejectReason,omitempty"`
-	CustomRiskPct           float64         `json:"customRiskPct,omitempty"`
-	CustomTP1R              float64         `json:"customTp1R,omitempty"`
-	CustomTP2R              float64         `json:"customTp2R,omitempty"`
-	EntryReason             string          `json:"entryReason,omitempty"`
-	EntrySource             string          `json:"entrySource,omitempty"`
-	EntryGrade              string          `json:"entryGrade,omitempty"`
-	EntryState              string          `json:"entryState,omitempty"`
-	EntryTrigger            string          `json:"entryTrigger,omitempty"`
-	ExitProfile             string          `json:"exitProfile,omitempty"`
-	EntryConf               float64         `json:"entryConf,omitempty"`
-	DiscoveryScore          float64         `json:"discoveryScore,omitempty"`
-	TriggerScore            float64         `json:"triggerScore,omitempty"`
-	ExecutionScore          float64         `json:"executionScore,omitempty"`
-	CombinedScore           float64         `json:"combinedScore,omitempty"`
-	Sponsored               bool            `json:"sponsored,omitempty"`
-	SponsorshipScore        float64         `json:"sponsorshipScore,omitempty"`
-	WeakSponsorStreak       int             `json:"weakSponsorStreak,omitempty"`
-	StrongSponsorStreak     int             `json:"strongSponsorStreak,omitempty"`
-	LastConfluenceRefresh   time.Time       `json:"lastConfluenceRefresh,omitempty"`
-	ConfluenceRefreshCount  int             `json:"confluenceRefreshCount,omitempty"`
-	EntryTags               []string        `json:"entryTags,omitempty"`
-	EntryReasons            []string        `json:"entryReasons,omitempty"`
-	EntryVolumeUSD          float64         `json:"entryVolumeUsd,omitempty"`
-	StopReason              string          `json:"stopReason,omitempty"`
-	StopDistancePct         float64         `json:"stopDistancePct,omitempty"`
-	RegimeTag               string          `json:"regimeTag,omitempty"`
-	MaxFavorableR           float64         `json:"maxFavorableR,omitempty"`
-	MaxAdverseR             float64         `json:"maxAdverseR,omitempty"`
-	StallBars               int             `json:"stallBars,omitempty"`
-	LastMark                float64         `json:"lastMark,omitempty"`
-	RealizedPnL             float64         `json:"realizedPnl,omitempty"`
-	ProtectionPending       bool            `json:"protectionPending,omitempty"`
-	ProtectionRetryAfter    time.Time       `json:"protectionRetryAfter,omitempty"`
-	ProtectionRetryCount    int             `json:"protectionRetryCount,omitempty"`
-	ProtectionFailCount     int             `json:"protectionFailCount,omitempty"`
-	ManageFailSuppressCount int             `json:"manageFailSuppressCount,omitempty"`
-	LastManageFailAt        time.Time       `json:"lastManageFailAt,omitempty"`
-	LastManageFailCause     string          `json:"lastManageFailCause,omitempty"`
-	ManualManageState       string          `json:"manualManageState,omitempty"`
-	Managed                 bool            `json:"managed,omitempty"`
-	Protected               bool            `json:"protected,omitempty"`
-	UnknownEntryChecks      int             `json:"unknownEntryChecks,omitempty"`
-	UnknownExitChecks       int             `json:"unknownExitChecks,omitempty"`
-	PendingAddOrderID       int64           `json:"pendingAddOrderId,omitempty"`
-	PendingAddPrice         float64         `json:"pendingAddPrice,omitempty"`
-	PendingAddQty           float64         `json:"pendingAddQty,omitempty"`
-	PendingAddFilledQty     float64         `json:"pendingAddFilledQty,omitempty"`
-	PendingAddMargin        float64         `json:"pendingAddMargin,omitempty"`
-	PendingAddCreatedAt     time.Time       `json:"pendingAddCreatedAt,omitempty"`
-	PendingAddEntryReason   string          `json:"pendingAddEntryReason,omitempty"`
-	ProfitSweptUSDT         float64         `json:"profitSweptUsdt,omitempty"`
-	ReentryCount            int             `json:"reentryCount,omitempty"`
-	ExhaustionExit          bool            `json:"exhaustionExit,omitempty"`
-	ProtectionStage         protectionStage `json:"protectionStage,omitempty"`
-	FirstProtectAt          time.Time       `json:"firstProtectAt,omitempty"`
-	ProtectedStop           float64         `json:"protectedStop,omitempty"`
-	MaxGivebackR            float64         `json:"maxGivebackR,omitempty"`
-	CaptureRatio            float64         `json:"captureRatio,omitempty"`
+	Symbol                  string           `json:"symbol"`
+	Side                    string           `json:"side"`
+	State                   execState        `json:"state"`
+	CreatedAt               time.Time        `json:"createdAt"`
+	UpdatedAt               time.Time        `json:"updatedAt"`
+	ClosedAt                time.Time        `json:"closedAt,omitempty"`
+	CloseReason             string           `json:"closeReason,omitempty"`
+	EntryOrderID            int64            `json:"entryOrderId"`
+	EntryPrice              float64          `json:"entryPrice"`
+	ManageAnchorPrice       float64          `json:"manageAnchorPrice,omitempty"`
+	Qty                     float64          `json:"qty"`
+	FilledQty               float64          `json:"filledQty"`
+	RemainingQty            float64          `json:"remainingQty"`
+	Margin                  float64          `json:"margin"`
+	DeployedMargin          float64          `json:"deployedMargin,omitempty"`
+	Leverage                int              `json:"leverage"`
+	AddCount                int              `json:"addCount,omitempty"`
+	StarterOnly             bool             `json:"starterOnly,omitempty"`
+	AddLockedUntilConfirm   bool             `json:"addLockedUntilConfirm,omitempty"`
+	StopPrice               float64          `json:"stopPrice"`
+	TP1Price                float64          `json:"tp1Price"`
+	TP2Price                float64          `json:"tp2Price"`
+	TP3Price                float64          `json:"tp3Price"`
+	TP1Qty                  float64          `json:"tp1Qty"`
+	TP2Qty                  float64          `json:"tp2Qty"`
+	TP3Qty                  float64          `json:"tp3Qty"`
+	TP1FilledQty            float64          `json:"tp1FilledQty,omitempty"`
+	TP2FilledQty            float64          `json:"tp2FilledQty,omitempty"`
+	TP3FilledQty            float64          `json:"tp3FilledQty,omitempty"`
+	StopFilledQty           float64          `json:"stopFilledQty,omitempty"`
+	HitTP1                  bool             `json:"hitTp1,omitempty"`
+	HitTP2                  bool             `json:"hitTp2,omitempty"`
+	HitTP3                  bool             `json:"hitTp3,omitempty"`
+	StopOrderID             int64            `json:"stopOrderId"`
+	TP1OrderID              int64            `json:"tp1OrderId"`
+	TP2OrderID              int64            `json:"tp2OrderId"`
+	TP3OrderID              int64            `json:"tp3OrderId"`
+	TrailOn                 bool             `json:"trailOn"`
+	TrailRef                float64          `json:"trailRef"`
+	TrailStop               float64          `json:"trailStop"`
+	TrailCandidateRef       float64          `json:"trailCandidateRef,omitempty"`
+	TrailCandidateStop      float64          `json:"trailCandidateStop,omitempty"`
+	TrailCandidateLevel     float64          `json:"trailCandidateLevel,omitempty"`
+	TrailCandidateAt        time.Time        `json:"trailCandidateAt,omitempty"`
+	VPSetup                 string           `json:"vpSetup,omitempty"`
+	VPLevel                 float64          `json:"vpLevel,omitempty"`
+	VPTargetLevel           float64          `json:"vpTargetLevel,omitempty"`
+	VPStopMode              string           `json:"vpStopMode,omitempty"`
+	VPTargetMode            string           `json:"vpTargetMode,omitempty"`
+	RejectReason            string           `json:"rejectReason,omitempty"`
+	CustomRiskPct           float64          `json:"customRiskPct,omitempty"`
+	CustomTP1R              float64          `json:"customTp1R,omitempty"`
+	CustomTP2R              float64          `json:"customTp2R,omitempty"`
+	EntryReason             string           `json:"entryReason,omitempty"`
+	EntrySource             string           `json:"entrySource,omitempty"`
+	EntryGrade              string           `json:"entryGrade,omitempty"`
+	EntryState              string           `json:"entryState,omitempty"`
+	EntryTrigger            string           `json:"entryTrigger,omitempty"`
+	ExitProfile             string           `json:"exitProfile,omitempty"`
+	EntryConf               float64          `json:"entryConf,omitempty"`
+	DiscoveryScore          float64          `json:"discoveryScore,omitempty"`
+	TriggerScore            float64          `json:"triggerScore,omitempty"`
+	ExecutionScore          float64          `json:"executionScore,omitempty"`
+	CombinedScore           float64          `json:"combinedScore,omitempty"`
+	Sponsored               bool             `json:"sponsored,omitempty"`
+	SponsorshipScore        float64          `json:"sponsorshipScore,omitempty"`
+	WeakSponsorStreak       int              `json:"weakSponsorStreak,omitempty"`
+	StrongSponsorStreak     int              `json:"strongSponsorStreak,omitempty"`
+	LastConfluenceRefresh   time.Time        `json:"lastConfluenceRefresh,omitempty"`
+	ConfluenceRefreshCount  int              `json:"confluenceRefreshCount,omitempty"`
+	EntryTags               []string         `json:"entryTags,omitempty"`
+	EntryReasons            []string         `json:"entryReasons,omitempty"`
+	EntryVolumeUSD          float64          `json:"entryVolumeUsd,omitempty"`
+	StopReason              string           `json:"stopReason,omitempty"`
+	StopDistancePct         float64          `json:"stopDistancePct,omitempty"`
+	RegimeTag               string           `json:"regimeTag,omitempty"`
+	MaxFavorableR           float64          `json:"maxFavorableR,omitempty"`
+	MaxAdverseR             float64          `json:"maxAdverseR,omitempty"`
+	StallBars               int              `json:"stallBars,omitempty"`
+	LastMark                float64          `json:"lastMark,omitempty"`
+	RealizedPnL             float64          `json:"realizedPnl,omitempty"`
+	ProtectionPending       bool             `json:"protectionPending,omitempty"`
+	ProtectionRetryAfter    time.Time        `json:"protectionRetryAfter,omitempty"`
+	ProtectionRetryCount    int              `json:"protectionRetryCount,omitempty"`
+	ProtectionFailCount     int              `json:"protectionFailCount,omitempty"`
+	ManageFailSuppressCount int              `json:"manageFailSuppressCount,omitempty"`
+	LastManageFailAt        time.Time        `json:"lastManageFailAt,omitempty"`
+	LastManageFailCause     string           `json:"lastManageFailCause,omitempty"`
+	ManualManageState       string           `json:"manualManageState,omitempty"`
+	Managed                 bool             `json:"managed,omitempty"`
+	Protected               bool             `json:"protected,omitempty"`
+	UnknownEntryChecks      int              `json:"unknownEntryChecks,omitempty"`
+	UnknownExitChecks       int              `json:"unknownExitChecks,omitempty"`
+	PendingAddOrderID       int64            `json:"pendingAddOrderId,omitempty"`
+	PendingAddPrice         float64          `json:"pendingAddPrice,omitempty"`
+	PendingAddQty           float64          `json:"pendingAddQty,omitempty"`
+	PendingAddFilledQty     float64          `json:"pendingAddFilledQty,omitempty"`
+	PendingAddMargin        float64          `json:"pendingAddMargin,omitempty"`
+	PendingAddCreatedAt     time.Time        `json:"pendingAddCreatedAt,omitempty"`
+	PendingAddEntryReason   string           `json:"pendingAddEntryReason,omitempty"`
+	ProfitSweptUSDT         float64          `json:"profitSweptUsdt,omitempty"`
+	ReentryCount            int              `json:"reentryCount,omitempty"`
+	ExhaustionExit          bool             `json:"exhaustionExit,omitempty"`
+	ProtectionStage         protectionStage  `json:"protectionStage,omitempty"`
+	FirstProtectAt          time.Time        `json:"firstProtectAt,omitempty"`
+	ProtectedStop           float64          `json:"protectedStop,omitempty"`
+	MaxGivebackR            float64          `json:"maxGivebackR,omitempty"`
+	CaptureRatio            float64          `json:"captureRatio,omitempty"`
+	ManagePhase             tradeManagePhase `json:"managePhase,omitempty"`
+	RunnerMinQty            float64          `json:"runnerMinQty,omitempty"`
+	RunnerCaptureFailed     bool             `json:"runnerCaptureFailed,omitempty"`
 }
 
 type liveExecStore struct {
@@ -4335,6 +4346,114 @@ func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mf
 	return newStop, changed
 }
 
+func shouldAdvanceProtection(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	switch p.ManagePhase {
+	case managePhaseExhaustion:
+		return true
+	case managePhaseContinuation:
+		return true
+	default:
+		if importedManagedPosition(p) {
+			return p.MaxFavorableR >= envFloat("LIVE_IMPORTED_PROTECTION_MIN_R", 0.35) || p.HitTP1 || p.HitTP2 || p.HitTP3
+		}
+		return p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25)
+	}
+}
+
+func runnerPreservePct() float64 {
+	return clamp(envFloat("LIVE_RUNNER_PRESERVE_PCT", 0.25), 0.05, 0.50)
+}
+
+func runnerMinQtyForPosition(p *livePosition, starterUSDT float64) float64 {
+	if p == nil || p.RemainingQty <= 0 || p.DeployedMargin <= 0 || starterUSDT <= 0 {
+		return 0
+	}
+	if p.DeployedMargin < starterUSDT*2 {
+		return 0
+	}
+	sizeModelQty := p.RemainingQty * (starterUSDT / maxFloat(p.DeployedMargin, starterUSDT))
+	pctModelQty := p.RemainingQty * runnerPreservePct()
+	return min(p.RemainingQty, maxFloat(sizeModelQty, pctModelQty))
+}
+
+func updateManagePhase(p *livePosition, exhaustion bool) {
+	if p == nil {
+		return
+	}
+	if exhaustion {
+		p.ManagePhase = managePhaseExhaustion
+		return
+	}
+	if importedManagedPosition(p) {
+		if p.MaxFavorableR >= envFloat("LIVE_IMPORTED_PROTECTION_MIN_R", 0.35) || p.AddCount > 0 || p.HitTP1 || p.HitTP2 || p.HitTP3 {
+			p.ManagePhase = managePhaseContinuation
+		} else {
+			p.ManagePhase = managePhaseStarter
+		}
+		return
+	}
+	if p.AddCount > 0 || p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25) || p.HitTP1 || p.HitTP2 || p.HitTP3 {
+		p.ManagePhase = managePhaseContinuation
+		return
+	}
+	p.ManagePhase = managePhaseStarter
+}
+
+func refreshRunnerReservation(p *livePosition, starterUSDT float64) {
+	if p == nil {
+		return
+	}
+	if p.ManagePhase != managePhaseContinuation && p.ManagePhase != managePhaseExhaustion {
+		p.RunnerMinQty = 0
+		return
+	}
+	p.RunnerMinQty = runnerMinQtyForPosition(p, starterUSDT)
+}
+
+func shouldPreserveRunnerOnExit(p *livePosition, reason string) bool {
+	if p == nil || p.RemainingQty <= 0 || p.RunnerMinQty <= 0 {
+		return false
+	}
+	if p.ManagePhase != managePhaseContinuation && p.ManagePhase != managePhaseExhaustion {
+		return false
+	}
+	if strings.Contains(strings.ToUpper(strings.TrimSpace(reason)), "STRUCTURE") || strings.Contains(strings.ToUpper(strings.TrimSpace(reason)), "INVALID") {
+		return false
+	}
+	return p.RemainingQty-p.RunnerMinQty > fillEpsilon(p.RemainingQty)
+}
+
+func runnerCaptureFailed(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	minMFE := envFloat("LIVE_RUNNER_CAPTURE_FAIL_MIN_MFE_R", 2.0)
+	maxCapture := envFloat("LIVE_RUNNER_CAPTURE_FAIL_MAX_CAPTURE_RATIO", 0.25)
+	maxReturnPct := envFloat("LIVE_RUNNER_CAPTURE_FAIL_MAX_RETURN_PCT", 1.0)
+	return p.MaxFavorableR >= minMFE &&
+		p.CaptureRatio <= maxCapture &&
+		math.Abs(tradeReturnPct(p)) <= maxReturnPct
+}
+
+func (m *liveExecManager) trimToRunner(now time.Time, p *livePosition, reason string) bool {
+	if m == nil || p == nil || !shouldPreserveRunnerOnExit(p, reason) {
+		return false
+	}
+	trimQty := maxFloat(0, p.RemainingQty-p.RunnerMinQty)
+	if trimQty <= fillEpsilon(p.RemainingQty) {
+		return false
+	}
+	if err := m.closeSymbolMarketQty(p.Symbol, trimQty); err != nil {
+		return false
+	}
+	p.RemainingQty = maxFloat(p.RunnerMinQty, p.RemainingQty-trimQty)
+	p.UpdatedAt = now
+	return true
+}
+
 func updateGivebackMetrics(mfeR, riskR float64, captureRatio *float64, maxGivebackR *float64) {
 	if captureRatio != nil && mfeR > 0 {
 		*captureRatio = clamp(riskR/mfeR, -10, 10)
@@ -6731,8 +6850,15 @@ func (m *liveExecManager) applyAddFill(now time.Time, p *livePosition, deltaQty,
 	if strings.EqualFold(strings.TrimSpace(reason), "CONFIRMED_ADD") {
 		p.StarterOnly = false
 		p.AddLockedUntilConfirm = false
-		p.EntryReason = "continuation_fast"
+		if !importedManagedPosition(p) {
+			p.EntryReason = "continuation_fast"
+		}
 	}
+	if importedManagedPosition(p) && fillPx > 0 {
+		p.ManageAnchorPrice = fillPx
+	}
+	updateManagePhase(p, false)
+	refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 	p.State = execOpen
 	p.UpdatedAt = now
 	p.TP1FilledQty = 0
@@ -7159,6 +7285,7 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 		p.Managed = true
 		p.Protected = false
 	}
+	updateManagePhase(p, false)
 	if p.Margin <= 0 && p.EntryPrice > 0 && p.Leverage > 0 {
 		p.Margin = (p.EntryPrice * p.FilledQty) / float64(p.Leverage)
 	}
@@ -7194,6 +7321,13 @@ func botManagedPosition(p *livePosition) bool {
 	return !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") &&
 		p.ManageAnchorPrice > 0 &&
 		strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged)
+}
+
+func importedManagedPosition(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	return botManagedPosition(p) && !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT")
 }
 
 func manualPassivePosition(p *livePosition) bool {
@@ -7389,9 +7523,6 @@ func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) 
 	if pnlPct < minAddPnLPct {
 		return false
 	}
-	if p.HitTP3 && !manualCatchUpAddAllowed(p) {
-		return false
-	}
 	return true
 }
 
@@ -7428,15 +7559,6 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 	p.ManageAnchorPrice = mark
 	p.LastMark = mark
 	updateFavorableRLive(p, mark)
-	if targetHit(p.Side, mark, p.TP1Price) {
-		p.HitTP1 = true
-	}
-	if targetHit(p.Side, mark, p.TP2Price) {
-		p.HitTP2 = true
-	}
-	if targetHit(p.Side, mark, p.TP3Price) {
-		p.HitTP3 = true
-	}
 	if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
 		p.StopPrice = newStop
 	}
@@ -7457,11 +7579,12 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 		}
 	}
 	updateGivebackMetrics(p.MaxFavorableR, unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, mark), &p.CaptureRatio, &p.MaxGivebackR)
-	if p.HitTP3 {
-		m.maybeEnableTrail(p, 3)
-	} else if p.HitTP2 {
+	trailMinR := envFloat("LIVE_IMPORTED_TRAIL_MIN_R", 1.5)
+	if p.MaxFavorableR >= maxFloat(trailMinR, tp1R) {
 		m.maybeEnableTrail(p, 2)
 	}
+	updateManagePhase(p, false)
+	refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 	if p.TrailOn {
 		sideBuy := isLongSide(p.Side)
 		if p.TrailRef <= 0 || (sideBuy && mark > p.TrailRef) || (!sideBuy && mark < p.TrailRef) {
@@ -8266,6 +8389,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		StarterOnly:           starterOnly,
 		AddLockedUntilConfirm: starterOnly,
 		ReentryCount:          reentryCount,
+		ManagePhase:           managePhaseStarter,
 	}
 	if stopDistancePct > 0 {
 		p.CustomRiskPct = stopDistancePct / 100.0
@@ -8517,10 +8641,12 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
-			if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
-				p.StopPrice = newStop
-				if err := m.placeOrReplaceStop(p); err == nil {
-					changed = true
+			if shouldAdvanceProtection(p) {
+				if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+					p.StopPrice = newStop
+					if err := m.placeOrReplaceStop(p); err == nil {
+						changed = true
+					}
 				}
 			}
 			updateGivebackMetrics(p.MaxFavorableR, unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, mark), &p.CaptureRatio, &p.MaxGivebackR)
@@ -8556,6 +8682,9 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			if updated {
 				changed = true
 			}
+			currentRunnerState := evaluateRunnerExitState(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
+			updateManagePhase(p, currentRunnerState.ExhaustionConfirmed && !currentRunnerState.StructureBroken)
+			refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 			if m.exitManager != nil {
 				mv := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 					Side:              p.Side,
@@ -8574,7 +8703,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					HitTP3:            p.HitTP3,
 					WeakSponsorStreak: p.WeakSponsorStreak,
 				})
-				runnerState := evaluateRunnerExitState(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
+				runnerState := currentRunnerState
 				if mv.MoveStopToBE {
 					be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -8591,6 +8720,9 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					}
 				}
 				if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+					if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
+						changed = true
+					}
 					if m.tightenRunnerStop(p, runnerState.TightenReason) {
 						changed = true
 					}
@@ -8772,6 +8904,9 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 	sideBuy := strings.EqualFold(p.Side, "BUY")
 	anchor := p.EntryPrice
+	if importedManagedPosition(p) && p.ManageAnchorPrice > 0 {
+		anchor = p.ManageAnchorPrice
+	}
 	stopPct := m.stopPct / 100.0
 	if stopPct <= 0 {
 		stopPct = 0.02
@@ -9297,30 +9432,12 @@ func (m *liveExecManager) handleRatchetTargets(p *livePosition, mark float64) (b
 	changed := false
 	if !p.HitTP1 && targetHit(p.Side, mark, p.TP1Price) {
 		p.HitTP1 = true
-		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 1); ok {
-			p.StopPrice = stop
-			changed = true
-		}
 	}
 	if !p.HitTP2 && targetHit(p.Side, mark, p.TP2Price) {
 		p.HitTP2 = true
-		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 2); ok {
-			p.StopPrice = stop
-			changed = true
-		}
-		m.maybeEnableTrail(p, 2)
-		if p.TrailOn && p.TrailRef <= 0 {
-			p.TrailRef = mark
-			p.TrailStop = m.calcTrailStopForPosition(p, strings.EqualFold(p.Side, "BUY"), mark, false)
-			changed = true
-		}
 	}
 	if !p.HitTP3 && targetHit(p.Side, mark, p.TP3Price) {
 		p.HitTP3 = true
-		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 3); ok {
-			p.StopPrice = stop
-			changed = true
-		}
 		m.maybeEnableTrail(p, 3)
 		if p.TrailOn {
 			if p.TrailRef <= 0 || (strings.EqualFold(p.Side, "BUY") && mark > p.TrailRef) || (!strings.EqualFold(p.Side, "BUY") && mark < p.TrailRef) {
@@ -9868,6 +9985,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			continue
 		}
 		runnerState := evaluateRunnerExitState(p.Side, mv, ext[sym])
+		updateManagePhase(p, runnerState.ExhaustionConfirmed && !runnerState.StructureBroken)
+		refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 		if m.exitManager != nil {
 			dec := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:              p.Side,
@@ -9911,6 +10030,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				}
 			}
 			if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+				if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
+					changed = true
+				}
 				if m.tightenRunnerStop(p, runnerState.TightenReason) {
 					changed = true
 				}
@@ -9946,6 +10068,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			}
 		}
 		if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
+			if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
+				changed = true
+			}
 			if m.tightenRunnerStop(p, runnerState.TightenReason) {
 				changed = true
 			}
@@ -13825,22 +13950,7 @@ type ladderPlan struct {
 }
 
 func manualCatchUpAddAllowed(p *livePosition) bool {
-	if p == nil {
-		return false
-	}
-	if !botManagedPosition(p) {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(p.EntryReason), manualEntryReasonManaged) {
-		return false
-	}
-	if p.State != execOpen || p.PendingAddOrderID > 0 {
-		return false
-	}
-	if p.StarterOnly || p.AddLockedUntilConfirm {
-		return false
-	}
-	return true
+	return false
 }
 
 func candidateStarterOnlyByStopPlan(c candidate) bool {
@@ -13870,6 +13980,87 @@ func positionPnLPct(p *livePosition, meta map[string]symbolMeta) float64 {
 	}
 	_, pct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
 	return pct
+}
+
+func candidateTargetForAdd(c candidate) float64 {
+	if c.Sig.TP3 > 0 {
+		return c.Sig.TP3
+	}
+	if c.Sig.TP2 > 0 {
+		return c.Sig.TP2
+	}
+	return c.Sig.TP1
+}
+
+func addRoomLeftR(c candidate) float64 {
+	target := candidateTargetForAdd(c)
+	risk := abs(c.Sig.Entry - c.Sig.Stop)
+	if target <= 0 || risk <= 0 || c.LastClose <= 0 {
+		return 0
+	}
+	return abs(target-c.LastClose) / risk
+}
+
+func directionMoveFromAnchorPct(side string, anchor, mark float64) float64 {
+	if anchor <= 0 || mark <= 0 {
+		return 0
+	}
+	if strings.EqualFold(side, "BUY") {
+		return ((mark - anchor) / anchor) * 100
+	}
+	return ((anchor - mark) / anchor) * 100
+}
+
+func candidateExtendedForBotAdd(c candidate) bool {
+	if hasFreshStructureReset(c) {
+		return false
+	}
+	maxATR := envFloat("LIVE_ADD_MAX_EXTENSION_ATR", 1.35)
+	maxMovePct := envFloat("LIVE_ADD_MAX_DIRECTIONAL_PCT", 6.0)
+	return c.ExtensionATR >= maxATR || candidateDirectionalMovePct(c) >= maxMovePct
+}
+
+func importedPositionExtendedForAdd(p *livePosition, c candidate, meta map[string]symbolMeta) bool {
+	if p == nil || hasFreshStructureReset(c) {
+		return false
+	}
+	anchor := p.ManageAnchorPrice
+	if anchor <= 0 {
+		anchor = p.LastMark
+	}
+	if anchor <= 0 {
+		anchor = c.LastClose
+	}
+	mark := p.LastMark
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+	if info, ok := meta[raw]; ok && info.LastPrice > 0 {
+		mark = info.LastPrice
+	}
+	if mark <= 0 {
+		mark = c.LastClose
+	}
+	movePct := directionMoveFromAnchorPct(p.Side, anchor, mark)
+	maxATR := envFloat("LIVE_IMPORTED_ADD_MAX_EXTENSION_ATR", 1.10)
+	maxMovePct := envFloat("LIVE_IMPORTED_ADD_MAX_EXT_PCT", 2.0)
+	return c.ExtensionATR >= maxATR || movePct >= maxMovePct
+}
+
+func addRoomSufficient(c candidate, imported bool) bool {
+	if c.Sig.Stop <= 0 || candidateTargetForAdd(c) <= 0 {
+		return true
+	}
+	minRR := envFloat("LIVE_ADD_MIN_RR_LEFT", 1.5)
+	if imported {
+		minRR = envFloat("LIVE_IMPORTED_ADD_MIN_RR_LEFT", minRR)
+	}
+	return addRoomLeftR(c) >= minRR
+}
+
+func addNeedsFreshPhase(p *livePosition, c candidate) bool {
+	if p == nil || p.AddCount <= 0 {
+		return false
+	}
+	return !hasFreshStructureReset(c)
 }
 
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
@@ -13905,7 +14096,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		}
 	}
 	if activeSame != nil {
-		manualCatchUp := manualCatchUpAddAllowed(activeSame)
+		importedManaged := importedManagedPosition(activeSame)
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
 			return plan
@@ -13922,11 +14113,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "position_not_ready_for_add"
 			return plan
 		}
-		if (activeSame.HitTP1 || activeSame.HitTP2 || activeSame.HitTP3) && !manualCatchUp {
-			plan.RejectReason = "position_not_ready_for_add"
-			return plan
-		}
-		if !winnerAddStrategyReady(c, manualCatchUp) {
+		if !winnerAddStrategyReady(c, false) {
 			if activeSame.AddLockedUntilConfirm || activeSame.StarterOnly {
 				plan.RejectReason = "starter_waiting_full_confirmation"
 			} else {
@@ -13954,17 +14141,40 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "pyramid_structure_not_intact"
 			return plan
 		}
+		if addNeedsFreshPhase(activeSame, c) {
+			plan.RejectReason = "pyramid_needs_fresh_phase"
+			return plan
+		}
 		if candidateExhaustionActive(c) {
 			plan.RejectReason = "pyramid_exhaustion_active"
 			return plan
 		}
-		if candidateSpikeCandle(c) && !manualCatchUp {
+		if candidateSpikeCandle(c) {
 			plan.RejectReason = "pyramid_spike_candle"
 			return plan
 		}
-		if candidateRapidExpansion(c) && !manualCatchUp {
-			plan.RejectReason = "pyramid_rapid_expansion"
-			return plan
+		if importedManaged {
+			if importedPositionExtendedForAdd(activeSame, c, meta) {
+				plan.RejectReason = "imported_add_extended_wait_reset"
+				return plan
+			}
+			if !addRoomSufficient(c, true) {
+				plan.RejectReason = "imported_add_room_too_small"
+				return plan
+			}
+		} else {
+			if candidateRapidExpansion(c) {
+				plan.RejectReason = "pyramid_rapid_expansion"
+				return plan
+			}
+			if candidateExtendedForBotAdd(c) {
+				plan.RejectReason = "pyramid_extended_wait_reset"
+				return plan
+			}
+			if !addRoomSufficient(c, false) {
+				plan.RejectReason = "pyramid_room_too_small"
+				return plan
+			}
 		}
 		if sessionLowLiquidity(sessionPhaseUTC(now)) {
 			plan.RejectReason = "pyramid_low_liquidity_window"
@@ -14012,6 +14222,10 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		}
 		if isStopCloseReason(closedSame.CloseReason) && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 15*time.Minute) {
 			plan.RejectReason = "reentry_after_stop_cooldown"
+			return plan
+		}
+		if closedSame.RunnerCaptureFailed && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 30*time.Minute) && !hasFreshStructureReset(c) {
+			plan.RejectReason = "reentry_runner_capture_failed"
 			return plan
 		}
 		if !qualifiesStructuredReentry(c) {
@@ -17463,6 +17677,7 @@ func markLivePositionClosed(p *livePosition, now time.Time, reason string) {
 	p.ClosedAt = now
 	p.UpdatedAt = now
 	p.ExhaustionExit = isExhaustionCloseReason(reason)
+	p.RunnerCaptureFailed = runnerCaptureFailed(p)
 }
 
 func sessionTag(ts time.Time) string {

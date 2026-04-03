@@ -295,6 +295,18 @@ Notes:
 - `LIVE_TRIGGER_PRICE_PROTECT`: default `true`
 - `LIVE_TP_FRONT_RUN_PCT`: default `0.001`
 - `LIVE_TRAIL_AFTER_TP`: default `3`
+- `LIVE_ADD_MIN_RR_LEFT`: default `1.5`
+  Bot-native add gate. Blocks adds when the current move has too little reward left to the next target.
+- `LIVE_ADD_MAX_EXTENSION_ATR`: default `1.35`
+  Bot-native extension cap from the latest reclaim/base.
+- `LIVE_ADD_MAX_DIRECTIONAL_PCT`: default `6.0`
+  Bot-native directional move cap before the bot waits for reset instead of adding.
+- `LIVE_IMPORTED_ADD_MIN_RR_LEFT`: default `1.5`
+  Imported/manual-managed add gate after handoff.
+- `LIVE_IMPORTED_ADD_MAX_EXTENSION_ATR`: default `1.10`
+  Stricter extension cap for imported trades so the bot does not late-chase.
+- `LIVE_IMPORTED_ADD_MAX_EXT_PCT`: default `2.0`
+  Percent move cap from the handoff anchor before imported adds must wait for reset.
 - `LIVE_TRAIL_ATR_MULT_CONT`: default `2.6`
 - `LIVE_TRAIL_ATR_MULT_REV`: default `1.9`
 - `LIVE_TRAIL_PCT_MIN`: default `1.0`
@@ -302,6 +314,18 @@ Notes:
 - `LIVE_TRAIL_STEP_BPS`: default `10.0`
 - `LIVE_TRAIL_STOP_PCT`: default `1.50`
 - `LIVE_TRAIL_STOP_PCT_TP3`: default `3.25`
+- `LIVE_CONTINUATION_PROTECTION_MIN_R`: default `1.25`
+  Bot-native trades wait for more proof before moving into tighter protection logic.
+- `LIVE_IMPORTED_PROTECTION_MIN_R`: default `0.35`
+  Imported/manual-managed trades can arm protection earlier from the handoff state.
+- `LIVE_RUNNER_PRESERVE_PCT`: default `0.25`
+  Minimum runner share to preserve once the bot has built enough size.
+- `LIVE_RUNNER_CAPTURE_FAIL_MIN_MFE_R`: default `2.0`
+  Flags trades that had strong open edge but poor realized capture.
+- `LIVE_RUNNER_CAPTURE_FAIL_MAX_CAPTURE_RATIO`: default `0.25`
+- `LIVE_RUNNER_CAPTURE_FAIL_MAX_RETURN_PCT`: default `1.0`
+- `LIVE_IMPORTED_TRAIL_MIN_R`: default `1.5`
+  Imported/manual-managed winners can begin runner-style trailing once they have enough open edge from the handoff.
 
 ## Strategy Routing: Ignite Continuation Reversal Exhaustion
 
