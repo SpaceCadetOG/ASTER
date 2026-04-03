@@ -2404,7 +2404,7 @@ func TestPostWinCooldownRejectReasonBlocksOppositeAfterBigWin(t *testing.T) {
 
 func TestLoadSafetyConfigUsesStarterMarginForMinAvailable(t *testing.T) {
 	t.Setenv("LIVE_MIN_AVAILABLE_USDT", "")
-	t.Setenv("LIVE_ENTRY_STARTER_USDT", "10")
+	t.Setenv("LIVE_STARTER_USDT", "10")
 	cfg := loadSafetyConfig(0, 25)
 	if cfg.minAvailUSDT != 10 {
 		t.Fatalf("expected starter-based min available of 10, got %.2f", cfg.minAvailUSDT)
@@ -2412,10 +2412,30 @@ func TestLoadSafetyConfigUsesStarterMarginForMinAvailable(t *testing.T) {
 }
 
 func TestLoadLadderConfigDefaultsStarterToTen(t *testing.T) {
+	t.Setenv("LIVE_STARTER_USDT", "")
 	t.Setenv("LIVE_ENTRY_STARTER_USDT", "")
 	cfg := loadLadderConfig(0)
 	if cfg.StarterUSDT != 10 {
 		t.Fatalf("expected starter default of 10, got %.2f", cfg.StarterUSDT)
+	}
+}
+
+func TestLoadLadderConfigPrefersNewSizingEnvNames(t *testing.T) {
+	t.Setenv("LIVE_STARTER_USDT", "25")
+	t.Setenv("LIVE_ADD_USDT", "25")
+	t.Setenv("LIVE_MAX_TOTAL_USDT", "100")
+	t.Setenv("LIVE_ENTRY_STARTER_USDT", "10")
+	t.Setenv("LIVE_PYRAMID_STEP_USDT", "10")
+	t.Setenv("LIVE_PYRAMID_MAX_TOTAL_USDT", "50")
+	cfg := loadLadderConfig(20)
+	if cfg.StarterUSDT != 25 {
+		t.Fatalf("expected starter from LIVE_STARTER_USDT, got %.2f", cfg.StarterUSDT)
+	}
+	if cfg.StepUSDT != 25 {
+		t.Fatalf("expected add step from LIVE_ADD_USDT, got %.2f", cfg.StepUSDT)
+	}
+	if cfg.MaxTotalUSDT != 100 {
+		t.Fatalf("expected max total from LIVE_MAX_TOTAL_USDT, got %.2f", cfg.MaxTotalUSDT)
 	}
 }
 

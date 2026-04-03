@@ -5045,10 +5045,14 @@ func loadHybridStopConfig() exitmgr.HybridStopConfig {
 }
 
 func loadLadderConfig(defaultStarter float64) ladderConfig {
+	starterFallback := maxFloat(defaultStarter, 10)
+	starterUSDT := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", starterFallback))
+	stepUSDT := envFloat("LIVE_ADD_USDT", envFloat("LIVE_PYRAMID_STEP_USDT", 10))
+	maxTotalUSDT := envFloat("LIVE_MAX_TOTAL_USDT", envFloat("LIVE_PYRAMID_MAX_TOTAL_USDT", 50))
 	cfg := ladderConfig{
-		StarterUSDT:   envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(defaultStarter, 10)),
-		StepUSDT:      envFloat("LIVE_PYRAMID_STEP_USDT", 10),
-		MaxTotalUSDT:  envFloat("LIVE_PYRAMID_MAX_TOTAL_USDT", 50),
+		StarterUSDT:   starterUSDT,
+		StepUSDT:      stepUSDT,
+		MaxTotalUSDT:  maxTotalUSDT,
 		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
 		MinAddPnLPct:  envFloat("LIVE_PYRAMID_MIN_ADD_PNL_PCT", 0.75),
 		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 3),
@@ -14065,7 +14069,7 @@ func addNeedsFreshPhase(p *livePosition, c candidate) bool {
 
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
 	plan := ladderPlan{
-		MarginUSDT: envFloat("LIVE_ENTRY_STARTER_USDT", 10),
+		MarginUSDT: envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10)),
 	}
 	if execMgr == nil {
 		return plan
@@ -15697,7 +15701,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			cand.RejectReason = ""
 			cand.QualityReasons = append(cand.QualityReasons, "persistence_override")
 			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
-				strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol)), cand.Side, strings.Join(fails, ","), firstNonEmpty(cand.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
+				strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol)), cand.Side, strings.Join(fails, ","), firstNonEmpty(cand.PersistenceReason, "strong_persistence"), envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10)))
 			return cand
 		}
 		if envBool("LIVE_HEATING_STARTER_ENABLE", true) &&
@@ -16956,7 +16960,7 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 }
 
 func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
-	starterMargin := envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMargin, 10))
+	starterMargin := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMargin, 10)))
 	if starterMargin <= 0 {
 		starterMargin = maxFloat(tradeMargin, 10)
 	}
