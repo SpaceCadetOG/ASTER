@@ -2186,7 +2186,7 @@ func TestResolveLadderPlanBlocksReentryAfterRunnerCaptureFailureWithoutReset(t *
 	}
 }
 
-func TestManualProtectionConvictionReadyRequiresProgressForManualManagedTrade(t *testing.T) {
+func TestManualProtectionConvictionReadyImmediatelyForImportedManagedTrade(t *testing.T) {
 	p := &livePosition{
 		Symbol:            "SIRENUSDT",
 		Side:              "SELL",
@@ -2196,12 +2196,8 @@ func TestManualProtectionConvictionReadyRequiresProgressForManualManagedTrade(t 
 		ManageAnchorPrice: 1.2415,
 		LastMark:          1.2415,
 	}
-	if manualProtectionConvictionReady(p) {
-		t.Fatalf("expected no conviction before meaningful progress")
-	}
-	p.HitTP1 = true
 	if !manualProtectionConvictionReady(p) {
-		t.Fatalf("expected conviction once TP1-equivalent is reached")
+		t.Fatalf("expected imported/manual-managed trades to require immediate baseline protection")
 	}
 }
 
@@ -2363,6 +2359,7 @@ func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
 }
 
 func TestResolveLadderPlanAllowsStructuredReentry(t *testing.T) {
+	t.Setenv("LIVE_REENTRY_ENABLE", "1")
 	now := time.Date(2026, 3, 25, 9, 30, 0, 0, time.UTC)
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
@@ -2527,8 +2524,8 @@ func TestPersistenceSoftBlockMatchesExpectedReasons(t *testing.T) {
 	if !persistenceSoftBlock("meta_quality:0.45<0.52") {
 		t.Fatalf("expected meta_quality to be soft")
 	}
-	if !persistenceSoftBlock("continuation_no_structure_confirm") {
-		t.Fatalf("expected continuation_no_structure_confirm to be soft")
+	if persistenceSoftBlock("continuation_no_structure_confirm") {
+		t.Fatalf("expected continuation_no_structure_confirm to stay hard under stricter persistence routing")
 	}
 	if persistenceSoftBlock("min_available_usdt") {
 		t.Fatalf("expected min_available_usdt to remain hard")
@@ -2541,15 +2538,24 @@ func TestPersistenceStrongRequiresEvidence(t *testing.T) {
 		PersistSoftMinSeen:      3,
 		PersistSoftMinTopN:      2,
 	}
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
 	c := candidate{
 		Strat:                  "persistence_entry",
+		Side:                   "BUY",
 		CombinedScore:          0.82,
+		Conf:                   0.65,
 		PersistenceSeenCount:   3,
 		PersistenceTopNCount:   2,
 		PersistenceVolumeTrend: true,
 		PersistenceMomentum:    true,
+		LastClose:              1.02,
+		SessionVWAP:            1.01,
+		EMA9:                   1.01,
+		ReclaimHold:            true,
 		Entry: inplay.Entry{
-			State: inplay.StateHeating,
+			State:        inplay.StateHeating,
+			CurrentScore: 92,
 		},
 	}
 	if !persistenceStrong(c, cfg) {
@@ -2562,11 +2568,74 @@ func TestPersistenceStrongRequiresEvidence(t *testing.T) {
 }
 
 func TestPersistenceSoftBlocksOnly(t *testing.T) {
-	if !persistenceSoftBlocksOnly([]string{"continuation_no_structure_confirm", "below_vwap_ema"}) {
-		t.Fatalf("expected pure soft blockers to pass")
+	if !persistenceSoftBlocksOnly([]string{"wall_not_persistent", "meta_quality:0.50<0.58"}) {
+		t.Fatalf("expected supported soft blockers to pass")
 	}
-	if persistenceSoftBlocksOnly([]string{"continuation_no_structure_confirm", "min_available_usdt"}) {
+	if persistenceSoftBlocksOnly([]string{"below_vwap_ema", "min_available_usdt"}) {
 		t.Fatalf("expected mixed soft/hard blockers to fail")
+	}
+}
+
+func TestPersistenceStrongRejectsVWAPConflict(t *testing.T) {
+	cfg := entryQualityConfig{
+		PersistenceSoftOverride: true,
+		PersistSoftMinSeen:      3,
+		PersistSoftMinTopN:      2,
+	}
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
+	c := candidate{
+		Strat:                  "persistence_entry",
+		CombinedScore:          0.84,
+		Conf:                   0.66,
+		PersistenceSeenCount:   3,
+		PersistenceTopNCount:   2,
+		PersistenceVolumeTrend: true,
+		PersistenceMomentum:    true,
+		LastClose:              0.99,
+		SessionVWAP:            1.01,
+		EMA9:                   1.01,
+		Entry: inplay.Entry{
+			State:        inplay.StateHeating,
+			CurrentScore: 93,
+		},
+	}
+	if persistenceStrong(c, cfg) {
+		t.Fatalf("expected vwap/ema conflict to block persistence entry")
+	}
+}
+
+func TestPersistenceStrongRejectsStrongOFIConflict(t *testing.T) {
+	cfg := entryQualityConfig{
+		PersistenceSoftOverride: true,
+		PersistSoftMinSeen:      3,
+		PersistSoftMinTopN:      2,
+	}
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
+	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
+	t.Setenv("LIVE_PERSISTENCE_OFI_TOLERANCE_Z", "0.10")
+	c := candidate{
+		Strat:                  "persistence_entry",
+		Side:                   "BUY",
+		CombinedScore:          0.84,
+		Conf:                   0.66,
+		PersistenceSeenCount:   3,
+		PersistenceTopNCount:   2,
+		PersistenceVolumeTrend: true,
+		PersistenceMomentum:    true,
+		LastClose:              1.02,
+		SessionVWAP:            1.01,
+		EMA9:                   1.01,
+		OFISamples:             10,
+		OFIZ:                   -0.35,
+		Entry: inplay.Entry{
+			State:        inplay.StateHeating,
+			CurrentScore: 93,
+		},
+	}
+	if persistenceStrong(c, cfg) {
+		t.Fatalf("expected strong OFI disagreement to block persistence entry")
 	}
 }
 

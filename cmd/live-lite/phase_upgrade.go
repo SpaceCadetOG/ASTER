@@ -410,6 +410,15 @@ func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *li
 		}
 	}
 	baseConf := clamp(0.46+float64(st.SeenCount)*0.02+float64(st.TopNCount)*0.03+maxFloat(0, c.CombinedScore-0.70)*0.15, 0.42, 0.68)
+	c.Conf = maxFloat(c.Conf, baseConf)
+	c.PersistenceSeenCount = st.SeenCount
+	c.PersistenceTopNCount = st.TopNCount
+	c.PersistenceBestRank = st.BestRank
+	c.PersistenceVolumeTrend = st.VolumeTrendUp
+	c.PersistenceMomentum = st.MomentumStableOrUp
+	if !persistenceEntryEligible(c) {
+		return c
+	}
 	reasonsText := []string{
 		fmt.Sprintf("seen=%d", st.SeenCount),
 		fmt.Sprintf("topn=%d", st.TopNCount),
@@ -421,7 +430,7 @@ func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *li
 		reasonsText = append(reasonsText, "prior_reject="+st.LastRejectReason)
 	}
 	c.Strat = "persistence_entry"
-	c.Conf = baseConf
+	c.Conf = maxFloat(baseConf, envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62))
 	c.Sig = strategies.Signal{
 		Active:     true,
 		Name:       "persistence_entry",

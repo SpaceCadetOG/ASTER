@@ -46,6 +46,8 @@ Live:
 LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live-lite
 ```
 
+Manual trades may be imported for tracking. Bot-managed status is granted only after protection is successfully attached; unprotected manual-managed positions block new entries and can be force-closed by the safety layer.
+
 ## Stats CLI
 
 Aggregate JSONL event logs:

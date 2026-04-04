@@ -34,6 +34,10 @@ Notes:
 - `LIVE_TRADE_MARGIN_MIN_USDT`: default `5.0`
 - `LIVE_TRADE_MARGIN_PCT`: default `10.0`
 - `LIVE_TRADE_MARGIN_USDT`: default `100`
+- `LIVE_IMPORT_AUTO_MANAGE_ENABLE`: default `false`
+- `LIVE_IMPORT_REQUIRE_PROTECTION`: default `true`
+- `LIVE_IMPORT_PROTECT_TIMEOUT_SEC`: default `15`
+- `LIVE_IMPORT_BLOCK_IF_UNPROTECTED`: default `true`
 - `LIVE_TRADE_SLOTS`: default `5`
 
 ## In-Play Tracker And Ranking

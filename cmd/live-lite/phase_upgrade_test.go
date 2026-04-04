@@ -73,7 +73,7 @@ func TestMissedTrackerEmitsAfterFifteenMinutes(t *testing.T) {
 	}
 }
 
-func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
+func TestMissedTrackerKeepsCandidateUntouchedWhenPersistencePromotionStillFallsShort(t *testing.T) {
 	t.Setenv("LIVE_OPP_TRACK_ENABLE", "1")
 	t.Setenv("LIVE_OPP_TRACK_WINDOW_SEC", "1800")
 	t.Setenv("LIVE_OPP_MIN_SEEN_COUNT", "3")
@@ -82,6 +82,8 @@ func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
 	t.Setenv("LIVE_SOFT_REJECT_MEMORY_TTL_SEC", "3600")
 	t.Setenv("LIVE_PERSISTENCE_ENTRY_ENABLE", "1")
 	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.58")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
 	t.Setenv("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", "1")
 	t.Setenv("LIVE_PERSISTENCE_ALLOW_STABLE_MOMENTUM", "1")
 	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
@@ -91,7 +93,7 @@ func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
 	base := candidate{
 		Side:          "BUY",
 		Strat:         "none",
-		CombinedScore: 0.76,
+		CombinedScore: 0.90,
 		VolumeUSD:     1_000_000,
 		VolumeRatio:   1.05,
 		OFIZ:          0.48,
@@ -99,7 +101,8 @@ func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
 		LastClose:     1.05,
 		SessionVWAP:   1.04,
 		EMA9:          1.04,
-		RejectReason:  "continuation_no_structure_confirm",
+		RejectReason:  "meta_quality:0.54<0.58",
+		ReclaimHold:   true,
 		Entry: inplay.Entry{
 			Symbol:       "LYNUSDT",
 			CurrentGrade: "A",
@@ -119,13 +122,14 @@ func TestMissedTrackerPromotesPersistenceEntry(t *testing.T) {
 	base.Entry.ScoreSlope = 0.11
 	base.RejectReason = ""
 	trk.ObserveCandidate(now.Add(time.Minute), base, false)
+	base.VolumeUSD = 1_150_000
+	base.VolumeRatio = 1.15
+	base.Entry.ScoreSlope = 0.12
+	trk.ObserveCandidate(now.Add(90*time.Second), base, false)
 
-	got := trk.PromoteCandidate(now.Add(90*time.Second), base, nil, nil)
-	if got.Strat != "persistence_entry" {
-		t.Fatalf("expected persistence_entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
-	}
-	if got.Conf <= 0 {
-		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	got := trk.PromoteCandidate(now.Add(100*time.Second), base, nil, nil)
+	if got.Strat == "persistence_entry" {
+		t.Fatalf("expected stricter persistence gating to keep candidate untouched, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -135,6 +139,8 @@ func TestMissedTrackerReviewLinesShowsPersistentReady(t *testing.T) {
 	t.Setenv("LIVE_OPP_MIN_TOPN_COUNT", "1")
 	t.Setenv("LIVE_PERSISTENCE_ENTRY_ENABLE", "1")
 	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
+	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
 	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
 	trk := newMissedTracker()
 	now := time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC)
@@ -149,6 +155,7 @@ func TestMissedTrackerReviewLinesShowsPersistentReady(t *testing.T) {
 		LastClose:     0.95,
 		SessionVWAP:   0.96,
 		EMA9:          0.955,
+		RetestHold:    true,
 		Entry: inplay.Entry{
 			Symbol:       "SIRENUSDT",
 			CurrentGrade: "A",
@@ -321,17 +328,17 @@ func TestDeepQueuePreflightAllowsPersistenceEntryPastWallPersistence(t *testing.
 	t.Setenv("LIVE_PERSISTENCE_MIN_RANK", "0.70")
 	t.Setenv("LIVE_WALL_MIN_PERSIST_MS", "3000")
 	c := candidate{
-		Strat:                 "persistence_entry",
-		Side:                  "BUY",
-		CombinedScore:         0.78,
-		PersistenceSeenCount:  4,
-		PersistenceTopNCount:  3,
+		Strat:                  "persistence_entry",
+		Side:                   "BUY",
+		CombinedScore:          0.78,
+		PersistenceSeenCount:   4,
+		PersistenceTopNCount:   3,
 		PersistenceVolumeTrend: true,
 		PersistenceMomentum:    true,
-		PersistenceReason:     "seen=4,topn=3",
-		WallConfidence:        0.62,
-		WallPersistence:       1500 * time.Millisecond,
-		Entry:                 inplay.Entry{Symbol: "BTCUSDT"},
+		PersistenceReason:      "seen=4,topn=3",
+		WallConfidence:         0.62,
+		WallPersistence:        1500 * time.Millisecond,
+		Entry:                  inplay.Entry{Symbol: "BTCUSDT"},
 	}
 	res := deepQueuePreflight(c, queueDeepPreflightCtx{
 		MetaBySymbol: map[string]symbolMeta{"BTCUSDT": {LastPrice: 100}},

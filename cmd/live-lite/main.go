@@ -333,10 +333,12 @@ const (
 	manualEntrySourcePassive = "MANUAL_PASSIVE"
 	manualEntrySourceManaged = "MANUAL_MANAGED"
 
-	manualManageStatePassive           = "manual_import_passive"
-	manualManageStatePendingProtection = "manual_managed_pending_protection"
-	manualManageStateDegraded          = "manual_managed_degraded"
+	manualManageStatePassive           = "manual_manage_state_passive_import"
+	manualManageStatePendingProtection = "manual_manage_state_protecting"
 	manualManageStateLive              = "manual_managed_live"
+	manualManageStateForceClose        = "manual_manage_state_force_close"
+	manualManageStateCritical          = "manual_manage_state_critical"
+	manualManageStateDegraded          = manualManageStateCritical
 	manualManageStateConflict          = "manual_state_conflict"
 )
 
@@ -4364,7 +4366,7 @@ func shouldAdvanceProtection(p *livePosition) bool {
 }
 
 func runnerPreservePct() float64 {
-	return clamp(envFloat("LIVE_RUNNER_PRESERVE_PCT", 0.25), 0.05, 0.50)
+	return clamp(envFloat("LIVE_RUNNER_PRESERVE_PCT", 0.30), 0.05, 0.50)
 }
 
 func runnerMinQtyForPosition(p *livePosition, starterUSDT float64) float64 {
@@ -5055,7 +5057,7 @@ func loadLadderConfig(defaultStarter float64) ladderConfig {
 		MaxTotalUSDT:  maxTotalUSDT,
 		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
 		MinAddPnLPct:  envFloat("LIVE_PYRAMID_MIN_ADD_PNL_PCT", 0.75),
-		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 3),
+		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 2),
 		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", false),
 	}
 	if cfg.StarterUSDT <= 0 {
@@ -5099,13 +5101,13 @@ func loadFundsManagerConfig() fundsManagerConfig {
 
 func loadReentryConfig(defaultSize float64) reentryConfig {
 	cfg := reentryConfig{
-		Enable:       envBool("LIVE_REENTRY_ENABLE", true),
-		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 20)),
+		Enable:       envBool("LIVE_REENTRY_ENABLE", false),
+		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 10)),
 		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 1),
 		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
 	}
 	if cfg.SizeUSDT <= 0 {
-		cfg.SizeUSDT = maxFloat(defaultSize, 20)
+		cfg.SizeUSDT = maxFloat(defaultSize, 10)
 	}
 	if cfg.MaxPerSymbol < 0 {
 		cfg.MaxPerSymbol = 0
@@ -5972,10 +5974,10 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
 			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.28),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.20),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.45),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
-			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.40),
 			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 			UnsponsoredTightenR:    envFloat("LIVE_EXIT_UNSPONSORED_TIGHTEN_R", 0.18),
 			UnsponsoredWeakStreak:  envInt("LIVE_EXIT_UNSPONSORED_WEAK_STREAK", 2),
@@ -6305,10 +6307,10 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 			ProfitLockArmR:         envFloat("LIVE_EXIT_PROFIT_LOCK_ARM_R", 1.40),
 			ProfitGivebackPct:      envFloat("LIVE_EXIT_PROFIT_GIVEBACK_PCT", 0.55),
 			SponsoredGivebackPct:   envFloat("LIVE_EXIT_SPONSOR_GIVEBACK_PCT", 0.28),
-			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.20),
+			WeakFlowArmBER:         envFloat("LIVE_EXIT_WEAK_FLOW_BE_R", 1.45),
 			LiqSpikePartialPct:     envFloat("LIVE_EXIT_LIQ_SPIKE_PARTIAL_PCT", 0.35),
 			StallBarsForTighten:    envInt("LIVE_EXIT_STALL_BARS", 3),
-			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.20),
+			StallTightenToR:        envFloat("LIVE_EXIT_STALL_TIGHTEN_TO_R", 0.40),
 			SponsorshipGraceMin:    envInt("LIVE_EXIT_SPONSOR_FADE_HOLD_MIN", 120),
 			UnsponsoredTightenR:    envFloat("LIVE_EXIT_UNSPONSORED_TIGHTEN_R", 0.18),
 			UnsponsoredWeakStreak:  envInt("LIVE_EXIT_UNSPONSORED_WEAK_STREAK", 2),
@@ -7483,12 +7485,14 @@ func manualProtectionStatus(p *livePosition) string {
 		return "UNPROTECTED"
 	}
 	switch strings.TrimSpace(p.ManualManageState) {
-	case manualManageStateDegraded:
-		return "DEGRADED"
+	case manualManageStateForceClose:
+		return "FORCE_CLOSE"
+	case manualManageStateCritical:
+		return "CRITICAL_UNPROTECTED"
 	case manualManageStateLive:
 		return "PROTECTED"
 	default:
-		return "PENDING_PROTECTION"
+		return "PROTECTING"
 	}
 }
 
@@ -7496,13 +7500,28 @@ func manualManagedProtectionBroken(p *livePosition) bool {
 	if p == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
 		return false
 	}
-	if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
+	state := strings.TrimSpace(p.ManualManageState)
+	if state == manualManageStateForceClose || state == manualManageStateCritical {
 		return true
 	}
 	if p.Protected || p.StopOrderID > 0 {
 		return false
 	}
-	return p.ProtectionPending || strings.TrimSpace(p.ManualManageState) == manualManageStatePendingProtection
+	if !envBool("LIVE_IMPORT_BLOCK_IF_UNPROTECTED", true) {
+		return false
+	}
+	if state == manualManageStatePendingProtection {
+		timeout := time.Duration(envInt("LIVE_IMPORT_PROTECT_TIMEOUT_SEC", 15)) * time.Second
+		if timeout <= 0 {
+			timeout = 15 * time.Second
+		}
+		anchor := p.UpdatedAt
+		if anchor.IsZero() {
+			anchor = p.CreatedAt
+		}
+		return time.Since(anchor) >= timeout || p.ProtectionPending
+	}
+	return p.ProtectionPending
 }
 
 func (m *liveExecManager) hasBlockingManagedProtectionFailure() bool {
@@ -7530,12 +7549,12 @@ func recordManualProtectionFailure(p *livePosition, now time.Time, cause string)
 	p.Managed = true
 	p.Protected = false
 	if !manualProtectionRetryEnabled() {
-		p.ManualManageState = manualManageStateDegraded
+		p.ManualManageState = manualManageStateForceClose
 		p.ProtectionRetryAfter = time.Time{}
 		return true
 	}
 	if p.ProtectionRetryCount >= manualProtectionRetryBudget() {
-		p.ManualManageState = manualManageStateDegraded
+		p.ManualManageState = manualManageStateForceClose
 		p.ProtectionRetryAfter = time.Time{}
 		return true
 	}
@@ -7549,28 +7568,66 @@ func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause s
 		return
 	}
 	cause = strings.TrimSpace(cause)
-	if envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", true) {
-		if ok, err := m.ForceCloseSymbol(p.Symbol, firstNonEmpty(cause, "MANUAL_PROTECTION_FAILED")); ok && err == nil {
-			if m.tg != nil {
-				m.tg.Sendf("%s", notify.BuildEventHTML("🛑", "MANUAL PROTECTION FORCE CLOSE",
-					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
-					fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
-					"Bot could not attach legal protection, so the position was force-closed to avoid an unprotected liquidation risk.",
-				))
-			}
-			return
-		}
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("🚨", "MANUAL PROTECTION CRITICAL",
-				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
-				"Protection attach and automatic force-close both failed. New entries should remain blocked until the position is handled.",
-			))
-		}
+	if err := m.emergencyForceCloseManagedPosition(p, cause, now); err == nil {
+		return
 	}
 	if m.manualConfirm {
 		m.queueManualForceFlatRequest(manualManageRequestFromPosition(p), cause, now)
 	}
+}
+
+func (m *liveExecManager) emergencyForceCloseManagedPosition(p *livePosition, cause string, now time.Time) error {
+	if m == nil || p == nil || m.rest == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
+		return nil
+	}
+	if !envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", true) {
+		p.ManualManageState = manualManageStateCritical
+		p.Managed = true
+		p.Protected = false
+		return fmt.Errorf("force_close_disabled")
+	}
+	p.ManualManageState = manualManageStateForceClose
+	maxRetries := envInt("LIVE_FORCE_CLOSE_RETRY_MAX", 5)
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	retryDelay := time.Duration(envInt("LIVE_FORCE_CLOSE_RETRY_SEC", 2)) * time.Second
+	if retryDelay <= 0 {
+		retryDelay = 2 * time.Second
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if ok, err := m.ForceCloseSymbol(p.Symbol, firstNonEmpty(cause, "MANUAL_PROTECTION_FAILED")); ok && err == nil {
+			if m.tg != nil {
+				m.tg.Sendf("%s", notify.BuildEventHTML("🛑", "EMERGENCY PROTECTION RESOLVED",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+					fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+					"The bot could not attach legal protection, so it force-closed the managed position before it could stay unprotected.",
+				))
+			}
+			return nil
+		} else if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("force close not acknowledged")
+		}
+		if attempt+1 < maxRetries {
+			time.Sleep(retryDelay)
+		}
+	}
+	p.ManualManageState = manualManageStateCritical
+	p.Managed = true
+	p.Protected = false
+	p.ProtectionPending = true
+	p.ProtectionRetryAfter = now.Add(time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300)) * time.Second)
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("🚨", "CRITICAL UNPROTECTED POSITION",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+			"Emergency protection failed and force-close also failed. New entries are blocked until this position is handled.",
+		))
+	}
+	return lastErr
 }
 
 func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) bool {
@@ -7594,6 +7651,9 @@ func manualManagedTrade(p *livePosition) bool {
 
 func manualProtectionConvictionReady(p *livePosition) bool {
 	if !manualManagedTrade(p) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && envBool("LIVE_IMPORT_REQUIRE_PROTECTION", true) {
 		return true
 	}
 	if p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed {
@@ -7621,7 +7681,7 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 		p.StopPrice = newStop
 	}
 	tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
-	beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
+	beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
 	if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
 		if be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps); be > 0 {
 			if stop, improved := improvedStopPrice(p.Side, p.StopPrice, be); improved {
@@ -7683,6 +7743,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 	if m == nil || m.rest == nil {
 		return 0, nil
 	}
+	importAutoManage := envBool("LIVE_IMPORT_AUTO_MANAGE_ENABLE", false)
 	if err := signedUserDataBackoffCheck(now); err != nil {
 		return 0, err
 	}
@@ -7749,6 +7810,12 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		}
 		if m.queueManualManagementRequest(sym, side, qty, entry, margin, lev, now) {
 			if _, err := m.activatePassiveManualImport(req, now, "MANUAL_PENDING_IMPORT", true); err == nil {
+				imported++
+			}
+			continue
+		}
+		if !importAutoManage {
+			if _, err := m.activatePassiveManualImport(req, now, "MANUAL_AUTO_IMPORT_PASSIVE", false); err == nil {
 				imported++
 			}
 			continue
@@ -8723,7 +8790,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				changed = true
 			}
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
-			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.10), tp1R)
+			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
 				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
@@ -9159,7 +9226,7 @@ func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64
 	if ref <= 0 {
 		return false
 	}
-	minGapPct := envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035)
+	minGapPct := envFloat("LIVE_STOP_LEGALIZE_MIN_GAP_PCT", envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035))
 	minGapAbs := ref * minGapPct
 	if tickSize > 0 {
 		minGapAbs = maxFloat(minGapAbs, tickSize*8)
@@ -9205,7 +9272,20 @@ func widenedImmediateTriggerStopPct(side string, entry, mark, tickSize, basePct 
 }
 
 func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []float64 {
-	basePcts := []float64{0.0025, 0.0050, 0.0100, 0.0150, 0.0200, 0.0300, 0.0400, 0.0500}
+	if !envBool("LIVE_STOP_LEGALIZE_ENABLE", true) {
+		return nil
+	}
+	minGapPct := envFloat("LIVE_STOP_LEGALIZE_MIN_GAP_PCT", envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035))
+	stepPct := envFloat("LIVE_STOP_LEGALIZE_STEP_PCT", 0.0030)
+	maxRetries := envInt("LIVE_STOP_LEGALIZE_MAX_RETRIES", 6)
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	basePcts := make([]float64, 0, maxRetries+1)
+	basePcts = append(basePcts, maxFloat(0.0025, minGapPct))
+	for i := 1; i <= maxRetries; i++ {
+		basePcts = append(basePcts, maxFloat(0.0025, minGapPct+stepPct*float64(i)))
+	}
 	base := make([]float64, 0, len(basePcts)+1)
 	base = append(base, widenedProtectiveStop(side, entry, mark, tickSize))
 	for _, pct := range basePcts {
@@ -9296,8 +9376,11 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		suppressed := p.ManageFailSuppressCount
 		p.ManageFailSuppressCount = 0
 		title := "MANAGE FAILED SAFE"
-		if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
-			title = "MANAGE DEGRADED"
+		switch strings.TrimSpace(p.ManualManageState) {
+		case manualManageStateForceClose:
+			title = "EMERGENCY PROTECTION FAILED"
+		case manualManageStateCritical:
+			title = "CRITICAL UNPROTECTED"
 		}
 		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
@@ -9322,16 +9405,9 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	now := time.Now().UTC()
 	if manualManagedTrade(p) {
-		if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
-			if m.tg != nil && (p.LastManageFailAt.IsZero() || now.Sub(p.LastManageFailAt) >= degradedReminderInterval()) {
-				p.LastManageFailAt = now
-				m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANAGE DEGRADED",
-					fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
-					fmt.Sprintf("<b>Protection:</b> %s | <b>Cause:</b> %s", manualProtectionStatus(p), firstNonEmpty(p.LastManageFailCause, "retry_budget_exhausted")),
-					"Quiet degraded monitoring remains active until operator action or a later retry command.",
-				))
-			}
-			return nil
+		switch strings.TrimSpace(p.ManualManageState) {
+		case manualManageStateForceClose, manualManageStateCritical:
+			return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
 		}
 		if p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
 			return nil
@@ -10023,7 +10099,7 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 }
 
 func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView, ext map[string]flowfeed.ExternalSignal) {
-	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(m.positions) == 0 {
+	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", false) || len(m.positions) == 0 {
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
@@ -11442,7 +11518,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 }
 
 func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumView, meta map[string]symbolMeta, depth map[string]aster.OrderBook, ext map[string]flowfeed.ExternalSignal) {
-	if p == nil || !p.enabled || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", true) || len(p.positions) == 0 {
+	if p == nil || !p.enabled || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", false) || len(p.positions) == 0 {
 		return
 	}
 	slopeMax := envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)
@@ -13968,6 +14044,48 @@ func candidateDirectionalMovePct(c candidate) float64 {
 	return maxFloat(-c.DayUTC24h, maxFloat(-c.UTC4hPct, -c.UTC1hPct))
 }
 
+func classifyImpulseQuality(c candidate) string {
+	if candidateExhaustionActive(c) || candidateSpikeCandle(c) {
+		return "likely_exhaustion"
+	}
+	dirMove := candidateDirectionalMovePct(c)
+	structureOK := continuationStructureConfirmed(c) || hasFreshStructureReset(c) || c.ReclaimHold || c.RetestHold || c.ClosedBreakHold
+	priceOK := candidatePriceConfirmsDirection(c)
+	ofiMinSamples := maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	directionalOFI := true
+	if c.OFISamples >= ofiMinSamples {
+		if strings.EqualFold(c.Side, "BUY") {
+			directionalOFI = c.OFIZ >= 0
+		} else {
+			directionalOFI = c.OFIZ <= 0
+		}
+	}
+	if !structureOK || !priceOK || !directionalOFI {
+		return "weak/noisy"
+	}
+	if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A") &&
+		c.Entry.CurrentScore >= 95 &&
+		c.Entry.Rank <= 2 &&
+		c.Entry.ScoreSlope >= 0.04 &&
+		c.VolumeRatio >= 0.95 &&
+		c.Entry.State != inplay.StateExhausted {
+		return "elite_breakout"
+	}
+	if c.Entry.CurrentScore >= 72 &&
+		c.Entry.ScoreSlope >= 0.04 &&
+		c.VolumeRatio >= 1.20 &&
+		c.Entry.State != inplay.StateCooling {
+		if dirMove >= envFloat("LIVE_ADD_MAX_DIRECTIONAL_PCT", 6.0) || c.ExtensionATR >= envFloat("LIVE_ADD_MAX_EXTENSION_ATR", 1.35) {
+			return "extended_but_valid"
+		}
+		return "healthy_continuation"
+	}
+	if dirMove >= envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0) && structureOK && priceOK {
+		return "extended_but_valid"
+	}
+	return "weak/noisy"
+}
+
 func qualifiesStructuredReentry(c candidate) bool {
 	if !continuationStateTrending(c.Entry.State) || candidateExhaustionActive(c) || !candidatePriceConfirmsDirection(c) {
 		return false
@@ -14742,6 +14860,30 @@ func persistenceStrong(c candidate, cfg entryQualityConfig) bool {
 	if c.CombinedScore < envFloat("LIVE_PERSISTENCE_MIN_RANK", 0.70) {
 		return false
 	}
+	if c.Entry.CurrentScore < envFloat("LIVE_PERSISTENCE_STRONG_MIN_SCORE", 90.0) {
+		return false
+	}
+	if c.Conf < envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62) {
+		return false
+	}
+	if !candidatePriceConfirmsDirection(c) {
+		return false
+	}
+	if directionalConflictRejectReason(c) != "" {
+		return false
+	}
+	if !continuationStructureConfirmed(c) && !hasFreshStructureReset(c) && !c.ReclaimHold && !c.RetestHold && !c.ClosedBreakHold {
+		return false
+	}
+	if c.OFISamples >= maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8)) {
+		tolerance := envFloat("LIVE_PERSISTENCE_OFI_TOLERANCE_Z", 0.10)
+		if strings.EqualFold(c.Side, "BUY") && c.OFIZ < -tolerance {
+			return false
+		}
+		if strings.EqualFold(c.Side, "SELL") && c.OFIZ > tolerance {
+			return false
+		}
+	}
 	if !c.PersistenceVolumeTrend && !envBool("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", true) {
 		return false
 	}
@@ -14758,12 +14900,6 @@ func persistenceSoftBlock(reason string) bool {
 		return true
 	case strings.Contains(reason, "meta_quality"):
 		return true
-	case strings.Contains(reason, "continuation_no_structure_confirm"):
-		return true
-	case strings.Contains(reason, "below_vwap_ema"):
-		return true
-	case strings.Contains(reason, "above_vwap_ema"):
-		return true
 	default:
 		return false
 	}
@@ -14779,6 +14915,19 @@ func persistenceSoftBlocksOnly(reasons []string) bool {
 		}
 	}
 	return true
+}
+
+func persistenceEntryEligible(c candidate) bool {
+	tmp := c
+	if strings.TrimSpace(tmp.Strat) == "" {
+		tmp.Strat = "persistence_entry"
+	}
+	cfg := entryQualityConfig{
+		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
+		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
+		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
+	}
+	return persistenceStrong(tmp, cfg)
 }
 
 func qualifiesConfOverride(c candidate, cfg entryQualityConfig) bool {
@@ -15626,6 +15775,31 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 		lateMinVolRatio := envFloat("LIVE_CONT_FAST_LATE_MIN_VOL_RATIO", 1.35)
 		lateMinScore := envFloat("LIVE_CONT_FAST_LATE_MIN_SCORE", 90.0)
 		leaderUnwindShortMode := false
+		impulseQuality := classifyImpulseQuality(cand)
+		switch impulseQuality {
+		case "likely_exhaustion":
+			cand.Strat = "none"
+			cand.Conf = 0
+			cand.RejectReason = "impulse_likely_exhaustion"
+			return cand
+		case "elite_breakout":
+			fastMinScore = maxFloat(fastMinScore, 72)
+			fastMinSlope = maxFloat(fastMinSlope, 0.04)
+			fastMinVolRatio = min(fastMinVolRatio, 0.95)
+			fastMinOFIZ = min(fastMinOFIZ, 0.10)
+		case "healthy_continuation":
+			fastMinScore = maxFloat(fastMinScore, 72)
+			fastMinSlope = maxFloat(fastMinSlope, 0.04)
+			fastMinVolRatio = maxFloat(fastMinVolRatio, 1.20)
+			fastMinOFIZ = min(fastMinOFIZ, 0.25)
+		case "extended_but_valid":
+			if !hasFreshStructureReset(cand) {
+				cand.Strat = "none"
+				cand.Conf = 0
+				cand.RejectReason = "extended_valid_wait_reset"
+				return cand
+			}
+		}
 		if strings.EqualFold(cand.Side, "SELL") {
 			leaderUnwindShortMode =
 				cand.Entry.CurrentScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SCORE", 88.0) &&
@@ -15782,7 +15956,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 		}
 		if persistenceStrong(cand, persistCfg) && persistenceSoftBlocksOnly(fails) {
 			cand.Strat = "persistence_entry"
-			cand.Conf = maxFloat(cand.Conf, 0.58)
+			cand.Conf = maxFloat(cand.Conf, envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62))
 			cand.Sig = strategies.Signal{
 				Active:     true,
 				Name:       "persistence_entry",

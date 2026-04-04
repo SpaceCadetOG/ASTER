@@ -44,28 +44,28 @@ func TestBuildPositionCardTreatsShortAsShort(t *testing.T) {
 	}
 }
 
-func TestManualProtectionFailureBudgetDegradesAfterRetries(t *testing.T) {
+func TestManualProtectionFailureBudgetEscalatesToForceCloseAfterRetries(t *testing.T) {
 	p := &livePosition{
-		Symbol:           "ONUSDT",
-		Side:             "LONG",
-		EntrySource:      manualEntrySourceManaged,
-		EntryReason:      manualEntryReasonManaged,
+		Symbol:            "ONUSDT",
+		Side:              "LONG",
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
 		ManualManageState: manualManageStatePendingProtection,
 	}
 	now := time.Now().UTC()
 	for i := 0; i < manualProtectionRetryBudget()-1; i++ {
-		if degraded := recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed"); degraded {
-			t.Fatalf("degraded too early on attempt %d", i+1)
+		if escalated := recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed"); escalated {
+			t.Fatalf("escalated too early on attempt %d", i+1)
 		}
 	}
 	if strings.TrimSpace(p.ManualManageState) != manualManageStatePendingProtection {
 		t.Fatalf("expected pending protection before budget exhausted, got %s", p.ManualManageState)
 	}
-	if degraded := recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed"); !degraded {
-		t.Fatal("expected degraded after exhausting retry budget")
+	if escalated := recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed"); !escalated {
+		t.Fatal("expected force-close escalation after exhausting retry budget")
 	}
-	if strings.TrimSpace(p.ManualManageState) != manualManageStateDegraded {
-		t.Fatalf("expected degraded state, got %s", p.ManualManageState)
+	if strings.TrimSpace(p.ManualManageState) != manualManageStateForceClose {
+		t.Fatalf("expected force-close state, got %s", p.ManualManageState)
 	}
 }
 
