@@ -1631,6 +1631,46 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 	}
 }
 
+func TestApplySimpleContinuationFallbackEliteReclaimStarterAllowsSoftOFIAndVWAP(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.20")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
+	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")
+	t.Setenv("LIVE_STARTER_MIN_VOL_RATIO", "0.80")
+	t.Setenv("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", "1")
+	t.Setenv("LIVE_STARTER_ALLOW_STRUCTURE_SOFT", "1")
+	t.Setenv("LIVE_ELITE_STARTER_MIN_SCORE", "95")
+	t.Setenv("LIVE_ELITE_STARTER_MAX_RANK", "2")
+	t.Setenv("LIVE_ELITE_STARTER_MIN_OFI_Z", "0.10")
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.88,
+		VolumeRatio:   0.92,
+		OFIZ:          -0.06,
+		OFISamples:    12,
+		LastClose:     10.05,
+		SessionVWAP:   10.20,
+		EMA9:          10.15,
+		ReclaimHold:   true,
+		Entry: inplay.Entry{
+			Symbol:               "RLSUSDT",
+			CurrentGrade:         "A+",
+			State:                inplay.StateInPlay,
+			CurrentScore:         101,
+			ScoreSlope:           0.18,
+			Rank:                 1.0,
+			FailedBreakdownCount: 1,
+			EntryStyle:           "pullback_long",
+		},
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 0, 0, 0, time.UTC))
+	if got.Strat != "continuation_fast_starter" {
+		t.Fatalf("expected continuation_fast_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
 func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterWhenImpulseStrong(t *testing.T) {
 	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
 	t.Setenv("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", "1")
@@ -1670,6 +1710,44 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterWhenImpulseStro
 	}
 }
 
+func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterOnFailedBounce(t *testing.T) {
+	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
+	t.Setenv("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", "1")
+	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "72")
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.04")
+	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.20")
+	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.25")
+	t.Setenv("LIVE_IMPULSIVE_SHORT_MAX_CONTRARY_OFI_Z", "0.10")
+	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	c := candidate{
+		Side:        "SELL",
+		VolumeRatio: 0.62,
+		VolumeUSD:   9_500_000,
+		OFIZ:        0.04,
+		OFISamples:  12,
+		LastClose:   1.021,
+		SessionVWAP: 1.030,
+		EMA9:        1.028,
+		DayUTC24h:   -22.5,
+		Entry: inplay.Entry{
+			Symbol:            "STOUSDT",
+			CurrentGrade:      "A",
+			Rank:              1.5,
+			State:             inplay.StateInPlay,
+			TimeInStateMin:    10,
+			CurrentScore:      98,
+			ScoreSlope:        0.12,
+			EntryStyle:        "pullback_short",
+			Momentum:          true,
+			FailedBounceCount: 1,
+		},
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 10, 0, 0, time.UTC))
+	if got.Strat != "impulsive_short_starter" {
+		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
 func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStrong(t *testing.T) {
 	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
 	t.Setenv("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", "1")
@@ -1706,6 +1784,32 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStron
 	}
 	if got.Conf <= 0 {
 		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	}
+}
+
+func TestClassifyImpulseQualityTreatsEliteReclaimAsBreakout(t *testing.T) {
+	t.Setenv("LIVE_ELITE_STARTER_MIN_OFI_Z", "0.10")
+	c := candidate{
+		Side:        "BUY",
+		VolumeRatio: 1.02,
+		OFIZ:        -0.04,
+		OFISamples:  10,
+		LastClose:   10.1,
+		SessionVWAP: 10.2,
+		EMA9:        10.15,
+		Entry: inplay.Entry{
+			CurrentGrade:         "A+",
+			CurrentScore:         99,
+			ScoreSlope:           0.09,
+			Rank:                 1.0,
+			State:                inplay.StateInPlay,
+			FailedBreakdownCount: 1,
+			EntryStyle:           "pullback_long",
+		},
+		ReclaimHold: true,
+	}
+	if got := classifyImpulseQuality(c); got != "elite_breakout" {
+		t.Fatalf("expected elite_breakout, got %q", got)
 	}
 }
 

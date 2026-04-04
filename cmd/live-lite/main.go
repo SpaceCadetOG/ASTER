@@ -13108,11 +13108,11 @@ func qualifiesImpulsiveLongStarter(c candidate, fails []string) (float64, []stri
 	if !volumeOK {
 		return 0, nil, false
 	}
-	structureOK := (c.SessionVWAP > 0 && c.LastClose >= c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose >= c.EMA9) || c.ReclaimHold || c.ClosedBreakHold
+	structureOK := starterDirectionalContextOK(c) || starterStructureContextOK(c)
 	if !structureOK {
 		return 0, nil, false
 	}
-	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ < -minAbsOFI {
+	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ < -envFloat("LIVE_IMPULSIVE_LONG_MAX_CONTRARY_OFI_Z", minAbsOFI) {
 		return 0, nil, false
 	}
 	styleOK := c.Entry.Momentum ||
@@ -13190,11 +13190,11 @@ func qualifiesImpulsiveShortStarter(c candidate, fails []string) (float64, []str
 	if !volumeOK {
 		return 0, nil, false
 	}
-	structureOK := (c.SessionVWAP > 0 && c.LastClose <= c.SessionVWAP) || (c.EMA9 > 0 && c.LastClose <= c.EMA9) || c.RetestHold || c.ClosedBreakHold
+	structureOK := starterDirectionalContextOK(c) || starterStructureContextOK(c)
 	if !structureOK {
 		return 0, nil, false
 	}
-	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ > minAbsOFI {
+	if c.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && c.OFIZ > envFloat("LIVE_IMPULSIVE_SHORT_MAX_CONTRARY_OFI_Z", minAbsOFI) {
 		return 0, nil, false
 	}
 	styleOK := c.Entry.Momentum ||
@@ -13978,6 +13978,54 @@ func continuationFastOFIAgrees(c candidate, minOFIZ float64) bool {
 	return c.OFIZ <= -minOFIZ
 }
 
+func starterDirectionalContextOK(c candidate) bool {
+	if candidatePriceConfirmsDirection(c) {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.ReclaimHold || c.Entry.FailedBreakdownCount > 0 || c.Entry.FailedBreakLowCount > 0 ||
+			c.SetupFamily == "deep_pullback_reclaim" || c.Entry.EntryStyle == "pullback_long"
+	}
+	return c.ReclaimHold || c.Entry.FailedBounceCount > 0 || c.Entry.FailedReclaimCount > 0 ||
+		c.Entry.EntryStyle == "pullback_short"
+}
+
+func starterStructureContextOK(c candidate) bool {
+	if continuationStructureConfirmed(c) || hasFreshStructureReset(c) {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.Entry.FailedBreakdownCount > 0 || c.Entry.FailedBreakLowCount > 0 ||
+			c.SetupFamily == "deep_pullback_reclaim" || c.Entry.EntryStyle == "pullback_long"
+	}
+	return c.Entry.FailedBounceCount > 0 || c.Entry.FailedReclaimCount > 0 ||
+		c.Entry.EntryStyle == "pullback_short"
+}
+
+func starterOFIAgrees(c candidate, minOFIZ float64) bool {
+	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
+	ofiMinSamples := maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	if !ofiEnabled || c.OFISamples < ofiMinSamples {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.OFIZ >= minOFIZ
+	}
+	return c.OFIZ <= -minOFIZ
+}
+
+func starterOFIToleratesEliteNoise(c candidate, tolerance float64) bool {
+	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
+	ofiMinSamples := maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	if !ofiEnabled || c.OFISamples < ofiMinSamples {
+		return true
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.OFIZ >= -tolerance
+	}
+	return c.OFIZ <= tolerance
+}
+
 func qualifiesEliteStarterCandidate(c candidate) bool {
 	if gradeValue(c.Entry.CurrentGrade) < gradeValue("A") {
 		return false
@@ -13993,6 +14041,16 @@ func qualifiesEliteStarterCandidate(c candidate) bool {
 	fastMinOFIZ := envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35)
 	if c.Entry.CurrentScore < fastMinScore || c.Entry.ScoreSlope < fastMinSlope {
 		return false
+	}
+	if candidateExhaustionActive(c) {
+		return false
+	}
+	eliteOFITolerance := envFloat("LIVE_ELITE_STARTER_OFI_TOLERANCE_Z", 0.10)
+	if eliteOFITolerance <= 0 {
+		eliteOFITolerance = min(0.10, fastMinOFIZ)
+	}
+	if c.Entry.Rank <= envFloat("LIVE_ELITE_STARTER_MAX_RANK", 2.0) && c.Entry.CurrentScore >= envFloat("LIVE_ELITE_STARTER_MIN_SCORE", 95.0) {
+		return starterOFIToleratesEliteNoise(c, eliteOFITolerance)
 	}
 	return continuationFastOFIAgrees(c, fastMinOFIZ)
 }
@@ -14049,15 +14107,19 @@ func classifyImpulseQuality(c candidate) string {
 		return "likely_exhaustion"
 	}
 	dirMove := candidateDirectionalMovePct(c)
-	structureOK := continuationStructureConfirmed(c) || hasFreshStructureReset(c) || c.ReclaimHold || c.RetestHold || c.ClosedBreakHold
-	priceOK := candidatePriceConfirmsDirection(c)
+	structureOK := starterStructureContextOK(c)
+	priceOK := starterDirectionalContextOK(c)
 	ofiMinSamples := maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
 	directionalOFI := true
 	if c.OFISamples >= ofiMinSamples {
+		ofiThreshold := 0.0
+		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A") && c.Entry.Rank <= 2 && c.Entry.CurrentScore >= 95 {
+			ofiThreshold = envFloat("LIVE_ELITE_STARTER_OFI_TOLERANCE_Z", 0.10)
+		}
 		if strings.EqualFold(c.Side, "BUY") {
-			directionalOFI = c.OFIZ >= 0
+			directionalOFI = c.OFIZ >= -ofiThreshold
 		} else {
-			directionalOFI = c.OFIZ <= 0
+			directionalOFI = c.OFIZ <= ofiThreshold
 		}
 	}
 	if !structureOK || !priceOK || !directionalOFI {
@@ -14142,9 +14204,11 @@ func continuationFastStarterSoftRejectAllowed(c candidate, reject string) bool {
 	case strings.HasPrefix(reject, "vol_ratio:"):
 		return c.VolumeRatio >= envFloat("LIVE_STARTER_MIN_VOL_RATIO", 0.80)
 	case reject == "continuation_no_structure_confirm" || reject == strings.TrimSpace(c.StructureReason):
-		return envBool("LIVE_STARTER_ALLOW_STRUCTURE_SOFT", true)
+		return envBool("LIVE_STARTER_ALLOW_STRUCTURE_SOFT", true) && starterStructureContextOK(c)
 	case reject == "below_vwap_ema", reject == "above_vwap_ema":
-		return envBool("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", true)
+		return envBool("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", true) && (starterDirectionalContextOK(c) || qualifiesEliteStarterCandidate(c))
+	case strings.HasPrefix(reject, "ofi_z:"):
+		return qualifiesEliteStarterCandidate(c)
 	case strings.HasPrefix(reject, "hybrid_stop_too_wide"), strings.HasPrefix(reject, "hybrid_stop_rr_too_low"):
 		return true
 	default:
@@ -15793,7 +15857,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			fastMinVolRatio = maxFloat(fastMinVolRatio, 1.20)
 			fastMinOFIZ = min(fastMinOFIZ, 0.25)
 		case "extended_but_valid":
-			if !hasFreshStructureReset(cand) {
+			if !hasFreshStructureReset(cand) && !qualifiesEliteStarterCandidate(cand) && !starterStructureContextOK(cand) {
 				cand.Strat = "none"
 				cand.Conf = 0
 				cand.RejectReason = "extended_valid_wait_reset"
