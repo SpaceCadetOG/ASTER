@@ -2176,6 +2176,47 @@ func TestMarkProtectionPendingBacksOffSameCause(t *testing.T) {
 	}
 }
 
+func TestProtectiveStopExchangeSafeRequiresBuffer(t *testing.T) {
+	if protectiveStopExchangeSafe("SELL", 1.00, 0.99, 0.991, 0.0001) {
+		t.Fatalf("expected short stop too close to mark to be rejected")
+	}
+	if !protectiveStopExchangeSafe("SELL", 1.00, 0.99, 1.01, 0.0001) {
+		t.Fatalf("expected wider short stop to be exchange-safe")
+	}
+	if protectiveStopExchangeSafe("BUY", 1.00, 1.01, 1.009, 0.0001) {
+		t.Fatalf("expected long stop too close to mark to be rejected")
+	}
+	if !protectiveStopExchangeSafe("BUY", 1.00, 1.01, 0.99, 0.0001) {
+		t.Fatalf("expected wider long stop to be exchange-safe")
+	}
+}
+
+func TestManualStopRetryCandidatesEscalateBeyondLegacyImmediateTriggerWidths(t *testing.T) {
+	candidates := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
+	if len(candidates) < 6 {
+		t.Fatalf("expected expanded retry ladder, got %d candidates: %#v", len(candidates), candidates)
+	}
+	if candidates[len(candidates)-1] <= 1.02 {
+		t.Fatalf("expected final retry candidate to widen materially, got %#v", candidates)
+	}
+}
+
+func TestNormalizeManualProtectiveStopWidensToExchangeSafeCandidate(t *testing.T) {
+	stop, mark, err := normalizeManualProtectiveStop("SIRENUSDT", "SELL", nil, 1.00, 0.99, 0.991, 0.0001)
+	if err != nil {
+		t.Fatalf("expected normalized manual stop, got err=%v", err)
+	}
+	if mark != 0.99 {
+		t.Fatalf("expected mark to be preserved, got %v", mark)
+	}
+	if !protectiveStopExchangeSafe("SELL", 1.00, 0.99, stop, 0.0001) {
+		t.Fatalf("expected normalized stop to be exchange-safe, got %v", stop)
+	}
+	if stop <= 0.991 {
+		t.Fatalf("expected normalized stop to widen beyond original, got %v", stop)
+	}
+}
+
 func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
 	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
 	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")

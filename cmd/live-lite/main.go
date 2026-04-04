@@ -9094,6 +9094,28 @@ func protectiveStopValid(side string, entry, mark, stop float64) bool {
 	return stop > mark && stop > entry
 }
 
+func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64) bool {
+	if !protectiveStopValid(side, entry, mark, stop) {
+		return false
+	}
+	ref := mark
+	if ref <= 0 {
+		ref = entry
+	}
+	if ref <= 0 {
+		return false
+	}
+	minGapPct := envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035)
+	minGapAbs := ref * minGapPct
+	if tickSize > 0 {
+		minGapAbs = maxFloat(minGapAbs, tickSize*8)
+	}
+	if strings.EqualFold(side, "BUY") {
+		return stop <= mark-minGapAbs
+	}
+	return stop >= mark+minGapAbs
+}
+
 func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
 	ref := maxFloat(entry, mark)
 	if strings.EqualFold(side, "BUY") {
@@ -9129,11 +9151,11 @@ func widenedImmediateTriggerStopPct(side string, entry, mark, tickSize, basePct 
 }
 
 func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []float64 {
-	base := []float64{
-		widenedProtectiveStop(side, entry, mark, tickSize),
-		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0050),
-		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0100),
-		widenedImmediateTriggerStopPct(side, entry, mark, tickSize, 0.0150),
+	basePcts := []float64{0.0025, 0.0050, 0.0100, 0.0150, 0.0200, 0.0300, 0.0400, 0.0500}
+	base := make([]float64, 0, len(basePcts)+1)
+	base = append(base, widenedProtectiveStop(side, entry, mark, tickSize))
+	for _, pct := range basePcts {
+		base = append(base, widenedImmediateTriggerStopPct(side, entry, mark, tickSize, pct))
 	}
 	out := make([]float64, 0, len(base))
 	for _, px := range base {
@@ -9152,6 +9174,26 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 		}
 	}
 	return out
+}
+
+func normalizeManualProtectiveStop(symbol, side string, rest *aster.RESTAuth, entry, mark, stopPx, tickSize float64) (float64, float64, error) {
+	currentMark := mark
+	if currentMark <= 0 && rest != nil {
+		bid, ask, err := rest.BookTicker(symbol)
+		if err == nil {
+			currentMark = (bid + ask) / 2
+		}
+	}
+	if protectiveStopExchangeSafe(side, entry, currentMark, stopPx, tickSize) {
+		return stopPx, currentMark, nil
+	}
+	for _, candidate := range manualStopRetryCandidates(side, entry, currentMark, tickSize) {
+		if !protectiveStopExchangeSafe(side, entry, currentMark, candidate, tickSize) {
+			continue
+		}
+		return candidate, currentMark, nil
+	}
+	return 0, currentMark, fmt.Errorf("no_exchange_safe_manual_stop")
 }
 
 func immediateTriggerAPIError(err error) bool {
@@ -9250,10 +9292,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if prevStop <= 0 {
 		prevStop = p.StopPrice
 	}
-	if p.StopOrderID > 0 {
-		_, _ = m.rest.CancelOrder(p.Symbol, p.StopOrderID)
-		p.StopOrderID = 0
-	}
+	oldStopOrderID := p.StopOrderID
 	meta, err := m.rest.SymbolMeta(p.Symbol, true)
 	if err != nil {
 		return err
@@ -9281,29 +9320,17 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			}
 			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 		}
-		if !protectiveStopValid(p.Side, protectiveEntry, mark, stopPx) {
-			validRetry := 0.0
-			for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
-				retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
-				if roundErr != nil {
-					continue
-				}
-				if protectiveStopValid(p.Side, protectiveEntry, mark, retryStop) {
-					validRetry = retryStop
-					break
-				}
+		normalizedStop, normalizedMark, normErr := normalizeManualProtectiveStop(p.Symbol, p.Side, m.rest, protectiveEntry, mark, stopPx, meta.TickSize)
+		if normErr != nil || normalizedStop <= 0 {
+			recordManualProtectionFailure(p, now, "invalid_after_retry")
+			m.logManageFailedSafe(p, normalizedMark, computedStop, stopPx, "invalid_after_retry")
+			if manualManagedTrade(p) {
+				return nil
 			}
-			if validRetry <= 0 {
-				recordManualProtectionFailure(p, now, "invalid_after_retry")
-				m.logManageFailedSafe(p, mark, computedStop, stopPx, "invalid_after_retry")
-				if manualManagedTrade(p) {
-					return nil
-				}
-				return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
-					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
-			}
-			stopPx = validRetry
+			return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
+				p.Symbol, p.Side, fmtPrice(normalizedMark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
 		}
+		stopPx = normalizedStop
 	}
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
@@ -9316,7 +9343,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	out, err := m.rest.ReplaceStopOrder(
 		p.Symbol,
 		closeSide,
-		p.StopOrderID,
+		oldStopOrderID,
 		qty,
 		stopPx,
 		meta.QtyPrecision,
@@ -9324,53 +9351,58 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	)
 	if err != nil {
 		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && immediateTriggerAPIError(err) {
-			mark, markErr := m.currentMark(p.Symbol)
-			if markErr != nil || mark <= 0 {
-				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
-				m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
-				if manualManagedTrade(p) {
-					return nil
-				}
-				return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
-			}
-			retryPlaced := false
 			lastRetryStop := stopPx
-			for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
-				retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
-				if roundErr != nil {
-					continue
+			retryPlaced := false
+			lastRetryMark := 0.0
+			retryOldStopID := int64(0)
+			for attempt := 0; attempt < 3 && !retryPlaced; attempt++ {
+				mark, markErr := m.currentMark(p.Symbol)
+				if markErr != nil || mark <= 0 {
+					recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
+					m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
+					if manualManagedTrade(p) {
+						return nil
+					}
+					return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 				}
-				if !protectiveStopValid(p.Side, protectiveEntry, mark, retryStop) {
+				lastRetryMark = mark
+				for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
+					retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
+					if roundErr != nil {
+						continue
+					}
+					if !protectiveStopExchangeSafe(p.Side, protectiveEntry, mark, retryStop, meta.TickSize) {
+						lastRetryStop = retryStop
+						continue
+					}
 					lastRetryStop = retryStop
-					continue
-				}
-				lastRetryStop = retryStop
-				out, err = m.rest.ReplaceStopOrder(
-					p.Symbol,
-					closeSide,
-					p.StopOrderID,
-					qty,
-					retryStop,
-					meta.QtyPrecision,
-					meta.PricePrecision,
-				)
-				if err == nil {
-					stopPx = retryStop
-					retryPlaced = true
-					break
-				}
-				if !immediateTriggerAPIError(err) {
-					break
+					out, err = m.rest.ReplaceStopOrder(
+						p.Symbol,
+						closeSide,
+						retryOldStopID,
+						qty,
+						retryStop,
+						meta.QtyPrecision,
+						meta.PricePrecision,
+					)
+					if err == nil {
+						stopPx = retryStop
+						retryPlaced = true
+						break
+					}
+					if !immediateTriggerAPIError(err) {
+						break
+					}
 				}
 			}
 			if !retryPlaced {
 				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed")
-				m.logManageFailedSafe(p, mark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
+				m.logManageFailedSafe(p, lastRetryMark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
 				if manualManagedTrade(p) {
 					return nil
 				}
 				return fmt.Errorf("manage-failed-safe: stop placement retry failed symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s err=%v",
-					p.Symbol, p.Side, fmtPrice(mark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
+					p.Symbol, p.Side, fmtPrice(lastRetryMark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
 			}
 		} else {
 			return err
