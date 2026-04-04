@@ -7549,12 +7549,12 @@ func recordManualProtectionFailure(p *livePosition, now time.Time, cause string)
 	p.Managed = true
 	p.Protected = false
 	if !manualProtectionRetryEnabled() {
-		p.ManualManageState = manualManageStateForceClose
+		p.ManualManageState = manualManageStateCritical
 		p.ProtectionRetryAfter = time.Time{}
 		return true
 	}
 	if p.ProtectionRetryCount >= manualProtectionRetryBudget() {
-		p.ManualManageState = manualManageStateForceClose
+		p.ManualManageState = manualManageStateCritical
 		p.ProtectionRetryAfter = time.Time{}
 		return true
 	}
@@ -7568,19 +7568,66 @@ func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause s
 		return
 	}
 	cause = strings.TrimSpace(cause)
-	if err := m.emergencyForceCloseManagedPosition(p, cause, now); err == nil {
-		return
+	if m.shouldEmergencyForceCloseManagedPosition(p, cause) {
+		if err := m.emergencyForceCloseManagedPosition(p, cause, now); err == nil {
+			return
+		}
 	}
-	if m.manualConfirm {
+	p.ManualManageState = manualManageStateCritical
+	p.Managed = true
+	p.Protected = false
+	if !p.ProtectionPending {
+		markProtectionPending(p, now, cause)
+	} else if p.ProtectionRetryAfter.IsZero() || !p.ProtectionRetryAfter.After(now) {
+		p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(maxInt(1, p.ProtectionRetryCount)))
+	}
+	if m.tg != nil && now.Sub(p.LastManageFailAt) >= time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300))*time.Second {
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "PROTECTION RETRY ACTIVE",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+			"The bot could not attach legal protection yet. It is keeping the trade blocked from new entries and retrying wider legal protection before any emergency close.",
+		))
+		p.LastManageFailAt = now
+	}
+	if m.manualConfirm && m.shouldEmergencyForceCloseManagedPosition(p, cause) {
 		m.queueManualForceFlatRequest(manualManageRequestFromPosition(p), cause, now)
 	}
+}
+
+func managedProtectionUnrealizedLossPct(p *livePosition) float64 {
+	if p == nil || p.EntryPrice <= 0 || p.LastMark <= 0 {
+		return 0
+	}
+	_, pnlPct := realizedFromFill(p.Side, p.EntryPrice, p.LastMark, maxFloat(p.RemainingQty, 1))
+	if pnlPct >= 0 {
+		return 0
+	}
+	return -pnlPct
+}
+
+func (m *liveExecManager) shouldEmergencyForceCloseManagedPosition(p *livePosition, cause string) bool {
+	if m == nil || p == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
+		return false
+	}
+	if !envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", false) {
+		return false
+	}
+	maxLossPct := envFloat("LIVE_IMPORT_FORCE_CLOSE_MAX_LOSS_PCT", 2.5)
+	if maxLossPct <= 0 {
+		return false
+	}
+	lossPct := managedProtectionUnrealizedLossPct(p)
+	if lossPct >= maxLossPct {
+		return true
+	}
+	return false
 }
 
 func (m *liveExecManager) emergencyForceCloseManagedPosition(p *livePosition, cause string, now time.Time) error {
 	if m == nil || p == nil || m.rest == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
 		return nil
 	}
-	if !envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", true) {
+	if !envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", false) {
 		p.ManualManageState = manualManageStateCritical
 		p.Managed = true
 		p.Protected = false
@@ -9407,7 +9454,10 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if manualManagedTrade(p) {
 		switch strings.TrimSpace(p.ManualManageState) {
 		case manualManageStateForceClose, manualManageStateCritical:
-			return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
+			if m.shouldEmergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected")) {
+				return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
+			}
+			p.ManualManageState = manualManageStatePendingProtection
 		}
 		if p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
 			return nil

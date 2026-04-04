@@ -2357,6 +2357,63 @@ func TestNormalizeManualProtectiveStopWidensToExchangeSafeCandidate(t *testing.T
 	}
 }
 
+func TestShouldEmergencyForceCloseManagedPositionRequiresRealLoss(t *testing.T) {
+	t.Setenv("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", "1")
+	t.Setenv("LIVE_IMPORT_FORCE_CLOSE_MAX_LOSS_PCT", "2.5")
+	m := &liveExecManager{}
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		State:             execOpen,
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		EntryPrice:        0.5900,
+		LastMark:          0.59157,
+		RemainingQty:      212,
+		ManualManageState: manualManageStateCritical,
+		Managed:           true,
+	}
+	if m.shouldEmergencyForceCloseManagedPosition(p, "exchange_immediate_trigger_retry_failed") {
+		t.Fatal("expected healthy managed trade to stay open while protection retries continue")
+	}
+	p.LastMark = 0.6060
+	if !m.shouldEmergencyForceCloseManagedPosition(p, "exchange_immediate_trigger_retry_failed") {
+		t.Fatal("expected emergency force close once managed loss exceeds threshold")
+	}
+}
+
+func TestHandleManualProtectionFailureKeepsManagedTradeAliveWhenLossIsSmall(t *testing.T) {
+	t.Setenv("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", "1")
+	t.Setenv("LIVE_IMPORT_FORCE_CLOSE_MAX_LOSS_PCT", "2.5")
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		State:             execOpen,
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		EntryPrice:        0.5900,
+		LastMark:          0.59157,
+		RemainingQty:      212,
+		ManualManageState: manualManageStatePendingProtection,
+		Managed:           true,
+	}
+	m := &liveExecManager{}
+	now := time.Date(2026, 4, 4, 22, 20, 0, 0, time.UTC)
+	m.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
+	if p.State == execClosed {
+		t.Fatal("expected managed trade to remain open while retries continue")
+	}
+	if p.ManualManageState != manualManageStateCritical {
+		t.Fatalf("expected critical retry state, got %s", p.ManualManageState)
+	}
+	if !p.ProtectionPending {
+		t.Fatal("expected protection to remain pending")
+	}
+	if !p.ProtectionRetryAfter.After(now) {
+		t.Fatal("expected retry timer to be scheduled")
+	}
+}
+
 func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
 	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
 	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")

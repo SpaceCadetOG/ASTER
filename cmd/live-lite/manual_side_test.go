@@ -44,7 +44,7 @@ func TestBuildPositionCardTreatsShortAsShort(t *testing.T) {
 	}
 }
 
-func TestManualProtectionFailureBudgetEscalatesToForceCloseAfterRetries(t *testing.T) {
+func TestManualProtectionFailureBudgetEscalatesToCriticalAfterRetries(t *testing.T) {
 	p := &livePosition{
 		Symbol:            "ONUSDT",
 		Side:              "LONG",
@@ -62,10 +62,10 @@ func TestManualProtectionFailureBudgetEscalatesToForceCloseAfterRetries(t *testi
 		t.Fatalf("expected pending protection before budget exhausted, got %s", p.ManualManageState)
 	}
 	if escalated := recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed"); !escalated {
-		t.Fatal("expected force-close escalation after exhausting retry budget")
+		t.Fatal("expected critical escalation after exhausting retry budget")
 	}
-	if strings.TrimSpace(p.ManualManageState) != manualManageStateForceClose {
-		t.Fatalf("expected force-close state, got %s", p.ManualManageState)
+	if strings.TrimSpace(p.ManualManageState) != manualManageStateCritical {
+		t.Fatalf("expected critical state, got %s", p.ManualManageState)
 	}
 }
 
