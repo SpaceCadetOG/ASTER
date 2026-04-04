@@ -2039,6 +2039,46 @@ func TestResolveLadderPlanAllowsImportedManagedAddAfterFreshReset(t *testing.T) 
 	}
 }
 
+func TestResolveLadderPlanBlocksNewEntriesWhenManagedTradeIsUnprotected(t *testing.T) {
+	t.Setenv("LIVE_DEGRADED_BLOCK_NEW_ENTRIES", "1")
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:            "SIRENUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				RemainingQty:      100,
+				ManualManageState: manualManageStateDegraded,
+				ProtectionPending: true,
+				Protected:         false,
+				StopOrderID:       0,
+				ManageAnchorPrice: 1.05,
+				DeployedMargin:    20,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	c := candidate{
+		Side:        "BUY",
+		Strat:       "continuation_fast",
+		LastClose:   1.02,
+		SessionVWAP: 1.01,
+		EMA9:        1.01,
+		ReclaimHold: true,
+		Entry:       inplay.Entry{Symbol: "LYNUSDT", State: inplay.StateInPlay},
+		Sig: strategies.Signal{
+			Entry: 1.02,
+			TP1:   1.06,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC), c, execMgr, nil)
+	if plan.RejectReason != "managed_position_unprotected" {
+		t.Fatalf("expected managed_position_unprotected, got %+v", plan)
+	}
+}
+
 func TestInitializeBracketLevelsUsesManageAnchorForImportedManagedTrade(t *testing.T) {
 	m := &liveExecManager{
 		stopPct:    3.0,

@@ -7492,6 +7492,31 @@ func manualProtectionStatus(p *livePosition) string {
 	}
 }
 
+func manualManagedProtectionBroken(p *livePosition) bool {
+	if p == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
+		return false
+	}
+	if strings.TrimSpace(p.ManualManageState) == manualManageStateDegraded {
+		return true
+	}
+	if p.Protected || p.StopOrderID > 0 {
+		return false
+	}
+	return p.ProtectionPending || strings.TrimSpace(p.ManualManageState) == manualManageStatePendingProtection
+}
+
+func (m *liveExecManager) hasBlockingManagedProtectionFailure() bool {
+	if m == nil || !envBool("LIVE_DEGRADED_BLOCK_NEW_ENTRIES", true) {
+		return false
+	}
+	for _, p := range m.positions {
+		if manualManagedProtectionBroken(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func recordManualProtectionFailure(p *livePosition, now time.Time, cause string) bool {
 	if p == nil {
 		return false
@@ -7517,6 +7542,35 @@ func recordManualProtectionFailure(p *livePosition, now time.Time, cause string)
 	p.ManualManageState = manualManageStatePendingProtection
 	p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(p.ProtectionRetryCount))
 	return false
+}
+
+func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause string, now time.Time) {
+	if m == nil || p == nil || !manualManagedTrade(p) || p.State == execClosed || p.RemainingQty <= 0 {
+		return
+	}
+	cause = strings.TrimSpace(cause)
+	if envBool("LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL", true) {
+		if ok, err := m.ForceCloseSymbol(p.Symbol, firstNonEmpty(cause, "MANUAL_PROTECTION_FAILED")); ok && err == nil {
+			if m.tg != nil {
+				m.tg.Sendf("%s", notify.BuildEventHTML("🛑", "MANUAL PROTECTION FORCE CLOSE",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+					fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+					"Bot could not attach legal protection, so the position was force-closed to avoid an unprotected liquidation risk.",
+				))
+			}
+			return
+		}
+		if m.tg != nil {
+			m.tg.Sendf("%s", notify.BuildEventHTML("🚨", "MANUAL PROTECTION CRITICAL",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+				fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+				"Protection attach and automatic force-close both failed. New entries should remain blocked until the position is handled.",
+			))
+		}
+	}
+	if m.manualConfirm {
+		m.queueManualForceFlatRequest(manualManageRequestFromPosition(p), cause, now)
+	}
 }
 
 func manualWouldAddCapital(p *livePosition, mark float64, minAddPnLPct float64) bool {
@@ -9315,6 +9369,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		if err != nil || mark <= 0 {
 			recordManualProtectionFailure(p, now, "mark_unavailable")
 			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
+			m.handleManualProtectionFailure(p, "mark_unavailable", now)
 			if manualManagedTrade(p) {
 				return nil
 			}
@@ -9324,6 +9379,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		if normErr != nil || normalizedStop <= 0 {
 			recordManualProtectionFailure(p, now, "invalid_after_retry")
 			m.logManageFailedSafe(p, normalizedMark, computedStop, stopPx, "invalid_after_retry")
+			m.handleManualProtectionFailure(p, "invalid_after_retry", now)
 			if manualManagedTrade(p) {
 				return nil
 			}
@@ -9360,6 +9416,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				if markErr != nil || mark <= 0 {
 					recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
 					m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
+					m.handleManualProtectionFailure(p, "exchange_immediate_trigger_mark_unavailable", now)
 					if manualManagedTrade(p) {
 						return nil
 					}
@@ -9398,6 +9455,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			if !retryPlaced {
 				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed")
 				m.logManageFailedSafe(p, lastRetryMark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
+				m.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
 				if manualManagedTrade(p) {
 					return nil
 				}
@@ -14110,6 +14168,10 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 	reentryCfg := execMgr.reentryCfg
 	if cfg.StarterUSDT > 0 {
 		plan.MarginUSDT = cfg.StarterUSDT
+	}
+	if execMgr.hasBlockingManagedProtectionFailure() {
+		plan.RejectReason = "managed_position_unprotected"
+		return plan
 	}
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	var activeSame *livePosition

@@ -314,6 +314,12 @@ Notes:
 - `LIVE_TRAIL_STEP_BPS`: default `10.0`
 - `LIVE_TRAIL_STOP_PCT`: default `1.50`
 - `LIVE_TRAIL_STOP_PCT_TP3`: default `3.25`
+- `LIVE_MANUAL_PROTECTION_MIN_GAP_PCT`: default `0.0035`
+  Minimum gap from live mark when legalizing imported/manual-managed stop orders after immediate-trigger rejections.
+- `LIVE_DEGRADED_BLOCK_NEW_ENTRIES`: default `true`
+  Blocks fresh entries while any managed live trade is still unprotected or degraded.
+- `LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL`: default `true`
+  Force-closes imported/manual-managed trades if the bot cannot attach legal protection after retries.
 - `LIVE_CONTINUATION_PROTECTION_MIN_R`: default `1.25`
   Bot-native trades wait for more proof before moving into tighter protection logic.
 - `LIVE_IMPORTED_PROTECTION_MIN_R`: default `0.35`
