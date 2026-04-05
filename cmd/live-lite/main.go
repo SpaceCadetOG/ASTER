@@ -7508,6 +7508,9 @@ func manualProtectionStatus(p *livePosition) string {
 	case manualManageStateForceClose:
 		return "FORCE_CLOSE"
 	case manualManageStateCritical:
+		if p.ProtectionPending {
+			return "PROTECTING"
+		}
 		return "CRITICAL_UNPROTECTED"
 	case manualManageStateLive:
 		return "PROTECTED"
@@ -9182,21 +9185,33 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 		p.TP3Qty = q3
 	} else {
 		var err error
-		p.TP1Qty, err = m.roundQty(p.Symbol, q1)
-		if err != nil {
-			return err
+		if q1 > 0 {
+			p.TP1Qty, err = m.roundQty(p.Symbol, q1)
+			if err != nil {
+				return err
+			}
+		} else {
+			p.TP1Qty = 0
 		}
-		p.TP2Qty, err = m.roundQty(p.Symbol, q2)
-		if err != nil {
-			return err
+		if q2 > 0 {
+			p.TP2Qty, err = m.roundQty(p.Symbol, q2)
+			if err != nil {
+				return err
+			}
+		} else {
+			p.TP2Qty = 0
 		}
 		maxTP3 := maxFloat(0, p.FilledQty-p.TP1Qty-p.TP2Qty)
 		if q3 <= 0 || q3 > maxTP3 {
 			q3 = maxTP3
 		}
-		p.TP3Qty, err = m.roundQty(p.Symbol, q3)
-		if err != nil {
-			return err
+		if q3 > 0 {
+			p.TP3Qty, err = m.roundQty(p.Symbol, q3)
+			if err != nil {
+				return err
+			}
+		} else {
+			p.TP3Qty = 0
 		}
 	}
 	return nil
@@ -17992,7 +18007,7 @@ func displayManageState(state string) string {
 	case manualManageStatePendingProtection:
 		return "PENDING_PROTECTION"
 	case manualManageStateDegraded:
-		return "DEGRADED"
+		return "PROTECT_RETRY"
 	case manualManageStateLive:
 		return "LIVE"
 	case manualManageStateConflict:

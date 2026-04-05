@@ -2635,6 +2635,48 @@ func TestHandleManualProtectionFailureKeepsManagedTradeAliveWhenLossIsSmall(t *t
 	}
 }
 
+func TestInitializeBracketLevelsAllowsZeroTP1Fraction(t *testing.T) {
+	t.Setenv("LIVE_TP1_FRAC", "0.00")
+	m := &liveExecManager{
+		stopPct:    2,
+		minStopPct: 1,
+		maxStopPct: 5,
+		tp1R:       1,
+		tp2R:       2,
+		tp3R:       3,
+		tp1Frac:    0.0,
+		tp2Frac:    0.10,
+		tp3Frac:    0.10,
+	}
+	p := &livePosition{
+		Symbol:      "RLSUSDT",
+		Side:        "SELL",
+		EntryPrice:  0.006280,
+		FilledQty:   4183,
+		EntryReason: manualEntryReasonManaged,
+		EntrySource: manualEntrySourceManaged,
+	}
+	if err := m.initializeBracketLevels(p); err != nil {
+		t.Fatalf("expected zero TP1 fraction to be allowed, got %v", err)
+	}
+	if p.TP1Qty != 0 {
+		t.Fatalf("expected TP1 qty to stay zero, got %.6f", p.TP1Qty)
+	}
+}
+
+func TestManualProtectionStatusShowsProtectingWhileCriticalRetryPending(t *testing.T) {
+	p := &livePosition{
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		ManualManageState: manualManageStateCritical,
+		ProtectionPending: true,
+		RemainingQty:      100,
+	}
+	if got := manualProtectionStatus(p); got != "PROTECTING" {
+		t.Fatalf("expected PROTECTING, got %q", got)
+	}
+}
+
 func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
 	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
 	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")
