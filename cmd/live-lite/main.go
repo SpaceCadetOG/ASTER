@@ -3468,9 +3468,26 @@ func main() {
 			Combined:     best.CombinedScore,
 			EntryPx:      best.Sig.Entry,
 		})
-		if err := execMgr.PlaceEntry(best, entryBps, effectiveMargin, effectiveLev, ladderPlan); err != nil {
+		var placeErr error
+		usedLev := effectiveLev
+		levSequence := leverageRetrySequence(effectiveLev, leverageMin)
+		for idx, levTry := range levSequence {
+			usedLev = levTry
+			placeErr = execMgr.PlaceEntry(best, entryBps, effectiveMargin, levTry, ladderPlan)
+			if placeErr == nil {
+				break
+			}
+			if !isSymbolNotionalLimitError(placeErr) {
+				break
+			}
+			if idx == len(levSequence)-1 {
+				break
+			}
+			fmt.Printf("live-lite: notional limit for %s at %dx, retrying lower leverage\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), levTry)
+		}
+		if placeErr != nil {
 			recordCandidateDecision(cmdCtx, best, "order_error")
-			fmt.Println("live-lite: place error:", err)
+			fmt.Println("live-lite: place error:", placeErr)
 			eventLog.Emit(stats.Event{
 				Timestamp:    now,
 				Type:         "ORDER_REJECT",
@@ -3487,12 +3504,12 @@ func main() {
 				Execution:    best.ExecutionScore,
 				Combined:     best.CombinedScore,
 				EntryPx:      best.Sig.Entry,
-				Reason:       err.Error(),
+				Reason:       placeErr.Error(),
 			})
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("❌", "ORDER ERROR",
 					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Error:</b> %v", err),
+					fmt.Sprintf("<b>Error:</b> %v", placeErr),
 				))
 			}
 		} else {
@@ -3502,6 +3519,9 @@ func main() {
 			markSessionEntry(sessionChurns, now, best)
 			recentEntryAttempts = append(recentEntryAttempts, now)
 			recordCandidateDecision(cmdCtx, best, "")
+			if usedLev != effectiveLev {
+				fmt.Printf("live-lite: leverage fallback applied %s %s %dx->%dx\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveLev, usedLev)
+			}
 			eventLog.Emit(stats.Event{
 				Timestamp:    now,
 				Type:         "ORDER_FILL",
@@ -18943,6 +18963,56 @@ func computeLeverage(c candidate, mode string, fixed, minLev, maxLev int) int {
 	default:
 		return clamp(fixed)
 	}
+}
+
+func isSymbolNotionalLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(raw, "\"code\":-5018") ||
+		strings.Contains(raw, "maximum notional value limit") ||
+		strings.Contains(raw, "reached the maximum notional value limit")
+}
+
+func nextReducedLeverage(lev int) int {
+	switch {
+	case lev > 10:
+		return 10
+	case lev > 5:
+		return 5
+	case lev == 5:
+		return 4
+	case lev == 4:
+		return 3
+	case lev > 3:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func leverageRetrySequence(startLev, minLev int) []int {
+	if startLev <= 0 {
+		return nil
+	}
+	if minLev <= 0 {
+		minLev = 1
+	}
+	seen := map[int]bool{}
+	out := []int{startLev}
+	seen[startLev] = true
+	cur := startLev
+	for {
+		next := nextReducedLeverage(cur)
+		if next <= 0 || next < minLev || seen[next] {
+			break
+		}
+		out = append(out, next)
+		seen[next] = true
+		cur = next
+	}
+	return out
 }
 
 func envStr(k, def string) string {

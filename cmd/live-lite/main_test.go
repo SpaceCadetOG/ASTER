@@ -1998,6 +1998,42 @@ func TestClassifyStarterLaneHighExhaustionBlocksStarter(t *testing.T) {
 	}
 }
 
+func TestLeverageRetrySequenceStepsDownForNotionalLimit(t *testing.T) {
+	got := leverageRetrySequence(10, 3)
+	want := []int{10, 5, 4, 3}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected sequence len: got=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected sequence: got=%v want=%v", got, want)
+		}
+	}
+}
+
+func TestLeverageRetrySequenceClampsHighLeverageDown(t *testing.T) {
+	got := leverageRetrySequence(20, 3)
+	want := []int{20, 10, 5, 4, 3}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected sequence len: got=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected sequence: got=%v want=%v", got, want)
+		}
+	}
+}
+
+func TestIsSymbolNotionalLimitError(t *testing.T) {
+	err := fmt.Errorf("http 400 POST /fapi/v3/order: {\"code\":-5018,\"msg\":\"You’ve reached the maximum notional value limit for this symbol.\"}")
+	if !isSymbolNotionalLimitError(err) {
+		t.Fatal("expected -5018 error to be recognized")
+	}
+	if isSymbolNotionalLimitError(fmt.Errorf("some other error")) {
+		t.Fatal("did not expect unrelated error to match")
+	}
+}
+
 func TestResolveLadderPlanAllowsWinnerAdd(t *testing.T) {
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
