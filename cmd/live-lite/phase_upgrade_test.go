@@ -173,6 +173,23 @@ func TestMissedTrackerReviewLinesShowsPersistentReady(t *testing.T) {
 	}
 }
 
+func TestMissedTrackerMarksNewStarterSubtypeAsStarterSignal(t *testing.T) {
+	trk := newMissedTracker()
+	now := time.Date(2026, 4, 4, 15, 30, 0, 0, time.UTC)
+	c := candidate{
+		Side:  "BUY",
+		Strat: "reclaim_long_starter",
+		Entry: inplay.Entry{
+			Symbol: "RLSUSDT",
+		},
+	}
+	trk.ObserveCandidate(now, c, true)
+	key := persistenceKey("RLSUSDT", "BUY")
+	if trk.opp[key] == nil || !trk.opp[key].HadStarterSignal {
+		t.Fatalf("expected reclaim_long_starter to count as starter signal")
+	}
+}
+
 func TestFundingHazardWindow(t *testing.T) {
 	now := time.Date(2026, 3, 14, 10, 59, 50, 0, time.UTC)
 	if !fundingHazardWindow(now, time.Hour, 15*time.Second, 45*time.Second) {

@@ -2833,7 +2833,7 @@ func main() {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
 		eligibility.StarterAllowed = true
-		eligibility.FullEntryAllowed = !strings.EqualFold(best.Strat, "persistence_entry") && !strings.EqualFold(best.Strat, "continuation_fast_starter") && !strings.EqualFold(best.Strat, "early_dev_entry")
+		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) && !strings.EqualFold(best.Strat, "early_dev_entry")
 		bestMeta := metaBySymbol[rawBest]
 		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
@@ -8507,6 +8507,12 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			entryReason = "impulsive_short_starter"
 		} else if strings.EqualFold(c.Strat, "impulsive_long_starter") {
 			entryReason = "impulsive_long_starter"
+		} else if strings.EqualFold(c.Strat, "reclaim_long_starter") {
+			entryReason = "reclaim_long_starter"
+		} else if strings.EqualFold(c.Strat, "failed_bounce_short_starter") {
+			entryReason = "failed_bounce_short_starter"
+		} else if strings.EqualFold(c.Strat, "elite_starter") {
+			entryReason = "elite_starter"
 		} else {
 			entryReason = "continuation_fast_starter"
 		}
@@ -13099,7 +13105,7 @@ func strategyFamily(c candidate) string {
 
 func isStarterOnlyStrategyName(strat string) bool {
 	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter":
+	case "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
 		return true
 	default:
 		return false
@@ -13275,12 +13281,12 @@ func winnerAddStrategyReady(c candidate, manualCatchUp bool) bool {
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
 	case "continuation_fast", "guerilla_short_runner", "guerilla_long_runner", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return true
-	case "impulsive_short_starter":
+	case "impulsive_short_starter", "failed_bounce_short_starter":
 		if manualCatchUp {
 			return true
 		}
 		return c.Conf >= envFloat("LIVE_IMPULSIVE_SHORT_ADD_MIN_CONF", 0.56)
-	case "impulsive_long_starter":
+	case "impulsive_long_starter", "reclaim_long_starter", "elite_starter":
 		if manualCatchUp {
 			return true
 		}
@@ -14105,6 +14111,86 @@ func qualifiesEliteStarterCandidate(c candidate) bool {
 	return continuationFastOFIAgrees(c, fastMinOFIZ)
 }
 
+func classifyExhaustionRisk(c candidate, side string) string {
+	if candidateExhaustionActive(c) || candidateSpikeCandle(c) {
+		return "high"
+	}
+	movePct := candidateDirectionalMovePct(c)
+	highMovePct := envFloat("LIVE_ELITE_STARTER_HIGH_EXHAUST_DAYUTC_PCT", 25.0)
+	moderateMovePct := envFloat("LIVE_ELITE_STARTER_MODERATE_EXHAUST_DAYUTC_PCT", 18.0)
+	highExtATR := envFloat("LIVE_ELITE_STARTER_HIGH_EXHAUST_ATR", 1.60)
+	moderateExtATR := envFloat("LIVE_ELITE_STARTER_MODERATE_EXHAUST_ATR", 1.20)
+	if c.ExtensionATR >= highExtATR || movePct >= highMovePct {
+		return "high"
+	}
+	if c.Entry.TimeInStateMin >= envFloat("LIVE_ELITE_STARTER_HIGH_EXHAUST_STATE_MIN", 35.0) && c.Entry.ScoreSlope <= envFloat("LIVE_ELITE_STARTER_HIGH_EXHAUST_MAX_SLOPE", 0.02) {
+		return "high"
+	}
+	if c.ExtensionATR >= moderateExtATR || movePct >= moderateMovePct {
+		return "moderate"
+	}
+	if c.Entry.TimeInStateMin >= envFloat("LIVE_ELITE_STARTER_MODERATE_EXHAUST_STATE_MIN", 20.0) && c.Entry.ScoreSlope <= envFloat("LIVE_ELITE_STARTER_MODERATE_EXHAUST_MAX_SLOPE", 0.04) {
+		return "moderate"
+	}
+	return "low"
+}
+
+func classifyStarterLane(c candidate, side string) string {
+	if strings.TrimSpace(side) == "" {
+		side = c.Side
+	}
+	if directionalConflictRejectReason(c) != "" {
+		return "reject"
+	}
+	if !continuationStateTrending(c.Entry.State) {
+		return "reject"
+	}
+	switch classifyExhaustionRisk(c, side) {
+	case "high":
+		return "reject"
+	case "moderate":
+		if !qualifiesEliteStarterCandidate(c) {
+			return "extended_wait_reset"
+		}
+	}
+	if qualifiesEliteStarterCandidate(c) {
+		minEliteScore := envFloat("LIVE_ELITE_STARTER_MIN_SCORE", 92.0)
+		minEliteSlope := envFloat("LIVE_ELITE_STARTER_MIN_SLOPE", 0.05)
+		minEliteVol := envFloat("LIVE_ELITE_STARTER_MIN_VOL_RATIO", 0.95)
+		if c.Entry.Rank <= envFloat("LIVE_ELITE_STARTER_MAX_RANK", 2.0) &&
+			gradeValue(c.Entry.CurrentGrade) >= gradeValue("A") &&
+			c.Entry.CurrentScore >= minEliteScore &&
+			c.Entry.ScoreSlope >= minEliteSlope &&
+			c.VolumeRatio >= minEliteVol &&
+			starterDirectionalContextOK(c) &&
+			starterStructureContextOK(c) {
+			return "elite_starter"
+		}
+	}
+	if c.Entry.CurrentScore >= 72 &&
+		c.Entry.ScoreSlope >= 0.04 &&
+		c.VolumeRatio >= 1.20 &&
+		continuationStructureConfirmed(c) &&
+		candidatePriceConfirmsDirection(c) &&
+		classifyExhaustionRisk(c, side) == "low" {
+		return "clean_continuation"
+	}
+	if candidateDirectionalMovePct(c) >= envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0) || c.ExtensionATR >= envFloat("LIVE_ADD_MAX_EXTENSION_ATR", 1.35) {
+		return "extended_wait_reset"
+	}
+	return "reject"
+}
+
+func starterSubtypeName(c candidate) string {
+	if strings.EqualFold(c.Side, "BUY") && (c.ReclaimHold || c.Entry.FailedBreakdownCount > 0 || c.Entry.FailedBreakLowCount > 0 || c.SetupFamily == "deep_pullback_reclaim") {
+		return "reclaim_long_starter"
+	}
+	if strings.EqualFold(c.Side, "SELL") && (c.Entry.FailedBounceCount > 0 || c.Entry.FailedReclaimCount > 0 || c.Entry.EntryStyle == "pullback_short") {
+		return "failed_bounce_short_starter"
+	}
+	return "elite_starter"
+}
+
 func candidatePriceConfirmsDirection(c candidate) bool {
 	if strings.EqualFold(c.Side, "BUY") {
 		aboveVWAP := c.SessionVWAP <= 0 || c.LastClose >= c.SessionVWAP
@@ -14153,8 +14239,13 @@ func candidateDirectionalMovePct(c candidate) float64 {
 }
 
 func classifyImpulseQuality(c candidate) string {
-	if candidateExhaustionActive(c) || candidateSpikeCandle(c) {
+	switch classifyExhaustionRisk(c, c.Side) {
+	case "high":
 		return "likely_exhaustion"
+	case "moderate":
+		if qualifiesEliteStarterCandidate(c) || starterStructureContextOK(c) {
+			return "extended_but_valid"
+		}
 	}
 	dirMove := candidateDirectionalMovePct(c)
 	structureOK := starterStructureContextOK(c)
@@ -14589,7 +14680,7 @@ func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) strin
 	}
 	switch phase {
 	case sessionAsiaDev:
-		if !strings.EqualFold(c.Strat, "early_dev_entry") && !strings.EqualFold(c.Strat, "continuation_fast_starter") && !strings.EqualFold(c.Strat, "impulsive_short_starter") && !strings.EqualFold(c.Strat, "impulsive_long_starter") {
+		if !strings.EqualFold(c.Strat, "early_dev_entry") && !isStarterOnlyStrategyName(c.Strat) {
 			return "asia_dev_starter_only"
 		}
 	case sessionAsiaContinue:
@@ -14900,7 +14991,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -14984,6 +15075,12 @@ func persistenceStrong(c candidate, cfg entryQualityConfig) bool {
 		return false
 	}
 	if directionalConflictRejectReason(c) != "" {
+		return false
+	}
+	if classifyExhaustionRisk(c, c.Side) != "low" {
+		return false
+	}
+	if candidateExtendedForBotAdd(c) {
 		return false
 	}
 	if !continuationStructureConfirmed(c) && !hasFreshStructureReset(c) && !c.ReclaimHold && !c.RetestHold && !c.ClosedBreakHold {
@@ -15890,6 +15987,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 		lateMinScore := envFloat("LIVE_CONT_FAST_LATE_MIN_SCORE", 90.0)
 		leaderUnwindShortMode := false
 		impulseQuality := classifyImpulseQuality(cand)
+		starterLane := classifyStarterLane(cand, cand.Side)
 		switch impulseQuality {
 		case "likely_exhaustion":
 			cand.Strat = "none"
@@ -15907,7 +16005,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			fastMinVolRatio = maxFloat(fastMinVolRatio, 1.20)
 			fastMinOFIZ = min(fastMinOFIZ, 0.25)
 		case "extended_but_valid":
-			if !hasFreshStructureReset(cand) && !qualifiesEliteStarterCandidate(cand) && !starterStructureContextOK(cand) {
+			if starterLane == "reject" && !hasFreshStructureReset(cand) && !qualifiesEliteStarterCandidate(cand) && !starterStructureContextOK(cand) {
 				cand.Strat = "none"
 				cand.Conf = 0
 				cand.RejectReason = "extended_valid_wait_reset"
@@ -16120,7 +16218,7 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 		if len(fails) == 0 {
 			fails = append(fails, "continuation_fast_not_ready")
 		}
-		if qualifiesEliteStarterCandidate(cand) {
+		if starterLane == "elite_starter" || qualifiesEliteStarterCandidate(cand) {
 			softRejects := make([]string, 0, len(fails))
 			hardRejects := make([]string, 0, len(fails))
 			for _, fail := range fails {
@@ -16136,21 +16234,21 @@ func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate 
 			}
 			if len(softRejects) > 0 && len(hardRejects) == 0 {
 				confBoost := min(0.10, max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.18)
-				cand.Strat = "continuation_fast_starter"
+				cand.Strat = starterSubtypeName(cand)
 				cand.Conf = clamp((fastBaseConf-0.12)+confBoost, 0.35, fastBaseConf-0.02)
 				if cand.Conf <= 0 {
 					cand.Conf = 0.44
 				}
 				cand.Sig = strategies.Signal{
 					Active: true,
-					Name:   "continuation_fast_starter",
+					Name:   cand.Strat,
 					Side:   toFeatureSide(cand.Side),
-					Tags:   []string{"starter_only", "elite_soft_override"},
+					Tags:   []string{"starter_only", "elite_soft_override", starterLane},
 					Reasons: append([]string{},
 						softRejects...,
 					),
 				}
-				cand.Sig = applySignalRiskGeometry(cand, "continuation_fast_starter")
+				cand.Sig = applySignalRiskGeometry(cand, cand.Strat)
 				cand.RejectReason = strings.Join(softRejects, ",")
 				return cand
 			}

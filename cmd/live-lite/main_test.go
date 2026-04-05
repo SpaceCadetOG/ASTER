@@ -1623,8 +1623,8 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "continuation_fast_starter" {
-		t.Fatalf("expected continuation_fast_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "elite_starter" {
+		t.Fatalf("expected elite_starter, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 	if got.Conf <= 0 {
 		t.Fatalf("expected starter confidence, got %.3f", got.Conf)
@@ -1666,8 +1666,8 @@ func TestApplySimpleContinuationFallbackEliteReclaimStarterAllowsSoftOFIAndVWAP(
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 0, 0, 0, time.UTC))
-	if got.Strat != "continuation_fast_starter" {
-		t.Fatalf("expected continuation_fast_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "reclaim_long_starter" {
+		t.Fatalf("expected reclaim_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -1679,6 +1679,9 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterWhenImpulseStro
 	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
 	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
 	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	t.Setenv("LIVE_EXHAUSTION_AVOID_CHASE_RISK", "10")
+	t.Setenv("LIVE_ELITE_STARTER_HIGH_EXHAUST_DAYUTC_PCT", "40")
+	t.Setenv("LIVE_ELITE_STARTER_MODERATE_EXHAUST_DAYUTC_PCT", "35")
 	c := candidate{
 		Side:        "SELL",
 		VolumeRatio: 0.07,
@@ -1756,6 +1759,9 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStron
 	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "1.15")
 	t.Setenv("LIVE_CONT_FAST_MIN_OFI_Z", "0.35")
 	t.Setenv("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", "1")
+	t.Setenv("LIVE_EXHAUSTION_AVOID_CHASE_RISK", "10")
+	t.Setenv("LIVE_ELITE_STARTER_HIGH_EXHAUST_DAYUTC_PCT", "40")
+	t.Setenv("LIVE_ELITE_STARTER_MODERATE_EXHAUST_DAYUTC_PCT", "35")
 	c := candidate{
 		Side:        "BUY",
 		VolumeRatio: 0.09,
@@ -1788,7 +1794,7 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStron
 }
 
 func TestClassifyImpulseQualityTreatsEliteReclaimAsBreakout(t *testing.T) {
-	t.Setenv("LIVE_ELITE_STARTER_MIN_OFI_Z", "0.10")
+	t.Setenv("LIVE_ELITE_STARTER_OFI_TOLERANCE_Z", "0.10")
 	c := candidate{
 		Side:        "BUY",
 		VolumeRatio: 1.02,
@@ -1810,6 +1816,185 @@ func TestClassifyImpulseQualityTreatsEliteReclaimAsBreakout(t *testing.T) {
 	}
 	if got := classifyImpulseQuality(c); got != "elite_breakout" {
 		t.Fatalf("expected elite_breakout, got %q", got)
+	}
+}
+
+func TestClassifyStarterLaneEliteLongReclaimPassesDirtyEarlySetup(t *testing.T) {
+	t.Setenv("LIVE_ELITE_STARTER_MIN_SCORE", "92")
+	t.Setenv("LIVE_ELITE_STARTER_MAX_RANK", "2")
+	t.Setenv("LIVE_ELITE_STARTER_OFI_TOLERANCE_Z", "0.10")
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.88,
+		VolumeRatio:   1.00,
+		OFIZ:          -0.06,
+		OFISamples:    12,
+		LastClose:     10.05,
+		SessionVWAP:   10.20,
+		EMA9:          10.15,
+		ReclaimHold:   true,
+		Entry: inplay.Entry{
+			CurrentGrade:         "A+",
+			CurrentScore:         95,
+			ScoreSlope:           0.08,
+			Rank:                 1,
+			State:                inplay.StateInPlay,
+			FailedBreakdownCount: 1,
+			EntryStyle:           "pullback_long",
+		},
+	}
+	if got := classifyStarterLane(c, c.Side); got != "elite_starter" {
+		t.Fatalf("expected elite_starter, got %q", got)
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
+	if got.Strat != "reclaim_long_starter" {
+		t.Fatalf("expected reclaim_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestClassifyStarterLaneEliteShortFailedBouncePassesDirtySetup(t *testing.T) {
+	t.Setenv("LIVE_ELITE_STARTER_MIN_SCORE", "92")
+	t.Setenv("LIVE_ELITE_STARTER_MAX_RANK", "2")
+	t.Setenv("LIVE_ELITE_STARTER_OFI_TOLERANCE_Z", "0.10")
+	c := candidate{
+		Side:          "SELL",
+		CombinedScore: 0.90,
+		VolumeRatio:   1.01,
+		OFIZ:          0.05,
+		OFISamples:    12,
+		LastClose:     0.98,
+		SessionVWAP:   0.95,
+		EMA9:          0.955,
+		Entry: inplay.Entry{
+			CurrentGrade:      "A+",
+			CurrentScore:      96,
+			ScoreSlope:        0.09,
+			Rank:              1,
+			State:             inplay.StateInPlay,
+			FailedBounceCount: 1,
+			EntryStyle:        "pullback_short",
+		},
+	}
+	if got := classifyStarterLane(c, c.Side); got != "elite_starter" {
+		t.Fatalf("expected elite_starter, got %q", got)
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
+	if got.Strat != "failed_bounce_short_starter" {
+		t.Fatalf("expected failed_bounce_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestClassifyStarterLaneRejectsMediocreDirtyContinuation(t *testing.T) {
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.70,
+		VolumeRatio:   0.82,
+		OFIZ:          -0.25,
+		OFISamples:    12,
+		LastClose:     9.9,
+		SessionVWAP:   10.1,
+		EMA9:          10.05,
+		Entry: inplay.Entry{
+			CurrentGrade: "B",
+			CurrentScore: 74,
+			ScoreSlope:   0.03,
+			Rank:         4,
+			State:        inplay.StateInPlay,
+		},
+	}
+	if got := classifyStarterLane(c, c.Side); got != "reject" {
+		t.Fatalf("expected reject, got %q", got)
+	}
+	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
+	if got.Strat != "none" {
+		t.Fatalf("expected no strategy for mediocre dirty setup, got %q", got.Strat)
+	}
+}
+
+func TestPersistenceStrongRejectsExtensionAndExhaustion(t *testing.T) {
+	cfg := entryQualityConfig{PersistenceSoftOverride: true, PersistSoftMinSeen: 2, PersistSoftMinTopN: 1}
+	c := candidate{
+		Side:                   "BUY",
+		Strat:                  "persistence_entry",
+		CombinedScore:          0.82,
+		Conf:                   0.66,
+		VolumeRatio:            1.30,
+		OFIZ:                   0.20,
+		OFISamples:             12,
+		LastClose:              11.0,
+		SessionVWAP:            10.5,
+		EMA9:                   10.6,
+		ExtensionATR:           1.5,
+		PersistenceSeenCount:   3,
+		PersistenceTopNCount:   2,
+		PersistenceVolumeTrend: true,
+		PersistenceMomentum:    true,
+		ClosedBreakHold:        true,
+		Entry: inplay.Entry{
+			CurrentGrade: "A",
+			CurrentScore: 93,
+			ScoreSlope:   0.08,
+			State:        inplay.StateInPlay,
+		},
+	}
+	if persistenceStrong(c, cfg) {
+		t.Fatal("expected persistence to reject extended setup")
+	}
+	c.ExtensionATR = 0.9
+	c.Entry.ExhaustionRisk = 5.5
+	if persistenceStrong(c, cfg) {
+		t.Fatal("expected persistence to reject exhausted setup")
+	}
+}
+
+func TestClassifyStarterLaneExtendedWaitReset(t *testing.T) {
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.86,
+		VolumeRatio:   1.05,
+		OFIZ:          0.04,
+		OFISamples:    12,
+		LastClose:     12.0,
+		SessionVWAP:   11.0,
+		EMA9:          11.1,
+		ExtensionATR:  1.45,
+		Entry: inplay.Entry{
+			CurrentGrade: "A",
+			CurrentScore: 94,
+			ScoreSlope:   0.07,
+			Rank:         1,
+			State:        inplay.StateInPlay,
+		},
+	}
+	if got := classifyStarterLane(c, c.Side); got != "extended_wait_reset" {
+		t.Fatalf("expected extended_wait_reset, got %q", got)
+	}
+}
+
+func TestClassifyStarterLaneHighExhaustionBlocksStarter(t *testing.T) {
+	c := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.90,
+		VolumeRatio:   1.25,
+		OFIZ:          0.20,
+		OFISamples:    12,
+		LastClose:     12.2,
+		SessionVWAP:   11.0,
+		EMA9:          11.1,
+		ExtensionATR:  1.7,
+		Entry: inplay.Entry{
+			CurrentGrade: "A+",
+			CurrentScore: 97,
+			ScoreSlope:   0.06,
+			Rank:         1,
+			State:        inplay.StateInPlay,
+		},
+	}
+	if got := classifyExhaustionRisk(c, c.Side); got != "high" {
+		t.Fatalf("expected high exhaustion, got %q", got)
+	}
+	if got := classifyStarterLane(c, c.Side); got != "reject" {
+		t.Fatalf("expected reject for high exhaustion, got %q", got)
 	}
 }
 

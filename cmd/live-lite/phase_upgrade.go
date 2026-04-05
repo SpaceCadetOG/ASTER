@@ -310,7 +310,7 @@ func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) 
 	st.VolumeTrendUp = volumeIncreasing(st.LastVolumeUSD, st.LastVolumeRatio, c, cfg.AllowStableVolume)
 	st.MomentumStableOrUp = momentumStableOrImproving(st.LastSlope, st.LastScore, c, cfg.AllowStableMomentum)
 	st.DirectionStable = directionPersistent(st.Side, c)
-	st.HadStarterSignal = st.HadStarterSignal || strings.EqualFold(c.Strat, "continuation_fast_starter") || strings.EqualFold(c.Strat, "early_dev_entry") || strings.EqualFold(c.Strat, "persistence_entry")
+	st.HadStarterSignal = st.HadStarterSignal || isStarterOnlyStrategyName(c.Strat) || strings.EqualFold(c.Strat, "early_dev_entry")
 	st.HadEntrySignal = st.HadEntrySignal || (!strings.EqualFold(strings.TrimSpace(c.Strat), "") && !strings.EqualFold(c.Strat, "none"))
 	if strings.TrimSpace(c.RejectReason) != "" {
 		st.LastRejectReason = c.RejectReason
@@ -351,7 +351,7 @@ func (t *missedTracker) persistenceState(now time.Time, c candidate) (*Opportuni
 	if now.Sub(st.LastSeenAt) > cfg.Window {
 		return st, false, nil
 	}
-	if c.Strat != "" && !strings.EqualFold(c.Strat, "none") && !strings.EqualFold(c.Strat, "continuation_fast_starter") {
+	if c.Strat != "" && !strings.EqualFold(c.Strat, "none") && !isStarterOnlyStrategyName(c.Strat) {
 		return st, false, nil
 	}
 	if reason := persistenceHardInvalidationReason(c); reason != "" {
