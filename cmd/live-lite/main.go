@@ -7224,7 +7224,10 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 				side = "SELL"
 			}
 			if samePositionSide(existing.Side, side) {
-				syncImportedRemotePosition(existing, abs(rp.amt), rp.entry, rp.margin, rp.lev, now)
+				sync := syncImportedRemotePosition(existing, abs(rp.amt), rp.entry, rp.margin, rp.lev, now)
+				if sync.materialManualMutation() && manualManagedTrade(existing) {
+					m.recalibrateManagedManualPosition(existing, now, sync)
+				}
 			}
 			continue
 		}
@@ -7365,26 +7368,123 @@ func manualPassivePosition(p *livePosition) bool {
 		strings.EqualFold(strings.TrimSpace(p.EntrySource), manualEntrySourcePassive)
 }
 
-func syncImportedRemotePosition(p *livePosition, qty, entry, margin float64, lev int, now time.Time) {
-	if p == nil {
-		return
+type importedRemoteSync struct {
+	QtyChanged      bool
+	QtyIncreased    bool
+	EntryChanged    bool
+	MarginChanged   bool
+	LeverageChanged bool
+}
+
+func (s importedRemoteSync) materialManualMutation() bool {
+	return s.QtyIncreased || (s.EntryChanged && s.QtyChanged) || s.LeverageChanged
+}
+
+func relDiffFloat(a, b float64) float64 {
+	if a <= 0 && b <= 0 {
+		return 0
 	}
+	return math.Abs(a-b) / maxFloat(maxFloat(math.Abs(a), math.Abs(b)), 1e-9)
+}
+
+func syncImportedRemotePosition(p *livePosition, qty, entry, margin float64, lev int, now time.Time) importedRemoteSync {
+	var sync importedRemoteSync
+	if p == nil {
+		return sync
+	}
+	prevQty := maxFloat(p.RemainingQty, p.FilledQty)
+	if prevQty <= 0 {
+		prevQty = p.Qty
+	}
+	prevEntry := p.EntryPrice
+	prevMargin := maxFloat(p.Margin, p.DeployedMargin)
+	prevLev := p.Leverage
 	if qty > 0 {
+		sync.QtyChanged = relDiffFloat(prevQty, qty) > 0.002
+		sync.QtyIncreased = qty > prevQty && sync.QtyChanged
 		p.Qty = qty
 		p.FilledQty = qty
 		p.RemainingQty = qty
 	}
 	if entry > 0 {
+		sync.EntryChanged = relDiffFloat(prevEntry, entry) > 0.0005
 		p.EntryPrice = entry
 	}
 	if margin > 0 {
+		sync.MarginChanged = relDiffFloat(prevMargin, margin) > 0.02
 		p.Margin = margin
 		p.DeployedMargin = margin
 	}
 	if lev > 0 {
+		sync.LeverageChanged = prevLev > 0 && lev != prevLev
 		p.Leverage = maxInt(1, lev)
 	}
 	p.UpdatedAt = now
+	return sync
+}
+
+func resetManagedProtectionForRemoteMutation(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.HitTP1 = false
+	p.HitTP2 = false
+	p.HitTP3 = false
+	p.TrailOn = false
+	p.TrailRef = 0
+	p.TrailStop = 0
+	p.MaxFavorableR = 0
+	p.MaxAdverseR = 0
+	p.MaxGivebackR = 0
+	p.CaptureRatio = 0
+	p.ProtectionStage = protectionStageNone
+	p.FirstProtectAt = time.Time{}
+	p.ProtectedStop = 0
+	p.Protected = false
+	p.Managed = true
+	p.ManualManageState = manualManageStatePendingProtection
+	p.ProtectionPending = false
+	p.ProtectionRetryAfter = time.Time{}
+	p.ProtectionRetryCount = 0
+	p.ProtectionFailCount = 0
+	p.ManageFailSuppressCount = 0
+	p.LastManageFailAt = time.Time{}
+	p.LastManageFailCause = ""
+}
+
+func (m *liveExecManager) recalibrateManagedManualPosition(p *livePosition, now time.Time, sync importedRemoteSync) {
+	if m == nil || p == nil || !manualManagedTrade(p) || strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
+		return
+	}
+	resetManagedProtectionForRemoteMutation(p)
+	currentMark := 0.0
+	if m.rest != nil {
+		if mark, err := m.currentMark(p.Symbol); err == nil && mark > 0 {
+			currentMark = mark
+		}
+	}
+	if currentMark <= 0 {
+		currentMark = maxFloat(p.LastMark, p.EntryPrice)
+	}
+	if currentMark > 0 {
+		p.ManageAnchorPrice = currentMark
+	}
+	if err := m.initializeBracketLevels(p); err != nil {
+		if currentMark > 0 {
+			p.LastManageFailCause = fmt.Sprintf("recalibrate_brackets_failed:%v", err)
+			markProtectionPending(p, now, "recalibrate_brackets_failed")
+		}
+		return
+	}
+	if currentMark > 0 {
+		m.reconstructManualManagedState(now, p, currentMark)
+	}
+	armManualProtectionAfterReconstruct(now, p)
+	if manageDebugLogging() {
+		fmt.Printf("live-lite: manual-recalibrated symbol=%s side=%s qty=%.6f entry=%s mark=%s qty_increased=%v entry_changed=%v lev_changed=%v\n",
+			p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice), fmtPrice(currentMark),
+			sync.QtyIncreased, sync.EntryChanged, sync.LeverageChanged)
+	}
 }
 
 func manualProtectionRetryDelay(cause string) time.Duration {
@@ -7849,7 +7949,10 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		existing := m.positions[sym]
 		if m.isActive(existing) {
 			if samePositionSide(existing.Side, side) {
-				syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
+				sync := syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
+				if sync.materialManualMutation() && manualManagedTrade(existing) {
+					m.recalibrateManagedManualPosition(existing, now, sync)
+				}
 				if manualManagedTrade(existing) || manualPassivePosition(existing) {
 					continue
 				}
@@ -7991,7 +8094,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 			return nil, fmt.Errorf("active opposite-side state already exists for %s", sym)
 		}
 		if manualPassivePosition(existing) {
-			syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
+			_ = syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
 			p := existing
 			currentMark := 0.0
 			if m.rest != nil {
@@ -8082,7 +8185,7 @@ func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, n
 	}
 	if existing := m.positions[sym]; m.isActive(existing) {
 		if strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(req.Side)) && manualPassivePosition(existing) {
-			syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
+			_ = syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
 			if !keepRequest {
 				m.mu.Lock()
 				delete(m.manualRequests, req.Key)
@@ -9188,7 +9291,11 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 		if q1 > 0 {
 			p.TP1Qty, err = m.roundQty(p.Symbol, q1)
 			if err != nil {
-				return err
+				if benignZeroRoundedQtyErr(err) {
+					p.TP1Qty = 0
+				} else {
+					return err
+				}
 			}
 		} else {
 			p.TP1Qty = 0
@@ -9196,7 +9303,11 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 		if q2 > 0 {
 			p.TP2Qty, err = m.roundQty(p.Symbol, q2)
 			if err != nil {
-				return err
+				if benignZeroRoundedQtyErr(err) {
+					p.TP2Qty = 0
+				} else {
+					return err
+				}
 			}
 		} else {
 			p.TP2Qty = 0
@@ -9208,7 +9319,11 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 		if q3 > 0 {
 			p.TP3Qty, err = m.roundQty(p.Symbol, q3)
 			if err != nil {
-				return err
+				if benignZeroRoundedQtyErr(err) {
+					p.TP3Qty = 0
+				} else {
+					return err
+				}
 			}
 		} else {
 			p.TP3Qty = 0
@@ -9297,7 +9412,7 @@ func protectiveStopValid(side string, entry, mark, stop float64) bool {
 	if entry <= 0 || mark <= 0 || stop <= 0 {
 		return false
 	}
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return stop < mark && stop < entry
 	}
 	return stop > mark && stop > entry
@@ -9319,7 +9434,7 @@ func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64
 	if tickSize > 0 {
 		minGapAbs = maxFloat(minGapAbs, tickSize*8)
 	}
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return stop <= mark-minGapAbs
 	}
 	return stop >= mark+minGapAbs
@@ -9327,14 +9442,14 @@ func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64
 
 func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
 	ref := maxFloat(entry, mark)
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		ref = min(entry, mark)
 	}
 	bufferPct := 0.0025
 	if tickSize > 0 && ref > 0 {
 		bufferPct = maxFloat(bufferPct, (tickSize*2)/ref)
 	}
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return ref * (1 - bufferPct)
 	}
 	return ref * (1 + bufferPct)
@@ -9346,14 +9461,14 @@ func widenedImmediateTriggerStop(side string, entry, mark, tickSize float64) flo
 
 func widenedImmediateTriggerStopPct(side string, entry, mark, tickSize, basePct float64) float64 {
 	ref := maxFloat(entry, mark)
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		ref = min(entry, mark)
 	}
 	bufferPct := basePct
 	if tickSize > 0 && ref > 0 {
 		bufferPct = maxFloat(bufferPct, (tickSize*4)/ref)
 	}
-	if strings.EqualFold(side, "BUY") {
+	if isLongSide(side) {
 		return ref * (1 - bufferPct)
 	}
 	return ref * (1 + bufferPct)
@@ -10112,6 +10227,14 @@ func (m *liveExecManager) cancelRemainingExits(p *livePosition) error {
 func (m *liveExecManager) roundQty(symbol string, qty float64) (float64, error) {
 	q, _, err := m.rest.RoundQty(symbol, qty)
 	return q, err
+}
+
+func benignZeroRoundedQtyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "qty must be > 0")
 }
 
 func (m *liveExecManager) ForceCloseAll(reason string) error {

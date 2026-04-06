@@ -1269,6 +1269,110 @@ func TestReconstructManualManagedStateEnablesTrailForLateStageWinner(t *testing.
 	}
 }
 
+func TestSyncImportedRemotePositionDetectsManualAddMutation(t *testing.T) {
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:       "RLSUSDT",
+		Side:         "SHORT",
+		EntryReason:  manualEntryReasonManaged,
+		EntrySource:  manualEntrySourceManaged,
+		Qty:          4183,
+		FilledQty:    4183,
+		RemainingQty: 4183,
+		EntryPrice:   0.006280,
+		Margin:       26.0,
+		Leverage:     1,
+	}
+	sync := syncImportedRemotePosition(p, 8359, 0.006195, 52.0, 1, now)
+	if !sync.QtyIncreased {
+		t.Fatalf("expected qty increase to be detected: %+v", sync)
+	}
+	if !sync.EntryChanged {
+		t.Fatalf("expected blended entry change to be detected: %+v", sync)
+	}
+	if p.RemainingQty != 8359 || p.EntryPrice != 0.006195 {
+		t.Fatalf("expected live position updated from remote truth, got qty=%.0f entry=%.6f", p.RemainingQty, p.EntryPrice)
+	}
+}
+
+func TestRecalibrateManagedManualPositionResetsAndRearmsProtectionOnManualAdd(t *testing.T) {
+	now := time.Now().UTC()
+	m := &liveExecManager{
+		stopPct:    2,
+		minStopPct: 0.25,
+		maxStopPct: 8,
+		tp1R:       1.2,
+		tp2R:       2.5,
+		tp3R:       4.0,
+		tp1Frac:    0.00,
+		tp2Frac:    0.10,
+		tp3Frac:    0.10,
+		beLockBps:  5,
+		ladderCfg: ladderConfig{
+			StarterUSDT:  25,
+			MinAddPnLPct: 1.5,
+		},
+	}
+	p := &livePosition{
+		Symbol:               "RLSUSDT",
+		Side:                 "SHORT",
+		State:                execOpen,
+		EntryReason:          manualEntryReasonManaged,
+		EntrySource:          manualEntrySourceManaged,
+		ManualManageState:    manualManageStateCritical,
+		Managed:              true,
+		Protected:            false,
+		ProtectionPending:    true,
+		ProtectionRetryAfter: now.Add(5 * time.Minute),
+		ProtectionRetryCount: 3,
+		ProtectionFailCount:  3,
+		LastManageFailCause:  "exchange_immediate_trigger_retry_failed",
+		LastManageFailAt:     now.Add(-2 * time.Minute),
+		Qty:                  8359,
+		FilledQty:            8359,
+		RemainingQty:         8359,
+		EntryPrice:           0.006195,
+		LastMark:             0.006202,
+		Margin:               52,
+		Leverage:             1,
+		HitTP1:               true,
+		TrailOn:              true,
+		TrailRef:             0.0058,
+		TrailStop:            0.0060,
+		MaxFavorableR:        2.1,
+		ProtectionStage:      protectionStageArmed,
+		ManageAnchorPrice:    0.006048,
+	}
+	sync := importedRemoteSync{QtyChanged: true, QtyIncreased: true, EntryChanged: true}
+
+	m.recalibrateManagedManualPosition(p, now, sync)
+
+	if p.ManualManageState != manualManageStatePendingProtection {
+		t.Fatalf("expected recalibrated manual trade to return to pending protection, got %s", p.ManualManageState)
+	}
+	if !p.ProtectionPending {
+		t.Fatalf("expected protection to be re-armed after recalibration")
+	}
+	if p.ProtectionRetryCount != 0 || p.ProtectionFailCount != 0 {
+		t.Fatalf("expected stale protection counters cleared, got retries=%d fails=%d", p.ProtectionRetryCount, p.ProtectionFailCount)
+	}
+	if p.LastManageFailCause != "" {
+		t.Fatalf("expected stale manage failure cause cleared, got %q", p.LastManageFailCause)
+	}
+	if p.HitTP1 || p.HitTP2 || p.HitTP3 {
+		t.Fatalf("expected TP hit state reset after recalibration")
+	}
+	if p.TrailOn {
+		t.Fatalf("expected trailing state reset after recalibration")
+	}
+	if p.ManageAnchorPrice != p.LastMark {
+		t.Fatalf("expected manage anchor rebuilt from latest mark, got %.6f want %.6f", p.ManageAnchorPrice, p.LastMark)
+	}
+	if p.StopPrice <= 0 || p.TP2Price <= 0 || p.TP3Price <= 0 {
+		t.Fatalf("expected bracket geometry to be rebuilt, got stop=%.6f tp2=%.6f tp3=%.6f", p.StopPrice, p.TP2Price, p.TP3Price)
+	}
+}
+
 func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T) {
 	now := time.Now().UTC()
 	m := &liveExecManager{
@@ -2575,6 +2679,39 @@ func TestNormalizeManualProtectiveStopWidensToExchangeSafeCandidate(t *testing.T
 	}
 	if stop <= 0.991 {
 		t.Fatalf("expected normalized stop to widen beyond original, got %v", stop)
+	}
+}
+
+func TestBenignZeroRoundedQtyErrMatchesExchangeZeroQtyMessage(t *testing.T) {
+	if !benignZeroRoundedQtyErr(fmt.Errorf("qty must be > 0")) {
+		t.Fatal("expected exchange zero-qty message to be treated as benign for partial TP slices")
+	}
+	if benignZeroRoundedQtyErr(fmt.Errorf("some other error")) {
+		t.Fatal("did not expect unrelated error to be treated as benign")
+	}
+}
+
+func TestProtectiveStopHelpersSupportLongShortAliases(t *testing.T) {
+	if !protectiveStopValid("LONG", 1.00, 1.01, 0.99) {
+		t.Fatal("expected LONG alias to use long-side protective stop geometry")
+	}
+	if !protectiveStopExchangeSafe("LONG", 1.00, 1.01, 0.99, 0.0001) {
+		t.Fatal("expected LONG alias to accept long-side exchange-safe stop")
+	}
+	if got := widenedProtectiveStop("LONG", 1.00, 1.01, 0.0001); got >= 1.01 {
+		t.Fatalf("expected widened LONG stop below market, got %.6f", got)
+	}
+	if got := widenedImmediateTriggerStopPct("LONG", 1.00, 1.01, 0.0001, 0.005); got >= 1.01 {
+		t.Fatalf("expected widened immediate-trigger LONG stop below market, got %.6f", got)
+	}
+	if !protectiveStopValid("SHORT", 1.00, 0.99, 1.01) {
+		t.Fatal("expected SHORT alias to use short-side protective stop geometry")
+	}
+	if !protectiveStopExchangeSafe("SHORT", 1.00, 0.99, 1.01, 0.0001) {
+		t.Fatal("expected SHORT alias to accept short-side exchange-safe stop")
+	}
+	if got := widenedProtectiveStop("SHORT", 1.00, 0.99, 0.0001); got <= 0.99 {
+		t.Fatalf("expected widened SHORT stop above market, got %.6f", got)
 	}
 }
 
