@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2712,6 +2713,22 @@ func TestProtectiveStopHelpersSupportLongShortAliases(t *testing.T) {
 	}
 	if got := widenedProtectiveStop("SHORT", 1.00, 0.99, 0.0001); got <= 0.99 {
 		t.Fatalf("expected widened SHORT stop above market, got %.6f", got)
+	}
+}
+
+func TestChooseProtectiveReferenceUsesAskForShortAndBidForLong(t *testing.T) {
+	if got := chooseProtectiveReference("SHORT", 0.0680, 0.0715); got != 0.0715 {
+		t.Fatalf("expected short protective reference to use ask, got %.6f", got)
+	}
+	if got := chooseProtectiveReference("LONG", 0.0680, 0.0715); got != 0.0680 {
+		t.Fatalf("expected long protective reference to use bid, got %.6f", got)
+	}
+}
+
+func TestChooseManagedProtectiveStopKeepsExistingLegalProtectedStop(t *testing.T) {
+	got := chooseManagedProtectiveStop("SHORT", 0.06417, 0.06802, 0.064202, 0.06900)
+	if math.Abs(got-0.06900) > 1e-9 {
+		t.Fatalf("expected legal existing protected stop to be preserved, got %.6f", got)
 	}
 }
 

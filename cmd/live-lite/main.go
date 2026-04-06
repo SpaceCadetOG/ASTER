@@ -9474,6 +9474,41 @@ func widenedImmediateTriggerStopPct(side string, entry, mark, tickSize, basePct 
 	return ref * (1 + bufferPct)
 }
 
+func chooseProtectiveReference(side string, bid, ask float64) float64 {
+	if isLongSide(side) {
+		if bid > 0 {
+			return bid
+		}
+		if ask > 0 {
+			return ask
+		}
+	} else {
+		if ask > 0 {
+			return ask
+		}
+		if bid > 0 {
+			return bid
+		}
+	}
+	if bid > 0 && ask > 0 {
+		return (bid + ask) / 2
+	}
+	return maxFloat(bid, ask)
+}
+
+func chooseManagedProtectiveStop(side string, entry, mark, computedStop, protectedStop float64) float64 {
+	if computedStop > 0 && protectiveStopValid(side, entry, mark, computedStop) {
+		return computedStop
+	}
+	if protectedStop > 0 && protectiveStopValid(side, entry, mark, protectedStop) {
+		return protectedStop
+	}
+	if protectedStop > 0 {
+		return protectedStop
+	}
+	return computedStop
+}
+
 func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []float64 {
 	if !envBool("LIVE_STOP_LEGALIZE_ENABLE", true) {
 		return nil
@@ -9518,7 +9553,7 @@ func normalizeManualProtectiveStop(symbol, side string, rest *aster.RESTAuth, en
 	if currentMark <= 0 && rest != nil {
 		bid, ask, err := rest.BookTicker(symbol)
 		if err == nil {
-			currentMark = (bid + ask) / 2
+			currentMark = chooseProtectiveReference(side, bid, ask)
 		}
 	}
 	if protectiveStopExchangeSafe(side, entry, currentMark, stopPx, tickSize) {
@@ -9647,7 +9682,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		return err
 	}
 	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
-		mark, err := m.currentMark(p.Symbol)
+		mark, err := m.currentProtectiveReference(p.Symbol, p.Side)
 		if err != nil || mark <= 0 {
 			recordManualProtectionFailure(p, now, "mark_unavailable")
 			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
@@ -9656,6 +9691,11 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				return nil
 			}
 			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
+		}
+		computedStop = chooseManagedProtectiveStop(p.Side, protectiveEntry, mark, computedStop, p.ProtectedStop)
+		stopPx, _, err = m.rest.RoundPrice(p.Symbol, computedStop)
+		if err != nil {
+			return err
 		}
 		normalizedStop, normalizedMark, normErr := normalizeManualProtectiveStop(p.Symbol, p.Side, m.rest, protectiveEntry, mark, stopPx, meta.TickSize)
 		if normErr != nil || normalizedStop <= 0 {
@@ -9694,7 +9734,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			lastRetryMark := 0.0
 			retryOldStopID := int64(0)
 			for attempt := 0; attempt < 3 && !retryPlaced; attempt++ {
-				mark, markErr := m.currentMark(p.Symbol)
+				mark, markErr := m.currentProtectiveReference(p.Symbol, p.Side)
 				if markErr != nil || mark <= 0 {
 					recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
 					m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
@@ -9789,6 +9829,18 @@ func (m *liveExecManager) currentMark(symbol string) (float64, error) {
 		return 0, fmt.Errorf("invalid mark")
 	}
 	return mid, nil
+}
+
+func (m *liveExecManager) currentProtectiveReference(symbol, side string) (float64, error) {
+	bid, ask, err := m.rest.BookTicker(symbol)
+	if err != nil {
+		return 0, err
+	}
+	ref := chooseProtectiveReference(side, bid, ask)
+	if ref <= 0 {
+		return 0, fmt.Errorf("invalid protective reference")
+	}
+	return ref, nil
 }
 
 func (m *liveExecManager) maybeEnableTrail(p *livePosition, stage int) {
