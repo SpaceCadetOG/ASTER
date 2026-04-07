@@ -12,7 +12,11 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-LOG_DIR="${ASTER_LOG_DIR:-logs}"
+DEFAULT_LOG_DIR="logs"
+if [[ -d /opt/aster || "${ENV_FILE}" == /opt/aster/* ]]; then
+  DEFAULT_LOG_DIR="/opt/aster/logs"
+fi
+LOG_DIR="${ASTER_LOG_DIR:-$DEFAULT_LOG_DIR}"
 mkdir -p "$LOG_DIR"
 
 LOCK_FILE="${ASTER_LOCK_FILE:-/tmp/aster-live.lock}"

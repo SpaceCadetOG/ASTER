@@ -17933,7 +17933,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 			blockMap[raw] = struct{}{}
 		}
 	}
-	contextOnly := envCSV("LIVE_CONTEXT_ONLY_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
+	contextOnly := envCSV("LIVE_CONTEXT_ONLY_SYMBOLS", "")
 	contextOnlyMap := make(map[string]struct{}, len(contextOnly))
 	for _, s := range contextOnly {
 		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))

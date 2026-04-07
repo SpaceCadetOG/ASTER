@@ -7,7 +7,11 @@ if [[ $# -lt 1 ]]; then
 fi
 
 PREFIX="$1"
-LOG_DIR="${ASTER_LOG_DIR:-logs}"
+DEFAULT_LOG_DIR="logs"
+if [[ -d /opt/aster ]]; then
+  DEFAULT_LOG_DIR="/opt/aster/logs"
+fi
+LOG_DIR="${ASTER_LOG_DIR:-$DEFAULT_LOG_DIR}"
 LOG_TZ="${ASTER_LOG_TZ:-America/Chicago}"
 LOG_ROLLOVER_TZ="${ASTER_LOG_ROLLOVER_TZ:-UTC}"
 LOG_DATE_MODE="${ASTER_LOG_DATE_MODE:-trading_day}"
