@@ -195,6 +195,12 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		p.EntryPrice = view.EntryPrice
 	}
 	if view.QtyAbs <= 1e-10 {
+		if p.PendingExitOrderID > 0 {
+			reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT_FILLED")
+			m.clearPendingExit(p)
+			changed, err := m.closeFromRemoteSnapshot(now, p, view.MarkPrice, reason)
+			return changed, true, err
+		}
 		changed, err := m.closeFromRemoteSnapshot(now, p, view.MarkPrice, "POSITION_FLAT_REMOTE")
 		return changed, true, err
 	}
@@ -243,6 +249,19 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		if fillPx <= 0 {
 			fillPx = p.EntryPrice
 		}
+		if p.PendingExitOrderID > 0 {
+			if err := m.applyPendingExitProgress(now, p, delta, fillPx, false); err != nil {
+				return true, false, err
+			}
+			p.UnknownExitChecks = 0
+			if p.RemainingQty <= fillEpsilon(p.Qty) {
+				reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT_FILLED")
+				m.clearPendingExit(p)
+				changed, err := m.closeFromRemoteSnapshot(now, p, fillPx, reason)
+				return changed, true, err
+			}
+			return true, false, nil
+		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, delta)
 		p.RealizedPnL += pnl
 		_ = m.addDayRealized(now, pnl)
@@ -263,6 +282,55 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 	}
 	p.UnknownExitChecks = 0
 	return false, false, nil
+}
+
+func (m *liveExecManager) applyPendingExitProgress(now time.Time, p *livePosition, deltaQty, fillPx float64, final bool) error {
+	if p == nil || deltaQty <= 0 {
+		return nil
+	}
+	p.PendingExitFilledQty += deltaQty
+	p.RemainingQty = maxFloat(0, p.RemainingQty-deltaQty)
+	p.UpdatedAt = now
+	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, deltaQty)
+	p.RealizedPnL += pnl
+	dayRealized := m.addDayRealized(now, pnl)
+	reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT")
+	action := firstNonEmpty(p.PendingExitAction, "CLOSE")
+	title := "LIMIT EXIT PARTIAL"
+	fillAction := "CLOSE"
+	if strings.EqualFold(action, "FORCE_CLOSE") {
+		title = "FORCE CLOSE PARTIAL"
+		fillAction = "FORCE_CLOSE"
+	}
+	if final {
+		title = "LIMIT EXIT FILLED"
+		if strings.EqualFold(action, "FORCE_CLOSE") {
+			title = "FORCE CLOSE FILLED"
+		}
+	}
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("✅", title,
+			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", deltaQty, fmtPrice(fillPx)),
+			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
+		))
+	}
+	_ = m.logFill(now, p, fillAction, reason, deltaQty, fillPx, pnl, pct)
+	m.sendFillReceipt(now, p, fillAction, reason, deltaQty, fillPx, pnl, pct)
+	if p.RemainingQty <= fillEpsilon(p.Qty) {
+		m.clearPendingExit(p)
+		markLivePositionClosed(p, now, reason)
+		p.RemainingQty = 0
+		m.maybeSweepTradeProfit(now, p)
+		return nil
+	}
+	if final {
+		m.clearPendingExit(p)
+		if err := m.ensureExitOrders(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage int, deltaQty, fillPx float64, final bool) error {

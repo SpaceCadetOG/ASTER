@@ -892,6 +892,13 @@ type livePosition struct {
 	PendingAddMargin        float64          `json:"pendingAddMargin,omitempty"`
 	PendingAddCreatedAt     time.Time        `json:"pendingAddCreatedAt,omitempty"`
 	PendingAddEntryReason   string           `json:"pendingAddEntryReason,omitempty"`
+	PendingExitOrderID      int64            `json:"pendingExitOrderId,omitempty"`
+	PendingExitPrice        float64          `json:"pendingExitPrice,omitempty"`
+	PendingExitQty          float64          `json:"pendingExitQty,omitempty"`
+	PendingExitFilledQty    float64          `json:"pendingExitFilledQty,omitempty"`
+	PendingExitCreatedAt    time.Time        `json:"pendingExitCreatedAt,omitempty"`
+	PendingExitReason       string           `json:"pendingExitReason,omitempty"`
+	PendingExitAction       string           `json:"pendingExitAction,omitempty"`
 	ProfitSweptUSDT         float64          `json:"profitSweptUsdt,omitempty"`
 	ReentryCount            int              `json:"reentryCount,omitempty"`
 	ExhaustionExit          bool             `json:"exhaustionExit,omitempty"`
@@ -4472,10 +4479,9 @@ func (m *liveExecManager) trimToRunner(now time.Time, p *livePosition, reason st
 	if trimQty <= fillEpsilon(p.RemainingQty) {
 		return false
 	}
-	if err := m.closeSymbolMarketQty(p.Symbol, trimQty); err != nil {
+	if err := m.submitCloseLimit(p, trimQty, reason, "TRIM"); err != nil {
 		return false
 	}
-	p.RemainingQty = maxFloat(p.RunnerMinQty, p.RemainingQty-trimQty)
 	p.UpdatedAt = now
 	return true
 }
@@ -6852,6 +6858,19 @@ func (m *liveExecManager) clearPendingAdd(p *livePosition) {
 	p.PendingAddEntryReason = ""
 }
 
+func (m *liveExecManager) clearPendingExit(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.PendingExitOrderID = 0
+	p.PendingExitPrice = 0
+	p.PendingExitQty = 0
+	p.PendingExitFilledQty = 0
+	p.PendingExitCreatedAt = time.Time{}
+	p.PendingExitReason = ""
+	p.PendingExitAction = ""
+}
+
 func (m *liveExecManager) applyAddFill(now time.Time, p *livePosition, deltaQty, fillPx, deltaMargin float64, reason string) error {
 	if m == nil || p == nil || deltaQty <= 0 {
 		return nil
@@ -8901,6 +8920,61 @@ func (m *liveExecManager) reconcilePendingAdd(now time.Time, p *livePosition) (b
 	return changed, nil
 }
 
+func (m *liveExecManager) reconcilePendingExit(now time.Time, p *livePosition) (bool, error) {
+	if m == nil || p == nil || p.PendingExitOrderID == 0 {
+		return false, nil
+	}
+	order, err := m.rest.GetOrder(p.Symbol, p.PendingExitOrderID)
+	if err != nil {
+		if rows, syncErr := m.rest.PositionRisk(p.Symbol); syncErr == nil {
+			changed, closed, applyErr := m.syncOpenFromRemote(now, p, rows)
+			if applyErr == nil && (changed || closed) {
+				return true, nil
+			}
+		}
+		if !p.PendingExitCreatedAt.IsZero() && now.Sub(p.PendingExitCreatedAt) >= m.entryTimeout {
+			_, _ = m.rest.CancelOrder(p.Symbol, p.PendingExitOrderID)
+			m.clearPendingExit(p)
+			if p.RemainingQty > fillEpsilon(p.Qty) {
+				return true, m.ensureExitOrders(p)
+			}
+			return true, nil
+		}
+		return false, err
+	}
+	prog := parseOrderProgress(order)
+	changed := false
+	if delta := maxFloat(0, prog.ExecQty-p.PendingExitFilledQty); delta > fillEpsilon(p.PendingExitQty) {
+		if err := m.applyPendingExitProgress(now, p, delta, prog.AvgPx, prog.Filled); err != nil {
+			return true, err
+		}
+		changed = true
+	}
+	if prog.Filled {
+		m.clearPendingExit(p)
+		if p.State != execClosed && p.RemainingQty > fillEpsilon(p.Qty) {
+			return true, m.ensureExitOrders(p)
+		}
+		return true, nil
+	}
+	if prog.Terminal {
+		m.clearPendingExit(p)
+		if p.State != execClosed && p.RemainingQty > fillEpsilon(p.Qty) {
+			return true, m.ensureExitOrders(p)
+		}
+		return true, nil
+	}
+	if !p.PendingExitCreatedAt.IsZero() && now.Sub(p.PendingExitCreatedAt) >= m.entryTimeout {
+		_, _ = m.rest.CancelOrder(p.Symbol, p.PendingExitOrderID)
+		m.clearPendingExit(p)
+		if p.RemainingQty > fillEpsilon(p.Qty) {
+			return true, m.ensureExitOrders(p)
+		}
+		return true, nil
+	}
+	return changed, nil
+}
+
 func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[string]momentumView, flow map[string]flowMetrics, meta map[string]symbolMeta) (bool, error) {
 	changed := false
 	closedByStop, err := m.reconcileExitOrders(now, p)
@@ -8931,6 +9005,14 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 		return changed, err
 	} else if addChanged {
 		changed = true
+	}
+	if exitChanged, err := m.reconcilePendingExit(now, p); err != nil {
+		return changed, err
+	} else if exitChanged {
+		changed = true
+	}
+	if p.PendingExitOrderID > 0 {
+		return changed, nil
 	}
 	if p.RemainingQty > 0 {
 		mark, err := m.currentMark(p.Symbol)
@@ -9045,15 +9127,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 						}
 					} else {
 						reason := firstNonEmpty(runnerState.FullExitReason, mv.Reason)
-						pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-						_ = m.addDayRealized(now, pnl)
 						_ = m.cancelRemainingExits(p)
-						if err := m.closeSymbolMarket(p.Symbol); err == nil {
-							p.RealizedPnL += pnl
-							_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-							m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-							markLivePositionClosed(p, now, reason)
-							m.maybeSweepTradeProfit(now, p)
+						if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
 							changed = true
 						}
 					}
@@ -9062,7 +9137,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 		}
 	}
 	// Ensure there is always a protective stop while position is live.
-	if p.RemainingQty > 0 && p.StopOrderID == 0 && !manualPassivePosition(p) {
+	if p.RemainingQty > 0 && p.StopOrderID == 0 && p.PendingExitOrderID == 0 && !manualPassivePosition(p) {
 		if err := m.placeOrReplaceStop(p); err != nil {
 			return changed, err
 		}
@@ -10313,23 +10388,20 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 			mark = p.EntryPrice
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-		dayRealized := m.addDayRealized(now, pnl)
+		dayRealized := m.dayRealizedAt(now)
 		_ = m.cancelRemainingExits(p)
 		_, _ = m.rest.CancelAllOrders(sym)
-		_ = m.closeSymbolMarket(sym)
+		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "FORCE_CLOSE"); err != nil {
+			continue
+		}
 		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
+			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE REQUESTED",
 				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
 			))
 		}
-		_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		p.RealizedPnL += pnl
-		markLivePositionClosed(p, now, reason)
-		m.maybeSweepTradeProfit(now, p)
 	}
 	_ = m.save()
 	return nil
@@ -10353,23 +10425,20 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 		mark = p.EntryPrice
 	}
 	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-	dayRealized := m.addDayRealized(now, pnl)
+	dayRealized := m.dayRealizedAt(now)
 	_ = m.cancelRemainingExits(p)
 	_, _ = m.rest.CancelAllOrders(raw)
-	_ = m.closeSymbolMarket(raw)
+	if err := m.submitCloseLimit(p, p.RemainingQty, reason, "FORCE_CLOSE"); err != nil {
+		return false, err
+	}
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE",
+		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE REQUESTED",
 			fmt.Sprintf("<b>%s %s</b>", raw, displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 			fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
 		))
 	}
-	_ = m.logFill(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-	m.sendFillReceipt(now, p, "FORCE_CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-	p.RealizedPnL += pnl
-	markLivePositionClosed(p, now, reason)
-	m.maybeSweepTradeProfit(now, p)
 	_ = m.save()
 	return true, nil
 }
@@ -10455,8 +10524,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
 				if q > 0 && q < p.RemainingQty {
-					if err := m.closeSymbolMarketQty(sym, q); err == nil {
-						p.RemainingQty -= q
+					if err := m.submitCloseLimit(p, q, dec.Reason, "TRIM"); err == nil {
+						changed = true
 					}
 				}
 			}
@@ -10492,23 +10561,18 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				}
 				reason := firstNonEmpty(runnerState.FullExitReason, dec.Reason)
 				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-				dayRealized := m.addDayRealized(now, pnl)
+				dayRealized := m.dayRealizedAt(now)
 				_ = m.cancelRemainingExits(p)
-				if err := m.closeSymbolMarket(sym); err != nil {
+				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 					continue
 				}
-				p.RealizedPnL += pnl
 				if m.tg != nil {
-					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
+					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT SUBMITTED",
 						fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 						fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 					))
 				}
-				_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-				m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-				markLivePositionClosed(p, now, reason)
-				m.maybeSweepTradeProfit(now, p)
 				changed = true
 				continue
 			}
@@ -10536,25 +10600,20 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		if !runnerState.StructureBroken {
 			continue
 		}
+		reason := firstNonEmpty(runnerState.FullExitReason, "MOMENTUM_FADE")
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-		dayRealized := m.addDayRealized(now, pnl)
+		dayRealized := m.dayRealizedAt(now)
 		_ = m.cancelRemainingExits(p)
-		if err := m.closeSymbolMarket(sym); err != nil {
+		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 			continue
 		}
-		p.RealizedPnL += pnl
-		reason := firstNonEmpty(runnerState.FullExitReason, "MOMENTUM_FADE")
-		markLivePositionClosed(p, now, reason)
 		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT",
+			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT SUBMITTED",
 				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 			))
 		}
-		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -10602,23 +10661,18 @@ func (m *liveExecManager) ApplyFundingExit(now time.Time, meta map[string]symbol
 			continue
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-		dayRealized := m.addDayRealized(now, pnl)
+		dayRealized := m.dayRealizedAt(now)
 		_ = m.cancelRemainingExits(p)
-		if err := m.closeSymbolMarket(sym); err != nil {
+		if err := m.submitCloseLimit(p, p.RemainingQty, "FUNDING", "CLOSE"); err != nil {
 			continue
 		}
 		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PRE-FUNDING EXIT",
+			m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PRE-FUNDING EXIT SUBMITTED",
 				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
 			))
 		}
-		_ = m.logFill(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
-		m.sendFillReceipt(now, p, "CLOSE", "FUNDING", p.RemainingQty, mark, pnl, pct)
-		p.RealizedPnL += pnl
-		markLivePositionClosed(p, now, "FUNDING")
-		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -10653,24 +10707,19 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 			continue
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-		dayRealized := m.addDayRealized(now, pnl)
+		dayRealized := m.dayRealizedAt(now)
 		_ = m.cancelRemainingExits(p)
-		if err := m.closeSymbolMarket(sym); err != nil {
+		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 			continue
 		}
 		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT",
+			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT SUBMITTED",
 				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", p.RemainingQty, fmtPrice(mark)),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
 				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
 				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
 			))
 		}
-		_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, mark, pnl, pct)
-		p.RealizedPnL += pnl
-		markLivePositionClosed(p, now, reason)
-		m.maybeSweepTradeProfit(now, p)
 		changed = true
 	}
 	if changed {
@@ -10678,85 +10727,93 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 	}
 }
 
-func (m *liveExecManager) closeSymbolMarket(symbol string) error {
-	rows, err := m.rest.PositionRisk(symbol)
+func exitLimitCrossBps() float64 {
+	return maxFloat(0, envFloat("LIVE_EXIT_LIMIT_CROSS_BPS", 8.0))
+}
+
+func (m *liveExecManager) exitLimitPrice(symbol, side string) (float64, error) {
+	bid, ask, err := m.rest.BookTicker(symbol)
+	if err != nil {
+		return 0, err
+	}
+	price := 0.0
+	cross := exitLimitCrossBps() / 10000.0
+	if isLongSide(side) {
+		if bid <= 0 {
+			return 0, fmt.Errorf("invalid bid for exit")
+		}
+		price = bid * (1 - cross)
+	} else {
+		if ask <= 0 {
+			return 0, fmt.Errorf("invalid ask for exit")
+		}
+		price = ask * (1 + cross)
+	}
+	price, _, err = m.rest.RoundPrice(symbol, price)
+	if err != nil {
+		return 0, err
+	}
+	if price <= 0 {
+		return 0, fmt.Errorf("invalid exit price")
+	}
+	return price, nil
+}
+
+func (m *liveExecManager) submitCloseLimit(p *livePosition, qty float64, reason, action string) error {
+	if m == nil || m.rest == nil || p == nil {
+		return fmt.Errorf("execution manager not ready")
+	}
+	if p.State == execClosed || p.RemainingQty <= 0 {
+		return nil
+	}
+	if p.PendingExitOrderID > 0 {
+		return nil
+	}
+	_ = m.cancelRemainingExits(p)
+	meta, err := m.rest.SymbolMeta(p.Symbol, true)
 	if err != nil {
 		return err
 	}
-	for _, row := range rows {
-		amt := mapFloat(row["positionAmt"])
-		if amt == 0 {
-			continue
-		}
-		side := "SELL"
-		if amt < 0 {
-			side = "BUY"
-		}
-		qty, _, err := m.rest.RoundQty(symbol, abs(amt))
-		if err != nil {
-			return err
-		}
-		if qty <= 0 {
-			continue
-		}
-		meta, err := m.rest.SymbolMeta(symbol, true)
-		if err != nil {
-			return err
-		}
-		vals := url.Values{}
-		vals.Set("symbol", symbol)
-		vals.Set("side", side)
-		vals.Set("type", "MARKET")
-		vals.Set("positionSide", "BOTH")
-		vals.Set("reduceOnly", "true")
-		vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
-		if _, err := m.rest.PlaceOrder(vals); err != nil {
-			return err
-		}
+	qty, _, err = m.rest.RoundQty(p.Symbol, min(maxFloat(0, qty), p.RemainingQty))
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func (m *liveExecManager) closeSymbolMarketQty(symbol string, qty float64) error {
 	if qty <= 0 {
 		return nil
 	}
-	rows, err := m.rest.PositionRisk(symbol)
+	price, err := m.exitLimitPrice(p.Symbol, p.Side)
 	if err != nil {
 		return err
 	}
-	for _, row := range rows {
-		amt := mapFloat(row["positionAmt"])
-		if amt == 0 {
-			continue
-		}
-		side := "SELL"
-		if amt < 0 {
-			side = "BUY"
-		}
-		meta, err := m.rest.SymbolMeta(symbol, true)
-		if err != nil {
-			return err
-		}
-		q, _, err := m.rest.RoundQty(symbol, min(abs(amt), qty))
-		if err != nil {
-			return err
-		}
-		if q <= 0 {
-			continue
-		}
-		vals := url.Values{}
-		vals.Set("symbol", symbol)
-		vals.Set("side", side)
-		vals.Set("type", "MARKET")
-		vals.Set("positionSide", "BOTH")
-		vals.Set("reduceOnly", "true")
-		vals.Set("quantity", formatFloat(q, meta.QtyPrecision))
-		if _, err := m.rest.PlaceOrder(vals); err != nil {
-			return err
-		}
-		return nil
+	closeSide := "SELL"
+	if strings.EqualFold(p.Side, "SELL") {
+		closeSide = "BUY"
 	}
+	vals := url.Values{}
+	vals.Set("symbol", p.Symbol)
+	vals.Set("side", closeSide)
+	vals.Set("type", "LIMIT")
+	vals.Set("timeInForce", "GTC")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
+	vals.Set("price", formatFloat(price, meta.PricePrecision))
+	out, err := m.rest.PlaceOrder(vals)
+	if err != nil {
+		return err
+	}
+	orderID := mapInt64(out["orderId"])
+	if orderID == 0 {
+		return fmt.Errorf("missing orderId from exit limit response")
+	}
+	p.PendingExitOrderID = orderID
+	p.PendingExitPrice = price
+	p.PendingExitQty = qty
+	p.PendingExitFilledQty = 0
+	p.PendingExitCreatedAt = time.Now().UTC()
+	p.PendingExitReason = strings.ToUpper(strings.TrimSpace(reason))
+	p.PendingExitAction = strings.ToUpper(strings.TrimSpace(action))
+	p.UpdatedAt = p.PendingExitCreatedAt
 	return nil
 }
 
@@ -20214,7 +20271,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		lines := []string{
 			fmt.Sprintf("<b>Symbol:</b> %s | <b>Side:</b> %s | <b>Src:</b> %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side), displayEntrySource(p.Source)),
 			fmt.Sprintf("<b>Manage:</b> %s | <b>Protection:</b> %s", nonEmpty(strings.ToUpper(strings.TrimSpace(p.ManageState)), "-"), nonEmpty(strings.ToUpper(strings.TrimSpace(p.ProtectionState)), "-")),
-			fmt.Sprintf("<b>Managed:</b> %s | <b>Protected:</b> %s", boolLabel(p.Managed), boolLabel(p.Protected)),
+			fmt.Sprintf("<b>Managed:</b> %s | <b>Exchange Stop:</b> %s", boolLabel(p.Managed), func() string {
+				if p.Protected {
+					return "LIVE"
+				}
+				return "NO"
+			}()),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", p.Qty, maxInt(1, p.Leverage), p.Margin),
 			fmt.Sprintf("<b>Entry:</b> %s | <b>Mark:</b> %s | <b>Last:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.MarkPrice), fmtPrice(p.LastPrice)),
 			fmt.Sprintf("<b>uPnL:</b> %+.2f (%+.2f%%) | <b>Exchange uPnL:</b> %+.2f", p.UnrealizedPnL, p.UnrealizedPnLPct, p.ExchangeUnreal),
