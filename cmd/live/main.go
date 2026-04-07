@@ -1010,6 +1010,7 @@ type fundsManagerConfig struct {
 	PerpTargetUSDT            float64
 	PerpFloorUSDT             float64
 	TopupMinUSDT              float64
+	SweepMinUSDT              float64
 	SweepProfitEnable         bool
 	SweepExcessOverTargetOnly bool
 }
@@ -5157,6 +5158,7 @@ func loadFundsManagerConfig() fundsManagerConfig {
 		PerpTargetUSDT:            envFloat("LIVE_PERP_BAL_TARGET_USDT", 100),
 		PerpFloorUSDT:             envFloat("LIVE_PERP_BAL_FLOOR_USDT", 50),
 		TopupMinUSDT:              envFloat("LIVE_TOPUP_MIN_USDT", 10),
+		SweepMinUSDT:              envFloat("LIVE_SWEEP_MIN_USDT", 0.01),
 		SweepProfitEnable:         envBool("LIVE_SWEEP_PROFIT_ENABLE", true),
 		SweepExcessOverTargetOnly: envBool("LIVE_SWEEP_EXCESS_OVER_TARGET_ONLY", false),
 	}
@@ -5171,6 +5173,9 @@ func loadFundsManagerConfig() fundsManagerConfig {
 	}
 	if cfg.TopupMinUSDT < 0 {
 		cfg.TopupMinUSDT = 0
+	}
+	if cfg.SweepMinUSDT < 0 {
+		cfg.SweepMinUSDT = 0
 	}
 	return cfg
 }
@@ -5188,6 +5193,17 @@ func perpSweepAmount(avail float64, cfg fundsManagerConfig) float64 {
 		return 0
 	}
 	return maxFloat(0, avail-cfg.PerpTargetUSDT)
+}
+
+func autoSweepAmount(avail float64, cfg fundsManagerConfig) float64 {
+	excess := perpSweepAmount(avail, cfg)
+	if excess <= 0 {
+		return 0
+	}
+	if excess < cfg.SweepMinUSDT {
+		return 0
+	}
+	return excess
 }
 
 func perpTopupTarget(avail float64, cfg fundsManagerConfig) float64 {
@@ -6930,15 +6946,13 @@ func (m *liveExecManager) MaintainPerpBalance(now time.Time) {
 		m.recordTransferStatus(fmt.Sprintf("funds maintenance refresh failed: %v", err))
 		return
 	}
-	if excess := perpSweepAmount(avail, m.fundsCfg); excess > 0 {
-		if excess >= m.fundsCfg.TopupMinUSDT {
-			if err := m.transferManager.TransferPerpToSpot(excess); err != nil {
-				m.recordTransferStatus(fmt.Sprintf("auto sweep failed %.2f: %v", excess, err))
-				fmt.Printf("live: funds manager auto sweep failed amount=%.2f err=%v\n", excess, err)
-			} else {
-				m.recordTransferStatus(fmt.Sprintf("auto sweep %.2f to spot (avail %.2f > target %.2f)", excess, avail, m.fundsCfg.PerpTargetUSDT))
-				fmt.Printf("live: funds manager auto sweep amount=%.2f avail=%.2f target=%.2f\n", excess, avail, m.fundsCfg.PerpTargetUSDT)
-			}
+	if excess := autoSweepAmount(avail, m.fundsCfg); excess > 0 {
+		if err := m.transferManager.TransferPerpToSpot(excess); err != nil {
+			m.recordTransferStatus(fmt.Sprintf("auto sweep failed %.2f: %v", excess, err))
+			fmt.Printf("live: funds manager auto sweep failed amount=%.2f err=%v\n", excess, err)
+		} else {
+			m.recordTransferStatus(fmt.Sprintf("auto sweep %.2f to spot (avail %.2f > target %.2f)", excess, avail, m.fundsCfg.PerpTargetUSDT))
+			fmt.Printf("live: funds manager auto sweep amount=%.2f avail=%.2f target=%.2f\n", excess, avail, m.fundsCfg.PerpTargetUSDT)
 		}
 		return
 	}

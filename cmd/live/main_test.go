@@ -3234,6 +3234,21 @@ func TestPerpSweepAmountUsesTargetCeiling(t *testing.T) {
 	}
 }
 
+func TestAutoSweepAmountUsesSweepMinNotTopupMin(t *testing.T) {
+	cfg := fundsManagerConfig{
+		PerpTargetUSDT: 200,
+		PerpFloorUSDT:  150,
+		TopupMinUSDT:   10,
+		SweepMinUSDT:   0.01,
+	}
+	if got := autoSweepAmount(202.66, cfg); math.Abs(got-2.66) > 1e-9 {
+		t.Fatalf("expected sweep amount 2.66, got %.6f", got)
+	}
+	if got := autoSweepAmount(200.005, cfg); got != 0 {
+		t.Fatalf("expected no sweep below sweep minimum, got %.6f", got)
+	}
+}
+
 func TestPerpTopupTargetUsesFloorGuard(t *testing.T) {
 	cfg := fundsManagerConfig{PerpTargetUSDT: 200, PerpFloorUSDT: 150}
 	if got := perpTopupTarget(149, cfg); got != 200 {
