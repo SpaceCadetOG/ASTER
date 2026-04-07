@@ -14,30 +14,17 @@ jobs:
         with:
           go-version: "1.21.x"
 
-      # Deploy-now mode: compile must pass; tests can be fixed after
-      - name: Build + install
+      - name: Deploy to Pi
         run: |
-          sudo mkdir -p /opt/aster/bin
-          sudo chown -R "$(id -u):$(id -g)" /opt/aster || true
-          go build -o /opt/aster/bin/long  ./cmd/long
-          go build -o /opt/aster/bin/short ./cmd/short
-          go build -o /opt/aster/bin/tape ./cmd/tape
-          go build -o /opt/aster/bin/whale ./cmd/whale
-          go build -o /opt/aster/bin/live-lite ./cmd/live-lite
-          chmod +x /opt/aster/bin/long /opt/aster/bin/short /opt/aster/bin/tape /opt/aster/bin/whale /opt/aster/bin/live-lite
+          bash scripts/deploy_pi.sh
 
       - name: Restart services
         run: |
-          sudo systemctl restart aster-long || true
-          sudo systemctl restart aster-short || true
-          sudo systemctl restart aster-tape || true
-          sudo systemctl restart aster-whale || true
-          sudo systemctl restart aster-live-lite || true
+          sudo systemctl restart aster-modules-tmux || true
+          sudo systemctl restart aster-autoupdate.timer || true
 
       - name: Status
         run: |
-          systemctl --no-pager --full status aster-long || true
-          systemctl --no-pager --full status aster-short || true
-          systemctl --no-pager --full status aster-tape || true
-          systemctl --no-pager --full status aster-whale || true
-          systemctl --no-pager --full status aster-live-lite || true
+          systemctl --no-pager --full status aster-modules-tmux || true
+          systemctl --no-pager --full status aster-autoupdate.timer || true
+          tmux ls || true
