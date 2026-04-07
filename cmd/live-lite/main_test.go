@@ -2657,6 +2657,18 @@ func TestProtectiveStopExchangeSafeRequiresBuffer(t *testing.T) {
 	}
 }
 
+func TestHasLiveProtectiveOrderRequiresRealOrderAndNoPendingProtection(t *testing.T) {
+	if hasLiveProtectiveOrder(&livePosition{}) {
+		t.Fatal("expected no live protection without stop order")
+	}
+	if hasLiveProtectiveOrder(&livePosition{StopOrderID: 123, ProtectionPending: true}) {
+		t.Fatal("expected pending protection to not count as live")
+	}
+	if !hasLiveProtectiveOrder(&livePosition{StopOrderID: 123}) {
+		t.Fatal("expected active stop order to count as live protection")
+	}
+}
+
 func TestManualStopRetryCandidatesEscalateBeyondLegacyImmediateTriggerWidths(t *testing.T) {
 	candidates := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
 	if len(candidates) < 6 {

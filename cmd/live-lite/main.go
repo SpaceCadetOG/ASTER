@@ -3700,6 +3700,10 @@ func scannerItemsForCommand(s liveLiteStatus, which string) ([]notify.ScanItem, 
 	}
 }
 
+func hasLiveProtectiveOrder(p *livePosition) bool {
+	return p != nil && p.StopOrderID > 0 && !p.ProtectionPending
+}
+
 func buildLivePulseAndCards(title string, now time.Time, m *liveExecManager) (notify.PulseSnapshot, []notify.PositionCard) {
 	snap := m.LiveAccountSnapshot(32)
 	cards := make([]notify.PositionCard, 0, len(snap.Positions))
@@ -7599,7 +7603,7 @@ func manualProtectionStatus(p *livePosition) string {
 		return "CONFLICT"
 	}
 	if !manualManagedTrade(p) {
-		if p.Protected || p.StopOrderID > 0 {
+		if hasLiveProtectiveOrder(p) || p.Protected {
 			return "PROTECTED"
 		}
 		return "UNPROTECTED"
@@ -7613,7 +7617,10 @@ func manualProtectionStatus(p *livePosition) string {
 		}
 		return "CRITICAL_UNPROTECTED"
 	case manualManageStateLive:
-		return "PROTECTED"
+		if hasLiveProtectiveOrder(p) || p.Protected {
+			return "PROTECTED"
+		}
+		return "PROTECTING"
 	default:
 		return "PROTECTING"
 	}
@@ -7627,7 +7634,7 @@ func manualManagedProtectionBroken(p *livePosition) bool {
 	if state == manualManageStateForceClose || state == manualManageStateCritical {
 		return true
 	}
-	if p.Protected || p.StopOrderID > 0 {
+	if p.Protected || hasLiveProtectiveOrder(p) {
 		return false
 	}
 	if !envBool("LIVE_IMPORT_BLOCK_IF_UNPROTECTED", true) {
@@ -9992,7 +9999,7 @@ func (m *liveExecManager) tightenRunnerStop(p *livePosition, reason string) bool
 	if err := m.placeOrReplaceStop(p); err != nil {
 		return false
 	}
-	return true
+	return hasLiveProtectiveOrder(p)
 }
 
 func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (bool, error) {
@@ -10050,6 +10057,9 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 	p.StopPrice = newStop
 	if err := m.placeOrReplaceStop(p); err != nil {
 		return false, err
+	}
+	if !hasLiveProtectiveOrder(p) {
+		return false, nil
 	}
 	clearTrailCandidate(p)
 	if m.tg != nil {
@@ -17362,7 +17372,7 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 			ManageState:      manageState,
 			ProtectionState:  protectionState,
 			Managed:          lp != nil && (lp.Managed || botManagedPosition(lp)),
-			Protected:        lp != nil && (lp.Protected || lp.StopOrderID > 0),
+			Protected:        lp != nil && (lp.Protected || hasLiveProtectiveOrder(lp)),
 			Qty:              rp.SizeAbs,
 			EntryPrice:       rp.Entry,
 			MarkPrice:        markPx,
