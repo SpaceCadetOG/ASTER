@@ -1614,7 +1614,7 @@ func main() {
 		go cmdCtx.run()
 	}
 	payoutMgr := newPayoutManager()
-	if paper != nil || execMgr != nil || payoutMgr != nil {
+	if (paper != nil || execMgr != nil || payoutMgr != nil) && envBool("LIVE_STARTUP_DEBUG", false) {
 		paperPath := ""
 		livePath := ""
 		payoutPath := ""
@@ -1632,7 +1632,7 @@ func main() {
 	}
 
 	pureMode := envBool("LIVE_PURE_MODE", true)
-	fmt.Println("live started")
+	fmt.Printf("LIVE STARTED | mode=%s\n", map[bool]string{true: "PAPER", false: "LIVE"}[dryRun])
 	modeLabel := "LIVE"
 	if dryRun {
 		modeLabel = "PAPER"
@@ -19989,10 +19989,16 @@ func manageDebugLogging() bool {
 func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg watchConfig, ladderCfg ladderConfig, reentryCfg reentryConfig, safety safetyConfig, execMgr *liveExecManager) []string {
 	lines := []string{
 		fmt.Sprintf("mode=%s | scan=%s | watch=%s | priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
-		fmt.Sprintf("starter=%.2f | add=%.2f | max_total=%.2f | min_available=%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, safety.minAvailUSDT),
-		fmt.Sprintf("fixed_size_no_add=%s | max_open=%d | max_per_side=%d", boolState(ladderAddsDisabled(ladderCfg)), envInt("LIVE_MAX_OPEN_POS", 1), envInt("LIVE_MAX_OPEN_PER_SIDE", 1)),
-		fmt.Sprintf("one_symbol_only=%s | reentry=%s | post_win_cooldown=%s | persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
-		fmt.Sprintf("funds_manager=%s | account_snapshots=%s | session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
+		fmt.Sprintf("margin=%.2f | reentry=%.2f | min_available=%.2f | max_open=%d", ladderCfg.StarterUSDT, reentryCfg.SizeUSDT, safety.minAvailUSDT, envInt("LIVE_MAX_OPEN_POS", 1)),
+		fmt.Sprintf("sizing=%s | reentry=%s | persistence=%s | max_per_side=%d",
+			map[bool]string{true: "fixed", false: "ladder"}[ladderAddsDisabled(ladderCfg)],
+			boolState(reentryCfg.Enable),
+			boolState(missedOpportunitiesEnabled()),
+			envInt("LIVE_MAX_OPEN_PER_SIDE", 1)),
+	}
+	if execMgr != nil && execMgr.fundsCfg.Enable {
+		lines = append(lines, fmt.Sprintf("perp_target=%.2f | perp_floor=%.2f | funds_check=%ds",
+			execMgr.fundsCfg.PerpTargetUSDT, execMgr.fundsCfg.PerpFloorUSDT, envInt("LIVE_FUNDS_MAINTENANCE_SEC", 60)))
 	}
 	if len(safety.contextOnlySymbols) > 0 {
 		syms := make([]string, 0, len(safety.contextOnlySymbols))
@@ -20004,24 +20010,21 @@ func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg wat
 	}
 	if execMgr != nil {
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
-		lines = append(lines, fmt.Sprintf("account_health=%s | detail=%s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")))
+		lines = append(lines, compactAccountSummaryLine(report))
 	}
 	return lines
 }
 
 func startupWarningLines(ladderCfg ladderConfig, safety safetyConfig, execMgr *liveExecManager) []string {
 	warnings := []string{}
-	if ladderCfg.StarterUSDT > 15 {
-		warnings = append(warnings, fmt.Sprintf("BOOT_WARNING starter_high=%.2f", ladderCfg.StarterUSDT))
-	}
 	if safety.minAvailUSDT > maxFloat(ladderCfg.StarterUSDT, 10)*1.5 {
-		warnings = append(warnings, fmt.Sprintf("BOOT_WARNING min_available_high=%.2f", safety.minAvailUSDT))
+		warnings = append(warnings, fmt.Sprintf("warning min_available_high=%.2f", safety.minAvailUSDT))
 	}
 	if !ladderCfg.OneSymbolOnly {
-		warnings = append(warnings, "BOOT_WARNING one_symbol_only_disabled")
+		warnings = append(warnings, "note multi-symbol mode enabled")
 	}
 	if execMgr != nil && !execMgr.fundsCfg.Enable {
-		warnings = append(warnings, "BOOT_WARNING funds_manager_disabled")
+		warnings = append(warnings, "warning funds_manager_disabled")
 	}
 	return warnings
 }

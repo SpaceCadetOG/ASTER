@@ -60,7 +60,7 @@ case "${launch_mode,,}" in
     ;;
 esac
 
-echo "Starting live in ${mode_label} mode"
-echo "Manual trades opened on the exchange will be imported and managed by the bot."
+echo "starting ${mode_label} using $(basename "${ENV_FILE}")"
+echo "logs: ${LOG_DIR}/live-*.log"
 
 go run ./cmd/live 2>&1 | bash scripts/stream_to_rotating_log.sh live
