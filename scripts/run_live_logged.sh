@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE="${ASTER_ENV_FILE:-/opt/aster/env/live-lite.env}"
+ENV_FILE="${ASTER_ENV_FILE:-/opt/aster/env/live.env}"
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -15,15 +15,15 @@ fi
 LOG_DIR="${ASTER_LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR"
 
-LOCK_FILE="${ASTER_LOCK_FILE:-/tmp/aster-live-lite.lock}"
+LOCK_FILE="${ASTER_LOCK_FILE:-/tmp/aster-live.lock}"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "live-lite already running (lock: $LOCK_FILE)" >&2
+  echo "live already running (lock: $LOCK_FILE)" >&2
   exit 1
 fi
 
-pkill -9 -x live-lite 2>/dev/null || true
-pkill -9 -f 'cmd/live-lite' 2>/dev/null || true
+pkill -9 -x live 2>/dev/null || true
+pkill -9 -f 'cmd/live' 2>/dev/null || true
 
 launch_mode="${LIVE_LAUNCH_MODE:-}"
 if [[ -z "$launch_mode" && -t 0 ]]; then
@@ -60,7 +60,7 @@ case "${launch_mode,,}" in
     ;;
 esac
 
-echo "Starting live-lite in ${mode_label} mode"
+echo "Starting live in ${mode_label} mode"
 echo "Manual trades opened on the exchange will be imported and managed by the bot."
 
-go run ./cmd/live-lite 2>&1 | bash scripts/stream_to_rotating_log.sh live-lite
+go run ./cmd/live 2>&1 | bash scripts/stream_to_rotating_log.sh live

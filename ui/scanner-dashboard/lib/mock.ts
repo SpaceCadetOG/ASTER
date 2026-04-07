@@ -89,8 +89,8 @@ export const mockDashboardData: DashboardData = {
   ],
   modules: [
     {
-      key: "live-lite",
-      label: "live-lite",
+      key: "live",
+      label: "live",
       source: "http://127.0.0.1:8787/api/status",
       status: "ok",
       note: "Execution status reachable"

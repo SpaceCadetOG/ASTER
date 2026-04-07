@@ -19,7 +19,7 @@ OUT_FILE="${OUT_DIR}/agent-handoff-${SINCE_DATE}-to-${UNTIL_DATE}.md"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-LIVE_MERGED="${TMP_DIR}/live-lite-merged.log"
+LIVE_MERGED="${TMP_DIR}/live-merged.log"
 LONG_MERGED="${TMP_DIR}/long-merged.log"
 SHORT_MERGED="${TMP_DIR}/short-merged.log"
 STATS_OUT="${TMP_DIR}/stats.txt"
@@ -44,7 +44,7 @@ merge_logs() {
   fi
 }
 
-merge_logs "live-lite-*.log" "$LIVE_MERGED"
+merge_logs "live-*.log" "$LIVE_MERGED"
 merge_logs "long-*.log" "$LONG_MERGED"
 merge_logs "short-*.log" "$SHORT_MERGED"
 

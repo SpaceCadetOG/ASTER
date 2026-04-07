@@ -1,4 +1,4 @@
-# Optional strategy quality profile for live-lite (mapped to LIVE_* envs).
+# Optional strategy quality profile for live (mapped to LIVE_* envs).
 # Source of truth for runtime remains env vars; keep this file for versioned defaults.
 
 discovery:

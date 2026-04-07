@@ -2,7 +2,7 @@
 
 ## Main commands
 
-- `cmd/live-lite`: integrated paper/live-lite runtime and trade manager.
+- `cmd/live`: integrated paper/live runtime and trade manager.
 - `cmd/backtest`: historical simulation runner.
 - `cmd/long`: long scanner + web API/UI.
 - `cmd/short`: short scanner + web API/UI.
@@ -11,7 +11,7 @@
 - `cmd/vp`: VP inspection command.
 - `cmd/stats`: JSONL event-log performance aggregation.
 
-## `cmd/live-lite` behavior
+## `cmd/live` behavior
 
 - Polls scanner candidates every `LIVE_SCAN_SEC`.
 - Applies strategy ranking and no-trade gates.

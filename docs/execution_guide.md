@@ -231,7 +231,7 @@ go run ./cmd/exec
     - `LIVE_TG_DAILY_REPORT_MIN=0`
     - `LIVE_TG_DAILY_REPORT_DAY_OFFSET=0`
 
-Recommended env overrides in `/opt/aster/env/live-lite.env`:
+Recommended env overrides in `/opt/aster/env/live.env`:
 
 ```bash
 LIVE_PURE_MODE=1
@@ -393,7 +393,7 @@ LIVE_REVERSAL_VOL_SPIKE_MIN=3.0
 Paper continuity:
 
 - Paper trader state is persisted to `LIVE_PAPER_STATE_FILE`.
-- Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
+- Restarting `cmd/live` restores open paper positions, balance, and day stats from that file.
 - Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
 - `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).
 - Payout cycle defaults to daily and executes at `16:00 CT` with a hard deadline by `16:15 CT`.

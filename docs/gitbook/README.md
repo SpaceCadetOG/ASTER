@@ -5,7 +5,7 @@ This is the GitBook-style API and system documentation for the ASTER crypto perp
 It covers:
 - Runtime architecture and module boundaries.
 - CLI APIs (`cmd/*`) and their env contracts.
-- HTTP APIs (scanner UI/API + live-lite status API).
+- HTTP APIs (scanner UI/API + live status API).
 - Telegram command API.
 - Core internal interfaces (signals, snapshots, risk shell, backtest outputs).
 - Ops and deployment contracts for Pi/systemd/tmux.

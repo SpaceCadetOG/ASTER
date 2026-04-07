@@ -41,7 +41,7 @@ func (m *liveExecManager) transitionPendingToOpen(now time.Time, p *livePosition
 	if err := m.placeInitialBrackets(p); err != nil {
 		return true, err
 	}
-	fmt.Printf("live-lite: entry live %s reason=%s qty=%.6f avg=%.6f\n", p.Symbol, reason, p.FilledQty, p.EntryPrice)
+	fmt.Printf("live: entry live %s reason=%s qty=%.6f avg=%.6f\n", p.Symbol, reason, p.FilledQty, p.EntryPrice)
 	if m.tg != nil {
 		title := "ENTRY FILLED"
 		if !strings.EqualFold(reason, "ENTRY_FILLED") {

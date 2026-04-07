@@ -42,19 +42,19 @@ EXEC_ACTION=auth_check \
 go run ./cmd/exec
 ```
 
-Only proceed to live-lite if `auth_check` succeeds on `/fapi/v3/agent`, `/account`, `/balance`, and `/openOrders`.
+Only proceed to live if `auth_check` succeeds on `/fapi/v3/agent`, `/account`, `/balance`, and `/openOrders`.
 
-Live-lite dry run:
+Live dry run:
 
 ```bash
-ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com LIVE_DRY_RUN=1 LIVE_SHOW_ACCOUNT=1 LIVE_ACCOUNT_ASSETS= go run ./cmd/live-lite
+ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com LIVE_DRY_RUN=1 LIVE_SHOW_ACCOUNT=1 LIVE_ACCOUNT_ASSETS= go run ./cmd/live
 ```
 
 Expected behavior:
 - IN-PLAY long/short sections print each loop.
-- If nothing is eligible: `live-lite: no trade candidate`.
+- If nothing is eligible: `live: no trade candidate`.
 - Account snapshot shows `availableUSDT`, balances list, and active positions list.
-- In live mode, `live-lite` now refuses to continue when account auth is unhealthy at boot unless `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1` is explicitly set.
+- In live mode, `live` now refuses to continue when account auth is unhealthy at boot unless `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1` is explicitly set.
 
 ## 3) Install systemd units on Pi
 
@@ -65,7 +65,7 @@ sudo mkdir -p /opt/aster/scripts
 sudo cp scripts/tmux_module_runner.sh scripts/start_tmux_modules.sh scripts/reconcile_on_boot.sh scripts/maintenance_midnight.sh scripts/maintenance_eod.sh /opt/aster/scripts/
 sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
 sudo systemctl daemon-reload
-sudo systemctl disable --now aster-live-lite aster-tape aster-whale || true
+sudo systemctl disable --now aster-live aster-tape aster-whale || true
 sudo systemctl enable --now aster-modules-tmux
 ```
 
@@ -73,7 +73,7 @@ sudo systemctl enable --now aster-modules-tmux
 
 ```bash
 tmux ls
-tmux attach -t aster-live-lite
+tmux attach -t aster-live
 tmux attach -t aster-tape
 tmux attach -t aster-whale
 ```
@@ -92,7 +92,7 @@ scripts/tmux_aster.sh
 
 Layout:
 - Tab 1 `gitaction`
-- Tab 2 `live-lite`
+- Tab 2 `live`
 - Tab 3 `scanners` split: long | short
 - Tab 4 `flow` cross split: tape | whale | liqs | oflow
 

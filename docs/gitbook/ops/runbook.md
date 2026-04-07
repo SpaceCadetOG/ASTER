@@ -1,10 +1,10 @@
 # Runbook and Operations
 
-## Local run (live-lite dry-run)
+## Local run (live dry-run)
 
 ```bash
 cd /Users/victorogbebor/2026/go-machine
-go run ./cmd/live-lite
+go run ./cmd/live
 ```
 
 ## Backtest run
@@ -23,7 +23,7 @@ go run ./cmd/short
 
 ## Health checks
 
-- Live-lite:
+- Live:
   - `curl http://localhost:8787/healthz`
   - `curl http://localhost:8787/api/status`
 - Long scanner:

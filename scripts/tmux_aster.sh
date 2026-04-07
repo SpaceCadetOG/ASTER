@@ -34,9 +34,9 @@ fi
 tmux new-session -d -s "${SESSION}" -n gitaction
 tmux send-keys -t "${SESSION}:gitaction.0" "cd ${WORKDIR} && git status -sb && echo \"git actions tab ready\" && exec bash" C-m
 
-# Tab 2: live-lite
-tmux new-window -t "${SESSION}" -n live-lite
-tmux send-keys -t "${SESSION}:live-lite.0" "$(pane_cmd "/opt/aster/env/live-lite.env" "$(bin_or_fallback "${BINDIR}/live-lite" "go run ./cmd/live-lite")")" C-m
+# Tab 2: live
+tmux new-window -t "${SESSION}" -n live
+tmux send-keys -t "${SESSION}:live.0" "$(pane_cmd "/opt/aster/env/live.env" "$(bin_or_fallback "${BINDIR}/live" "go run ./cmd/live")")" C-m
 
 # Tab 3: long/short split
 tmux new-window -t "${SESSION}" -n scanners
@@ -56,5 +56,5 @@ tmux split-window -v -t "${SESSION}:flow.1"
 tmux send-keys -t "${SESSION}:flow.3" "$(pane_cmd "/opt/aster/env/oflow.env" "$(bin_or_fallback "${BINDIR}/oflow" "go run ./cmd/oflow")")" C-m
 tmux select-layout -t "${SESSION}:flow" tiled >/dev/null
 
-tmux select-window -t "${SESSION}:live-lite"
+tmux select-window -t "${SESSION}:live"
 exec tmux attach -t "${SESSION}"

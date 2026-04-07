@@ -1,9 +1,9 @@
 # Environment Variables
 
 Primary reference file:
-- `systemd/env/live-lite.env.example`
+- `systemd/env/live.env.example`
 
-## Live-lite core
+## Live core
 - `ASTER_AUTH_MODE`
 - `ASTER_USER`
 - `ASTER_SIGNER`

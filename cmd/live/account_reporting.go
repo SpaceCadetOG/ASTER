@@ -536,12 +536,12 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 	}
 	if persist && m.accountReportCfg.SnapshotEnable {
 		if err := appendAccountSnapshot(m.accountReportCfg.SnapshotPath, rec); err != nil {
-			fmt.Printf("live-lite: account snapshot write error: %v\n", err)
+			fmt.Printf("live: account snapshot write error: %v\n", err)
 		}
 	}
 	records, err := loadAccountSnapshots(m.accountReportCfg.SnapshotPath)
 	if err != nil {
-		fmt.Printf("live-lite: account snapshot load error: %v\n", err)
+		fmt.Printf("live: account snapshot load error: %v\n", err)
 	}
 	if len(records) == 0 || records[len(records)-1].Timestamp.Before(rec.Timestamp) {
 		records = append(records, rec)

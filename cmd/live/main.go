@@ -379,7 +379,7 @@ type telegramCommandCtx struct {
 	paper   *paperTrader
 	missed  *missedTracker
 	safety  safetyConfig
-	status  *liveLiteStatusStore
+	status  *liveStatusStore
 	mode    *runtimeModeController
 
 	metaMu sync.RWMutex
@@ -613,11 +613,11 @@ type watchRuntime struct {
 }
 
 var (
-	liveLiteWatchEvery     time.Duration
-	liveLiteWatchTick      func(time.Time) bool
-	liveLiteWakeReason     string
-	liveLitePriorityEvery  time.Duration
-	liveLitePriorityActive func() bool
+	liveWatchEvery     time.Duration
+	liveWatchTick      func(time.Time) bool
+	liveWakeReason     string
+	livePriorityEvery  time.Duration
+	livePriorityActive func() bool
 )
 
 type paperPosition struct {
@@ -992,6 +992,7 @@ type liveExecManager struct {
 	accountReport        accountReport
 	lastTransferStatus   string
 	lastRemoteImportAt   time.Time
+	lastFundsCheckAt     time.Time
 }
 
 type ladderConfig struct {
@@ -1046,7 +1047,7 @@ type liveExecSnapshot struct {
 	Active    []livePosition `json:"active"`
 }
 
-type liveLiteStatus struct {
+type liveStatus struct {
 	Generated       time.Time           `json:"generated"`
 	DryRun          bool                `json:"dry_run"`
 	LiveEnabled     bool                `json:"live_enabled"`
@@ -1087,9 +1088,9 @@ type liveLiteStatus struct {
 	BlockedStrong   []string            `json:"blocked_strong,omitempty"`
 }
 
-type liveLiteStatusStore struct {
+type liveStatusStore struct {
 	mu  sync.RWMutex
-	cur liveLiteStatus
+	cur liveStatus
 }
 
 type maintenanceWindow struct {
@@ -1408,12 +1409,12 @@ func main() {
 	featureCache := newFeatureRuntimeCache(client.LoadCandles)
 	rest := buildRESTFromConfig()
 	if rest == nil {
-		fmt.Println("live-lite: no credentials found, forcing DRY_RUN mode")
+		fmt.Println("live: no credentials found, forcing DRY_RUN mode")
 		dryRun = true
 	}
 	safety := loadSafetyConfig(reserveUSDT, tradeMargin)
 	if !dryRun && !safety.enableLiveTrading {
-		fmt.Println("live-lite: LIVE_DRY_RUN=0 but LIVE_ENABLE_LIVE_TRADING is not enabled, forcing DRY_RUN")
+		fmt.Println("live: LIVE_DRY_RUN=0 but LIVE_ENABLE_LIVE_TRADING is not enabled, forcing DRY_RUN")
 		dryRun = true
 	}
 	modeCtrl := newRuntimeModeController(dryRun, safety.enableLiveTrading, dryRun)
@@ -1421,7 +1422,7 @@ func main() {
 	execMgr := newLiveExecManager(rest, tg)
 	if execMgr != nil {
 		if nClosed, nImported, err := execMgr.ReconcileBootState(); err != nil {
-			fmt.Println("live-lite: boot reconcile warning:", err)
+			fmt.Println("live: boot reconcile warning:", err)
 		} else if nClosed > 0 || nImported > 0 {
 			tg.Sendf("%s", notify.BuildEventHTML("🧩", "BOOT RECONCILE COMPLETE",
 				fmt.Sprintf("<b>Closed local:</b> %d", nClosed),
@@ -1430,28 +1431,28 @@ func main() {
 		}
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
 		if !dryRun && !accountHealthAllowsLiveBoot(report) && !envBool("LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH", false) {
-			fmt.Printf("live-lite: refusing live boot because account auth is unhealthy (health=%s detail=%s). Set LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1 to override.\n",
+			fmt.Printf("live: refusing live boot because account auth is unhealthy (health=%s detail=%s). Set LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1 to override.\n",
 				firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none"))
 			os.Exit(1)
 		}
 	}
-	statusStore := newLiveLiteStatusStore()
+	statusStore := newLiveStatusStore()
 	statusAddr := envStr("LIVE_STATUS_ADDR", ":8787")
-	if err := startLiveLiteStatusServer(statusAddr, statusStore); err != nil {
-		fmt.Println("live-lite status server error:", err)
+	if err := startLiveStatusServer(statusAddr, statusStore); err != nil {
+		fmt.Println("live status server error:", err)
 		os.Exit(1)
 	}
 	watchCfg := loadWatchConfig()
 	watcher := newWatchRuntime(watchCfg, client)
 	wallSignals := map[string]wallSignal{}
-	liveLiteWatchEvery = 0
-	liveLiteWatchTick = nil
-	liveLitePriorityEvery = 0
-	liveLitePriorityActive = nil
+	liveWatchEvery = 0
+	liveWatchTick = nil
+	livePriorityEvery = 0
+	livePriorityActive = nil
 	if watcher != nil {
-		liveLiteWatchEvery = watchCfg.Every
-		liveLitePriorityEvery = watchCfg.PriorityEvery
-		liveLiteWatchTick = func(ts time.Time) bool {
+		liveWatchEvery = watchCfg.Every
+		livePriorityEvery = watchCfg.PriorityEvery
+		liveWatchTick = func(ts time.Time) bool {
 			return watcher.Tick(ts)
 		}
 	}
@@ -1608,7 +1609,7 @@ func main() {
 		suggestions: map[string]operatorSuggestion{},
 		suggestTTL:  time.Duration(envInt("LIVE_TG_SUGGEST_TTL_MIN", 15)) * time.Minute,
 	}
-	liveLitePriorityActive = cmdCtx.hasActiveSuggestions
+	livePriorityActive = cmdCtx.hasActiveSuggestions
 	if envBool("LIVE_TG_COMMANDS_ENABLE", true) {
 		go cmdCtx.run()
 	}
@@ -1631,7 +1632,7 @@ func main() {
 	}
 
 	pureMode := envBool("LIVE_PURE_MODE", true)
-	fmt.Println("live-lite started")
+	fmt.Println("live started")
 	modeLabel := "LIVE"
 	if dryRun {
 		modeLabel = "PAPER"
@@ -1647,7 +1648,7 @@ func main() {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
 	fmt.Println()
-	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE-LITE STARTED",
+	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE STARTED",
 		fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
 		fmt.Sprintf("<b>Scan / Watch:</b> %s / %s", scanEvery, watchCfg.Every),
 		fmt.Sprintf("<b>Starter / Add / Max:</b> %.2f / %.2f / %.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT),
@@ -1694,7 +1695,7 @@ func main() {
 	if cmdCtx != nil {
 		cmdCtx.missed = missed
 	}
-	liveLitePriorityActive = func() bool {
+	livePriorityActive = func() bool {
 		active := cmdCtx != nil && cmdCtx.hasActiveSuggestions()
 		if missed != nil && missed.HasPriority(time.Now().UTC()) {
 			active = true
@@ -1746,7 +1747,7 @@ func main() {
 				cachedShortInPlay = nil
 				cachedMetaBySymbol = map[string]symbolMeta{}
 				lastScanAt = time.Time{}
-				fmt.Printf("live-lite: dayutc reset state cleared anchor=%s rolling24_context=preserved\n", resetKey)
+				fmt.Printf("live: dayutc reset state cleared anchor=%s rolling24_context=preserved\n", resetKey)
 			}
 			lastDayUTCResetKey = resetKey
 		}
@@ -1762,7 +1763,7 @@ func main() {
 		localMaintNow := now.In(maintLoc)
 		maintWindow, inMaint := maintenanceWindow{}, false
 		_ = maintEnabled
-		watcherOnly := liveLiteWakeReason == "watcher" && !lastScanAt.IsZero() && now.Sub(lastScanAt) < scanEvery && len(cachedMetaBySymbol) > 0
+		watcherOnly := liveWakeReason == "watcher" && !lastScanAt.IsZero() && now.Sub(lastScanAt) < scanEvery && len(cachedMetaBySymbol) > 0
 		cycleMode := "scan"
 		if watcherOnly {
 			cycleMode = "watcher"
@@ -1775,7 +1776,7 @@ func main() {
 				Timestamp:         cycleEnd,
 				Type:              "METRICS_SNAPSHOT",
 				TF:                "1m",
-				Reason:            fmt.Sprintf("cycle_complete mode=%s wake=%s", cycleMode, liveLiteWakeReason),
+				Reason:            fmt.Sprintf("cycle_complete mode=%s wake=%s", cycleMode, liveWakeReason),
 				LoopMs:            float64(cycleEnd.Sub(cycleStart).Milliseconds()),
 				CacheHits:         cacheDelta.totalHits(),
 				CacheMisses:       cacheDelta.totalMisses(),
@@ -1789,9 +1790,9 @@ func main() {
 				CacheEntries:      cacheStatsEnd.CandleKeys + cacheStatsEnd.MicroKeys + cacheStatsEnd.EMAKeys,
 			})
 			if envBool("LIVE_PERF_LOG_ENABLE", false) {
-				fmt.Printf("live-lite: perf mode=%s wake=%s loop_ms=%.1f cache_hits=%d cache_misses=%d candle=%d/%d micro=%d/%d ema=%d/%d entries=%d evictions=%d\n",
+				fmt.Printf("live: perf mode=%s wake=%s loop_ms=%.1f cache_hits=%d cache_misses=%d candle=%d/%d micro=%d/%d ema=%d/%d entries=%d evictions=%d\n",
 					cycleMode,
-					liveLiteWakeReason,
+					liveWakeReason,
 					float64(cycleEnd.Sub(cycleStart).Milliseconds()),
 					cacheDelta.totalHits(),
 					cacheDelta.totalMisses(),
@@ -1849,7 +1850,7 @@ func main() {
 					longRows = filterUniverseRows(longRows, universe)
 					shortRows = filterUniverseRows(shortRows, universe)
 					if len(longRows) == 0 && len(shortRows) == 0 {
-						fmt.Println("live-lite: discovery_fallback_active reason=filtered_universe_empty")
+						fmt.Println("live: discovery_fallback_active reason=filtered_universe_empty")
 						eventLog.Emit(stats.Event{
 							Timestamp: now,
 							Type:      "METRICS_SNAPSHOT",
@@ -1859,7 +1860,7 @@ func main() {
 						shortRows = baseShortRows
 					}
 				} else {
-					fmt.Println("live-lite: discovery_fallback_active reason=empty_universe")
+					fmt.Println("live: discovery_fallback_active reason=empty_universe")
 					eventLog.Emit(stats.Event{
 						Timestamp: now,
 						Type:      "METRICS_SNAPSHOT",
@@ -2028,7 +2029,7 @@ func main() {
 			paper.ApplyMomentumExit(now, momBySymbol, metaBySymbol, paperDepth, externalFlow)
 		}
 		if execMgr != nil {
-			execMgr.ApplyMomentumExit(now, momBySymbol, externalFlow)
+			execMgr.ApplyMomentumExit(now, momBySymbol, flowMetricsBySymbol, externalFlow)
 		}
 		printScanHeader(localMaintNow)
 		printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
@@ -2072,7 +2073,7 @@ func main() {
 				return nil
 			}(), accountAssets)
 			if err != nil {
-				fmt.Println("live-lite: account snapshot error:", err)
+				fmt.Println("live: account snapshot error:", err)
 			} else {
 				acct = snap
 				realizedToday := 0.0
@@ -2096,7 +2097,7 @@ func main() {
 							_ = execMgr.ForceCloseAll("DAILY_LOSS_KILL")
 						}
 						msg := fmt.Sprintf("KILL_SWITCH daily loss hit: eq=%.4f start=%.4f limit=%.4f", eq, dayStartEq[dayKey], minEq)
-						fmt.Println("live-lite:", msg)
+						fmt.Println("live:", msg)
 						tg.Sendf("%s", notify.BuildEventHTML("🛑", "KILL SWITCH",
 							fmt.Sprintf("<b>Equity:</b> %.4f", eq),
 							fmt.Sprintf("<b>Start:</b> %.4f | <b>Limit:</b> %.4f", dayStartEq[dayKey], minEq),
@@ -2107,6 +2108,7 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.Reconcile(now, momBySymbol, flowMetricsBySymbol, metaBySymbol)
+			execMgr.MaintainPerpBalance(now)
 			for sym, pos := range execMgr.positions {
 				if pos == nil || pos.State != execClosed || pos.ClosedAt.IsZero() {
 					continue
@@ -2534,7 +2536,7 @@ func main() {
 				if c.Conf < minConf && qualifiesConfOverride(c, entryQualityCfg) {
 					confReject := confidenceRejectReason(c, minConf)
 					c.QualityReasons = append(c.QualityReasons, "conf_persistence_override")
-					fmt.Printf("live-lite: conf override %s %s strat=%s reason=%s\n",
+					fmt.Printf("live: conf override %s %s strat=%s reason=%s\n",
 						strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), c.Side, c.Strat, confReject)
 				}
 			}
@@ -2613,7 +2615,7 @@ func main() {
 			})
 			copy(cands[:topN], queue)
 		}
-		st := liveLiteStatus{
+		st := liveStatus{
 			Generated:     now,
 			DryRun:        dryRun,
 			LiveEnabled:   safety.enableLiveTrading,
@@ -2842,7 +2844,7 @@ func main() {
 		eligibility.StarterAllowed = true
 		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) && !strings.EqualFold(best.Strat, "early_dev_entry")
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live-lite: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
+		fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
 			best.Side,
 			best.Entry.CurrentGrade,
@@ -3041,7 +3043,7 @@ func main() {
 						fmt.Sprintf("imb=%.3f", obImb),
 					},
 				})
-				fmt.Printf("live-lite: skip (%s reason=%s spread_bps=%.2f imb=%.3f)\n", rawBest, obReason, obSpreadBps, obImb)
+				fmt.Printf("live: skip (%s reason=%s spread_bps=%.2f imb=%.3f)\n", rawBest, obReason, obSpreadBps, obImb)
 				waitAndReport()
 				continue
 			}
@@ -3082,7 +3084,7 @@ func main() {
 				addEligibilityBlock(&eligibility, riskDec.RejectReason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 				statusStore.Set(st)
-				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
+				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
 				waitAndReport()
 				continue
 			}
@@ -3172,7 +3174,7 @@ func main() {
 				addEligibilityBlock(&eligibility, reason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 				statusStore.Set(st)
-				fmt.Println("live-lite: safety skip:", reason)
+				fmt.Println("live: safety skip:", reason)
 				if tgVerbose {
 					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
 						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
@@ -3188,7 +3190,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "event_lockout")
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
-			fmt.Println("live-lite: skip reason=event_lockout")
+			fmt.Println("live: skip reason=event_lockout")
 			waitAndReport()
 			continue
 		}
@@ -3197,7 +3199,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "correlated_exposure_gate")
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			statusStore.Set(st)
-			fmt.Println("live-lite: skip reason=correlated_exposure_gate")
+			fmt.Println("live: skip reason=correlated_exposure_gate")
 			waitAndReport()
 			continue
 		}
@@ -3207,7 +3209,7 @@ func main() {
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
-				fmt.Println("live-lite:", msg)
+				fmt.Println("live:", msg)
 				tg.Sendf("%s", notify.BuildEventHTML("⏳", "SHADOW GATE ACTIVE", fmt.Sprintf("<b>Requirement:</b> %s", msg)))
 				shadowWarnAt = now
 			}
@@ -3231,7 +3233,7 @@ func main() {
 			addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
+			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
 			waitAndReport()
 			continue
 		}
@@ -3240,7 +3242,7 @@ func main() {
 			addEligibilityBlock(&eligibility, reason)
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
+			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
 			continue
 		}
@@ -3250,7 +3252,7 @@ func main() {
 				addEligibilityBlock(&eligibility, reason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 				statusStore.Set(st)
-				fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
+				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 				waitAndReport()
 				continue
 			}
@@ -3276,7 +3278,7 @@ func main() {
 				GateAllow:   &eventAllow,
 				GateReasons: []string{reason},
 			})
-			fmt.Printf("live-lite: skip (%s reason=%s)\n", rawBest, reason)
+			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
 			continue
 		}
@@ -3289,7 +3291,7 @@ func main() {
 				addEligibilityBlock(&eligibility, "account_balance_fetch")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 				statusStore.Set(st)
-				fmt.Println("live-lite: balance error:", err)
+				fmt.Println("live: balance error:", err)
 				waitAndReport()
 				continue
 			}
@@ -3304,7 +3306,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "min_available_usdt")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
+			fmt.Printf("live: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
 					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
@@ -3328,7 +3330,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "insufficient_usable")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
+			fmt.Printf("live: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
 					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
@@ -3343,7 +3345,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "reserve_lock_active")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
+			fmt.Printf("live: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🔒", "RESERVE LOCK ACTIVE",
 					fmt.Sprintf("<b>Base:</b> %.2f below threshold", baseBal),
@@ -3362,7 +3364,7 @@ func main() {
 				addEligibilityBlock(&eligibility, "position_check_error")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 				statusStore.Set(st)
-				fmt.Println("live-lite: position check error:", err)
+				fmt.Println("live: position check error:", err)
 				waitAndReport()
 				continue
 			}
@@ -3372,7 +3374,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "max_open_positions")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
+			fmt.Printf("live: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
 					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
@@ -3392,7 +3394,7 @@ func main() {
 				addEligibilityBlock(&eligibility, "max_open_positions_side")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 				statusStore.Set(st)
-				fmt.Printf("live-lite: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
+				fmt.Printf("live: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
 				if tgVerbose {
 					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: SIDE FULL",
 						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
@@ -3408,7 +3410,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "max_tracked_entries")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Printf("live-lite: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
+			fmt.Printf("live: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
 			waitAndReport()
 			continue
 		}
@@ -3418,7 +3420,7 @@ func main() {
 			addEligibilityBlock(&eligibility, "exec_manager_unavailable")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
-			fmt.Println("live-lite: execution manager unavailable")
+			fmt.Println("live: execution manager unavailable")
 			waitAndReport()
 			continue
 		}
@@ -3490,11 +3492,11 @@ func main() {
 			if idx == len(levSequence)-1 {
 				break
 			}
-			fmt.Printf("live-lite: notional limit for %s at %dx, retrying lower leverage\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), levTry)
+			fmt.Printf("live: notional limit for %s at %dx, retrying lower leverage\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), levTry)
 		}
 		if placeErr != nil {
 			recordCandidateDecision(cmdCtx, best, "order_error")
-			fmt.Println("live-lite: place error:", placeErr)
+			fmt.Println("live: place error:", placeErr)
 			eventLog.Emit(stats.Event{
 				Timestamp:    now,
 				Type:         "ORDER_REJECT",
@@ -3527,7 +3529,7 @@ func main() {
 			recentEntryAttempts = append(recentEntryAttempts, now)
 			recordCandidateDecision(cmdCtx, best, "")
 			if usedLev != effectiveLev {
-				fmt.Printf("live-lite: leverage fallback applied %s %s %dx->%dx\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveLev, usedLev)
+				fmt.Printf("live: leverage fallback applied %s %s %dx->%dx\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveLev, usedLev)
 			}
 			eventLog.Emit(stats.Event{
 				Timestamp:    now,
@@ -3576,7 +3578,7 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 		mode = "DRY_RUN"
 	}
 	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, maxInt(1, limit))
-	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE-LITE DIGEST",
+	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE DIGEST",
 		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
 		fmt.Sprintf("<b>Session:</b> %s", sessionTag(now)),
 		notify.BuildScannerSnapshotHTML(longTop, shortTop, bias),
@@ -3696,7 +3698,7 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 	return tgPre(strings.TrimSpace(b.String()))
 }
 
-func scannerItemsForCommand(s liveLiteStatus, which string) ([]notify.ScanItem, []notify.ScanItem, string) {
+func scannerItemsForCommand(s liveStatus, which string) ([]notify.ScanItem, []notify.ScanItem, string) {
 	switch strings.ToLower(strings.TrimSpace(which)) {
 	case "long", "longs":
 		return s.ScannerLongs, nil, "long"
@@ -4377,6 +4379,35 @@ func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mf
 		*protectedStop = newStop
 	}
 	return newStop, changed
+}
+
+func pnlLockTarget(side string, entry, mark, lockFrac float64) float64 {
+	lockFrac = clamp(lockFrac, 0, 0.95)
+	if entry <= 0 || mark <= 0 || lockFrac <= 0 {
+		return entry
+	}
+	move := mark - entry
+	if strings.EqualFold(side, "SELL") || strings.EqualFold(side, "SHORT") {
+		move = entry - mark
+		if move <= 0 {
+			return entry
+		}
+		return entry - move*lockFrac
+	}
+	if move <= 0 {
+		return entry
+	}
+	return entry + move*lockFrac
+}
+
+func applyPnLProtectiveStop(side string, entry, currentStop, mark, upnlPct float64) (float64, bool) {
+	armPct := envFloat("LIVE_PNL_PROTECT_ARM_PCT", 20.0)
+	lockFrac := envFloat("LIVE_PNL_PROTECT_LOCK_FRAC", 0.75)
+	if armPct <= 0 || lockFrac <= 0 || upnlPct < armPct {
+		return currentStop, false
+	}
+	target := pnlLockTarget(side, entry, mark, lockFrac)
+	return improvedStopPrice(side, currentStop, target)
 }
 
 func shouldAdvanceProtection(p *livePosition) bool {
@@ -5102,7 +5133,22 @@ func loadLadderConfig(defaultStarter float64) ladderConfig {
 	if cfg.MaxAdds < 0 {
 		cfg.MaxAdds = 0
 	}
+	if envBool("LIVE_FIXED_SIZE_NO_ADD", false) {
+		cfg.StepUSDT = 0
+		cfg.MaxTotalUSDT = cfg.StarterUSDT
+		cfg.MaxAdds = 0
+	}
 	return cfg
+}
+
+func ladderAddsDisabled(cfg ladderConfig) bool {
+	if envBool("LIVE_FIXED_SIZE_NO_ADD", false) {
+		return true
+	}
+	if cfg.MaxAdds <= 0 {
+		return true
+	}
+	return cfg.MaxTotalUSDT <= cfg.StarterUSDT+1e-9
 }
 
 func loadFundsManagerConfig() fundsManagerConfig {
@@ -5127,6 +5173,28 @@ func loadFundsManagerConfig() fundsManagerConfig {
 		cfg.TopupMinUSDT = 0
 	}
 	return cfg
+}
+
+func fundsMaintenanceEvery() time.Duration {
+	d := time.Duration(envInt("LIVE_FUNDS_MAINTENANCE_SEC", 60)) * time.Second
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func perpSweepAmount(avail float64, cfg fundsManagerConfig) float64 {
+	if avail <= 0 || avail <= cfg.PerpTargetUSDT {
+		return 0
+	}
+	return maxFloat(0, avail-cfg.PerpTargetUSDT)
+}
+
+func perpTopupTarget(avail float64, cfg fundsManagerConfig) float64 {
+	if avail >= cfg.PerpFloorUSDT {
+		return 0
+	}
+	return cfg.PerpTargetUSDT
 }
 
 func loadReentryConfig(defaultSize float64) reentryConfig {
@@ -6028,7 +6096,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
 		if err := p.load(); err != nil {
-			fmt.Printf("live-lite: paper state load warning: %v\n", err)
+			fmt.Printf("live: paper state load warning: %v\n", err)
 		}
 	}
 	return p
@@ -6753,7 +6821,7 @@ func (m *liveExecManager) EnsureEntryFunds(required, currentAvail float64) (floa
 	}
 	if m.transferManager == nil || !m.transferManager.Supported() {
 		m.recordTransferStatus(fmt.Sprintf("topup unavailable required=%.2f avail=%.2f", required, currentAvail))
-		fmt.Printf("live-lite: funds manager top-up unavailable required=%.2f avail=%.2f reason=transfer_unsupported\n", required, currentAvail)
+		fmt.Printf("live: funds manager top-up unavailable required=%.2f avail=%.2f reason=transfer_unsupported\n", required, currentAvail)
 		return currentAvail, false
 	}
 	shortfall := required - currentAvail
@@ -6766,13 +6834,13 @@ func (m *liveExecManager) EnsureEntryFunds(required, currentAvail float64) (floa
 	}
 	if transferAmt < m.fundsCfg.TopupMinUSDT {
 		m.recordTransferStatus(fmt.Sprintf("topup skipped amount=%.2f min=%.2f", transferAmt, m.fundsCfg.TopupMinUSDT))
-		fmt.Printf("live-lite: funds manager top-up skipped amount=%.2f below_min=%.2f\n", transferAmt, m.fundsCfg.TopupMinUSDT)
+		fmt.Printf("live: funds manager top-up skipped amount=%.2f below_min=%.2f\n", transferAmt, m.fundsCfg.TopupMinUSDT)
 		return currentAvail, false
 	}
 	spotAvail, err := m.transferManager.SpotAvailableUSDT()
 	if err != nil {
 		m.recordTransferStatus(fmt.Sprintf("topup spot balance unavailable: %v", err))
-		fmt.Printf("live-lite: funds manager spot balance unavailable: %v\n", err)
+		fmt.Printf("live: funds manager spot balance unavailable: %v\n", err)
 		return currentAvail, false
 	}
 	if transferAmt > spotAvail {
@@ -6780,22 +6848,22 @@ func (m *liveExecManager) EnsureEntryFunds(required, currentAvail float64) (floa
 	}
 	if transferAmt < m.fundsCfg.TopupMinUSDT {
 		m.recordTransferStatus(fmt.Sprintf("topup skipped spot=%.2f amount=%.2f min=%.2f", spotAvail, transferAmt, m.fundsCfg.TopupMinUSDT))
-		fmt.Printf("live-lite: funds manager top-up skipped spot_available=%.2f amount=%.2f min=%.2f\n", spotAvail, transferAmt, m.fundsCfg.TopupMinUSDT)
+		fmt.Printf("live: funds manager top-up skipped spot_available=%.2f amount=%.2f min=%.2f\n", spotAvail, transferAmt, m.fundsCfg.TopupMinUSDT)
 		return currentAvail, false
 	}
 	if err := m.transferManager.TransferSpotToPerp(transferAmt); err != nil {
 		m.recordTransferStatus(fmt.Sprintf("topup failed %.2f: %v", transferAmt, err))
-		fmt.Printf("live-lite: funds manager top-up failed amount=%.2f err=%v\n", transferAmt, err)
+		fmt.Printf("live: funds manager top-up failed amount=%.2f err=%v\n", transferAmt, err)
 		return currentAvail, false
 	}
 	refreshed, err := availableUSDT(m.rest)
 	if err != nil {
 		m.recordTransferStatus(fmt.Sprintf("topup refresh failed %.2f: %v", transferAmt, err))
-		fmt.Printf("live-lite: funds manager top-up refresh failed after amount=%.2f err=%v\n", transferAmt, err)
+		fmt.Printf("live: funds manager top-up refresh failed after amount=%.2f err=%v\n", transferAmt, err)
 		return currentAvail, false
 	}
 	m.recordTransferStatus(fmt.Sprintf("topup %.2f to perp (%.2f -> %.2f)", transferAmt, currentAvail, refreshed))
-	fmt.Printf("live-lite: funds manager top-up amount=%.2f avail_before=%.2f avail_after=%.2f\n", transferAmt, currentAvail, refreshed)
+	fmt.Printf("live: funds manager top-up amount=%.2f avail_before=%.2f avail_after=%.2f\n", transferAmt, currentAvail, refreshed)
 	return refreshed, true
 }
 
@@ -6808,13 +6876,13 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 	}
 	if m.transferManager == nil || !m.transferManager.Supported() {
 		m.recordTransferStatus(fmt.Sprintf("sweep unavailable %s realized=%.2f", p.Symbol, p.RealizedPnL))
-		fmt.Printf("live-lite: profit sweep unavailable symbol=%s realized=%.2f reason=transfer_unsupported\n", p.Symbol, p.RealizedPnL)
+		fmt.Printf("live: profit sweep unavailable symbol=%s realized=%.2f reason=transfer_unsupported\n", p.Symbol, p.RealizedPnL)
 		return
 	}
 	avail, err := availableUSDT(m.rest)
 	if err != nil {
 		m.recordTransferStatus(fmt.Sprintf("sweep refresh failed %s: %v", p.Symbol, err))
-		fmt.Printf("live-lite: profit sweep balance refresh failed symbol=%s err=%v\n", p.Symbol, err)
+		fmt.Printf("live: profit sweep balance refresh failed symbol=%s err=%v\n", p.Symbol, err)
 		return
 	}
 	sweepable := maxFloat(0, avail-m.fundsCfg.PerpFloorUSDT)
@@ -6829,12 +6897,12 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 	}
 	if err := m.transferManager.TransferPerpToSpot(amount); err != nil {
 		m.recordTransferStatus(fmt.Sprintf("sweep failed %s %.2f: %v", p.Symbol, amount, err))
-		fmt.Printf("live-lite: profit sweep failed symbol=%s amount=%.2f err=%v\n", p.Symbol, amount, err)
+		fmt.Printf("live: profit sweep failed symbol=%s amount=%.2f err=%v\n", p.Symbol, amount, err)
 		return
 	}
 	p.ProfitSweptUSDT += amount
 	m.recordTransferStatus(fmt.Sprintf("sweep %.2f from %s to spot", amount, p.Symbol))
-	fmt.Printf("live-lite: profit sweep symbol=%s amount=%.2f realized=%.2f closed=%s\n",
+	fmt.Printf("live: profit sweep symbol=%s amount=%.2f realized=%.2f closed=%s\n",
 		p.Symbol, amount, p.RealizedPnL, now.UTC().Format(time.RFC3339))
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PROFIT SWEPT",
@@ -6842,6 +6910,40 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 			fmt.Sprintf("<b>Amount:</b> %.2f USDT", amount),
 			fmt.Sprintf("<b>Trade Realized:</b> %+.2f", p.RealizedPnL),
 		))
+	}
+}
+
+func (m *liveExecManager) MaintainPerpBalance(now time.Time) {
+	if m == nil || !m.fundsCfg.Enable || m.rest == nil {
+		return
+	}
+	every := fundsMaintenanceEvery()
+	if every > 0 && !m.lastFundsCheckAt.IsZero() && now.Sub(m.lastFundsCheckAt) < every {
+		return
+	}
+	m.lastFundsCheckAt = now
+	if m.transferManager == nil || !m.transferManager.Supported() {
+		return
+	}
+	avail, err := availableUSDT(m.rest)
+	if err != nil {
+		m.recordTransferStatus(fmt.Sprintf("funds maintenance refresh failed: %v", err))
+		return
+	}
+	if excess := perpSweepAmount(avail, m.fundsCfg); excess > 0 {
+		if excess >= m.fundsCfg.TopupMinUSDT {
+			if err := m.transferManager.TransferPerpToSpot(excess); err != nil {
+				m.recordTransferStatus(fmt.Sprintf("auto sweep failed %.2f: %v", excess, err))
+				fmt.Printf("live: funds manager auto sweep failed amount=%.2f err=%v\n", excess, err)
+			} else {
+				m.recordTransferStatus(fmt.Sprintf("auto sweep %.2f to spot (avail %.2f > target %.2f)", excess, avail, m.fundsCfg.PerpTargetUSDT))
+				fmt.Printf("live: funds manager auto sweep amount=%.2f avail=%.2f target=%.2f\n", excess, avail, m.fundsCfg.PerpTargetUSDT)
+			}
+		}
+		return
+	}
+	if target := perpTopupTarget(avail, m.fundsCfg); target > 0 {
+		_, _ = m.EnsureEntryFunds(target, avail)
 	}
 }
 
@@ -7504,7 +7606,7 @@ func (m *liveExecManager) recalibrateManagedManualPosition(p *livePosition, now 
 	}
 	armManualProtectionAfterReconstruct(now, p)
 	if manageDebugLogging() {
-		fmt.Printf("live-lite: manual-recalibrated symbol=%s side=%s qty=%.6f entry=%s mark=%s qty_increased=%v entry_changed=%v lev_changed=%v\n",
+		fmt.Printf("live: manual-recalibrated symbol=%s side=%s qty=%.6f entry=%s mark=%s qty_increased=%v entry_changed=%v lev_changed=%v\n",
 			p.Symbol, p.Side, p.RemainingQty, fmtPrice(p.EntryPrice), fmtPrice(currentMark),
 			sync.QtyIncreased, sync.EntryChanged, sync.LeverageChanged)
 	}
@@ -7909,7 +8011,7 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 			}
 		}
 	}
-	fmt.Printf("live-lite: manual-stage symbol=%s side=%s entry=%s mark=%s pnl=%+.2f%% mfe_r=%.2f stage=%d hit_tp1=%v hit_tp2=%v hit_tp3=%v would_add=%v\n",
+	fmt.Printf("live: manual-stage symbol=%s side=%s entry=%s mark=%s pnl=%+.2f%% mfe_r=%.2f stage=%d hit_tp1=%v hit_tp2=%v hit_tp3=%v would_add=%v\n",
 		p.Symbol, p.Side, fmtPrice(p.EntryPrice), fmtPrice(mark),
 		func() float64 {
 			_, pct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
@@ -8638,7 +8740,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		existing.PendingAddEntryReason = c.Strat
 		existing.UpdatedAt = now
 		_ = m.save()
-		fmt.Printf("live-lite: add submitted %s %s qty=%s px=%s orderId=%d add_count=%d deployed=%.2f\n",
+		fmt.Printf("live: add submitted %s %s qty=%s px=%s orderId=%d add_count=%d deployed=%.2f\n",
 			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
 		if m.tg != nil {
 			m.tg.Sendf("%s", notify.BuildEventHTML("➕", "ADD SUBMITTED",
@@ -8738,7 +8840,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	m.positions[rawSym] = p
 	_ = m.save()
-	fmt.Printf("live-lite: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v stop_reason=%s\n",
+	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v stop_reason=%s\n",
 		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(stopReason, "generic"))
 	if m.tg != nil {
 		title := "ENTRY SUBMITTED"
@@ -8764,7 +8866,7 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 	if m.lastRemoteImportAt.IsZero() || now.Sub(m.lastRemoteImportAt) >= m.remoteImportEvery {
 		m.lastRemoteImportAt = now
 		if nImported, err := m.importRemotePositions(now); err != nil {
-			fmt.Printf("live-lite: import remote positions error: %v\n", err)
+			fmt.Printf("live: import remote positions error: %v\n", err)
 		} else if nImported > 0 {
 			changed = true
 		}
@@ -8783,14 +8885,14 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 		case execPendingEntry:
 			ch, err := m.reconcilePendingEntry(now, p)
 			if err != nil {
-				fmt.Printf("live-lite: reconcile pending %s error: %v\n", sym, err)
+				fmt.Printf("live: reconcile pending %s error: %v\n", sym, err)
 			}
 			changed = changed || ch
 		case execOpen, execPartialTP1, execPartialTP2:
 			ch, err := m.reconcileOpen(now, p, mom, flow, meta)
 			if err != nil {
 				if !strings.Contains(strings.ToLower(err.Error()), "manage-failed-safe") {
-					fmt.Printf("live-lite: reconcile open %s error: %v\n", sym, err)
+					fmt.Printf("live: reconcile open %s error: %v\n", sym, err)
 				}
 			}
 			changed = changed || ch
@@ -9053,9 +9155,17 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			sponsorSnap := classifySponsorship(p.Side, p.Symbol, mom, flow)
 			updateLiveSponsorship(p, sponsorSnap)
 			if maybeRefreshLiveConfluence(now, p, sponsorSnap, prevSponsored, prevSponsorScore) {
-				fmt.Printf("live-lite: confluence refresh %s %s score=%.2f slope=%.3f state=%s count=%d\n",
+				fmt.Printf("live: confluence refresh %s %s score=%.2f slope=%.3f state=%s count=%d\n",
 					p.Symbol, p.Side, sponsorSnap.Score, sponsorSnap.Slope, sponsorSnap.State, p.ConfluenceRefreshCount)
 				changed = true
+			}
+			_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+			if stop, tightened := applyPnLProtectiveStop(p.Side, p.EntryPrice, p.StopPrice, mark, upct); tightened {
+				p.StopReason = "PNL_PROTECT_LOCK"
+				p.StopPrice = stop
+				if err := m.placeOrReplaceStop(p); err == nil {
+					changed = true
+				}
 			}
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
@@ -9075,7 +9185,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			if updated {
 				changed = true
 			}
-			currentRunnerState := evaluateRunnerExitState(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
+			currentRunnerState := evaluateRunnerExitStateWithFlow(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flow[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
 			updateManagePhase(p, currentRunnerState.ExhaustionConfirmed && !currentRunnerState.StructureBroken)
 			refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 			if m.exitManager != nil {
@@ -9669,7 +9779,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 	}
 	cause = strings.TrimSpace(cause)
 	if manageDebugLogging() {
-		fmt.Printf("live-lite: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
+		fmt.Printf("live: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
 			p.Symbol,
 			p.Side,
 			fmtPrice(mark),
@@ -9875,7 +9985,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	clearProtectionPending(p)
 	stopChanged := prevStop <= 0 || math.Abs(prevStop-stopPx) > 1e-9
 	if stopChanged && manageDebugLogging() {
-		fmt.Printf("live-lite: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
+		fmt.Printf("live: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
 			p.Symbol,
 			p.Side,
 			fmtPrice(prevStop),
@@ -10443,7 +10553,7 @@ func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) 
 	return true, nil
 }
 
-func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView, ext map[string]flowfeed.ExternalSignal) {
+func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]momentumView, flow map[string]flowMetrics, ext map[string]flowfeed.ExternalSignal) {
 	if m == nil || m.rest == nil || !envBool("LIVE_MOMENTUM_EXIT_ENABLE", false) || len(m.positions) == 0 {
 		return
 	}
@@ -10475,7 +10585,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		if swingHoldEnable {
 			if holdScore, holdReason, hold := evaluateSwingHold(p.Side, mv, sponsored, confluenceRefreshActive(now, p.LastConfluenceRefresh), p.MaxFavorableR, p.HitTP1, p.HitTP2, p.HitTP3); hold {
 				if swingHoldLog {
-					fmt.Printf("live-lite: swing hold %s %s score=%.2f reason=%s state=%s slope=%.3f\n",
+					fmt.Printf("live: swing hold %s %s score=%.2f reason=%s state=%s slope=%.3f\n",
 						sym, p.Side, holdScore, holdReason, sameSideMomentumEntry(p.Side, mv).State, sameSideMomentumEntry(p.Side, mv).ScoreSlope)
 				}
 				continue
@@ -10499,7 +10609,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		if upct < minUpnlPct {
 			continue
 		}
-		runnerState := evaluateRunnerExitState(p.Side, mv, ext[sym])
+		runnerState := evaluateRunnerExitStateWithFlow(p.Side, mv, flow[sym], ext[sym])
 		updateManagePhase(p, runnerState.ExhaustionConfirmed && !runnerState.StructureBroken)
 		refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 		if m.exitManager != nil {
@@ -14807,6 +14917,10 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "pending_add_order"
 			return plan
 		}
+		if ladderAddsDisabled(cfg) {
+			plan.RejectReason = "fixed_size_no_add"
+			return plan
+		}
 		if activeSame.State != execOpen {
 			plan.RejectReason = "position_not_ready_for_add"
 			return plan
@@ -16952,16 +17066,47 @@ type runnerExitState struct {
 }
 
 func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.ExternalSignal) runnerExitState {
+	return evaluateRunnerExitStateWithFlow(side, mv, flowMetrics{}, ext)
+}
+
+func runnerFlowBias(side string, fm flowMetrics) (bool, bool) {
+	if fm.OFISamples < envInt("LIVE_RUNNER_FLOW_MIN_SAMPLES", 8) && fm.BookImbalance <= 0 {
+		return false, false
+	}
+	ofiMin := envFloat("LIVE_RUNNER_FLOW_MIN_OFI_Z", 0.35)
+	if ofiMin <= 0 {
+		ofiMin = 0.35
+	}
+	imbMin := envFloat("LIVE_RUNNER_FLOW_MIN_IMB", 1.15)
+	if imbMin <= 1 {
+		imbMin = 1.15
+	}
+	bookLongSupport := fm.BookImbalance >= imbMin
+	bookLongAdverse := fm.BookImbalance > 0 && fm.BookImbalance <= (1.0/imbMin)
+	bookShortSupport := fm.BookImbalance > 0 && fm.BookImbalance <= (1.0/imbMin)
+	bookShortAdverse := fm.BookImbalance >= imbMin
+	ofiLongSupport := fm.OFIZ >= ofiMin
+	ofiLongAdverse := fm.OFIZ <= -ofiMin
+	ofiShortSupport := fm.OFIZ <= -ofiMin
+	ofiShortAdverse := fm.OFIZ >= ofiMin
+	if strings.EqualFold(side, "SELL") || strings.EqualFold(side, "SHORT") {
+		return ofiShortSupport || bookShortSupport, ofiShortAdverse || bookShortAdverse
+	}
+	return ofiLongSupport || bookLongSupport, ofiLongAdverse || bookLongAdverse
+}
+
+func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetrics, ext flowfeed.ExternalSignal) runnerExitState {
 	e := sameSideMomentumEntry(side, mv)
 	if e == nil {
 		return runnerExitState{StructureBroken: true, FullExitReason: "RUNNER_STRUCTURE_LOST"}
 	}
+	supportiveFlow, adverseFlow := runnerFlowBias(side, fm)
 	state := runnerExitState{}
 	if e.LongDemotionFlag || e.ShortDemotionFlag || e.State == inplay.StateExhausted {
 		state.StructureBroken = true
 		state.FullExitReason = "RUNNER_STRUCTURE_LOST"
 	}
-	if shouldExitOnMomentumFade(side, mv, envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)) {
+	if shouldExitOnMomentumFade(side, mv, envFloat("LIVE_MOMENTUM_EXIT_SLOPE_MAX", 0.0)) && (adverseFlow || (!supportiveFlow && !e.Momentum)) {
 		state.StructureBroken = true
 		if state.FullExitReason == "" {
 			state.FullExitReason = "RUNNER_STRUCTURE_LOST"
@@ -16969,11 +17114,12 @@ func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.External
 	}
 	metaState := strings.ToLower(strings.TrimSpace(e.MetaState))
 	switch {
-	case (ext.LiqSpike || ext.WhaleSpike) && !e.Momentum && e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01):
+	case (ext.LiqSpike || ext.WhaleSpike) && adverseFlow && !e.Momentum && e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01):
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_LIQ_NO_CONT"
 	case strings.Contains(metaState, "exhaust") || e.ReversalWatchFlag:
-		if !e.Momentum ||
+		if adverseFlow ||
+			!e.Momentum ||
 			e.ScoreSlope <= envFloat("LIVE_RUNNER_EXHAUST_TIGHTEN_SLOPE_MAX", 0.04) ||
 			e.State == inplay.StateCooling ||
 			e.State == inplay.StateDumping ||
@@ -16981,9 +17127,18 @@ func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.External
 			state.ExhaustionConfirmed = true
 			state.TightenReason = "RUNNER_EXHAUST_WICK_REJECTION"
 		}
-	case e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01) && (e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted):
+	case e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01) &&
+		(e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted) &&
+		(adverseFlow || !supportiveFlow):
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_SLOPE_COLLAPSE"
+	}
+	if supportiveFlow && e.Momentum && (e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping) {
+		state.StructureBroken = false
+		if strings.HasPrefix(state.TightenReason, "RUNNER_EXHAUST") {
+			state.ExhaustionConfirmed = false
+			state.TightenReason = ""
+		}
 	}
 	if state.StructureBroken && state.FullExitReason == "" {
 		state.FullExitReason = "RUNNER_STRUCTURE_LOST"
@@ -17711,7 +17866,7 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 	if err != nil {
 		return err
 	}
-	fmt.Printf("live-lite: placed entry %s %s qty=%s price=%s -> %v\n",
+	fmt.Printf("live: placed entry %s %s qty=%s price=%s -> %v\n",
 		rawSym, c.Side, vals.Get("quantity"), vals.Get("price"), out)
 	return nil
 }
@@ -17798,7 +17953,7 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 		stopoutWindow:          time.Duration(stopoutWindowMin) * time.Minute,
 		stopoutLock:            time.Duration(stopoutLockMin) * time.Minute,
 		stopoutCount:           stopoutCount,
-		pauseFile:              envStr("LIVE_PAUSE_FILE", "/tmp/live-lite.pause"),
+		pauseFile:              envStr("LIVE_PAUSE_FILE", "/tmp/live.pause"),
 		allowSymbols:           allowMap,
 		blockSymbols:           blockMap,
 		contextOnlySymbols:     contextOnlyMap,
@@ -17982,13 +18137,13 @@ func buildRESTFromConfig() *aster.RESTAuth {
 	}
 	rest := aster.NewRESTAuthWithConfig(cfg)
 	summary := rest.StartupAuthSummary()
-	fmt.Printf("live-lite auth: mode=%v source=%v explicit=%v base=%v chain=%v user=%v signer=%v\n",
+	fmt.Printf("live auth: mode=%v source=%v explicit=%v base=%v chain=%v user=%v signer=%v\n",
 		summary["auth_mode"], summary["auth_source"], summary["auth_explicit"], summary["base_url"], summary["chain_id"], summary["user"], summary["signer"])
 	if cfgPath := resolveConfigPath(); cfgPath != "" {
-		fmt.Printf("live-lite auth: config_path=%s\n", cfgPath)
+		fmt.Printf("live auth: config_path=%s\n", cfgPath)
 	}
 	if err := rest.ConfigError(); err != nil {
-		fmt.Println("live-lite auth config error:", err)
+		fmt.Println("live auth config error:", err)
 		return nil
 	}
 	_ = rest.SyncTime()
@@ -18022,7 +18177,7 @@ func effectiveRESTBaseURL() string {
 		baseURL = "https://fapi.asterdex.com"
 	}
 	if looksLikeTestnet(baseURL) && !envBool("LIVE_ALLOW_TESTNET", false) {
-		fmt.Printf("live-lite: overriding testnet URL %q with mainnet https://fapi.asterdex.com (set LIVE_ALLOW_TESTNET=1 to bypass)\n", baseURL)
+		fmt.Printf("live: overriding testnet URL %q with mainnet https://fapi.asterdex.com (set LIVE_ALLOW_TESTNET=1 to bypass)\n", baseURL)
 		baseURL = "https://fapi.asterdex.com"
 	}
 	return strings.TrimRight(baseURL, "/")
@@ -18139,26 +18294,26 @@ func waitForNextCycle(cycleStart time.Time, scanEvery, reconEvery time.Duration,
 	for {
 		rem := time.Until(next)
 		if rem <= 0 {
-			liveLiteWakeReason = "scan"
+			liveWakeReason = "scan"
 			return
 		}
 		sleepFor := rem
 		if execMgr != nil && reconEvery > 0 && sleepFor > reconEvery {
 			sleepFor = reconEvery
 		}
-		if liveLiteWatchTick != nil && liveLiteWatchEvery > 0 && sleepFor > liveLiteWatchEvery {
-			sleepFor = liveLiteWatchEvery
+		if liveWatchTick != nil && liveWatchEvery > 0 && sleepFor > liveWatchEvery {
+			sleepFor = liveWatchEvery
 		}
-		if liveLitePriorityActive != nil && liveLitePriorityEvery > 0 && liveLitePriorityActive() && sleepFor > liveLitePriorityEvery {
-			sleepFor = liveLitePriorityEvery
+		if livePriorityActive != nil && livePriorityEvery > 0 && livePriorityActive() && sleepFor > livePriorityEvery {
+			sleepFor = livePriorityEvery
 		}
 		time.Sleep(sleepFor)
 		if execMgr != nil {
 			execMgr.Reconcile(time.Now().UTC(), nil, nil, nil)
 		}
-		if liveLiteWatchTick != nil && liveLiteWatchEvery > 0 {
-			if liveLiteWatchTick(time.Now().UTC()) {
-				liveLiteWakeReason = "watcher"
+		if liveWatchTick != nil && liveWatchEvery > 0 {
+			if liveWatchTick(time.Now().UTC()) {
+				liveWakeReason = "watcher"
 				return
 			}
 		}
@@ -18794,9 +18949,9 @@ func shadowReady(days int, equityFile string, now time.Time) bool {
 	return now.Sub(first) >= time.Duration(days)*24*time.Hour
 }
 
-func newLiveLiteStatusStore() *liveLiteStatusStore { return &liveLiteStatusStore{} }
+func newLiveStatusStore() *liveStatusStore { return &liveStatusStore{} }
 
-func (s *liveLiteStatusStore) Set(v liveLiteStatus) {
+func (s *liveStatusStore) Set(v liveStatus) {
 	if s == nil {
 		return
 	}
@@ -18805,16 +18960,16 @@ func (s *liveLiteStatusStore) Set(v liveLiteStatus) {
 	s.mu.Unlock()
 }
 
-func (s *liveLiteStatusStore) Snapshot() liveLiteStatus {
+func (s *liveStatusStore) Snapshot() liveStatus {
 	if s == nil {
-		return liveLiteStatus{}
+		return liveStatus{}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cur
 }
 
-func startLiveLiteStatusServer(addr string, s *liveLiteStatusStore) error {
+func startLiveStatusServer(addr string, s *liveStatusStore) error {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return nil
@@ -18837,7 +18992,7 @@ func startLiveLiteStatusServer(addr string, s *liveLiteStatusStore) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("live-lite status server:", addr)
+	fmt.Println("live status server:", addr)
 	go func() {
 		_ = http.Serve(ln, mux)
 	}()
@@ -19798,7 +19953,7 @@ func logFinalDecision(summary EntryEligibilitySummary) {
 		summary.Symbol, summary.FinalDecision, summary.FinalReason, rejectClass)
 }
 
-func applyDecisionToStatus(st *liveLiteStatus, summary EntryEligibilitySummary) {
+func applyDecisionToStatus(st *liveStatus, summary EntryEligibilitySummary) {
 	if st == nil {
 		return
 	}
@@ -19809,7 +19964,7 @@ func applyDecisionToStatus(st *liveLiteStatus, summary EntryEligibilitySummary) 
 	}
 }
 
-func finalizeEligibilityDecision(summary *EntryEligibilitySummary, plan ladderPlan, status *liveLiteStatus) {
+func finalizeEligibilityDecision(summary *EntryEligibilitySummary, plan ladderPlan, status *liveStatus) {
 	chooseFinalDecision(summary, plan)
 	logEligibilitySummary(*summary)
 	logFinalDecision(*summary)
@@ -19835,6 +19990,7 @@ func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg wat
 	lines := []string{
 		fmt.Sprintf("mode=%s | scan=%s | watch=%s | priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
 		fmt.Sprintf("starter=%.2f | add=%.2f | max_total=%.2f | min_available=%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT, safety.minAvailUSDT),
+		fmt.Sprintf("fixed_size_no_add=%s | max_open=%d | max_per_side=%d", boolState(ladderAddsDisabled(ladderCfg)), envInt("LIVE_MAX_OPEN_POS", 1), envInt("LIVE_MAX_OPEN_PER_SIDE", 1)),
 		fmt.Sprintf("one_symbol_only=%s | reentry=%s | post_win_cooldown=%s | persistence=%s", boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(execMgr != nil && execMgr.postWinCooldownCfg.Enable), boolState(missedOpportunitiesEnabled())),
 		fmt.Sprintf("funds_manager=%s | account_snapshots=%s | session_mode=utc_phases", boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
 	}

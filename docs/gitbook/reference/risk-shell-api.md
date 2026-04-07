@@ -66,5 +66,5 @@ type Decision struct {
 - `funding_too_expensive`
 
 ## Integration points
-- `cmd/live-lite/main.go`: pre-entry gate before paper/live place.
+- `cmd/live/main.go`: pre-entry gate before paper/live place.
 - `internal/backtest/engine.go`: pre-entry gate in simulation loop.

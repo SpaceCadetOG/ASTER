@@ -11,11 +11,11 @@ go run ./cmd/short
 - Long UI/API: `http://localhost:8080`
 - Short UI/API: `http://localhost:8081`
 
-## 2) Start live-lite (paper)
+## 2) Start live (paper)
 
 ```bash
 cd /Users/victorogbebor/2026/go-machine
-LIVE_DRY_RUN=1 go run ./cmd/live-lite
+LIVE_DRY_RUN=1 go run ./cmd/live
 ```
 
 Status API:
@@ -45,12 +45,12 @@ In your bot chat:
 - `/close SYMBOL`
 - `/closeall`
 
-## 5) Promote to live-lite mode
+## 5) Promote to live mode
 
 Only after paper validation:
 
 ```bash
-LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live-lite
+LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live
 ```
 
 Use isolated margin defaults and keep risk shell enabled.

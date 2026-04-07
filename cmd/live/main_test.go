@@ -1128,8 +1128,8 @@ func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing
 }
 
 func TestHandleCommandScannerSnapshot(t *testing.T) {
-	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
-	ctx.status.Set(liveLiteStatus{
+	ctx := &telegramCommandCtx{status: newLiveStatusStore()}
+	ctx.status.Set(liveStatus{
 		Generated:   time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
 		ScannerBias: "short",
 		ScannerLongs: []notify.ScanItem{
@@ -1148,8 +1148,8 @@ func TestHandleCommandScannerSnapshot(t *testing.T) {
 }
 
 func TestHandleCommandLongsSnapshot(t *testing.T) {
-	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
-	ctx.status.Set(liveLiteStatus{
+	ctx := &telegramCommandCtx{status: newLiveStatusStore()}
+	ctx.status.Set(liveStatus{
 		Generated: time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
 		ScannerLongs: []notify.ScanItem{
 			{Symbol: "ETHUSDT", Grade: "B", Score: 88},
@@ -1166,8 +1166,8 @@ func TestHandleCommandLongsSnapshot(t *testing.T) {
 }
 
 func TestHandleCommandShortsSnapshot(t *testing.T) {
-	ctx := &telegramCommandCtx{status: newLiveLiteStatusStore()}
-	ctx.status.Set(liveLiteStatus{
+	ctx := &telegramCommandCtx{status: newLiveStatusStore()}
+	ctx.status.Set(liveStatus{
 		Generated: time.Date(2026, 3, 27, 12, 34, 56, 0, time.UTC),
 		ScannerLongs: []notify.ScanItem{
 			{Symbol: "ETHUSDT", Grade: "B", Score: 88},
@@ -2887,6 +2887,45 @@ func TestEvaluateRunnerExitStateDoesNotTightenHealthyShortRunnerOnReversalWatchA
 	}
 }
 
+func TestEvaluateRunnerExitStateWithFlowKeepsHealthyRunnerWhenFlowSupports(t *testing.T) {
+	mv := momentumView{
+		Short: &inplay.Entry{
+			State:      inplay.StateInPlay,
+			ScoreSlope: 0.03,
+			Momentum:   true,
+		},
+	}
+	fm := flowMetrics{
+		OFISamples:    12,
+		OFIZ:          -0.62,
+		BookImbalance: 0.72,
+	}
+	got := evaluateRunnerExitStateWithFlow("SELL", mv, fm, flowfeed.ExternalSignal{})
+	if got.StructureBroken || got.ExhaustionConfirmed {
+		t.Fatalf("expected supportive flow to keep runner alive, got %+v", got)
+	}
+}
+
+func TestEvaluateRunnerExitStateWithFlowBreaksRunnerOnFadeAndAdverseFlow(t *testing.T) {
+	t.Setenv("LIVE_MOMENTUM_EXIT_SLOPE_MAX", "0.00")
+	mv := momentumView{
+		Short: &inplay.Entry{
+			State:      inplay.StateCooling,
+			ScoreSlope: -0.05,
+			Momentum:   false,
+		},
+	}
+	fm := flowMetrics{
+		OFISamples:    12,
+		OFIZ:          0.80,
+		BookImbalance: 1.40,
+	}
+	got := evaluateRunnerExitStateWithFlow("SELL", mv, fm, flowfeed.ExternalSignal{})
+	if !got.StructureBroken {
+		t.Fatalf("expected adverse flow plus fade to break runner, got %+v", got)
+	}
+}
+
 func TestSessionPhaseUTCUsesUTCWindows(t *testing.T) {
 	if got := sessionPhaseUTC(time.Date(2026, 3, 25, 1, 30, 0, 0, time.UTC)); got != sessionAsiaDev {
 		t.Fatalf("expected asia dev, got %s", got)
@@ -2990,6 +3029,54 @@ func TestResolveLadderPlanAllowsStructuredReentry(t *testing.T) {
 	}
 	if plan.MarginUSDT != 20 {
 		t.Fatalf("expected 20 usdt reentry, got %.2f", plan.MarginUSDT)
+	}
+}
+
+func TestResolveLadderPlanRejectsAddWhenFixedSizeNoAddEnabled(t *testing.T) {
+	t.Setenv("LIVE_FIXED_SIZE_NO_ADD", "1")
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:         "LYNUSDT",
+				Side:           "BUY",
+				State:          execOpen,
+				EntrySource:    "BOT",
+				EntryReason:    "continuation_fast",
+				RemainingQty:   50,
+				DeployedMargin: 50,
+				EntryPrice:     1.00,
+			},
+		},
+		ladderCfg: loadLadderConfig(50),
+	}
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		LastClose:    1.05,
+		SessionVWAP:  1.02,
+		EMA9:         1.03,
+		ReclaimHold:  true,
+		RetestHold:   true,
+		ResetRebreak: true,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_long",
+			CurrentScore: 95,
+			ScoreSlope:   0.20,
+			Momentum:     true,
+		},
+		Sig: strategies.Signal{
+			Entry: 1.05,
+			Stop:  1.00,
+			TP1:   1.12,
+			TP2:   1.18,
+			TP3:   1.24,
+		},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 4, 7, 14, 0, 0, 0, time.UTC), c, execMgr, map[string]symbolMeta{"LYNUSDT": {LastPrice: 1.05}})
+	if plan.RejectReason != "fixed_size_no_add" {
+		t.Fatalf("expected fixed_size_no_add reject, got %+v", plan)
 	}
 }
 
@@ -3104,6 +3191,56 @@ func TestLoadLadderConfigPrefersNewSizingEnvNames(t *testing.T) {
 	}
 	if cfg.MaxTotalUSDT != 100 {
 		t.Fatalf("expected max total from LIVE_MAX_TOTAL_USDT, got %.2f", cfg.MaxTotalUSDT)
+	}
+}
+
+func TestLoadLadderConfigFixedSizeNoAddMode(t *testing.T) {
+	t.Setenv("LIVE_ENTRY_STARTER_USDT", "50")
+	t.Setenv("LIVE_PYRAMID_STEP_USDT", "25")
+	t.Setenv("LIVE_PYRAMID_MAX_TOTAL_USDT", "125")
+	t.Setenv("LIVE_PYRAMID_MAX_ADDS", "3")
+	t.Setenv("LIVE_FIXED_SIZE_NO_ADD", "1")
+	cfg := loadLadderConfig(20)
+	if cfg.StarterUSDT != 50 {
+		t.Fatalf("expected starter 50, got %.2f", cfg.StarterUSDT)
+	}
+	if cfg.StepUSDT != 0 || cfg.MaxTotalUSDT != 50 || cfg.MaxAdds != 0 {
+		t.Fatalf("expected fixed-size no-add config, got %+v", cfg)
+	}
+	if !ladderAddsDisabled(cfg) {
+		t.Fatal("expected fixed-size ladder to disable adds")
+	}
+}
+
+func TestApplyPnLProtectiveStopLocksMaterialProfitOnceArmed(t *testing.T) {
+	t.Setenv("LIVE_PNL_PROTECT_ARM_PCT", "20")
+	t.Setenv("LIVE_PNL_PROTECT_LOCK_FRAC", "0.75")
+	stop, changed := applyPnLProtectiveStop("SELL", 1.00, 1.02, 0.80, 40.0)
+	if !changed {
+		t.Fatal("expected pnl protective lock to tighten stop")
+	}
+	if math.Abs(stop-0.85) > 1e-9 {
+		t.Fatalf("expected short stop to lock 75%% of move at 0.85, got %.6f", stop)
+	}
+}
+
+func TestPerpSweepAmountUsesTargetCeiling(t *testing.T) {
+	cfg := fundsManagerConfig{PerpTargetUSDT: 200, PerpFloorUSDT: 150}
+	if got := perpSweepAmount(235, cfg); got != 35 {
+		t.Fatalf("expected sweep amount 35, got %.2f", got)
+	}
+	if got := perpSweepAmount(199, cfg); got != 0 {
+		t.Fatalf("expected no sweep below target, got %.2f", got)
+	}
+}
+
+func TestPerpTopupTargetUsesFloorGuard(t *testing.T) {
+	cfg := fundsManagerConfig{PerpTargetUSDT: 200, PerpFloorUSDT: 150}
+	if got := perpTopupTarget(149, cfg); got != 200 {
+		t.Fatalf("expected topup target 200 below floor, got %.2f", got)
+	}
+	if got := perpTopupTarget(151, cfg); got != 0 {
+		t.Fatalf("expected no topup above floor, got %.2f", got)
 	}
 }
 

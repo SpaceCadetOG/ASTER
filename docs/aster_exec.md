@@ -138,6 +138,6 @@ go run ./cmd/exec
 
 - `GET /fapi/v3/*` agent routes sign the canonical querystring as `Message.msg`.
 - The exact canonical string signed is also the exact string sent to the server before appending `signature`.
-- `cmd/exec` and `live-lite` both fail fast if agent mode is selected but required fields are missing or the private key does not derive to `ASTER_SIGNER`.
+- `cmd/exec` and `live` both fail fast if agent mode is selected but required fields are missing or the private key does not derive to `ASTER_SIGNER`.
 - Manual trades may be imported for tracking, but bot-managed status is granted only after protection is successfully attached.
 - Live manual-managed positions that cannot be protected are escalated into emergency handling instead of remaining quietly degraded.

@@ -1,6 +1,6 @@
 # Telegram Command API
 
-Source: `cmd/live-lite/main.go` (`handleCommand`)
+Source: `cmd/live/main.go` (`handleCommand`)
 
 ## Supported commands
 

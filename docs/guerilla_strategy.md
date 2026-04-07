@@ -231,9 +231,9 @@ Look for:
 
 ## Existing Code Hooks
 
-Useful current hooks already exist in the live-lite path:
+Useful current hooks already exist in the live path:
 
-- candidate context and logs in `cmd/live-lite/main.go`
+- candidate context and logs in `cmd/live/main.go`
 - structure tagging for `break_hold`, `reclaim_hold`, and `retest_hold`
 - confluence refresh and swing hold logic
 - trail profile multipliers

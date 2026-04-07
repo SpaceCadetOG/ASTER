@@ -61,8 +61,8 @@ type Signal struct {
 }
 ```
 
-## Live-lite status snapshot
-Source: `cmd/live-lite/main.go` (`liveLiteStatus`)
+## Live status snapshot
+Source: `cmd/live/main.go` (`liveStatus`)
 
 Key fields exposed by `/api/status`:
 - dry-run/live mode flags

@@ -8,7 +8,7 @@ Autonomous crypto-perps trading stack (scanner -> confluence -> paper/live execu
 - `internal/gate`: hard entry quality gate (grade/score/slope/volume/MTF/regime).
 - `internal/throttle`: symbol cooldown + intent dedupe.
 - `internal/risk`: pre-trade hard gates (liq buffer, funding, spread, book imbalance).
-- `cmd/live-lite`: orchestration loop (paper/live parity, maintenance windows, digests).
+- `cmd/live`: orchestration loop (paper/live parity, maintenance windows, digests).
 - `internal/stats` + `cmd/stats`: event-log aggregation and performance reports.
 
 ## Runtime Flow
@@ -24,7 +24,7 @@ Safe default: if gate/throttle/risk fails, no trade intent is emitted.
 
 ## Config
 
-Primary runtime controls use `LIVE_*` env vars (see `systemd/env/live-lite.env.example`).
+Primary runtime controls use `LIVE_*` env vars (see `systemd/env/live.env.example`).
 
 A versioned schema sample is provided at `config/trading.yaml` for:
 - `discovery`
@@ -37,13 +37,13 @@ A versioned schema sample is provided at `config/trading.yaml` for:
 Paper:
 
 ```bash
-go run ./cmd/live-lite
+go run ./cmd/live
 ```
 
 Live:
 
 ```bash
-LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live-lite
+LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live
 ```
 
 Manual trades may be imported for tracking. Bot-managed status is granted only after protection is successfully attached; unprotected manual-managed positions block new entries and can be force-closed by the safety layer.
