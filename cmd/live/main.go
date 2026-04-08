@@ -17115,6 +17115,10 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 		return runnerExitState{StructureBroken: true, FullExitReason: "RUNNER_STRUCTURE_LOST"}
 	}
 	supportiveFlow, adverseFlow := runnerFlowBias(side, fm)
+	pullbackSlopeMin := envFloat("LIVE_RUNNER_PULLBACK_SLOPE_MIN", -0.12)
+	exhaustSlopeMax := envFloat("LIVE_RUNNER_EXHAUST_TIGHTEN_SLOPE_MAX", 0.04)
+	deteriorateSlopeMin := envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01)
+	slopeCollapseMin := envFloat("LIVE_RUNNER_SLOPE_COLLAPSE_MIN", -0.08)
 	state := runnerExitState{}
 	if e.LongDemotionFlag || e.ShortDemotionFlag || e.State == inplay.StateExhausted {
 		state.StructureBroken = true
@@ -17128,24 +17132,31 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 	}
 	metaState := strings.ToLower(strings.TrimSpace(e.MetaState))
 	switch {
-	case (ext.LiqSpike || ext.WhaleSpike) && adverseFlow && !e.Momentum && e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01):
+	case (ext.LiqSpike || ext.WhaleSpike) && adverseFlow && !e.Momentum && e.ScoreSlope <= deteriorateSlopeMin:
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_LIQ_NO_CONT"
 	case strings.Contains(metaState, "exhaust") || e.ReversalWatchFlag:
 		if adverseFlow ||
-			!e.Momentum ||
-			e.ScoreSlope <= envFloat("LIVE_RUNNER_EXHAUST_TIGHTEN_SLOPE_MAX", 0.04) ||
-			e.State == inplay.StateCooling ||
-			e.State == inplay.StateDumping ||
-			e.State == inplay.StateExhausted {
+			((!e.Momentum || e.ScoreSlope <= exhaustSlopeMax) &&
+				(e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted)) {
 			state.ExhaustionConfirmed = true
 			state.TightenReason = "RUNNER_EXHAUST_WICK_REJECTION"
 		}
-	case e.ScoreSlope <= envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01) &&
+	case e.ScoreSlope <= slopeCollapseMin &&
 		(e.State == inplay.StateCooling || e.State == inplay.StateDumping || e.State == inplay.StateExhausted) &&
 		(adverseFlow || !supportiveFlow):
 		state.ExhaustionConfirmed = true
 		state.TightenReason = "RUNNER_EXHAUST_SLOPE_COLLAPSE"
+	}
+	healthyPullback := !adverseFlow &&
+		e.ScoreSlope >= pullbackSlopeMin &&
+		(e.State == inplay.StateBalanced || e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping)
+	if healthyPullback {
+		state.StructureBroken = false
+		if strings.HasPrefix(state.TightenReason, "RUNNER_EXHAUST") {
+			state.ExhaustionConfirmed = false
+			state.TightenReason = ""
+		}
 	}
 	if supportiveFlow && e.Momentum && (e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping) {
 		state.StructureBroken = false
