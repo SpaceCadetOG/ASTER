@@ -5220,7 +5220,7 @@ func loadReentryConfig(defaultSize float64) reentryConfig {
 	cfg := reentryConfig{
 		Enable:       envBool("LIVE_REENTRY_ENABLE", false),
 		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 10)),
-		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 1),
+		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 5),
 		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
 	}
 	if cfg.SizeUSDT <= 0 {
