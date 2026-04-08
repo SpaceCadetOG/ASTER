@@ -8212,6 +8212,47 @@ func (m *liveExecManager) validateManualManageRequest(req manualManageRequest, n
 	return nil
 }
 
+func configuredLiveLeverage() int {
+	lev := envInt("LIVE_LEVERAGE_FIXED", 3)
+	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
+	if maxLev < 1 {
+		maxLev = 20
+	}
+	return clampInt(maxInt(1, lev), 1, maxLev)
+}
+
+func (m *liveExecManager) alignManualManagedLeverage(p *livePosition) {
+	if m == nil || m.rest == nil || p == nil || p.Symbol == "" {
+		return
+	}
+	targetLev := configuredLiveLeverage()
+	if targetLev <= 0 || p.Leverage == targetLev {
+		return
+	}
+	rawSym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+	if rawSym == "" {
+		rawSym = strings.ToUpper(strings.TrimSpace(p.Symbol))
+	}
+	if _, err := m.rest.ChangeLeverage(rawSym, targetLev); err == nil {
+		p.Leverage = targetLev
+		if p.EntryPrice > 0 && p.FilledQty > 0 {
+			p.Margin = (p.EntryPrice * p.FilledQty) / float64(maxInt(1, p.Leverage))
+		}
+	}
+}
+
+func (m *liveExecManager) tryImmediateManualProtection(p *livePosition) {
+	if m == nil || p == nil || !manualManagedTrade(p) || m.rest == nil {
+		return
+	}
+	if !manualProtectionConvictionReady(p) {
+		return
+	}
+	p.ProtectionPending = true
+	p.ProtectionRetryAfter = time.Time{}
+	_ = m.placeOrReplaceStopWithRetry(p)
+}
+
 func (m *liveExecManager) activateManualManagement(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
 	if m == nil {
 		return nil, fmt.Errorf("live execution manager unavailable")
@@ -8258,7 +8299,9 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 			if currentMark > 0 {
 				m.reconstructManualManagedState(now, p, currentMark)
 			}
+			m.alignManualManagedLeverage(p)
 			armManualProtectionAfterReconstruct(now, p)
+			m.tryImmediateManualProtection(p)
 			m.mu.Lock()
 			delete(m.manualRequests, req.Key)
 			m.mu.Unlock()
@@ -8290,7 +8333,9 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	if currentMark > 0 {
 		m.reconstructManualManagedState(now, p, currentMark)
 	}
+	m.alignManualManagedLeverage(p)
 	armManualProtectionAfterReconstruct(now, p)
+	m.tryImmediateManualProtection(p)
 	m.positions[sym] = p
 	m.mu.Lock()
 	delete(m.manualRequests, req.Key)
