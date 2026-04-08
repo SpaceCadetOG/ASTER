@@ -41,6 +41,11 @@ In your bot chat:
 - `/status`
 - `/balance`
 - `/positions`
+- `/scanner`
+- `/longs`
+- `/shorts`
+- `/manage SYMBOL y`
+- `/protect SYMBOL`
 - `/pause` and `/resume`
 - `/close SYMBOL`
 - `/closeall`
@@ -54,3 +59,32 @@ LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live
 ```
 
 Use isolated margin defaults and keep risk shell enabled.
+
+## 6) Pi operator start
+
+On the Pi, the normal operator entrypoint is:
+
+```bash
+cd /home/traderbot/actions-runner/_work/ASTER/ASTER/scripts
+bash run_live_logged.sh
+```
+
+That script:
+- loads `/opt/aster/env/live.env` by default
+- writes rotating logs to `ASTER_LOG_DIR` if set
+- launches the `cmd/live` runtime
+
+Recommended Pi overrides:
+- `ASTER_LOG_DIR=/home/traderbot/aster-logs`
+- `LIVE_STATE_DIR=/opt/aster/state`
+
+## 7) Current live operating model
+
+The current recommended live setup is:
+- fixed trade size: `$50`
+- re-entry size: `$50`
+- no adds
+- max open positions: `4`
+- target perp balance: `$200`
+- floor: `$150`
+- fixed leverage default: `10x`
