@@ -20775,6 +20775,10 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("⚠️", "PROTECT", "live execution manager unavailable")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		lp, found := c.execMgr.LivePositionBySymbol(sym)
+		if found {
+			sym = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(lp.Symbol)))
+		}
 		p, ok := c.execMgr.trackedPosition(sym)
 		if !ok || p == nil || !c.execMgr.isActive(p) {
 			return notify.BuildEventHTML("ℹ️", "PROTECT", fmt.Sprintf("No active position for %s", cleanSymbol(sym)))
