@@ -4635,7 +4635,9 @@ func isIgnorableMarginTypeError(err error) bool {
 	return strings.Contains(msg, "no need to change margin type") ||
 		strings.Contains(msg, "no need to change to isolated") ||
 		strings.Contains(msg, "margin type is isolated") ||
-		strings.Contains(msg, "same margin type")
+		strings.Contains(msg, "same margin type") ||
+		strings.Contains(msg, "\"code\":-2014") ||
+		strings.Contains(msg, "code=-2014")
 }
 
 func marginTypeAlreadySet(rows []map[string]any, symbol, want string) bool {
@@ -8223,11 +8225,43 @@ func configuredLiveLeverage() int {
 	return clampInt(maxInt(1, lev), 1, maxLev)
 }
 
+func configuredMinLiveLeverage() int {
+	lev := envInt("LIVE_LEVERAGE_MIN", 2)
+	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
+	if lev < 1 {
+		lev = 1
+	}
+	if maxLev >= 1 && lev > maxLev {
+		lev = maxLev
+	}
+	return lev
+}
+
+func applyLeverageWithFallback(startLev, minLev int, apply func(int) error) (int, error) {
+	seq := leverageRetrySequence(startLev, minLev)
+	if len(seq) == 0 {
+		return 0, fmt.Errorf("invalid leverage sequence")
+	}
+	var lastErr error
+	for _, lev := range seq {
+		if err := apply(lev); err == nil {
+			return lev, nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unable to apply leverage")
+	}
+	return 0, lastErr
+}
+
 func (m *liveExecManager) alignManualManagedLeverage(p *livePosition) {
 	if m == nil || m.rest == nil || p == nil || p.Symbol == "" {
 		return
 	}
 	targetLev := configuredLiveLeverage()
+	minLev := configuredMinLiveLeverage()
 	if targetLev <= 0 || p.Leverage == targetLev {
 		return
 	}
@@ -8235,8 +8269,11 @@ func (m *liveExecManager) alignManualManagedLeverage(p *livePosition) {
 	if rawSym == "" {
 		rawSym = strings.ToUpper(strings.TrimSpace(p.Symbol))
 	}
-	if _, err := m.rest.ChangeLeverage(rawSym, targetLev); err == nil {
-		p.Leverage = targetLev
+	if usedLev, err := applyLeverageWithFallback(targetLev, minLev, func(lev int) error {
+		_, err := m.rest.ChangeLeverage(rawSym, lev)
+		return err
+	}); err == nil {
+		p.Leverage = usedLev
 		if p.EntryPrice > 0 && p.FilledQty > 0 {
 			p.Margin = (p.EntryPrice * p.FilledQty) / float64(maxInt(1, p.Leverage))
 		}
@@ -8754,7 +8791,25 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	if lev <= 0 {
 		lev = 1
 	}
-	_, _ = m.rest.ChangeLeverage(rawSym, lev)
+	usedLev, err := applyLeverageWithFallback(lev, configuredMinLiveLeverage(), func(tryLev int) error {
+		_, err := m.rest.ChangeLeverage(rawSym, tryLev)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("set leverage failed: %w", err)
+	}
+	if usedLev != lev {
+		fmt.Printf("live: leverage fallback applied %s %s %dx->%dx\n", rawSym, c.Side, lev, usedLev)
+		lev = usedLev
+		qty = margin * float64(maxInt(lev, 1)) / price
+		qty, _, err = m.rest.RoundQty(rawSym, qty)
+		if err != nil {
+			return err
+		}
+		if qty <= 0 {
+			return fmt.Errorf("qty <= 0 after leverage fallback rounding")
+		}
+	}
 	if m.marginType != "" {
 		alreadySet := false
 		if rows, err := m.rest.PositionRisk(rawSym); err == nil {

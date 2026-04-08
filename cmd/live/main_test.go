@@ -2139,6 +2139,39 @@ func TestIsSymbolNotionalLimitError(t *testing.T) {
 	}
 }
 
+func TestIsIgnorableMarginTypeErrorRecognizes2014(t *testing.T) {
+	err := fmt.Errorf("http 400 POST /fapi/v1/marginType: {\"code\":-2014,\"msg\":\"margin type unsupported in this auth mode\"}")
+	if !isIgnorableMarginTypeError(err) {
+		t.Fatal("expected -2014 margin type error to be ignored")
+	}
+}
+
+func TestApplyLeverageWithFallbackStepsDownUntilAccepted(t *testing.T) {
+	var attempts []int
+	got, err := applyLeverageWithFallback(5, 2, func(lev int) error {
+		attempts = append(attempts, lev)
+		if lev > 4 {
+			return fmt.Errorf("rejected")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("expected accepted leverage 4, got %d", got)
+	}
+	want := []int{5, 4}
+	if len(attempts) != len(want) {
+		t.Fatalf("unexpected attempts: got=%v want=%v", attempts, want)
+	}
+	for i := range want {
+		if attempts[i] != want[i] {
+			t.Fatalf("unexpected attempts: got=%v want=%v", attempts, want)
+		}
+	}
+}
+
 func TestResolveLadderPlanAllowsWinnerAdd(t *testing.T) {
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
