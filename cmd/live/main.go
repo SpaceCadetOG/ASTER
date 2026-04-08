@@ -17221,6 +17221,8 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 	exhaustSlopeMax := envFloat("LIVE_RUNNER_EXHAUST_TIGHTEN_SLOPE_MAX", 0.04)
 	deteriorateSlopeMin := envFloat("LIVE_CONT_DETERIORATE_MIN_SLOPE", 0.01)
 	slopeCollapseMin := envFloat("LIVE_RUNNER_SLOPE_COLLAPSE_MIN", -0.08)
+	maxHealthyDrawdown := envFloat("LIVE_RUNNER_MAX_HEALTHY_DRAWDOWN_PCT", 4.5)
+	minTrendHoldDistancePct := envFloat("LIVE_RUNNER_TREND_HOLD_DISTANCE_PCT", -0.20)
 	state := runnerExitState{}
 	if e.LongDemotionFlag || e.ShortDemotionFlag || e.State == inplay.StateExhausted {
 		state.StructureBroken = true
@@ -17253,7 +17255,19 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 	healthyPullback := !adverseFlow &&
 		e.ScoreSlope >= pullbackSlopeMin &&
 		(e.State == inplay.StateBalanced || e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping)
+	trendStillAccepted := !adverseFlow &&
+		e.DrawdownFromPeakPct >= -maxHealthyDrawdown &&
+		e.VWAPDistancePct >= minTrendHoldDistancePct &&
+		e.EMADistancePct >= minTrendHoldDistancePct &&
+		(e.State == inplay.StateBalanced || e.State == inplay.StateHeating || e.State == inplay.StateInPlay || e.State == inplay.StatePumping || e.State == inplay.StateCooling)
 	if healthyPullback {
+		state.StructureBroken = false
+		if strings.HasPrefix(state.TightenReason, "RUNNER_EXHAUST") {
+			state.ExhaustionConfirmed = false
+			state.TightenReason = ""
+		}
+	}
+	if trendStillAccepted {
 		state.StructureBroken = false
 		if strings.HasPrefix(state.TightenReason, "RUNNER_EXHAUST") {
 			state.ExhaustionConfirmed = false

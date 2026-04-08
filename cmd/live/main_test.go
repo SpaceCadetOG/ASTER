@@ -2980,6 +2980,30 @@ func TestEvaluateRunnerExitStateWithFlowKeepsHealthyLongPullbackAlive(t *testing
 	}
 }
 
+func TestEvaluateRunnerExitStateWithFlowKeepsTrendAcceptedLongAlive(t *testing.T) {
+	mv := momentumView{
+		Long: &inplay.Entry{
+			State:               inplay.StateCooling,
+			ScoreSlope:          -0.20,
+			Momentum:            false,
+			ReversalWatchFlag:   true,
+			MetaState:           "exhaust_watch",
+			DrawdownFromPeakPct: -1.6,
+			VWAPDistancePct:     2.1,
+			EMADistancePct:      1.8,
+		},
+	}
+	fm := flowMetrics{
+		OFISamples:    12,
+		OFIZ:          0.08,
+		BookImbalance: 1.03,
+	}
+	got := evaluateRunnerExitStateWithFlow("BUY", mv, fm, flowfeed.ExternalSignal{})
+	if got.StructureBroken || got.ExhaustionConfirmed {
+		t.Fatalf("expected trend-accepted long to stay alive, got %+v", got)
+	}
+}
+
 func TestSessionPhaseUTCUsesUTCWindows(t *testing.T) {
 	if got := sessionPhaseUTC(time.Date(2026, 3, 25, 1, 30, 0, 0, time.UTC)); got != sessionAsiaDev {
 		t.Fatalf("expected asia dev, got %s", got)
