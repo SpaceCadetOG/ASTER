@@ -877,6 +877,7 @@ type livePosition struct {
 	ProtectionRetryAfter    time.Time        `json:"protectionRetryAfter,omitempty"`
 	ProtectionRetryCount    int              `json:"protectionRetryCount,omitempty"`
 	ProtectionFailCount     int              `json:"protectionFailCount,omitempty"`
+	ForceProtectionNow      bool             `json:"forceProtectionNow,omitempty"`
 	ManageFailSuppressCount int              `json:"manageFailSuppressCount,omitempty"`
 	LastManageFailAt        time.Time        `json:"lastManageFailAt,omitempty"`
 	LastManageFailCause     string           `json:"lastManageFailCause,omitempty"`
@@ -7676,6 +7677,7 @@ func clearProtectionPending(p *livePosition) {
 	p.ProtectionRetryAfter = time.Time{}
 	p.ProtectionRetryCount = 0
 	p.ProtectionFailCount = 0
+	p.ForceProtectionNow = false
 	p.ManageFailSuppressCount = 0
 	p.LastManageFailAt = time.Time{}
 	p.LastManageFailCause = ""
@@ -8245,11 +8247,9 @@ func (m *liveExecManager) tryImmediateManualProtection(p *livePosition) {
 	if m == nil || p == nil || !manualManagedTrade(p) || m.rest == nil {
 		return
 	}
-	if !manualProtectionConvictionReady(p) {
-		return
-	}
 	p.ProtectionPending = true
 	p.ProtectionRetryAfter = time.Time{}
+	p.ForceProtectionNow = true
 	_ = m.placeOrReplaceStopWithRetry(p)
 }
 
@@ -9894,6 +9894,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	now := time.Now().UTC()
 	if manualManagedTrade(p) {
+		forceNow := p.ForceProtectionNow
 		switch strings.TrimSpace(p.ManualManageState) {
 		case manualManageStateForceClose, manualManageStateCritical:
 			if m.shouldEmergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected")) {
@@ -9901,14 +9902,15 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			}
 			p.ManualManageState = manualManageStatePendingProtection
 		}
-		if p.ProtectionPending && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
+		if p.ProtectionPending && !forceNow && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
 			return nil
 		}
-		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !manualProtectionConvictionReady(p) {
+		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !forceNow && !manualProtectionConvictionReady(p) {
 			p.ManualManageState = manualManageStatePendingProtection
 			markProtectionPending(p, now, "awaiting_conviction")
 			return nil
 		}
+		p.ForceProtectionNow = false
 	}
 	prevStop := p.ProtectedStop
 	if prevStop <= 0 {
