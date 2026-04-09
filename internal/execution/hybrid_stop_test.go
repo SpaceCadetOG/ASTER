@@ -143,3 +143,15 @@ func TestComputeHybridStopClampsAbsurdWideEliteStop(t *testing.T) {
 		t.Fatalf("expected stop width <= %.2f, got %+v", cfg.MaxWidthPct, res)
 	}
 }
+
+func TestRRBelowMinimumAllowsEquality(t *testing.T) {
+	if rrBelowMinimum(1.0, 1.0) {
+		t.Fatal("expected equal rr to pass")
+	}
+	if rrBelowMinimum(0.9999999, 1.0) {
+		t.Fatal("expected tiny float noise to pass")
+	}
+	if !rrBelowMinimum(0.99, 1.0) {
+		t.Fatal("expected clearly lower rr to fail")
+	}
+}

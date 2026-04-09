@@ -4640,6 +4640,14 @@ func isIgnorableMarginTypeError(err error) bool {
 		strings.Contains(msg, "code=-2014")
 }
 
+func rrBelowMinimum(rr, minRR float64) bool {
+	if minRR <= 0 {
+		return false
+	}
+	const rrTol = 1e-6
+	return rr+rrTol < minRR
+}
+
 func marginTypeAlreadySet(rows []map[string]any, symbol, want string) bool {
 	symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
 	want = strings.ToUpper(strings.TrimSpace(want))
@@ -9576,8 +9584,9 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 	}
 	risk := abs(anchor - p.StopPrice)
 	reward := abs(p.TP1Price - anchor)
-	if risk <= 0 || reward/risk < m.minTP1RR {
-		return fmt.Errorf("tp1 rr below minimum: rr=%.3f min=%.3f", reward/maxFloat(risk, 1e-9), m.minTP1RR)
+	rr := reward / maxFloat(risk, 1e-9)
+	if risk <= 0 || rrBelowMinimum(rr, m.minTP1RR) {
+		return fmt.Errorf("tp1 rr below minimum: rr=%.3f min=%.3f", rr, m.minTP1RR)
 	}
 	p.TrailRef = anchor
 	p.TrailStop = p.StopPrice

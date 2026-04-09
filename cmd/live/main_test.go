@@ -2172,6 +2172,18 @@ func TestApplyLeverageWithFallbackStepsDownUntilAccepted(t *testing.T) {
 	}
 }
 
+func TestRRBelowMinimumTreatsEqualityAsAllowed(t *testing.T) {
+	if rrBelowMinimum(1.0, 1.0) {
+		t.Fatal("expected equal rr to pass minimum check")
+	}
+	if rrBelowMinimum(0.9999999, 1.0) {
+		t.Fatal("expected tiny float noise to pass minimum check")
+	}
+	if !rrBelowMinimum(0.99, 1.0) {
+		t.Fatal("expected meaningfully lower rr to fail minimum check")
+	}
+}
+
 func TestResolveLadderPlanAllowsWinnerAdd(t *testing.T) {
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{

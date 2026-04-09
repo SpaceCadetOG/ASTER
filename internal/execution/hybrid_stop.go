@@ -167,7 +167,7 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)
 		rr := reward / maxFloat(dist, 1e-9)
-		if rr < cfg.MinRRToTP1 {
+		if rrBelowMinimum(rr, cfg.MinRRToTP1) {
 			reason += "+rr_low"
 		}
 	}
@@ -190,6 +190,14 @@ func appendRejectReason(cur, reason string) string {
 		return cur
 	}
 	return cur + "," + reason
+}
+
+func rrBelowMinimum(rr, minRR float64) bool {
+	if minRR <= 0 {
+		return false
+	}
+	const rrTol = 1e-6
+	return rr+rrTol < minRR
 }
 
 func atrMultForTemplate(cfg HybridStopConfig, template StopTemplate) float64 {
