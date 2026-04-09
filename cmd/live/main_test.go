@@ -990,6 +990,30 @@ func TestHandleCommandManageDecline(t *testing.T) {
 	}
 }
 
+func TestHandleCommandManageExistingManagedTradeRearmsProtection(t *testing.T) {
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"4USDT": {
+				Symbol:            "4USDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				RemainingQty:      100,
+				ProtectionPending: true,
+			},
+		},
+	}
+	ctx := &telegramCommandCtx{execMgr: m}
+	resp := ctx.handleCommand("", "/manage 4USDT y")
+	if !strings.Contains(resp, "MANAGE ACTIVE") {
+		t.Fatalf("expected active manage response, got %s", resp)
+	}
+	if !strings.Contains(resp, "already bot-managed") {
+		t.Fatalf("expected already-managed guidance, got %s", resp)
+	}
+}
+
 func TestActivatePassiveManualImportKeepsPendingRequestAndCreatesPassiveLocal(t *testing.T) {
 	now := time.Now().UTC()
 	req := manualManageRequest{

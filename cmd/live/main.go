@@ -6672,6 +6672,27 @@ func (m *liveExecManager) passiveManualPositionBySymbol(symbol string) (*livePos
 	return nil, false
 }
 
+func (m *liveExecManager) managedManualPositionBySymbol(symbol string) (*livePosition, bool) {
+	if m == nil {
+		return nil, false
+	}
+	base := canonicalSymbolBase(strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))))
+	if base == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !manualManagedTrade(p) {
+			continue
+		}
+		if canonicalSymbolBase(p.Symbol) == base {
+			return p, true
+		}
+	}
+	return nil, false
+}
+
 func manualManageRequestFromPosition(p *livePosition) manualManageRequest {
 	if p == nil {
 		return manualManageRequest{}
@@ -20674,6 +20695,21 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					}
 					return notify.BuildEventHTML("✅", "MANAGE APPROVED",
 						fmt.Sprintf("<b>%s %s</b> is now bot-managed from existing passive import", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
+					)
+				}
+				if managed, managedOK := c.execMgr.managedManualPositionBySymbol(sym); managedOK {
+					if !hasLiveProtectiveOrder(managed) {
+						c.execMgr.tryImmediateManualProtection(managed)
+						_ = c.execMgr.save()
+						return notify.BuildEventHTML("✅", "MANAGE ACTIVE",
+							fmt.Sprintf("<b>%s %s</b> is already bot-managed", cleanSymbol(managed.Symbol), displayPositionSide(managed.Side)),
+							fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(managed)),
+							"Live protection was re-armed automatically.",
+						)
+					}
+					return notify.BuildEventHTML("✅", "MANAGE ACTIVE",
+						fmt.Sprintf("<b>%s %s</b> is already bot-managed", cleanSymbol(managed.Symbol), displayPositionSide(managed.Side)),
+						fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(managed)),
 					)
 				}
 			}
