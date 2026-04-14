@@ -25,7 +25,9 @@ type SymbolMeta struct {
 	TickSize       float64 `json:"tickSize"`
 	StepSize       float64 `json:"stepSize"`
 	MinQty         float64 `json:"minQty"`
+	MaxQty         float64 `json:"maxQty"`
 	MinNotional    float64 `json:"minNotional"`
+	MaxNotional    float64 `json:"maxNotional"`
 	QtyPrecision   int     `json:"qtyPrecision"`
 	PricePrecision int     `json:"pricePrecision"`
 }
@@ -81,8 +83,10 @@ func (r *RESTAuth) SymbolMeta(symbol string, useCache bool) (SymbolMeta, error) 
 				TickSize    string `json:"tickSize"`
 				StepSize    string `json:"stepSize"`
 				MinQty      string `json:"minQty"`
+				MaxQty      string `json:"maxQty"`
 				Notional    string `json:"notional"`
 				MinNotional string `json:"minNotional"`
+				MaxNotional string `json:"maxNotional"`
 			} `json:"filters"`
 		} `json:"symbols"`
 	}
@@ -102,8 +106,10 @@ func (r *RESTAuth) SymbolMeta(symbol string, useCache bool) (SymbolMeta, error) 
 			TickSize    string `json:"tickSize"`
 			StepSize    string `json:"stepSize"`
 			MinQty      string `json:"minQty"`
+			MaxQty      string `json:"maxQty"`
 			Notional    string `json:"notional"`
 			MinNotional string `json:"minNotional"`
+			MaxNotional string `json:"maxNotional"`
 		} `json:"filters"`
 	}
 	for i := range out.Symbols {
@@ -132,12 +138,18 @@ func (r *RESTAuth) SymbolMeta(symbol string, useCache bool) (SymbolMeta, error) 
 			if meta.MinQty == 0 {
 				meta.MinQty = parseFloatString(f.MinQty)
 			}
+			if meta.MaxQty == 0 {
+				meta.MaxQty = parseFloatString(f.MaxQty)
+			}
 		case "MIN_NOTIONAL", "NOTIONAL":
 			if meta.MinNotional == 0 {
 				meta.MinNotional = parseFloatString(f.MinNotional)
 				if meta.MinNotional == 0 {
 					meta.MinNotional = parseFloatString(f.Notional)
 				}
+			}
+			if meta.MaxNotional == 0 {
+				meta.MaxNotional = parseFloatString(f.MaxNotional)
 			}
 		}
 	}
