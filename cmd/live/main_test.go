@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -18,6 +20,23 @@ import (
 	"go-machine/internal/strategies"
 	"go-machine/internal/types"
 )
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe create: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
+	return buf.String()
+}
 
 func TestRestAuthConfigFromConfigSupportsAgentWallet(t *testing.T) {
 	dir := t.TempDir()
@@ -191,6 +210,21 @@ func TestActiveMaintenanceWindowMinutePrecision(t *testing.T) {
 	_, ok = activeMaintenanceWindow(after, true, w)
 	if ok {
 		t.Fatalf("expected no maintenance at 18:05")
+	}
+}
+
+func TestBlockedNewRiskWindowReturnsForceFlatReason(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 3, 3, 16, 20, 0, 0, loc)
+	window, reason, blocked := blockedNewRiskWindow(now.UTC(), loc)
+	if !blocked {
+		t.Fatal("expected force-flat maintenance window to block new risk")
+	}
+	if !window.ForceFlat {
+		t.Fatalf("expected force-flat window, got %+v", window)
+	}
+	if reason != blockedForceFlatWindowReason {
+		t.Fatalf("expected %s, got %s", blockedForceFlatWindowReason, reason)
 	}
 }
 
@@ -2578,6 +2612,205 @@ func TestResolveLadderPlanBlocksNewEntriesWhenManagedTradeIsUnprotected(t *testi
 	}
 }
 
+func TestDegradedEntryReasonBlocksPartialAccountHealth(t *testing.T) {
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	mgr := &liveExecManager{
+		accountReport: accountReport{
+			Generated: now,
+			Health:    "partial",
+		},
+		accountReportCfg:  accountReportConfig{RefreshEvery: time.Hour},
+		userDataState:     aster.NewUserDataState(),
+		lastReconcileOKAt: now,
+	}
+	mgr.userDataState.ApplyAccountUpdateTestOnly(asterUserDataUpdateForTest())
+	if got := mgr.degradedEntryReason(now, "BTCUSDT"); got != degradedAccountHealthPartialReason {
+		t.Fatalf("expected %s, got %q", degradedAccountHealthPartialReason, got)
+	}
+}
+
+func TestDegradedEntryReasonBlocksStaleUserData(t *testing.T) {
+	t.Setenv("LIVE_USERDATA_STREAM_ENABLE", "1")
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	mgr := &liveExecManager{
+		accountReport: accountReport{
+			Generated: now,
+			Health:    "healthy",
+		},
+		accountReportCfg:  accountReportConfig{RefreshEvery: time.Hour},
+		lastReconcileOKAt: now,
+	}
+	if got := mgr.degradedEntryReason(now, "BTCUSDT"); got != degradedUserDataStaleReason {
+		t.Fatalf("expected %s, got %q", degradedUserDataStaleReason, got)
+	}
+}
+
+func TestDegradedModeBlocksFreshEntriesButAllowsExistingRiskManagement(t *testing.T) {
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	execMgr := &liveExecManager{
+		accountReport: accountReport{
+			Generated: now,
+			Health:    "partial",
+		},
+		accountReportCfg: accountReportConfig{RefreshEvery: time.Hour},
+	}
+	c := candidate{
+		Side:  "BUY",
+		Entry: inplay.Entry{Symbol: "BTCUSDT"},
+	}
+	reason := quickCandidateSelectionReject(
+		c,
+		now,
+		false,
+		false,
+		0,
+		now.In(time.Local),
+		maintenanceWindow{},
+		0,
+		nil,
+		execMgr,
+		safetyConfig{},
+		time.Time{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if reason != degradedAccountHealthPartialReason {
+		t.Fatalf("expected fresh-entry block %s, got %q", degradedAccountHealthPartialReason, reason)
+	}
+
+	p := &livePosition{
+		Symbol:            "BTCUSDT",
+		Side:              "BUY",
+		State:             execOpen,
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		RemainingQty:      1,
+		EntryPrice:        100,
+		LastMark:          99.5,
+		ManualManageState: manualManageStatePendingProtection,
+		Managed:           true,
+	}
+	execMgr.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
+	if p.State != execOpen {
+		t.Fatalf("expected existing position to remain open for protection retries, got state=%s", p.State)
+	}
+	if !p.ProtectionPending || p.ProtectionRetryAfter.IsZero() {
+		t.Fatalf("expected protection maintenance retry scheduling, pending=%v retry_after=%v", p.ProtectionPending, p.ProtectionRetryAfter)
+	}
+}
+
+func TestRecordOrderLegalityFailureQuarantinesSymbol(t *testing.T) {
+	t.Setenv("LIVE_ORDER_LEGALITY_FAIL_LIMIT", "3")
+	t.Setenv("LIVE_ORDER_LEGALITY_QUARANTINE_SEC", "1800")
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	mgr := &liveExecManager{
+		legalityFailCount:    map[string]int{},
+		symbolQuarantineTill: map[string]time.Time{},
+	}
+	mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+	mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+	if mgr.symbolQuarantined("BTCUSDT", now.Add(time.Minute)) {
+		t.Fatal("expected no quarantine before fail limit")
+	}
+	mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+	if !mgr.symbolQuarantined("BTCUSDT", now.Add(time.Minute)) {
+		t.Fatal("expected symbol quarantine after repeated legality failures")
+	}
+}
+
+func TestRecordOrderLegalityFailureLogsStructuredQuarantineVisibility(t *testing.T) {
+	t.Setenv("LIVE_ORDER_LEGALITY_FAIL_LIMIT", "3")
+	t.Setenv("LIVE_ORDER_LEGALITY_QUARANTINE_SEC", "1800")
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	mgr := &liveExecManager{
+		legalityFailCount:    map[string]int{},
+		symbolQuarantineTill: map[string]time.Time{},
+	}
+
+	logLine := captureStdout(t, func() {
+		mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+		mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+		mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+	})
+	if !strings.Contains(logLine, "LEGALITY_QUARANTINE") {
+		t.Fatalf("expected structured legality log marker, got %q", logLine)
+	}
+	if !strings.Contains(logLine, "symbol=BTCUSDT") ||
+		!strings.Contains(logLine, "reason="+orderIllegalMaxQtyReason) ||
+		!strings.Contains(logLine, "failure_count=3") ||
+		!strings.Contains(logLine, "quarantine_until=") ||
+		!strings.Contains(logLine, "fresh_entries_blocked=true") {
+		t.Fatalf("expected structured legality visibility fields, got %q", logLine)
+	}
+}
+
+func TestRecordOrderLegalityFailureWarnsBeforeQuarantine(t *testing.T) {
+	t.Setenv("LIVE_ORDER_LEGALITY_FAIL_LIMIT", "3")
+	t.Setenv("LIVE_ORDER_LEGALITY_QUARANTINE_SEC", "1800")
+	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
+	mgr := &liveExecManager{
+		legalityFailCount:    map[string]int{},
+		symbolQuarantineTill: map[string]time.Time{},
+	}
+
+	logLine := captureStdout(t, func() {
+		mgr.recordOrderLegalityFailure("BTCUSDT", orderIllegalMaxQtyReason, now)
+	})
+	if !strings.Contains(logLine, "LEGALITY_WARNING") {
+		t.Fatalf("expected legality warning before quarantine, got %q", logLine)
+	}
+	if !strings.Contains(logLine, "fresh_entries_blocked=false") {
+		t.Fatalf("expected fresh entries to stay unblocked before threshold, got %q", logLine)
+	}
+}
+
+func TestValidateOrderLegalityRejectsQtyAboveMaxWhenClampInvalid(t *testing.T) {
+	meta := aster.SymbolMeta{
+		StepSize:     1,
+		MinQty:       1,
+		MaxQty:       0.5,
+		MinNotional:  1,
+		QtyPrecision: 0,
+	}
+	_, _, reason := validateOrderLegality(meta, 2, 10)
+	if reason != orderIllegalMaxQtyReason {
+		t.Fatalf("expected %s, got %q", orderIllegalMaxQtyReason, reason)
+	}
+}
+
+func TestValidateOrderLegalityRejectsMinNotional(t *testing.T) {
+	meta := aster.SymbolMeta{
+		StepSize:     0.1,
+		MinQty:       0.1,
+		MaxQty:       10,
+		MinNotional:  50,
+		QtyPrecision: 2,
+	}
+	_, _, reason := validateOrderLegality(meta, 1, 10)
+	if reason != orderIllegalMinNotionalReason {
+		t.Fatalf("expected %s, got %q", orderIllegalMinNotionalReason, reason)
+	}
+}
+
+func TestValidateOrderLegalityProtectionPathRejectsIllegalTickSize(t *testing.T) {
+	meta := aster.SymbolMeta{
+		TickSize:       0.05,
+		StepSize:       0.001,
+		MinQty:         0.001,
+		MaxQty:         100,
+		MinNotional:    1,
+		PricePrecision: 2,
+		QtyPrecision:   3,
+	}
+	_, _, reason := validateOrderLegality(meta, 1, 100.03)
+	if reason != orderIllegalTickSizeReason {
+		t.Fatalf("expected %s, got %q", orderIllegalTickSizeReason, reason)
+	}
+}
+
 func TestInitializeBracketLevelsUsesManageAnchorForImportedManagedTrade(t *testing.T) {
 	m := &liveExecManager{
 		stopPct:    3.0,
@@ -2682,6 +2915,65 @@ func TestResolveLadderPlanBlocksReentryAfterRunnerCaptureFailureWithoutReset(t *
 	plan := resolveLadderPlan(time.Date(2026, 4, 3, 16, 10, 0, 0, time.UTC), c, execMgr, nil)
 	if plan.RejectReason != "reentry_runner_capture_failed" {
 		t.Fatalf("expected reentry runner capture failure block, got %+v", plan)
+	}
+}
+
+func TestResolveLadderPlanBlocksReentryWhenDisabled(t *testing.T) {
+	now := time.Date(2026, 4, 3, 16, 10, 0, 0, time.UTC)
+	execMgr := &liveExecManager{
+		reentryCfg: reentryConfig{Enable: false},
+		positions: map[string]*livePosition{
+			"STOUSDT": {
+				Symbol:   "STOUSDT",
+				Side:     "SELL",
+				State:    execClosed,
+				ClosedAt: now.Add(-10 * time.Minute),
+			},
+		},
+	}
+	c := candidate{
+		Side:      "SELL",
+		Strat:     "continuation_fast",
+		LastClose: 0.47,
+		Entry: inplay.Entry{
+			Symbol:     "STOUSDT",
+			State:      inplay.StateInPlay,
+			EntryStyle: "pullback_short",
+		},
+	}
+	plan := resolveLadderPlan(now, c, execMgr, nil)
+	if plan.IsReentry || plan.RejectReason != "reentry_disabled" {
+		t.Fatalf("expected reentry_disabled block, got %+v", plan)
+	}
+}
+
+func TestResolveLadderPlanBlocksReentryWhenDisabledEvenWithReset(t *testing.T) {
+	now := time.Date(2026, 4, 3, 16, 10, 0, 0, time.UTC)
+	execMgr := &liveExecManager{
+		reentryCfg: reentryConfig{Enable: false},
+		positions: map[string]*livePosition{
+			"STOUSDT": {
+				Symbol:   "STOUSDT",
+				Side:     "SELL",
+				State:    execClosed,
+				ClosedAt: now.Add(-10 * time.Minute),
+			},
+		},
+	}
+	c := candidate{
+		Side:       "SELL",
+		Strat:      "continuation_fast",
+		RetestHold: true,
+		LastClose:  0.47,
+		Entry: inplay.Entry{
+			Symbol:     "STOUSDT",
+			State:      inplay.StateInPlay,
+			EntryStyle: "pullback_short",
+		},
+	}
+	plan := resolveLadderPlan(now, c, execMgr, nil)
+	if plan.IsReentry || plan.RejectReason != "reentry_disabled" {
+		t.Fatalf("expected strict reentry_disabled block even with reset, got %+v", plan)
 	}
 }
 
@@ -2912,6 +3204,103 @@ func TestManualProtectionStatusShowsProtectingWhileCriticalRetryPending(t *testi
 	}
 }
 
+func TestCriticalProtectionStateHelpers(t *testing.T) {
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"SIRENUSDT": {
+				Symbol:               "SIRENUSDT",
+				Side:                 "SELL",
+				State:                execOpen,
+				RemainingQty:         120,
+				EntrySource:          manualEntrySourceManaged,
+				EntryReason:          manualEntryReasonManaged,
+				ManualManageState:    manualManageStateCritical,
+				ProtectionPending:    true,
+				ProtectionRetryCount: 2,
+				LastManageFailCause:  "invalid_after_retry",
+				Managed:              true,
+				Protected:            false,
+			},
+		},
+	}
+	if !m.hasCriticalProtectionState() {
+		t.Fatal("expected critical protection helper to detect managed critical state")
+	}
+	rows := m.criticalProtectionSummaryLines(2)
+	if len(rows) == 0 {
+		t.Fatal("expected critical protection summary lines")
+	}
+	if !strings.Contains(rows[0], "SIREN") || !strings.Contains(rows[0], "status=PROTECTING") {
+		t.Fatalf("unexpected critical summary row: %q", rows[0])
+	}
+}
+
+func TestHelpCommandGroupedByCategory(t *testing.T) {
+	resp := (&telegramCommandCtx{}).handleCommand("", "/help")
+	if !strings.Contains(resp, "Market + Status") || !strings.Contains(resp, "Trade + Manual Management") || !strings.Contains(resp, "Runtime Controls") {
+		t.Fatalf("expected grouped help categories, got %s", resp)
+	}
+}
+
+func TestPlaceOrReplaceStopEscalatesWhenConvictionPendingTooLong(t *testing.T) {
+	t.Setenv("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", "1")
+	t.Setenv("LIVE_MANUAL_PROTECTION_CONVICTION_TIMEOUT_SEC", "30")
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		State:             execOpen,
+		RemainingQty:      50,
+		EntrySource:       "BOT",
+		EntryReason:       manualEntryReasonManaged,
+		Managed:           true,
+		ManualManageState: manualManageStatePendingProtection,
+		CreatedAt:         now.Add(-2 * time.Minute),
+		UpdatedAt:         now.Add(-2 * time.Minute),
+	}
+	m := &liveExecManager{}
+	if err := m.placeOrReplaceStop(p); err != nil {
+		t.Fatalf("expected timeout escalation to short-circuit without exchange call, got %v", err)
+	}
+	if p.ManualManageState != manualManageStateCritical {
+		t.Fatalf("expected critical state after timeout escalation, got %s", p.ManualManageState)
+	}
+	if !p.ProtectionPending {
+		t.Fatal("expected protection pending to remain true after escalation")
+	}
+	if got := strings.TrimSpace(p.LastManageFailCause); got != "awaiting_conviction_timeout" {
+		t.Fatalf("expected awaiting_conviction_timeout cause, got %q", got)
+	}
+}
+
+func TestPlaceOrReplaceStopKeepsPendingWhileAwaitingConvictionWithinTimeout(t *testing.T) {
+	t.Setenv("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", "1")
+	t.Setenv("LIVE_MANUAL_PROTECTION_CONVICTION_TIMEOUT_SEC", "900")
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:            "SIRENUSDT",
+		Side:              "SELL",
+		State:             execOpen,
+		RemainingQty:      50,
+		EntrySource:       "BOT",
+		EntryReason:       manualEntryReasonManaged,
+		Managed:           true,
+		ManualManageState: manualManageStatePendingProtection,
+		CreatedAt:         now.Add(-1 * time.Minute),
+		UpdatedAt:         now.Add(-1 * time.Minute),
+	}
+	m := &liveExecManager{}
+	if err := m.placeOrReplaceStop(p); err != nil {
+		t.Fatalf("expected defer path without exchange call, got %v", err)
+	}
+	if p.ManualManageState != manualManageStatePendingProtection {
+		t.Fatalf("expected pending protection state, got %s", p.ManualManageState)
+	}
+	if !p.ProtectionPending || p.ProtectionRetryAfter.IsZero() {
+		t.Fatalf("expected pending + retry schedule while awaiting conviction, pending=%v retry_after=%v", p.ProtectionPending, p.ProtectionRetryAfter)
+	}
+}
+
 func TestTrailCandidateConfirmedFromBarsShortRequiresCloseBelowLevel(t *testing.T) {
 	t.Setenv("LIVE_TRAIL_CONFIRM_BARS", "1")
 	t.Setenv("LIVE_TRAIL_RETEST_ENABLE", "1")
@@ -3103,6 +3492,7 @@ func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
 
 func TestResolveLadderPlanAllowsStructuredReentry(t *testing.T) {
 	t.Setenv("LIVE_REENTRY_ENABLE", "1")
+	t.Setenv("LIVE_REENTRY_MAX_PER_SYMBOL", "1")
 	now := time.Date(2026, 3, 25, 9, 30, 0, 0, time.UTC)
 	execMgr := &liveExecManager{
 		positions: map[string]*livePosition{
@@ -3143,6 +3533,81 @@ func TestResolveLadderPlanAllowsStructuredReentry(t *testing.T) {
 	}
 	if plan.MarginUSDT != 20 {
 		t.Fatalf("expected 20 usdt reentry, got %.2f", plan.MarginUSDT)
+	}
+}
+
+func TestResolveLadderPlanBlocksSecondSymbolWhenOneSymbolOnly(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"BTCUSDT": {
+				Symbol:       "BTCUSDT",
+				Side:         "BUY",
+				State:        execOpen,
+				RemainingQty: 1,
+				EntrySource:  "BOT",
+			},
+		},
+		ladderCfg: ladderConfig{OneSymbolOnly: true},
+	}
+	c := candidate{
+		Side: "BUY",
+		Entry: inplay.Entry{
+			Symbol: "ETHUSDT",
+		},
+	}
+	plan := resolveLadderPlan(time.Now().UTC(), c, execMgr, nil)
+	if plan.RejectReason != "one_symbol_only_active" {
+		t.Fatalf("expected one_symbol_only_active, got %+v", plan)
+	}
+}
+
+func TestPrefilterCandidatesBeforeExpensiveWorkOneSymbolOnly(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"BTCUSDT": {
+				Symbol:       "BTCUSDT",
+				Side:         "BUY",
+				State:        execOpen,
+				RemainingQty: 1,
+				EntrySource:  "BOT",
+			},
+		},
+		ladderCfg: ladderConfig{OneSymbolOnly: true},
+	}
+	in := []candidate{
+		{Side: "BUY", Entry: inplay.Entry{Symbol: "BTCUSDT"}},
+		{Side: "BUY", Entry: inplay.Entry{Symbol: "ETHUSDT"}},
+	}
+	filtered, rejected := prefilterCandidatesBeforeExpensiveWork(in, execMgr)
+	if len(filtered) != 1 || !strings.EqualFold(filtered[0].Entry.Symbol, "BTCUSDT") {
+		t.Fatalf("expected only active symbol candidate before expensive work, got %+v", filtered)
+	}
+	if got := rejected["ETHUSDT"]; got != "one_symbol_only_active" {
+		t.Fatalf("expected ETH one-symbol early reject, got %q", got)
+	}
+}
+
+func TestManageApprovalBlockedByWindowUsesMaintenanceTimezone(t *testing.T) {
+	t.Setenv("LIVE_MAINT_TZ", "America/Chicago")
+	origLocal := time.Local
+	time.Local = time.UTC
+	defer func() { time.Local = origLocal }()
+
+	now := time.Date(2026, 4, 4, 5, 45, 0, 0, time.UTC) // 00:45 America/Chicago
+	if _, _, blocked := blockedNewRiskWindow(now, time.Local); blocked {
+		t.Fatal("expected UTC local clock to be outside blocked window")
+	}
+
+	reason, blocked := manageApprovalBlockedByWindow(now, "MANAGE")
+	if !blocked {
+		t.Fatal("expected maintenance policy timezone to block manual manage approval")
+	}
+	if reason != blockedMaintenanceWindowReason {
+		t.Fatalf("expected %s, got %q", blockedMaintenanceWindowReason, reason)
+	}
+
+	if _, blocked := manageApprovalBlockedByWindow(now, "FORCE_FLAT"); blocked {
+		t.Fatal("did not expect force-flat manage action to be blocked")
 	}
 }
 
@@ -3226,7 +3691,7 @@ func TestSessionEntryRejectReasonAllowsOffHoursAGradeEntry(t *testing.T) {
 	}
 }
 
-func TestSessionEntryRejectReasonAllowsOffHoursEntry(t *testing.T) {
+func TestSessionEntryRejectReasonBlocksOffHoursWeakEntry(t *testing.T) {
 	c := candidate{
 		Side:          "BUY",
 		Strat:         "continuation_fast",
@@ -3241,8 +3706,30 @@ func TestSessionEntryRejectReasonAllowsOffHoursEntry(t *testing.T) {
 		},
 	}
 	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 21, 30, 0, 0, time.UTC), c, ladderPlan{})
-	if reason != "" {
-		t.Fatalf("expected off-hours entry to pass, got %q", reason)
+	if reason != "utc_offhours_requires_a_grade" {
+		t.Fatalf("expected off-hours weak entry block, got %q", reason)
+	}
+}
+
+func TestChaseRejectReasonBlocksObviousChaseAndAllowsStructuredReset(t *testing.T) {
+	chase := candidate{
+		Side:      "BUY",
+		Strat:     "continuation_fast",
+		DayUTC24h: 10.0,
+		Entry: inplay.Entry{
+			State:           inplay.StatePumping,
+			BarsSinceTrough: 1,
+		},
+	}
+	if got := chaseRejectReason(chase, false); got == "" {
+		t.Fatal("expected obvious chase setup to be rejected")
+	}
+
+	reset := chase
+	reset.ReclaimHold = true
+	reset.RetestHold = true
+	if got := chaseRejectReason(reset, true); got != "" {
+		t.Fatalf("expected structured reset/retest to bypass chase reject, got %q", got)
 	}
 }
 
@@ -3323,6 +3810,154 @@ func TestLoadLadderConfigFixedSizeNoAddMode(t *testing.T) {
 	}
 	if !ladderAddsDisabled(cfg) {
 		t.Fatal("expected fixed-size ladder to disable adds")
+	}
+}
+
+func TestContinuationLaneRejectReasonBlocksExtendedNoReset(t *testing.T) {
+	t.Setenv("LIVE_ADD_MAX_DIRECTIONAL_PCT", "6")
+	c := candidate{
+		Side:         "BUY",
+		Strat:        "continuation_fast",
+		DayUTC24h:    9.0,
+		ExtensionATR: 1.5,
+		Entry: inplay.Entry{
+			State: inplay.StateInPlay,
+		},
+	}
+	if got := continuationLaneRejectReason(c); got == "" {
+		t.Fatal("expected continuation lane to reject extended no-reset candidate")
+	}
+}
+
+func TestContinuationLaneRejectReasonBlocksExhaustionAndFadingImpulse(t *testing.T) {
+	exhausted := candidate{
+		Side:  "BUY",
+		Strat: "continuation_fast",
+		Entry: inplay.Entry{
+			State:      inplay.StateInPlay,
+			EntryStyle: "avoid_chase",
+		},
+	}
+	if got := continuationLaneRejectReason(exhausted); got != "continuation_exhaustion_active" {
+		t.Fatalf("expected continuation_exhaustion_active, got %q", got)
+	}
+
+	fading := candidate{
+		Side:        "BUY",
+		Strat:       "continuation_fast",
+		LastClose:   99,
+		SessionVWAP: 100,
+		EMA9:        100,
+		Entry: inplay.Entry{
+			State:      inplay.StateInPlay,
+			ScoreSlope: 0.0,
+		},
+		TriggerState: string(triggerFailReclaim),
+	}
+	if got := continuationLaneRejectReason(fading); got != "continuation_impulse_fading" {
+		t.Fatalf("expected continuation_impulse_fading, got %q", got)
+	}
+}
+
+func TestStarterLaneQualityRequiresPersistenceOrReset(t *testing.T) {
+	t.Setenv("LIVE_STARTER_PERSIST_MIN_SEEN", "2")
+	t.Setenv("LIVE_STARTER_PERSIST_MIN_TOPN", "1")
+	c := candidate{
+		Strat: "continuation_fast_starter",
+		Entry: inplay.Entry{State: inplay.StateInPlay},
+	}
+	if starterLaneQualityReady(c) {
+		t.Fatal("expected starter lane quality to fail without reset/persistence")
+	}
+	c.PersistenceSeenCount = 2
+	c.PersistenceTopNCount = 1
+	if !starterLaneQualityReady(c) {
+		t.Fatal("expected starter lane quality to pass on persistence evidence")
+	}
+}
+
+func TestResolveLadderPlanStarterLaneBlocksAdds(t *testing.T) {
+	execMgr := &liveExecManager{
+		positions: map[string]*livePosition{
+			"LYNUSDT": {
+				Symbol:       "LYNUSDT",
+				Side:         "BUY",
+				State:        execOpen,
+				EntrySource:  "BOT",
+				RemainingQty: 1,
+			},
+		},
+		ladderCfg: loadLadderConfig(10),
+	}
+	c := candidate{
+		Side:  "BUY",
+		Strat: "reclaim_long_starter",
+		Entry: inplay.Entry{Symbol: "LYNUSDT"},
+	}
+	plan := resolveLadderPlan(time.Date(2026, 4, 8, 13, 0, 0, 0, time.UTC), c, execMgr, nil)
+	if plan.IsAdd || plan.RejectReason != "starter_lane_no_adds" {
+		t.Fatalf("expected starter lane no-add rejection, got %+v", plan)
+	}
+}
+
+func TestQuickCandidateSelectionRejectBlocksMaintenanceWindow(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 4, 4, 0, 45, 0, 0, time.UTC)
+	local := time.Date(2026, 4, 4, 0, 45, 0, 0, loc)
+	c := candidate{Side: "BUY", Entry: inplay.Entry{Symbol: "BTCUSDT"}}
+	got := quickCandidateSelectionReject(c, now, false, false, 0, local, maintenanceWindow{}, 0, nil, nil, safetyConfig{}, time.Time{}, nil, nil, nil, nil, nil)
+	if got != blockedMaintenanceWindowReason {
+		t.Fatalf("expected %s, got %q", blockedMaintenanceWindowReason, got)
+	}
+}
+
+func TestMaintenanceWindowBlocksFreshPromotionButKeepsProtectionHandling(t *testing.T) {
+	loc, _ := time.LoadLocation("America/Chicago")
+	now := time.Date(2026, 4, 4, 0, 45, 0, 0, time.UTC)
+	localMaint := time.Date(2026, 4, 4, 0, 45, 0, 0, loc)
+	c := candidate{Side: "BUY", Entry: inplay.Entry{Symbol: "BTCUSDT"}}
+	freshReject := quickCandidateSelectionReject(
+		c,
+		now,
+		false,
+		false,
+		0,
+		localMaint,
+		maintenanceWindow{},
+		0,
+		nil,
+		nil,
+		safetyConfig{},
+		time.Time{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if freshReject != blockedMaintenanceWindowReason {
+		t.Fatalf("expected fresh promotion blocked by maintenance window, got %q", freshReject)
+	}
+
+	mgr := &liveExecManager{}
+	p := &livePosition{
+		Symbol:            "BTCUSDT",
+		Side:              "BUY",
+		State:             execOpen,
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		RemainingQty:      1,
+		EntryPrice:        100,
+		LastMark:          99.5,
+		ManualManageState: manualManageStatePendingProtection,
+		Managed:           true,
+	}
+	mgr.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
+	if p.State != execOpen {
+		t.Fatalf("expected essential protection handling to keep position open, got state=%s", p.State)
+	}
+	if !p.ProtectionPending || p.ProtectionRetryAfter.IsZero() {
+		t.Fatalf("expected essential protection retry scheduling during maintenance, pending=%v retry_after=%v", p.ProtectionPending, p.ProtectionRetryAfter)
 	}
 }
 

@@ -791,6 +791,20 @@ const (
 	execClosed       execState = "CLOSED"
 )
 
+const (
+	blockedMaintenanceWindowReason        = "BLOCKED_MAINTENANCE_WINDOW"
+	blockedForceFlatWindowReason          = "BLOCKED_FORCE_FLAT_WINDOW"
+	degradedAccountHealthPartialReason    = "DEGRADED_ACCOUNT_HEALTH_PARTIAL"
+	degradedUserDataStaleReason           = "DEGRADED_USERDATA_STALE"
+	degradedReconcileStaleReason          = "DEGRADED_RECONCILE_STALE"
+	degradedOrderLegalityQuarantineReason = "DEGRADED_ORDER_LEGALITY_SYMBOL_QUARANTINE"
+	orderIllegalMaxQtyReason              = "ORDER_ILLEGAL_MAX_QTY"
+	orderIllegalMinQtyReason              = "ORDER_ILLEGAL_MIN_QTY"
+	orderIllegalStepSizeReason            = "ORDER_ILLEGAL_STEP_SIZE"
+	orderIllegalMinNotionalReason         = "ORDER_ILLEGAL_MIN_NOTIONAL"
+	orderIllegalTickSizeReason            = "ORDER_ILLEGAL_TICK_SIZE"
+)
+
 type livePosition struct {
 	Symbol                  string           `json:"symbol"`
 	Side                    string           `json:"side"`
@@ -994,6 +1008,11 @@ type liveExecManager struct {
 	lastTransferStatus   string
 	lastRemoteImportAt   time.Time
 	lastFundsCheckAt     time.Time
+	lastReconcileOKAt    time.Time
+	lastReconcileErrAt   time.Time
+	reconcileFailCount   int
+	legalityFailCount    map[string]int
+	symbolQuarantineTill map[string]time.Time
 }
 
 type ladderConfig struct {
@@ -1172,7 +1191,7 @@ func main() {
 	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 0)
 	reserveMode := strings.ToLower(envStr("LIVE_RESERVE_MODE", "fixed")) // fixed|percent|dynamic
 	reservePct := envFloat("LIVE_RESERVE_PCT", 50.0)
-	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 20)
+	tradeMargin := envFloat("LIVE_TRADE_MARGIN_USDT", 10)
 	tradeMarginMode := strings.ToLower(envStr("LIVE_TRADE_MARGIN_MODE", "fixed")) // fixed|percent|slots|dynamic
 	tradeMarginPct := envFloat("LIVE_TRADE_MARGIN_PCT", 10.0)
 	tradeSlots := envInt("LIVE_TRADE_SLOTS", 5)
@@ -1184,8 +1203,8 @@ func main() {
 	ladderCfg := loadLadderConfig(tradeMargin)
 	reentryCfg := loadReentryConfig(ladderCfg.StarterUSDT)
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
-	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 3)
-	leverageMin := envInt("LIVE_LEVERAGE_MIN", 3)
+	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 2)
+	leverageMin := envInt("LIVE_LEVERAGE_MIN", 2)
 	stopMode := strings.ToLower(envStr("LIVE_STOP_MODE", "hybrid"))
 	targetMode := strings.ToLower(envStr("LIVE_TARGET_MODE", "hybrid"))
 	vpMinTargetPct := envFloat("LIVE_VP_MIN_TARGET_PCT", 0.10)
@@ -1224,11 +1243,11 @@ func main() {
 	if strategyTopN <= 0 {
 		strategyTopN = 3
 	}
-	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 5)
+	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 1)
 	if maxOpenPos <= 0 {
-		maxOpenPos = 5
+		maxOpenPos = 1
 	}
-	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 5)
+	maxOpenPerSide := envInt("LIVE_MAX_OPEN_PER_SIDE", 1)
 	if maxOpenPerSide < 0 {
 		maxOpenPerSide = 0
 	}
@@ -1522,7 +1541,6 @@ func main() {
 	if err != nil {
 		maintLoc = hourlyLoc
 	}
-	maintEnabled := envBool("LIVE_MAINT_ENABLE", false)
 	maintWarmup := time.Duration(envInt("LIVE_MAINT_WARMUP_MIN", 0)) * time.Minute
 	preEODEntryBlockMin := 0
 	postSLCooldown := time.Duration(envInt("POST_SL_COOLDOWN_MIN", 30)) * time.Minute
@@ -1552,18 +1570,14 @@ func main() {
 	if reversalVolSpike <= 0 {
 		reversalVolSpike = 3.0
 	}
-	maintEOD := maintenanceWindow{
-		Name:      "EOD",
-		Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", false),
-		StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
-		StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
-		EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
-		EndMin:    envInt("LIVE_MAINT2_END_MIN", 0),
-		ForceFlat: false,
-		HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
-		HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
+	maintenanceWindows := runtimeMaintenanceWindows()
+	maintEOD := maintenanceWindow{}
+	for _, w := range maintenanceWindows {
+		if w.ForceFlat {
+			maintEOD = w
+			break
+		}
 	}
-	maintEOD = normalizeMaintenanceWindow(maintEOD)
 	nextDigestAt := time.Now().UTC().Add(10 * time.Second)
 	nextTradeUpdateAt := time.Now().UTC().Add(45 * time.Second)
 	lastDailyReportDay := ""
@@ -1575,6 +1589,7 @@ func main() {
 	lastPaperTradeUpdateSig := ""
 	lastLiveTradeUpdateSig := ""
 	var lastPulseSentAt time.Time
+	var lastCriticalProtectSummaryAt time.Time
 	maintState := maintenanceState{
 		LastStartDay: map[string]string{},
 		LastEndDay:   map[string]string{},
@@ -1763,8 +1778,7 @@ func main() {
 		}
 		cacheStatsStart := featureCache.statsSnapshot()
 		localMaintNow := now.In(maintLoc)
-		maintWindow, inMaint := maintenanceWindow{}, false
-		_ = maintEnabled
+		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, true, maintenanceWindows...)
 		watcherOnly := liveWakeReason == "watcher" && !lastScanAt.IsZero() && now.Sub(lastScanAt) < scanEvery && len(cachedMetaBySymbol) > 0
 		cycleMode := "scan"
 		if watcherOnly {
@@ -1942,89 +1956,103 @@ func main() {
 		if paper.enabled {
 			paper.CheckExit(now, metaBySymbol, paperDepth, longCurrent, shortCurrent, momBySymbol, flowMetricsBySymbol)
 		}
-		if paper.enabled && tg != nil && tg.Enabled() {
-			if now.After(nextTradeUpdateAt) {
-				if len(paper.positions) > 0 {
-					if sig := paper.TradeUpdateSignature(metaBySymbol, tradeUpdateTop); sig != "" && sig != lastPaperTradeUpdateSig {
-						if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
+		inCriticalProtection := execMgr != nil && execMgr.hasCriticalProtectionState()
+		if !inMaint {
+			if paper.enabled && tg != nil && tg.Enabled() {
+				if now.After(nextTradeUpdateAt) {
+					if len(paper.positions) > 0 {
+						if sig := paper.TradeUpdateSignature(metaBySymbol, tradeUpdateTop); sig != "" && sig != lastPaperTradeUpdateSig {
+							if msg := paper.TradeUpdateMessage(metaBySymbol, tradeUpdateTop); msg != "" {
+								tg.Sendf("%s", tgPre(msg))
+								lastPaperTradeUpdateSig = sig
+							}
+						}
+						nextTradeUpdateAt = now.Add(tradeUpdateEvery)
+					} else {
+						lastPaperTradeUpdateSig = ""
+						nextTradeUpdateAt = now.Add(time.Minute)
+					}
+				}
+				localNow := now.In(paper.reportLoc)
+				if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
+					dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
+					if dayKey != lastDailyReportDay {
+						tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
+							fmt.Sprintf("<b>Day:</b> %s", dayKey),
+							fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
+						))
+						if msg, ok := paper.DailyReportMessage(dayKey); ok {
+							tg.Sendf("%s", msg)
+						}
+						if receiptEnable {
+							if rmsg, ok := paper.DailyReceiptMessage(dayKey, receiptLimit); ok {
+								tg.Sendf("%s", tgPre(rmsg))
+							}
+						}
+						lastDailyReportDay = dayKey
+					}
+				}
+				if localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute) {
+					dayKey := localNow.Format("2006-01-02")
+					if dayKey != lastSODReportDay {
+						if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+							tg.Sendf("%s", buildSODReport(localNow, paper, metaBySymbol))
+							lastPulseSentAt = now
+							lastSODReportDay = dayKey
+						}
+					}
+				}
+			}
+			if tg != nil && tg.Enabled() && execMgr != nil {
+				if inCriticalProtection {
+					if shouldSendPulse(now, lastCriticalProtectSummaryAt, 3*time.Minute) {
+						lines := execMgr.criticalProtectionSummaryLines(3)
+						if len(lines) > 0 {
+							tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateDegraded, "", "",
+								append([]string{
+									"<b>Critical protection mode:</b> suppressing non-essential digests/live updates",
+								}, lines...)...,
+							))
+						}
+						lastCriticalProtectSummaryAt = now
+					}
+				} else if now.After(nextTradeUpdateAt) {
+					if execMgr.ActiveCount() > 0 {
+						if sig := execMgr.liveTradeUpdateSignature(metaBySymbol); sig != "" && sig != lastLiveTradeUpdateSig && !(hourlyEnable && localMaintNow.Minute() == 0) {
+							if msg := execMgr.liveTradeUpdateMessage(metaBySymbol); msg != "" {
+								tg.Sendf("%s", tgPre(msg))
+								lastLiveTradeUpdateSig = sig
+							}
+						}
+						nextTradeUpdateAt = now.Add(tradeUpdateEvery)
+					} else {
+						lastLiveTradeUpdateSig = ""
+						nextTradeUpdateAt = now.Add(time.Minute)
+					}
+				}
+			}
+			if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
+				localNow := now.In(execMgr.reportLoc)
+				if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
+					dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
+					if dayKey != lastDailyLiveReceiptDay {
+						tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
+							fmt.Sprintf("<b>Day:</b> %s", dayKey),
+							fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
+						))
+						if msg, ok := execMgr.DailyReportMessage(dayKey); ok {
+							tg.Sendf("%s", msg)
+						}
+						if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
 							tg.Sendf("%s", tgPre(msg))
-							lastPaperTradeUpdateSig = sig
 						}
-					}
-					nextTradeUpdateAt = now.Add(tradeUpdateEvery)
-				} else {
-					lastPaperTradeUpdateSig = ""
-					nextTradeUpdateAt = now.Add(time.Minute)
-				}
-			}
-			localNow := now.In(paper.reportLoc)
-			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
-				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
-				if dayKey != lastDailyReportDay {
-					tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
-						fmt.Sprintf("<b>Day:</b> %s", dayKey),
-						fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
-					))
-					if msg, ok := paper.DailyReportMessage(dayKey); ok {
-						tg.Sendf("%s", msg)
-					}
-					if receiptEnable {
-						if rmsg, ok := paper.DailyReceiptMessage(dayKey, receiptLimit); ok {
-							tg.Sendf("%s", tgPre(rmsg))
-						}
-					}
-					lastDailyReportDay = dayKey
-				}
-			}
-			if localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute) {
-				dayKey := localNow.Format("2006-01-02")
-				if dayKey != lastSODReportDay {
-					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-						tg.Sendf("%s", buildSODReport(localNow, paper, metaBySymbol))
-						lastPulseSentAt = now
-						lastSODReportDay = dayKey
+						lastDailyLiveReceiptDay = dayKey
 					}
 				}
 			}
-		}
-		if tg != nil && tg.Enabled() && execMgr != nil {
-			if now.After(nextTradeUpdateAt) {
-				if execMgr.ActiveCount() > 0 {
-					if sig := execMgr.liveTradeUpdateSignature(metaBySymbol); sig != "" && sig != lastLiveTradeUpdateSig {
-						if msg := execMgr.liveTradeUpdateMessage(metaBySymbol); msg != "" {
-							tg.Sendf("%s", tgPre(msg))
-							lastLiveTradeUpdateSig = sig
-						}
-					}
-					nextTradeUpdateAt = now.Add(tradeUpdateEvery)
-				} else {
-					lastLiveTradeUpdateSig = ""
-					nextTradeUpdateAt = now.Add(time.Minute)
-				}
+			if missed != nil {
+				missed.Update(now, metaBySymbol, longCurrent, shortCurrent, eventLog)
 			}
-		}
-		if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
-			localNow := now.In(execMgr.reportLoc)
-			if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
-				dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
-				if dayKey != lastDailyLiveReceiptDay {
-					tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
-						fmt.Sprintf("<b>Day:</b> %s", dayKey),
-						fmt.Sprintf("<b>Time:</b> %s", localNow.Format("15:04 MST")),
-					))
-					if msg, ok := execMgr.DailyReportMessage(dayKey); ok {
-						tg.Sendf("%s", msg)
-					}
-					if msg, ok := execMgr.DailyReceiptMessage(dayKey, liveReceiptLimit); ok {
-						tg.Sendf("%s", tgPre(msg))
-					}
-					lastDailyLiveReceiptDay = dayKey
-				}
-			}
-		}
-
-		if missed != nil {
-			missed.Update(now, metaBySymbol, longCurrent, shortCurrent, eventLog)
 		}
 		externalFlow := externalFlowFeed.Snapshot(now)
 		if paper.enabled {
@@ -2033,37 +2061,39 @@ func main() {
 		if execMgr != nil {
 			execMgr.ApplyMomentumExit(now, momBySymbol, flowMetricsBySymbol, externalFlow)
 		}
-		printScanHeader(localMaintNow)
-		printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
-		eventLog.Emit(stats.Event{
-			Timestamp: now,
-			Type:      "METRICS_SNAPSHOT",
-			TF:        "1m",
-			Reason:    fmt.Sprintf("long_inplay=%d short_inplay=%d", len(longInPlay), len(shortInPlay)),
-		})
-		if tg != nil && tg.Enabled() && hourlyEnable && ((paper != nil && paper.enabled) || execMgr != nil) {
-			hk := localMaintNow.Format("2006-01-02 15")
-			if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
-				if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-					tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, execMgr, missed, metaBySymbol, longInPlay, shortInPlay, digestLimit))
-					lastPulseSentAt = now
-					lastHourlyKey = hk
-				}
-			}
-			if localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute) {
-				dayKey := localMaintNow.Format("2006-01-02")
-				if dayKey != lastPreUSReportDay {
+		if !inMaint {
+			printScanHeader(localMaintNow)
+			printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
+			eventLog.Emit(stats.Event{
+				Timestamp: now,
+				Type:      "METRICS_SNAPSHOT",
+				TF:        "1m",
+				Reason:    fmt.Sprintf("long_inplay=%d short_inplay=%d", len(longInPlay), len(shortInPlay)),
+			})
+			if tg != nil && tg.Enabled() && hourlyEnable && ((paper != nil && paper.enabled) || execMgr != nil) && !inCriticalProtection {
+				hk := localMaintNow.Format("2006-01-02 15")
+				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-						tg.Sendf("%s", buildWindowReport("Pre-US Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+						tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, execMgr, missed, metaBySymbol, longInPlay, shortInPlay, digestLimit))
 						lastPulseSentAt = now
-						lastPreUSReportDay = dayKey
+						lastHourlyKey = hk
+					}
+				}
+				if localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute) {
+					dayKey := localMaintNow.Format("2006-01-02")
+					if dayKey != lastPreUSReportDay {
+						if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+							tg.Sendf("%s", buildWindowReport("Pre-US Report", localMaintNow, paper, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+							lastPulseSentAt = now
+							lastPreUSReportDay = dayKey
+						}
 					}
 				}
 			}
-		}
-		if !hourlyEnable && time.Now().UTC().After(nextDigestAt) {
-			sendInPlayDigest(tg, longInPlay, shortInPlay, metaBySymbol, dryRun, digestLimit)
-			nextDigestAt = time.Now().UTC().Add(digestEvery)
+			if !hourlyEnable && !inCriticalProtection && time.Now().UTC().After(nextDigestAt) {
+				sendInPlayDigest(tg, longInPlay, shortInPlay, metaBySymbol, dryRun, digestLimit)
+				nextDigestAt = time.Now().UTC().Add(digestEvery)
+			}
 		}
 
 		var acct accountSnapshot
@@ -2110,7 +2140,9 @@ func main() {
 		}
 		if execMgr != nil {
 			execMgr.Reconcile(now, momBySymbol, flowMetricsBySymbol, metaBySymbol)
-			execMgr.MaintainPerpBalance(now)
+			if !inMaint {
+				execMgr.MaintainPerpBalance(now)
+			}
 			for sym, pos := range execMgr.positions {
 				if pos == nil || pos.State != execClosed || pos.ClosedAt.IsZero() {
 					continue
@@ -2177,7 +2209,7 @@ func main() {
 				}
 			}
 		} else {
-			for _, w := range []maintenanceWindow{maintEOD} {
+			for _, w := range maintenanceWindows {
 				if !w.Enabled {
 					continue
 				}
@@ -2193,10 +2225,10 @@ func main() {
 				}
 			}
 		}
-		if payoutMgr != nil && payoutMgr.enabled {
+		if payoutMgr != nil && payoutMgr.enabled && !inMaint {
 			payoutMgr.maybeRun(now, localMaintNow, maintEOD, &maintState, paper, metaBySymbol, acct, execMgr, tg)
 		}
-		if paper.enabled {
+		if paper.enabled && !inMaint {
 			fmt.Println(paper.ConsoleSummary(metaBySymbol))
 			for _, line := range paper.ConsolePositions(metaBySymbol) {
 				fmt.Println(line)
@@ -2221,6 +2253,21 @@ func main() {
 			acct.AvailableUSDT,
 			paper,
 		)
+		if inMaint {
+			reason := blockedWindowReason(maintWindow)
+			fmt.Printf("live: %s window=%s session=%s\n", reason, maintWindow.Name, sessionTag(localMaintNow))
+			statusStore.Set(liveStatus{
+				Generated:       now,
+				DryRun:          dryRun,
+				LiveEnabled:     safety.enableLiveTrading,
+				AvailableUSDT:   acct.AvailableUSDT,
+				TopDecision:     "blocked",
+				TopDecisionWhy:  reason,
+				TopRejectReason: reason,
+			})
+			waitAndReport()
+			continue
+		}
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(featureCache, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore, flowMetricsBySymbol)
@@ -2682,10 +2729,32 @@ func main() {
 		selectedDepth := map[string]aster.OrderBook{}
 		var selectionRejects []string
 		selectionN := minInt(maxInt(1, acceptanceCfg.TopN), len(cands))
+		queueCandidates := append([]candidate(nil), cands[:selectionN]...)
+		filteredQueue, earlyRejects := prefilterCandidatesBeforeExpensiveWork(queueCandidates, execMgr)
+		for _, c := range queueCandidates {
+			raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+			if reason, ok := earlyRejects[raw]; ok {
+				recordCandidateDecision(cmdCtx, c, reason)
+				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", raw, reason))
+				if missed != nil {
+					missed.Observe(now, c, reason)
+				}
+			}
+		}
+		queueCandidates = filteredQueue
+		if len(queueCandidates) == 0 {
+			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
+			statusStore.Set(st)
+			if verboseRejectLogging() {
+				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
+			}
+			waitAndReport()
+			continue
+		}
 		attemptBudget := maxInt(1, acceptanceCfg.MaxAttemptsPerCycle)
 		depthSyms := make([]string, 0, selectionN)
-		for i := 0; i < selectionN; i++ {
-			raw := strings.ToUpper(aster.RawSymbol(cands[i].Entry.Symbol))
+		for i := 0; i < len(queueCandidates); i++ {
+			raw := strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol))
 			if raw != "" {
 				depthSyms = append(depthSyms, raw)
 			}
@@ -2741,9 +2810,9 @@ func main() {
 			MaxOpenPerSide:        maxOpenPerSide,
 			ExecMgr:               execMgr,
 		}
-		for i := 0; i < selectionN && i < attemptBudget; i++ {
+		for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
 			reason := quickCandidateSelectionReject(
-				cands[i],
+				queueCandidates[i],
 				now,
 				pureMode,
 				allowDeadSessionTrading,
@@ -2762,23 +2831,23 @@ func main() {
 				symbolStopoutLockUntil,
 			)
 			if reason != "" {
-				recordCandidateDecision(cmdCtx, cands[i], reason)
-				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(cands[i].Entry.Symbol)), reason))
+				recordCandidateDecision(cmdCtx, queueCandidates[i], reason)
+				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), reason))
 				if missed != nil {
-					missed.Observe(now, cands[i], reason)
+					missed.Observe(now, queueCandidates[i], reason)
 				}
 				continue
 			}
-			deepRes := deepQueuePreflight(cands[i], queueCtx)
+			deepRes := deepQueuePreflight(queueCandidates[i], queueCtx)
 			if deepRes.RejectReason != "" {
-				recordCandidateDecision(cmdCtx, cands[i], deepRes.RejectReason)
-				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(cands[i].Entry.Symbol)), deepRes.RejectReason))
+				recordCandidateDecision(cmdCtx, queueCandidates[i], deepRes.RejectReason)
+				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), deepRes.RejectReason))
 				if missed != nil {
-					missed.Observe(now, cands[i], deepRes.RejectReason)
+					missed.Observe(now, queueCandidates[i], deepRes.RejectReason)
 				}
 				continue
 			}
-			best = cands[i]
+			best = queueCandidates[i]
 			selectedSpreadBps = deepRes.SpreadBps
 			selectedBookImb = deepRes.BookImb
 			raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
@@ -2798,11 +2867,11 @@ func main() {
 			continue
 		}
 		if missed != nil {
-			for i := 0; i < selectionN; i++ {
-				if strings.EqualFold(aster.RawSymbol(cands[i].Entry.Symbol), aster.RawSymbol(best.Entry.Symbol)) && strings.EqualFold(cands[i].Side, best.Side) {
+			for i := 0; i < len(queueCandidates); i++ {
+				if strings.EqualFold(aster.RawSymbol(queueCandidates[i].Entry.Symbol), aster.RawSymbol(best.Entry.Symbol)) && strings.EqualFold(queueCandidates[i].Side, best.Side) {
 					continue
 				}
-				missed.Observe(now, cands[i], "architecture_miss:not_selected")
+				missed.Observe(now, queueCandidates[i], "architecture_miss:not_selected")
 			}
 		}
 		st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
@@ -2843,8 +2912,11 @@ func main() {
 		if ladderCfg.StarterUSDT > 0 {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
-		eligibility.StarterAllowed = true
+		eligibility.StarterAllowed = starterLaneEligible(best) && starterLaneQualityReady(best)
 		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) && !strings.EqualFold(best.Strat, "early_dev_entry")
+		if starterLaneEligible(best) && !eligibility.StarterAllowed {
+			addEligibilityBlock(&eligibility, "starter_lane_needs_persistence_or_reset")
+		}
 		bestMeta := metaBySymbol[rawBest]
 		fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
 			best.Entry.Symbol,
@@ -3299,6 +3371,15 @@ func main() {
 			}
 		}
 		if execMgr != nil {
+			if degradedReason := execMgr.degradedEntryReason(now, best.Entry.Symbol); degradedReason != "" {
+				recordCandidateDecision(cmdCtx, best, degradedReason)
+				addEligibilityBlock(&eligibility, degradedReason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
+				fmt.Printf("live: degraded gate block symbol=%s reason=%s\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), degradedReason)
+				waitAndReport()
+				continue
+			}
 			if refreshed, toppedUp := execMgr.EnsureEntryFunds(maxFloat(safety.minAvailUSDT, effectiveMargin), avail); toppedUp {
 				avail = refreshed
 			}
@@ -3425,6 +3506,10 @@ func main() {
 			fmt.Println("live: execution manager unavailable")
 			waitAndReport()
 			continue
+		}
+		if contReject := continuationLaneRejectReason(best); contReject != "" {
+			recordCandidateDecision(cmdCtx, best, contReject)
+			addEligibilityBlock(&eligibility, contReject)
 		}
 		chooseFinalDecision(&eligibility, ladderPlan)
 		if eligibility.FinalDecision != "full_entry" && eligibility.FinalDecision != "starter_entry" && eligibility.FinalDecision != "reentry_entry" {
@@ -3579,7 +3664,7 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 	if dryRun {
 		mode = "DRY_RUN"
 	}
-	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, maxInt(1, limit))
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, minInt(3, maxInt(1, limit)))
 	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE DIGEST",
 		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
 		fmt.Sprintf("<b>Session:</b> %s", sessionTag(now)),
@@ -3642,20 +3727,20 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 		return tgPre(fmt.Sprintf("%s (%s) session=%s\nlive disabled", strings.TrimSpace(label), now.Format("15:04 MST"), sessionTag(now)))
 	}
 	pulse, cards := buildLivePulseAndCards(strings.TrimSpace(label), now, m)
-	var b strings.Builder
-	b.WriteString(notify.BuildSessionPulseHTML(pulse))
+	lines := []string{
+		fmt.Sprintf("<b>Session:</b> %s | <b>Time:</b> %s", strings.ToUpper(strings.TrimSpace(pulse.Session)), strings.TrimSpace(pulse.TimeLabel)),
+		fmt.Sprintf("<b>Balance:</b> $%.2f | <b>Equity:</b> $%.2f | <b>Net Day:</b> %+.2f", pulse.Balance, pulse.Equity, pulse.NetDay),
+	}
 	if len(cards) > 0 {
 		for i, card := range cards {
-			if i >= 3 {
+			if i >= 2 {
 				break
 			}
-			b.WriteString("\n\n")
-			b.WriteString(notify.BuildPositionCard(card))
+			lines = append(lines, notify.BuildPositionCard(card))
 		}
 	}
 	if acct := strings.TrimSpace(m.AccountDigestSection()); acct != "" {
-		b.WriteString("\n\n")
-		b.WriteString(acct)
+		lines = append(lines, acct)
 	}
 	degraded := []string{}
 	if snap := m.LiveAccountSnapshot(32); len(snap.Positions) > 0 {
@@ -3667,37 +3752,16 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 		}
 	}
 	if len(degraded) > 0 {
-		b.WriteString("\n\nProtection Degraded\n")
-		for _, row := range degraded {
-			b.WriteString("- ")
-			b.WriteString(row)
-			b.WriteByte('\n')
-		}
+		lines = append(lines, "<b>Protection Degraded:</b> "+strings.Join(degraded, " | "))
 	}
 	if missed != nil {
 		if rows := missed.ReviewLines(now.UTC(), 4); len(rows) > 0 {
-			b.WriteString("\n\nBlocked but Strong\n")
-			for _, row := range rows {
-				b.WriteString("- ")
-				b.WriteString(row)
-				b.WriteByte('\n')
-			}
-		}
-		if rows := missed.ReviewLines(now.UTC(), 4); len(rows) > 0 {
-			b.WriteString("\n\nMissed Opportunities\n")
-			for _, row := range rows {
-				b.WriteString("- ")
-				b.WriteString(row)
-				b.WriteByte('\n')
-			}
-			b.WriteString("What triggers persistence_entry: repeated top-rank presence, stable/up volume, stable/up momentum, no hard invalidation\n")
+			lines = append(lines, "<b>Blocked/Missed:</b> "+strings.Join(rows, " | "))
 		}
 	}
-	b.WriteString("\n\nLive Update\n")
-	b.WriteString(m.liveTradeUpdateMessage(meta))
-	b.WriteString("\n\nIn-Play Scanner\n")
-	appendUnifiedInPlayRows(&b, longInPlay, shortInPlay, meta, 10_000)
-	return tgPre(strings.TrimSpace(b.String()))
+	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, 3)
+	lines = append(lines, notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
+	return notify.BuildEventHTML("📡", strings.ToUpper(strings.TrimSpace(label)), lines...)
 }
 
 func scannerItemsForCommand(s liveStatus, which string) ([]notify.ScanItem, []notify.ScanItem, string) {
@@ -5228,7 +5292,7 @@ func loadReentryConfig(defaultSize float64) reentryConfig {
 	cfg := reentryConfig{
 		Enable:       envBool("LIVE_REENTRY_ENABLE", false),
 		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 10)),
-		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 5),
+		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 0),
 		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
 	}
 	if cfg.SizeUSDT <= 0 {
@@ -5240,7 +5304,272 @@ func loadReentryConfig(defaultSize float64) reentryConfig {
 	if cfg.Cooldown < 0 {
 		cfg.Cooldown = 0
 	}
+	if !cfg.Enable {
+		cfg.SizeUSDT = 0
+		cfg.MaxPerSymbol = 0
+	}
 	return cfg
+}
+
+func runtimeMaintenanceWindows() []maintenanceWindow {
+	windows := []maintenanceWindow{
+		normalizeMaintenanceWindow(maintenanceWindow{
+			Name:      "MAINTENANCE",
+			Enabled:   envBool("LIVE_MAINT1_ENABLE", true),
+			StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
+			StartMin:  envInt("LIVE_MAINT1_START_MIN", 0),
+			EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
+			EndMin:    envInt("LIVE_MAINT1_END_MIN", 30),
+			ForceFlat: false,
+		}),
+		normalizeMaintenanceWindow(maintenanceWindow{
+			Name:      "FORCE_FLAT",
+			Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", true),
+			StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
+			StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
+			EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
+			EndMin:    envInt("LIVE_MAINT2_END_MIN", 0),
+			ForceFlat: true,
+			HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
+			HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
+		}),
+	}
+	out := make([]maintenanceWindow, 0, len(windows))
+	for _, w := range windows {
+		if w.Enabled {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func blockedWindowReason(w maintenanceWindow) string {
+	if w.ForceFlat {
+		return blockedForceFlatWindowReason
+	}
+	return blockedMaintenanceWindowReason
+}
+
+func maintenanceLocation() *time.Location {
+	name := envStr("LIVE_MAINT_TZ", "America/Chicago")
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+func blockedNewRiskWindow(now time.Time, loc *time.Location) (maintenanceWindow, string, bool) {
+	if loc == nil {
+		loc = maintenanceLocation()
+	}
+	local := now.In(loc)
+	window, active := activeMaintenanceWindow(local, true, runtimeMaintenanceWindows()...)
+	if !active {
+		return maintenanceWindow{}, "", false
+	}
+	return window, blockedWindowReason(window), true
+}
+
+func manageApprovalBlockedByWindow(now time.Time, action string) (string, bool) {
+	_, reason, blocked := blockedNewRiskWindow(now, maintenanceLocation())
+	if blocked && !strings.EqualFold(strings.TrimSpace(action), "FORCE_FLAT") {
+		return reason, true
+	}
+	return "", false
+}
+
+func accountHealthBlocksNewRisk(report accountReport) bool {
+	if report.Generated.IsZero() {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(report.Health), "healthy")
+}
+
+func reconcileMaxStale() time.Duration {
+	d := time.Duration(envInt("LIVE_RECONCILE_MAX_STALE_SEC", 120)) * time.Second
+	if d <= 0 {
+		d = 120 * time.Second
+	}
+	return d
+}
+
+func orderLegalityQuarantineWindow() time.Duration {
+	d := time.Duration(envInt("LIVE_ORDER_LEGALITY_QUARANTINE_SEC", 1800)) * time.Second
+	if d <= 0 {
+		d = 30 * time.Minute
+	}
+	return d
+}
+
+func orderLegalityFailLimit() int {
+	n := envInt("LIVE_ORDER_LEGALITY_FAIL_LIMIT", 3)
+	if n <= 0 {
+		n = 3
+	}
+	return n
+}
+
+func (m *liveExecManager) userDataFresh() bool {
+	if m == nil {
+		return false
+	}
+	if !envBool("LIVE_USERDATA_STREAM_ENABLE", true) {
+		return true
+	}
+	_, ok := userDataSnapshotFresh(m.userDataState)
+	return ok
+}
+
+func (m *liveExecManager) reconcileFresh(now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	if m.lastReconcileOKAt.IsZero() {
+		return false
+	}
+	if now.Sub(m.lastReconcileOKAt) > reconcileMaxStale() {
+		return false
+	}
+	return m.reconcileFailCount == 0
+}
+
+func (m *liveExecManager) symbolQuarantined(symbol string, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return false
+	}
+	until := m.symbolQuarantineTill[raw]
+	return !until.IsZero() && now.Before(until)
+}
+
+func (m *liveExecManager) recordOrderLegalityFailure(symbol, reason string, now time.Time) {
+	if m == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return
+	}
+	m.legalityFailCount[raw]++
+	limit := orderLegalityFailLimit()
+	if m.legalityFailCount[raw] >= limit {
+		m.symbolQuarantineTill[raw] = now.Add(orderLegalityQuarantineWindow())
+	}
+	quarantineUntil := m.symbolQuarantineTill[raw]
+	freshBlocked := !quarantineUntil.IsZero() && now.Before(quarantineUntil)
+	eventType := "ORDER_LEGALITY_WARNING"
+	logPrefix := "LEGALITY_WARNING"
+	if freshBlocked {
+		eventType = "ORDER_LEGALITY_QUARANTINE"
+		logPrefix = "LEGALITY_QUARANTINE"
+	}
+	fmt.Printf("%s symbol=%s reason=%s failure_count=%d quarantine_until=%s fresh_entries_blocked=%t\n",
+		logPrefix, raw, strings.TrimSpace(reason), m.legalityFailCount[raw], quarantineUntil.Format(time.RFC3339), freshBlocked)
+	if m.eventLog != nil {
+		m.eventLog.Emit(stats.Event{
+			Timestamp: now,
+			Type:      eventType,
+			Symbol:    raw,
+			Reason: fmt.Sprintf("reason=%s failure_count=%d quarantine_until=%s fresh_entries_blocked=%t",
+				strings.TrimSpace(reason), m.legalityFailCount[raw], quarantineUntil.Format(time.RFC3339), freshBlocked),
+		})
+	}
+}
+
+func (m *liveExecManager) clearOrderLegalityFailures(symbol string) {
+	if m == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" {
+		return
+	}
+	delete(m.legalityFailCount, raw)
+	delete(m.symbolQuarantineTill, raw)
+}
+
+func (m *liveExecManager) degradedEntryReason(now time.Time, symbol string) string {
+	if m == nil {
+		return degradedReconcileStaleReason
+	}
+	report := m.ensureAccountReportFresh(now.UTC(), 30*time.Second)
+	if accountHealthBlocksNewRisk(report) {
+		return degradedAccountHealthPartialReason
+	}
+	if !m.userDataFresh() {
+		return degradedUserDataStaleReason
+	}
+	if !m.reconcileFresh(now) {
+		return degradedReconcileStaleReason
+	}
+	if m.symbolQuarantined(symbol, now) {
+		return degradedOrderLegalityQuarantineReason
+	}
+	return ""
+}
+
+func roundToPrecision(v float64, precision int) float64 {
+	if precision < 0 {
+		return v
+	}
+	out, err := strconv.ParseFloat(strconv.FormatFloat(v, 'f', precision, 64), 64)
+	if err != nil {
+		return v
+	}
+	return out
+}
+
+func isMultipleOfStep(v, step float64) bool {
+	if step <= 0 {
+		return true
+	}
+	ratio := v / step
+	return math.Abs(ratio-math.Round(ratio)) <= 1e-9
+}
+
+func validateOrderLegality(meta aster.SymbolMeta, qty, price float64) (float64, float64, string) {
+	if price <= 0 {
+		return 0, 0, orderIllegalTickSizeReason
+	}
+	if meta.TickSize > 0 {
+		rounded := roundToPrecision(math.Floor(price/meta.TickSize)*meta.TickSize, meta.PricePrecision)
+		if rounded <= 0 {
+			return 0, 0, orderIllegalTickSizeReason
+		}
+		if math.Abs(rounded-price) > 1e-9 || !isMultipleOfStep(rounded, meta.TickSize) {
+			return 0, 0, orderIllegalTickSizeReason
+		}
+		price = rounded
+	}
+	if qty <= 0 {
+		return 0, 0, orderIllegalMinQtyReason
+	}
+	if meta.MaxQty > 0 && qty > meta.MaxQty {
+		qty = roundToPrecision(math.Floor(meta.MaxQty/maxFloat(meta.StepSize, 1e-12))*maxFloat(meta.StepSize, 1e-12), meta.QtyPrecision)
+		if qty <= 0 {
+			return 0, 0, orderIllegalMaxQtyReason
+		}
+	}
+	if meta.StepSize > 0 {
+		if !isMultipleOfStep(qty, meta.StepSize) {
+			return 0, 0, orderIllegalStepSizeReason
+		}
+	}
+	if meta.MinQty > 0 && qty < meta.MinQty {
+		return 0, 0, orderIllegalMinQtyReason
+	}
+	notional := qty * price
+	if meta.MinNotional > 0 && notional < meta.MinNotional {
+		return 0, 0, orderIllegalMinNotionalReason
+	}
+	if meta.MaxNotional > 0 && notional > meta.MaxNotional {
+		return 0, 0, orderIllegalMaxQtyReason
+	}
+	return qty, price, ""
 }
 
 func loadPostWinCooldownConfig() postWinCooldownConfig {
@@ -6418,6 +6747,8 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		marketCancels:        map[string]context.CancelFunc{},
 		manualConfirm:        envBool("LIVE_MANUAL_CONFIRM_ENABLE", true),
 		manualRequests:       map[string]manualManageRequest{},
+		legalityFailCount:    map[string]int{},
+		symbolQuarantineTill: map[string]time.Time{},
 		ladderCfg:            ladderCfg,
 		fundsCfg:             fundsCfg,
 		reentryCfg:           reentryCfg,
@@ -6534,10 +6865,11 @@ func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty,
 		m.mu.Unlock()
 	}
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("✍️", "MANUAL TRADE DETECTED",
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateDetected, req.Symbol, req.Side,
 			fmt.Sprintf("<b>%s %s</b>", req.Symbol, displayPositionSide(req.Side)),
 			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s | <b>Lev:</b> %dx", req.Qty, fmtPrice(req.Entry), req.Leverage),
 			"Let the bot manage this trade?",
+			"<b>Status:</b> awaiting operator approval",
 			fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", req.Symbol, req.Symbol),
 			"If there is only one pending manual trade, you can also just reply <code>y</code> or <code>n</code>.",
 		))
@@ -6570,7 +6902,7 @@ func (m *liveExecManager) queueManualForceFlatRequest(req manualManageRequest, c
 			"Force close this manual trade?",
 			fmt.Sprintf("Reply <code>/manage %s y</code> or <code>/manage %s n</code>", req.Symbol, req.Symbol),
 		)
-		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANUAL TRADE NEEDS DECISION", lines...))
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAwaitingOperator, req.Symbol, req.Side, lines...))
 	}
 }
 
@@ -7162,22 +7494,33 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 	reasonU := strings.ToUpper(strings.TrimSpace(reason))
 	sourceLine := ""
 	if src := displayEntrySource(p.EntrySource); src != "" && src != "BOT" {
-		sourceLine = fmt.Sprintf("\n• <b>Source:</b> %s", src)
+		sourceLine = fmt.Sprintf("<b>Source:</b> %s", src)
 	}
-	m.tg.Sendf("%s <b>FILL %s %s</b>\n• <b>Action:</b> %s | <b>Reason:</b> %s\n• <b>Qty:</b> %.6f | <b>Fill:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Hold:</b> %.1fm | <b>Day Realized:</b> %+.2f\n• <b>Session:</b> %s%s",
-		exitAlertEmoji(reasonU),
-		p.Symbol,
-		displayPositionSide(p.Side),
-		strings.ToUpper(strings.TrimSpace(action)),
-		reasonU,
-		qty,
-		fmtPrice(fillPx),
-		pnl,
-		pct,
-		holdMin,
-		dayRealized,
-		sessionTag(now),
-		sourceLine)
+	title := "TRADE UPDATE"
+	icon := exitAlertEmoji(reasonU)
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "ENTRY", "ADD":
+		title = "TRADE ENTRY FILLED"
+		if icon == "" {
+			icon = "🟦"
+		}
+	case "CLOSE", "FORCE_CLOSE", "STOP", "TP":
+		title = "TRADE EXIT FILLED"
+		if icon == "" {
+			icon = "📤"
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
+		fmt.Sprintf("<b>Action:</b> %s | <b>Reason:</b> %s", strings.ToUpper(strings.TrimSpace(action)), reasonU),
+		fmt.Sprintf("<b>Qty:</b> %.6f | <b>Fill:</b> %s", qty, fmtPrice(fillPx)),
+		fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Hold:</b> %.1fm", pnl, pct, holdMin),
+		fmt.Sprintf("<b>Day Realized:</b> %+.2f | <b>Session:</b> %s", dayRealized, sessionTag(now)),
+	}
+	if sourceLine != "" {
+		lines = append(lines, sourceLine)
+	}
+	m.tg.Sendf("%s", notify.BuildEventHTML(icon, title, lines...))
 }
 
 func (m *liveExecManager) DailyReceiptMessage(dayKey string, limit int) (string, bool) {
@@ -7674,6 +8017,28 @@ func manualProtectionRetryDelay(cause string) time.Duration {
 	return delay
 }
 
+func manualProtectionConvictionTimeout() time.Duration {
+	sec := envInt("LIVE_MANUAL_PROTECTION_CONVICTION_TIMEOUT_SEC", 900)
+	if sec <= 0 {
+		sec = 900
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func manualProtectionConvictionTimedOut(p *livePosition, now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	anchor := p.CreatedAt
+	if !p.UpdatedAt.IsZero() && p.UpdatedAt.After(anchor) {
+		anchor = p.UpdatedAt
+	}
+	if anchor.IsZero() {
+		anchor = now
+	}
+	return now.Sub(anchor) >= manualProtectionConvictionTimeout()
+}
+
 func manualProtectionAlertCooldown() time.Duration {
 	delay := time.Duration(envInt("LIVE_ALERT_SUPPRESSION_WINDOW_SEC", envInt("LIVE_MANUAL_PROTECTION_ALERT_COOLDOWN_SEC", 300))) * time.Second
 	if delay <= 0 {
@@ -7834,6 +8199,57 @@ func (m *liveExecManager) hasBlockingManagedProtectionFailure() bool {
 	return false
 }
 
+func (m *liveExecManager) hasCriticalProtectionState() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !manualManagedTrade(p) {
+			continue
+		}
+		state := manualProtectionStatus(p)
+		if state == "PROTECTING" || state == "CRITICAL_UNPROTECTED" || state == "FORCE_CLOSE" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *liveExecManager) criticalProtectionSummaryLines(limit int) []string {
+	if m == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rows := make([]string, 0, limit)
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !manualManagedTrade(p) {
+			continue
+		}
+		state := manualProtectionStatus(p)
+		if state != "PROTECTING" && state != "CRITICAL_UNPROTECTED" && state != "FORCE_CLOSE" {
+			continue
+		}
+		rows = append(rows, fmt.Sprintf("<b>%s %s</b> status=%s retries=%d/%d cause=%s",
+			cleanSymbol(p.Symbol),
+			displayPositionSide(p.Side),
+			state,
+			p.ProtectionRetryCount,
+			manualProtectionRetryBudget(),
+			firstNonEmpty(strings.TrimSpace(p.LastManageFailCause), "pending_protection"),
+		))
+		if len(rows) >= limit {
+			break
+		}
+	}
+	return rows
+}
+
 func recordManualProtectionFailure(p *livePosition, now time.Time, cause string) bool {
 	if p == nil {
 		return false
@@ -7880,9 +8296,10 @@ func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause s
 		p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(maxInt(1, p.ProtectionRetryCount)))
 	}
 	if m.tg != nil && now.Sub(p.LastManageFailAt) >= time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300))*time.Second {
-		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "PROTECTION RETRY ACTIVE",
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAttachingProtection, p.Symbol, p.Side,
 			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
+			fmt.Sprintf("<b>Retry:</b> %d/%d", p.ProtectionRetryCount, manualProtectionRetryBudget()),
 			"The bot could not attach legal protection yet. It is keeping the trade blocked from new entries and retrying wider legal protection before any emergency close.",
 		))
 		p.LastManageFailAt = now
@@ -7944,7 +8361,7 @@ func (m *liveExecManager) emergencyForceCloseManagedPosition(p *livePosition, ca
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if ok, err := m.ForceCloseSymbol(p.Symbol, firstNonEmpty(cause, "MANUAL_PROTECTION_FAILED")); ok && err == nil {
 			if m.tg != nil {
-				m.tg.Sendf("%s", notify.BuildEventHTML("🛑", "EMERGENCY PROTECTION RESOLVED",
+				m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateForceCloseTriggered, p.Symbol, p.Side,
 					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
 					fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
 					"The bot could not attach legal protection, so it force-closed the managed position before it could stay unprotected.",
@@ -7966,7 +8383,7 @@ func (m *liveExecManager) emergencyForceCloseManagedPosition(p *livePosition, ca
 	p.ProtectionPending = true
 	p.ProtectionRetryAfter = now.Add(time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300)) * time.Second)
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("🚨", "CRITICAL UNPROTECTED POSITION",
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateDegraded, p.Symbol, p.Side,
 			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
 			"Emergency protection failed and force-close also failed. New entries are blocked until this position is handled.",
@@ -8420,7 +8837,7 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 				fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(p)),
 			)
 		}
-		m.tg.Sendf("%s", notify.BuildEventHTML("🤝", "MANUAL TRADE MANAGEMENT ENABLED", lines...))
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAdopted, p.Symbol, p.Side, lines...))
 	}
 	_ = m.save()
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
@@ -8755,6 +9172,12 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		return fmt.Errorf("execution manager not ready")
 	}
 	rawSym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+	if plan.IsReentry && !m.reentryCfg.Enable {
+		return fmt.Errorf("reentry disabled")
+	}
+	if reason := m.degradedEntryReason(time.Now().UTC(), rawSym); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
 	existing, hasExisting := m.trackedPosition(rawSym)
 	if hasExisting && m.isActive(existing) {
 		if !strings.EqualFold(existing.Side, c.Side) {
@@ -8794,8 +9217,10 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	if err != nil {
 		return err
 	}
-	if qty <= 0 {
-		return fmt.Errorf("qty <= 0 after rounding")
+	qty, price, legalityReason := validateOrderLegality(meta, qty, price)
+	if legalityReason != "" {
+		m.recordOrderLegalityFailure(rawSym, legalityReason, time.Now().UTC())
+		return fmt.Errorf("%s", legalityReason)
 	}
 	stopReason := ""
 	stopDistancePct := 0.0
@@ -8835,8 +9260,10 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		if err != nil {
 			return err
 		}
-		if qty <= 0 {
-			return fmt.Errorf("qty <= 0 after leverage fallback rounding")
+		qty, price, legalityReason = validateOrderLegality(meta, qty, price)
+		if legalityReason != "" {
+			m.recordOrderLegalityFailure(rawSym, legalityReason, time.Now().UTC())
+			return fmt.Errorf("%s", legalityReason)
 		}
 	}
 	if m.marginType != "" {
@@ -8868,8 +9295,12 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 
 	out, err := m.rest.PlaceOrder(vals)
 	if err != nil {
+		if isVenueOrderLegalityError(err) {
+			m.recordOrderLegalityFailure(rawSym, err.Error(), now)
+		}
 		return err
 	}
+	m.clearOrderLegalityFailures(rawSym)
 	orderID := mapInt64(out["orderId"])
 	if orderID == 0 {
 		return fmt.Errorf("missing orderId from place response")
@@ -9006,15 +9437,24 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 		return
 	}
 	changed := false
+	hadError := false
 	if m.lastRemoteImportAt.IsZero() || now.Sub(m.lastRemoteImportAt) >= m.remoteImportEvery {
 		m.lastRemoteImportAt = now
 		if nImported, err := m.importRemotePositions(now); err != nil {
 			fmt.Printf("live: import remote positions error: %v\n", err)
+			hadError = true
 		} else if nImported > 0 {
 			changed = true
 		}
 	}
 	if len(m.positions) == 0 {
+		if hadError {
+			m.reconcileFailCount++
+			m.lastReconcileErrAt = now
+		} else {
+			m.reconcileFailCount = 0
+			m.lastReconcileOKAt = now
+		}
 		if changed {
 			_ = m.save()
 		}
@@ -9029,6 +9469,7 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 			ch, err := m.reconcilePendingEntry(now, p)
 			if err != nil {
 				fmt.Printf("live: reconcile pending %s error: %v\n", sym, err)
+				hadError = true
 			}
 			changed = changed || ch
 		case execOpen, execPartialTP1, execPartialTP2:
@@ -9037,9 +9478,17 @@ func (m *liveExecManager) Reconcile(now time.Time, mom map[string]momentumView, 
 				if !strings.Contains(strings.ToLower(err.Error()), "manage-failed-safe") {
 					fmt.Printf("live: reconcile open %s error: %v\n", sym, err)
 				}
+				hadError = true
 			}
 			changed = changed || ch
 		}
+	}
+	if hadError {
+		m.reconcileFailCount++
+		m.lastReconcileErrAt = now
+	} else {
+		m.reconcileFailCount = 0
+		m.lastReconcileOKAt = now
 	}
 	if changed {
 		_ = m.save()
@@ -9949,12 +10398,12 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		}
 		suppressed := p.ManageFailSuppressCount
 		p.ManageFailSuppressCount = 0
-		title := "MANAGE FAILED SAFE"
+		state := notify.ManageStateAttachingProtection
 		switch strings.TrimSpace(p.ManualManageState) {
 		case manualManageStateForceClose:
-			title = "EMERGENCY PROTECTION FAILED"
+			state = notify.ManageStateForceCloseTriggered
 		case manualManageStateCritical:
-			title = "CRITICAL UNPROTECTED"
+			state = notify.ManageStateDegraded
 		}
 		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
@@ -9966,7 +10415,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		if suppressed > 0 {
 			lines = append(lines, fmt.Sprintf("<b>Suppressed duplicates:</b> %d", suppressed))
 		}
-		m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", title, lines...))
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(state, p.Symbol, p.Side, lines...))
 	}
 }
 
@@ -9991,6 +10440,11 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			return nil
 		}
 		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !forceNow && !manualProtectionConvictionReady(p) {
+			if manualProtectionConvictionTimedOut(p, now) {
+				recordManualProtectionFailure(p, now, "awaiting_conviction_timeout")
+				m.handleManualProtectionFailure(p, "awaiting_conviction_timeout", now)
+				return nil
+			}
 			p.ManualManageState = manualManageStatePendingProtection
 			markProtectionPending(p, now, "awaiting_conviction")
 			return nil
@@ -10051,6 +10505,18 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
 	}
+	if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx); legalityReason != "" {
+		m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
+		if manualManagedTrade(p) {
+			recordManualProtectionFailure(p, now, legalityReason)
+			m.handleManualProtectionFailure(p, legalityReason, now)
+			return nil
+		}
+		return fmt.Errorf("%s", legalityReason)
+	} else {
+		qty = legalQty
+		stopPx = legalStop
+	}
 	p.StopPrice = stopPx
 	closeSide := "SELL"
 	if strings.EqualFold(p.Side, "SELL") {
@@ -10092,6 +10558,15 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 						lastRetryStop = retryStop
 						continue
 					}
+					if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, retryStop); legalityReason != "" {
+						m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
+						lastRetryStop = retryStop
+						qty = legalQty
+						continue
+					} else {
+						retryStop = legalStop
+						qty = legalQty
+					}
 					lastRetryStop = retryStop
 					out, err = m.rest.ReplaceStopOrder(
 						p.Symbol,
@@ -10128,7 +10603,15 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
 	p.ProtectedStop = stopPx
+	wasProtectionPending := p.ProtectionPending
 	clearProtectionPending(p)
+	if wasProtectionPending && m.tg != nil && manualManagedTrade(p) {
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateProtected, p.Symbol, p.Side,
+			fmt.Sprintf("<b>Exchange stop:</b> %s", fmtPrice(stopPx)),
+			fmt.Sprintf("<b>Order ID:</b> %d", p.StopOrderID),
+			"<b>Fresh entries remain blocked</b> until normal gates re-evaluate.",
+		))
+	}
 	stopChanged := prevStop <= 0 || math.Abs(prevStop-stopPx) > 1e-9
 	if stopChanged && manageDebugLogging() {
 		fmt.Printf("live: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
@@ -13645,6 +14128,69 @@ func isStarterOnlyStrategyName(strat string) bool {
 	}
 }
 
+func starterLaneEligible(c candidate) bool {
+	if isStarterOnlyStrategyName(c.Strat) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(c.Sig.Name)), "starter")
+}
+
+func starterLaneQualityReady(c candidate) bool {
+	if hasFreshStructureReset(c) || continuationStructureConfirmed(c) {
+		return true
+	}
+	minSeen := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_SEEN", 2))
+	minTopN := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_TOPN", 1))
+	return c.PersistenceSeenCount >= minSeen && c.PersistenceTopNCount >= minTopN
+}
+
+func continuationLaneRejectReason(c candidate) string {
+	if strategyFamily(c) != "cont" {
+		return ""
+	}
+	if starterLaneEligible(c) {
+		return ""
+	}
+	if candidateExhaustionActive(c) {
+		return "continuation_exhaustion_active"
+	}
+	if continuationDeteriorating(c) {
+		return "continuation_impulse_fading"
+	}
+	if candidateRapidExpansion(c) {
+		return "continuation_rapid_expansion"
+	}
+	if candidateExtendedForBotAdd(c) {
+		return "continuation_extended_wait_reset"
+	}
+	if !hasFreshStructureReset(c) {
+		maxVWAPExtPct := envFloat("LIVE_CONT_MAX_VWAP_EXTENSION_PCT", 1.25)
+		if maxVWAPExtPct > 0 && c.SessionVWAP > 0 {
+			extVWAPPct := math.Abs((c.LastClose-c.SessionVWAP)/c.SessionVWAP) * 100.0
+			if extVWAPPct >= maxVWAPExtPct {
+				return "continuation_vwap_extension"
+			}
+		}
+		maxEMAExtPct := envFloat("LIVE_CONT_MAX_EMA_EXTENSION_PCT", 1.00)
+		if maxEMAExtPct > 0 && c.EMA9 > 0 {
+			extEMAPct := math.Abs((c.LastClose-c.EMA9)/c.EMA9) * 100.0
+			if extEMAPct >= maxEMAExtPct {
+				return "continuation_structure_extension"
+			}
+		}
+	}
+	if !hasFreshStructureReset(c) && candidateDirectionalMovePct(c) >= envFloat("LIVE_CONTINUATION_MAX_DIRECTIONAL_EXT_PCT", envFloat("LIVE_ADD_MAX_DIRECTIONAL_PCT", 6.0)) {
+		return "continuation_directional_extension"
+	}
+	if !(c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || hasFreshStructureReset(c)) {
+		return "continuation_requires_reclaim_retest"
+	}
+	if !continuationStructureConfirmed(c) && !hasFreshStructureReset(c) {
+		return "continuation_no_structure_confirm"
+	}
+	return ""
+}
+
 func qualifiesImpulsiveLongStarter(c candidate, fails []string) (float64, []string, bool) {
 	if !envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true) || !strings.EqualFold(c.Side, "BUY") {
 		return 0, nil, false
@@ -13814,17 +14360,8 @@ func winnerAddStrategyReady(c candidate, manualCatchUp bool) bool {
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
 	case "continuation_fast", "guerilla_short_runner", "guerilla_long_runner", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return true
-	case "impulsive_short_starter", "failed_bounce_short_starter":
-		if manualCatchUp {
-			return true
-		}
-		return c.Conf >= envFloat("LIVE_IMPULSIVE_SHORT_ADD_MIN_CONF", 0.56)
-	case "impulsive_long_starter", "reclaim_long_starter", "elite_starter":
-		if manualCatchUp {
-			return true
-		}
-		return c.Conf >= envFloat("LIVE_IMPULSIVE_LONG_ADD_MIN_CONF", 0.56)
 	default:
+		_ = manualCatchUp
 		return false
 	}
 }
@@ -15050,6 +15587,10 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		}
 	}
 	if activeSame != nil {
+		if starterLaneEligible(c) {
+			plan.RejectReason = "starter_lane_no_adds"
+			return plan
+		}
 		importedManaged := importedManagedPosition(activeSame)
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
@@ -15160,6 +15701,21 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		plan.Active = activeSame
 		return plan
 	}
+	disabledReentryCooldown := time.Duration(envInt("LIVE_REENTRY_DISABLED_COOLDOWN_SEC", 6*3600)) * time.Second
+	if disabledReentryCooldown <= 0 {
+		disabledReentryCooldown = 6 * time.Hour
+	}
+	allowResetRestartWhenDisabled := envBool("LIVE_REENTRY_DISABLED_ALLOW_RESET_RESTART", false)
+	if closedSame != nil &&
+		!reentryCfg.Enable &&
+		strings.EqualFold(closedSame.Side, c.Side) &&
+		!closedSame.ClosedAt.IsZero() &&
+		now.Sub(closedSame.ClosedAt) <= disabledReentryCooldown {
+		if !(allowResetRestartWhenDisabled && hasFreshStructureReset(c)) {
+			plan.RejectReason = "reentry_disabled"
+			return plan
+		}
+	}
 	if closedSame != nil &&
 		reentryCfg.Enable &&
 		reentryCfg.MaxPerSymbol > 0 &&
@@ -15201,6 +15757,27 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 }
 
 func chaseRejectReason(c candidate, allowStructuredReset bool) string {
+	if allowStructuredReset && hasFreshStructureReset(c) {
+		return ""
+	}
+	if candidateExhaustionActive(c) {
+		return "avoid_chase_exhaustion"
+	}
+	if continuationDeteriorating(c) && !hasFreshStructureReset(c) {
+		return "late_chase_fading_impulse"
+	}
+	if candidateRapidExpansion(c) && !hasFreshStructureReset(c) {
+		if allowStructuredReset && (c.ReclaimHold || c.RetestHold || continuationStructureConfirmed(c)) {
+			return ""
+		}
+		return "late_chase_rapid_expansion"
+	}
+	if candidateExtendedForBotAdd(c) && !hasFreshStructureReset(c) {
+		if allowStructuredReset && (c.ReclaimHold || c.RetestHold || continuationStructureConfirmed(c)) {
+			return ""
+		}
+		return "late_chase_extended_no_reset"
+	}
 	return ""
 }
 
@@ -15222,6 +15799,10 @@ func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) strin
 		}
 	case sessionAsiaContinue:
 		return "asia_continue_no_fresh_entry"
+	case sessionUTCOffHours:
+		if !qualifiesUTCOffHoursEntry(c) {
+			return "utc_offhours_requires_a_grade"
+		}
 	case sessionNYOpen:
 		if strategyFamily(c) == "cont" && gradeValue(c.Entry.CurrentGrade) < gradeValue("A") && c.Conf < 0.55 {
 			return "ny_open_requires_strong_setup"
@@ -18048,15 +18629,15 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 		starterMargin = maxFloat(tradeMargin, 10)
 	}
 	minAvail := envFloat("LIVE_MIN_AVAILABLE_USDT", starterMargin)
-	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
+	maxLev := envInt("LIVE_MAX_LEVERAGE", 2)
 	if maxLev <= 0 {
-		maxLev = 3
+		maxLev = 2
 	}
-	maxOrders := envInt("LIVE_MAX_ORDERS_PER_DAY", 6)
+	maxOrders := envInt("LIVE_MAX_ORDERS_PER_DAY", 2)
 	if maxOrders < 0 {
 		maxOrders = 0
 	}
-	maxOrdersHour := envInt("LIVE_MAX_ORDERS_PER_HOUR", 2)
+	maxOrdersHour := envInt("LIVE_MAX_ORDERS_PER_HOUR", 1)
 	if maxOrdersHour < 0 {
 		maxOrdersHour = 0
 	}
@@ -19558,6 +20139,23 @@ func isSymbolNotionalLimitError(err error) bool {
 		strings.Contains(raw, "reached the maximum notional value limit")
 }
 
+func isVenueOrderLegalityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(raw, "greater than max quantity") ||
+		strings.Contains(raw, "less than min quantity") ||
+		strings.Contains(raw, "step size") ||
+		strings.Contains(raw, "min notional") ||
+		strings.Contains(raw, "tick size") ||
+		strings.Contains(raw, orderIllegalMaxQtyReason) ||
+		strings.Contains(raw, orderIllegalMinQtyReason) ||
+		strings.Contains(raw, orderIllegalStepSizeReason) ||
+		strings.Contains(raw, orderIllegalMinNotionalReason) ||
+		strings.Contains(raw, orderIllegalTickSizeReason)
+}
+
 func nextReducedLeverage(lev int) int {
 	switch {
 	case lev > 10:
@@ -20085,7 +20683,7 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 		summary.FinalDecision = "reject"
 		summary.FinalReason = summary.StateBlocks[0]
 	case len(summary.SoftBlocks) > 0:
-		if summary.StarterAllowed || summary.AdjustedConfidence >= envFloat("LIVE_SOFT_SCORE_STARTER_MIN", 0.52) {
+		if summary.StarterAllowed {
 			summary.FinalDecision = "starter_entry"
 			summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.SoftBlocks[0], "soft_confirmation_only")
 		} else {
@@ -20383,33 +20981,15 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		return notify.BuildEventHTML("📘", "COMMANDS",
-			"<code>/status</code> runtime snapshot",
-			"<code>/scanner</code> top long/short scanner snapshot",
-			"<code>/longs</code> top long scanner snapshot",
-			"<code>/shorts</code> top short scanner snapshot",
-			"<code>/balance</code> account holdings",
-			"<code>/acct</code> normalized account summary",
-			"<code>/growth</code> equity growth windows",
-			"<code>/health</code> runtime + account health",
-			"<code>/summary</code> account + growth + missed opportunity review",
-			"<code>/pos</code> alias for /positions",
-			"<code>/positions</code> open trades",
-			"<code>/position SYMBOL</code> one live trade in detail",
-			"<code>/why SYMBOL</code> latest decision for a symbol",
-			"<code>/manual SYMBOL [LONG|SHORT]</code> manual entry assist",
-			"<code>/entry SYMBOL [LONG|SHORT]</code> alias for manual entry assist",
-			"<code>/suggest SYMBOL LONG|SHORT</code> operator watch + re-evaluate",
-			"<code>/trade SYMBOL LONG|SHORT [LEV]</code> operator-priority trade request",
-			"<code>/manage SYMBOL [y|n]</code> approve or inspect manual management",
-			"<code>/protect SYMBOL</code> retry/manual-arm protection for one symbol",
-			"<code>/mode</code> show live/paper mode",
-			"<code>/mode live</code> switch new entries to live mode",
-			"<code>/mode paper</code> switch new entries to paper mode",
-			"<code>/pause</code> pause new entries",
-			"<code>/resume</code> resume entries",
-			"<code>/flatten SYMBOL</code> alias for /close SYMBOL",
-			"<code>/close SYMBOL</code> close one symbol",
-			"<code>/closeall</code> close all positions",
+			"<b>Market + Status</b>",
+			"<code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
+			"<b>Account + Positions</b>",
+			"<code>/balance</code> <code>/acct</code> <code>/growth</code> <code>/health</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
+			"<b>Trade + Manual Management</b>",
+			"<code>/manual SYMBOL [LONG|SHORT]</code> <code>/trade SYMBOL LONG|SHORT [LEV]</code> <code>/suggest SYMBOL LONG|SHORT</code>",
+			"<code>/manage SYMBOL [y|n]</code> <code>/protect SYMBOL</code>",
+			"<b>Runtime Controls</b>",
+			"<code>/mode</code> <code>/mode live</code> <code>/mode paper</code> <code>/pause</code> <code>/resume</code> <code>/close SYMBOL</code> <code>/closeall</code>",
 		)
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
@@ -20634,6 +21214,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		approve := cmd == "y" || cmd == "yes"
 		req := pending[0]
 		if approve {
+			if reason, blocked := manageApprovalBlockedByWindow(time.Now().UTC(), req.Action); blocked {
+				return notify.BuildEventHTML("🛡️", "MANAGE BLOCKED",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+					fmt.Sprintf("<b>Reason:</b> %s", reason),
+				)
+			}
 			c.execMgr.markManualRequestApproved(req, time.Now().UTC())
 			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
 				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
@@ -20652,7 +21238,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 				)
 			}
-			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+			return notify.BuildManagementStatusCard(notify.ManageStateAdopted, req.Symbol, req.Side,
 				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 			)
 		}
@@ -20693,7 +21279,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 							fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 						)
 					}
-					return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+					return notify.BuildManagementStatusCard(notify.ManageStateAdopted, passive.Symbol, passive.Side,
 						fmt.Sprintf("<b>%s %s</b> is now bot-managed from existing passive import", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
 					)
 				}
@@ -20717,6 +21303,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		switch answer {
 		case "y", "yes":
+			if reason, blocked := manageApprovalBlockedByWindow(time.Now().UTC(), req.Action); blocked {
+				return notify.BuildEventHTML("🛡️", "MANAGE BLOCKED",
+					fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+					fmt.Sprintf("<b>Reason:</b> %s", reason),
+				)
+			}
 			c.execMgr.markManualRequestApproved(req, time.Now().UTC())
 			if strings.EqualFold(strings.TrimSpace(req.Action), "FORCE_FLAT") {
 				if err := c.execMgr.activateManualForceFlat(req, time.Now().UTC()); err != nil {
@@ -20735,7 +21327,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 				)
 			}
-			return notify.BuildEventHTML("✅", "MANAGE APPROVED",
+			return notify.BuildManagementStatusCard(notify.ManageStateAdopted, req.Symbol, req.Side,
 				fmt.Sprintf("<b>%s %s</b> is now bot-managed from current live state", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
 			)
 		case "n", "no":
@@ -20947,13 +21539,13 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		p.ProtectionPending = true
 		p.ProtectionRetryAfter = time.Now().UTC()
 		if err := c.execMgr.placeOrReplaceStop(p); err != nil {
-			return notify.BuildEventHTML("⚠️", "PROTECT",
+			return notify.BuildManagementStatusCard(notify.ManageStateAttachingProtection, sym, p.Side,
 				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
 				fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
 				fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 			)
 		}
-		return notify.BuildEventHTML("✅", "PROTECT",
+		return notify.BuildManagementStatusCard(notify.ManageStateProtected, sym, p.Side,
 			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
 		)

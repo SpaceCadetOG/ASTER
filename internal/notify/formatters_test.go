@@ -41,7 +41,10 @@ func TestBuildPositionCard(t *testing.T) {
 	if !strings.Contains(msg, "PENDING_PROTECTION") {
 		t.Fatalf("expected protection status in card, got %q", msg)
 	}
-	if !strings.Contains(msg, "Managed:</b> YES") || !strings.Contains(msg, "Next:</b> await stop attach") {
+	if !strings.Contains(msg, "UNPROTECTED MANAGED TRADE") {
+		t.Fatalf("expected unprotected managed banner, got %q", msg)
+	}
+	if !strings.Contains(msg, "Managed:</b> YES") || !strings.Contains(msg, "Exchange Stop:</b> NO") || !strings.Contains(msg, "Next:</b> await stop attach") {
 		t.Fatalf("expected managed/protected and next-action details, got %q", msg)
 	}
 }
@@ -63,7 +66,23 @@ func TestBuildScannerSnapshotHTML(t *testing.T) {
 	if msg == "" {
 		t.Fatal("expected scanner snapshot")
 	}
-	if !strings.Contains(msg, "score") || !strings.Contains(msg, "vol=") || !strings.Contains(msg, "heating") {
+	if !strings.Contains(msg, "TOP SCANS") || !strings.Contains(msg, "s=<b>82</b>") || !strings.Contains(msg, "heating") {
 		t.Fatalf("expected richer scanner details, got %q", msg)
+	}
+}
+
+func TestBuildManagementStatusCard(t *testing.T) {
+	msg := BuildManagementStatusCard(ManageStateDegraded, "BTCUSDT", "LONG",
+		"<b>Cause:</b> invalid_after_retry",
+		"<b>Retries:</b> 3/4",
+	)
+	if !strings.Contains(msg, "DEGRADED") {
+		t.Fatalf("expected degraded header, got %q", msg)
+	}
+	if !strings.Contains(msg, "BTCUSDT LONG") {
+		t.Fatalf("expected symbol/side context, got %q", msg)
+	}
+	if !strings.Contains(msg, "invalid_after_retry") || !strings.Contains(msg, "3/4") {
+		t.Fatalf("expected lifecycle details, got %q", msg)
 	}
 }
