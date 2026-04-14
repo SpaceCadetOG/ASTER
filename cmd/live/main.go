@@ -113,6 +113,16 @@ type candidate struct {
 	PersistenceVolumeTrend bool
 	PersistenceMomentum    bool
 	PersistenceReason      string
+	PriorDayBestRank       float64
+	PriorDayBestScore      float64
+	PriorDayGrade          string
+	PriorDayState          string
+	PriorDayClose          float64
+	PriorDayRelStrength    float64
+	PriorDayVolumeUSD      float64
+	PriorDayLeaderBoost    float64
+	PriorDayLeaderMode     string
+	PriorDayLeaderReasons  []string
 }
 
 type entryQualityConfig struct {
@@ -14139,6 +14149,11 @@ func starterLaneQualityReady(c candidate) bool {
 	if hasFreshStructureReset(c) || continuationStructureConfirmed(c) {
 		return true
 	}
+	if c.PriorDayLeaderBoost >= envFloat("LIVE_PRIOR_DAY_STARTER_READY_MIN_BOOST", 0.45) &&
+		!candidateExhaustionActive(c) &&
+		!continuationDeteriorating(c) {
+		return true
+	}
 	minSeen := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_SEEN", 2))
 	minTopN := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_TOPN", 1))
 	return c.PersistenceSeenCount >= minSeen && c.PersistenceTopNCount >= minTopN
@@ -14953,13 +14968,14 @@ func churnRejectReason(mem map[string]*sessionChurn, now time.Time, c candidate)
 }
 
 func candidateSelectionRank(c candidate) float64 {
+	boost := clamp(c.PriorDayLeaderBoost, 0, 1) * envFloat("LIVE_PRIOR_DAY_RANK_BOOST_POINTS", 4.0)
 	if c.FinalRank > 0 {
-		return c.FinalRank
+		return c.FinalRank + boost
 	}
 	if c.CombinedScore > 0 {
-		return c.CombinedScore * 100.0
+		return c.CombinedScore*100.0 + boost
 	}
-	return c.Entry.Rank
+	return c.Entry.Rank + boost
 }
 
 func sideDominanceRejectReason(c candidate, ranked []candidate) string {
@@ -20593,6 +20609,9 @@ func persistenceEligibilityScore(c candidate) float64 {
 	}
 	if c.PersistenceMomentum {
 		score += 0.10
+	}
+	if c.PriorDayLeaderBoost > 0 {
+		score += clamp(c.PriorDayLeaderBoost*envFloat("LIVE_PRIOR_DAY_PERSISTENCE_BOOST_WEIGHT", 0.12), 0, 0.18)
 	}
 	return clamp(score, 0, 1)
 }

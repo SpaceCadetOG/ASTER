@@ -231,6 +231,159 @@ func TestComputeDynamicTargetLadderUsesStructure(t *testing.T) {
 	}
 }
 
+func TestPriorDayLeaderMemoryRollsOverOnUTCReset(t *testing.T) {
+	t.Setenv("LIVE_DAYUTC_RESET_TZ", "UTC")
+	t.Setenv("LIVE_DAYUTC_RESET_HOUR", "0")
+	t.Setenv("LIVE_DAYUTC_RESET_MIN", "0")
+	trk := newMissedTracker()
+	day1 := time.Date(2026, 4, 10, 23, 50, 0, 0, time.UTC)
+	c1 := candidate{
+		Side:          "BUY",
+		CombinedScore: 0.92,
+		VolumeUSD:     2_000_000,
+		LastClose:     1.25,
+		DayUTC24h:     18.4,
+		Entry: inplay.Entry{
+			Symbol:       "LYNUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 93,
+			State:        inplay.StateInPlay,
+		},
+	}
+	trk.observeDayLeader(day1, c1)
+	if len(trk.currentDayLeaders) != 1 {
+		t.Fatalf("expected one current-day leader before rollover, got %d", len(trk.currentDayLeaders))
+	}
+	day2 := time.Date(2026, 4, 11, 0, 5, 0, 0, time.UTC)
+	c2 := c1
+	c2.CombinedScore = 0.70
+	trk.observeDayLeader(day2, c2)
+	if len(trk.priorDayLeaders) != 1 {
+		t.Fatalf("expected one prior-day leader after rollover, got %d", len(trk.priorDayLeaders))
+	}
+	key := persistenceKey("LYNUSDT", "BUY")
+	if got := trk.priorDayLeaders[key].BestRank; got < 0.92 {
+		t.Fatalf("expected prior-day best rank to persist, got %.2f", got)
+	}
+}
+
+func TestPriorDayContinuationAmplifierBoostsHealthyLeader(t *testing.T) {
+	t.Setenv("LIVE_DAYUTC_RESET_TZ", "UTC")
+	t.Setenv("LIVE_DAYUTC_RESET_HOUR", "0")
+	t.Setenv("LIVE_DAYUTC_RESET_MIN", "0")
+	now := time.Date(2026, 4, 11, 14, 0, 0, 0, time.UTC)
+	trk := newMissedTracker()
+	trk.currentDayKey = dayUTCResetKey(now)
+	trk.priorDayLeaders[persistenceKey("LYNUSDT", "BUY")] = dayLeaderSnapshot{
+		Symbol:    "LYNUSDT",
+		Side:      "BUY",
+		BestRank:  0.94,
+		BestScore: 94,
+		Grade:     "A",
+		State:     "in_play",
+		VolumeUSD: 2_500_000,
+	}
+	c := candidate{
+		Side:        "BUY",
+		LastClose:   1.32,
+		SessionVWAP: 1.30,
+		EMA9:        1.305,
+		VolumeRatio: 1.35,
+		ReclaimHold: true,
+		Entry: inplay.Entry{
+			Symbol:         "LYNUSDT",
+			State:          inplay.StateInPlay,
+			CurrentScore:   92,
+			ScoreSlope:     0.12,
+			ExhaustionRisk: 1.2,
+		},
+		TriggerState: string(triggerOFReclaim),
+	}
+	got := trk.applyPriorDayLeaderAmplifier(now, c)
+	if got.PriorDayLeaderBoost <= 0 {
+		t.Fatalf("expected healthy prior-day continuation boost, got %.4f", got.PriorDayLeaderBoost)
+	}
+	if got.PriorDayLeaderMode != "continuation" {
+		t.Fatalf("expected continuation mode, got %q", got.PriorDayLeaderMode)
+	}
+}
+
+func TestPriorDayLeaderExhaustedDoesNotBoost(t *testing.T) {
+	now := time.Date(2026, 4, 11, 14, 0, 0, 0, time.UTC)
+	trk := newMissedTracker()
+	trk.currentDayKey = dayUTCResetKey(now)
+	trk.priorDayLeaders[persistenceKey("LYNUSDT", "BUY")] = dayLeaderSnapshot{
+		Symbol:    "LYNUSDT",
+		Side:      "BUY",
+		BestRank:  0.95,
+		BestScore: 95,
+		Grade:     "A",
+		State:     "in_play",
+		VolumeUSD: 3_000_000,
+	}
+	c := candidate{
+		Side:        "BUY",
+		LastClose:   1.28,
+		SessionVWAP: 1.27,
+		EMA9:        1.275,
+		Entry: inplay.Entry{
+			Symbol:         "LYNUSDT",
+			State:          inplay.StateExhausted,
+			CurrentScore:   90,
+			ScoreSlope:     0.02,
+			ExhaustionRisk: 5.4,
+			EntryStyle:     "avoid_chase",
+		},
+		TriggerState: string(triggerExhaustion),
+	}
+	got := trk.applyPriorDayLeaderAmplifier(now, c)
+	if got.PriorDayLeaderBoost != 0 {
+		t.Fatalf("expected exhausted leader to receive no boost, got %.4f mode=%q", got.PriorDayLeaderBoost, got.PriorDayLeaderMode)
+	}
+}
+
+func TestPriorDayRevivalAmplifierBoostsResetReclaim(t *testing.T) {
+	t.Setenv("LIVE_DAYUTC_RESET_TZ", "UTC")
+	t.Setenv("LIVE_DAYUTC_RESET_HOUR", "0")
+	t.Setenv("LIVE_DAYUTC_RESET_MIN", "0")
+	now := time.Date(2026, 4, 11, 0, 40, 0, 0, time.UTC)
+	trk := newMissedTracker()
+	trk.currentDayKey = dayUTCResetKey(now)
+	trk.priorDayLeaders[persistenceKey("SIRENUSDT", "SELL")] = dayLeaderSnapshot{
+		Symbol:    "SIRENUSDT",
+		Side:      "SELL",
+		BestRank:  0.90,
+		BestScore: 91,
+		Grade:     "A",
+		State:     "in_play",
+		VolumeUSD: 2_200_000,
+	}
+	c := candidate{
+		Side:           "SELL",
+		LastClose:      0.92,
+		SessionVWAP:    0.93,
+		EMA9:           0.925,
+		RetestHold:     true,
+		ResetRebreak:   true,
+		StructureFresh: true,
+		Entry: inplay.Entry{
+			Symbol:         "SIRENUSDT",
+			State:          inplay.StateHeating,
+			CurrentScore:   88,
+			ScoreSlope:     -0.08,
+			ExhaustionRisk: 1.8,
+		},
+		TriggerState: string(triggerOFReclaim),
+	}
+	got := trk.applyPriorDayLeaderAmplifier(now, c)
+	if got.PriorDayLeaderBoost <= 0 {
+		t.Fatalf("expected revival/reset boost, got %.4f", got.PriorDayLeaderBoost)
+	}
+	if got.PriorDayLeaderMode != "revival_reset" {
+		t.Fatalf("expected revival_reset mode, got %q", got.PriorDayLeaderMode)
+	}
+}
+
 func TestApplyTriggerLifecycleRequiresReversalPersistence(t *testing.T) {
 	now := time.Now().UTC()
 	mem := map[string]triggerMemory{}

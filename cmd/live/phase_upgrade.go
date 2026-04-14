@@ -81,6 +81,20 @@ type OpportunityPersistence struct {
 	LastReadyLogAt   time.Time
 }
 
+type dayLeaderSnapshot struct {
+	Symbol       string
+	Side         string
+	DayKey       string
+	BestRank     float64
+	BestScore    float64
+	Grade        string
+	State        string
+	Close        float64
+	RelStrength  float64
+	VolumeUSD    float64
+	LastObserved time.Time
+}
+
 type softRejectMemory struct {
 	Symbol     string
 	Side       string
@@ -92,18 +106,23 @@ type softRejectMemory struct {
 }
 
 type missedTracker struct {
-	items        map[string]*missedOpportunity
-	opp          map[string]*OpportunityPersistence
-	softRejects  map[string]softRejectMemory
-	lastPriority map[string]time.Time
+	items             map[string]*missedOpportunity
+	opp               map[string]*OpportunityPersistence
+	softRejects       map[string]softRejectMemory
+	lastPriority      map[string]time.Time
+	currentDayKey     string
+	currentDayLeaders map[string]*dayLeaderSnapshot
+	priorDayLeaders   map[string]dayLeaderSnapshot
 }
 
 func newMissedTracker() *missedTracker {
 	return &missedTracker{
-		items:        map[string]*missedOpportunity{},
-		opp:          map[string]*OpportunityPersistence{},
-		softRejects:  map[string]softRejectMemory{},
-		lastPriority: map[string]time.Time{},
+		items:             map[string]*missedOpportunity{},
+		opp:               map[string]*OpportunityPersistence{},
+		softRejects:       map[string]softRejectMemory{},
+		lastPriority:      map[string]time.Time{},
+		currentDayLeaders: map[string]*dayLeaderSnapshot{},
+		priorDayLeaders:   map[string]dayLeaderSnapshot{},
 	}
 }
 
@@ -113,6 +132,208 @@ func missedKey(symbol, side string, ts time.Time) string {
 
 func persistenceKey(symbol, side string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(side))
+}
+
+func priorDayLeaderMinRank() float64 {
+	return clamp(envFloat("LIVE_PRIOR_DAY_LEADER_MIN_RANK", 0.78), 0, 2.0)
+}
+
+func priorDayLeaderMinScore() float64 {
+	return envFloat("LIVE_PRIOR_DAY_LEADER_MIN_SCORE", 86.0)
+}
+
+func priorDayLeaderMinVolumeUSD() float64 {
+	return maxFloat(0, envFloat("LIVE_PRIOR_DAY_LEADER_MIN_VOL_USD", 1_000_000))
+}
+
+func normalizeLeaderState(state string) string {
+	return strings.ToLower(strings.TrimSpace(state))
+}
+
+func (t *missedTracker) ensureDayLeaderWindow(now time.Time) {
+	if t == nil {
+		return
+	}
+	dayKey := dayUTCResetKey(now)
+	if t.currentDayLeaders == nil {
+		t.currentDayLeaders = map[string]*dayLeaderSnapshot{}
+	}
+	if t.priorDayLeaders == nil {
+		t.priorDayLeaders = map[string]dayLeaderSnapshot{}
+	}
+	if strings.TrimSpace(t.currentDayKey) == "" {
+		t.currentDayKey = dayKey
+		return
+	}
+	if t.currentDayKey == dayKey {
+		return
+	}
+	nextPrior := make(map[string]dayLeaderSnapshot, len(t.currentDayLeaders))
+	for key, snap := range t.currentDayLeaders {
+		if snap == nil {
+			continue
+		}
+		cp := *snap
+		nextPrior[key] = cp
+	}
+	t.priorDayLeaders = nextPrior
+	t.currentDayLeaders = map[string]*dayLeaderSnapshot{}
+	t.currentDayKey = dayKey
+}
+
+func (t *missedTracker) observeDayLeader(now time.Time, c candidate) {
+	if t == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if raw == "" {
+		return
+	}
+	t.ensureDayLeaderWindow(now)
+	key := persistenceKey(raw, c.Side)
+	snap := t.currentDayLeaders[key]
+	if snap == nil {
+		snap = &dayLeaderSnapshot{
+			Symbol: raw,
+			Side:   strings.ToUpper(strings.TrimSpace(c.Side)),
+			DayKey: t.currentDayKey,
+		}
+		t.currentDayLeaders[key] = snap
+	}
+	rankNow := maxFloat(c.CombinedScore, c.Entry.Rank)
+	if rankNow >= snap.BestRank {
+		snap.BestRank = rankNow
+		snap.BestScore = maxFloat(snap.BestScore, c.Entry.CurrentScore)
+		snap.Grade = strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade))
+		snap.State = normalizeLeaderState(fmt.Sprint(c.Entry.State))
+		snap.Close = maxFloat(c.LastClose, snap.Close)
+		snap.RelStrength = c.DayUTC24h
+		snap.VolumeUSD = maxFloat(c.VolumeUSD, snap.VolumeUSD)
+	}
+	if c.Entry.CurrentScore > snap.BestScore {
+		snap.BestScore = c.Entry.CurrentScore
+	}
+	if c.VolumeUSD > snap.VolumeUSD {
+		snap.VolumeUSD = c.VolumeUSD
+	}
+	if c.LastClose > 0 {
+		snap.Close = c.LastClose
+	}
+	snap.LastObserved = now
+}
+
+func priorDayLeaderGenuine(p dayLeaderSnapshot) bool {
+	if p.BestRank < priorDayLeaderMinRank() {
+		return false
+	}
+	if p.BestScore < priorDayLeaderMinScore() {
+		return false
+	}
+	if p.VolumeUSD > 0 && p.VolumeUSD < priorDayLeaderMinVolumeUSD() {
+		return false
+	}
+	state := normalizeLeaderState(p.State)
+	if strings.Contains(state, "dump") || strings.Contains(state, "exhaust") {
+		return false
+	}
+	return true
+}
+
+func continuationLeaderAmplifier(c candidate, p dayLeaderSnapshot) (float64, []string) {
+	if !priorDayLeaderGenuine(p) {
+		return 0, nil
+	}
+	if candidateExhaustionActive(c) || candidateRapidExpansion(c) || continuationDeteriorating(c) {
+		return 0, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
+		return 0, nil
+	}
+	if candidateExtendedForBotAdd(c) && !(hasFreshStructureReset(c) || c.ReclaimHold || c.RetestHold || c.ResetRebreak) {
+		return 0, nil
+	}
+	if !continuationStructureConfirmed(c) && !hasFreshStructureReset(c) {
+		return 0, nil
+	}
+	if c.Entry.State == inplay.StateDumping || c.Entry.State == inplay.StateExhausted {
+		return 0, nil
+	}
+	boost := 0.38
+	if c.Entry.CurrentScore >= 92 {
+		boost += 0.07
+	}
+	if c.VolumeRatio >= 1.2 {
+		boost += 0.05
+	}
+	if c.Entry.ScoreSlope >= envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02) {
+		boost += 0.04
+	}
+	return clamp(boost, 0, 0.65), []string{
+		"prior_day_leader_continuation",
+		fmt.Sprintf("prior_rank=%.2f", p.BestRank),
+		fmt.Sprintf("prior_score=%.1f", p.BestScore),
+	}
+}
+
+func revivalLeaderAmplifier(now time.Time, c candidate, p dayLeaderSnapshot) (float64, []string) {
+	if !priorDayLeaderGenuine(p) {
+		return 0, nil
+	}
+	if !(hasFreshStructureReset(c) || c.ReclaimHold || c.RetestHold || c.ResetRebreak) {
+		return 0, nil
+	}
+	if candidateExhaustionActive(c) || continuationDeteriorating(c) || c.Entry.State == inplay.StateExhausted {
+		return 0, nil
+	}
+	if minutesSinceDayUTCReset(now) > envFloat("LIVE_PRIOR_DAY_REVIVAL_MAX_MIN", 600.0) {
+		return 0, nil
+	}
+	boost := 0.32
+	if hasFreshStructureReset(c) {
+		boost += 0.10
+	}
+	if c.ReclaimHold || c.RetestHold {
+		boost += 0.06
+	}
+	return clamp(boost, 0, 0.60), []string{
+		"prior_day_leader_revival",
+		fmt.Sprintf("reset_age_min=%.1f", minutesSinceDayUTCReset(now)),
+	}
+}
+
+func (t *missedTracker) applyPriorDayLeaderAmplifier(now time.Time, c candidate) candidate {
+	if t == nil {
+		return c
+	}
+	t.ensureDayLeaderWindow(now)
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if raw == "" || t.priorDayLeaders == nil {
+		return c
+	}
+	p, ok := t.priorDayLeaders[persistenceKey(raw, c.Side)]
+	if !ok {
+		return c
+	}
+	c.PriorDayBestRank = p.BestRank
+	c.PriorDayBestScore = p.BestScore
+	c.PriorDayGrade = p.Grade
+	c.PriorDayState = p.State
+	c.PriorDayClose = p.Close
+	c.PriorDayRelStrength = p.RelStrength
+	c.PriorDayVolumeUSD = p.VolumeUSD
+
+	contBoost, contReasons := continuationLeaderAmplifier(c, p)
+	revBoost, revReasons := revivalLeaderAmplifier(now, c, p)
+	if revBoost > contBoost {
+		c.PriorDayLeaderBoost = revBoost
+		c.PriorDayLeaderMode = "revival_reset"
+		c.PriorDayLeaderReasons = append(c.PriorDayLeaderReasons, revReasons...)
+	} else if contBoost > 0 {
+		c.PriorDayLeaderBoost = contBoost
+		c.PriorDayLeaderMode = "continuation"
+		c.PriorDayLeaderReasons = append(c.PriorDayLeaderReasons, contReasons...)
+	}
+	return c
 }
 
 func loadOpportunityTrackConfig() opportunityTrackConfig {
@@ -285,6 +506,7 @@ func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) 
 	if raw == "" {
 		return
 	}
+	t.observeDayLeader(now, c)
 	t.pruneSoftRejects(now)
 	key := persistenceKey(raw, c.Side)
 	st := t.opp[key]
@@ -393,6 +615,7 @@ func (t *missedTracker) persistenceState(now time.Time, c candidate) (*Opportuni
 }
 
 func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *liveExecManager, log *stats.EventLogger) candidate {
+	c = t.applyPriorDayLeaderAmplifier(now, c)
 	st, ready, reasons := t.persistenceState(now, c)
 	if !ready || st == nil {
 		if st != nil && len(reasons) > 0 && strings.EqualFold(strings.TrimSpace(c.RejectReason), "") {
@@ -480,6 +703,7 @@ func (t *missedTracker) PrioritySuggestions(now time.Time) []operatorSuggestion 
 	if t == nil || !cfg.Enable {
 		return nil
 	}
+	t.ensureDayLeaderWindow(now)
 	t.pruneSoftRejects(now)
 	rows := make([]operatorSuggestion, 0, len(t.opp))
 	type ranked struct {
@@ -500,6 +724,29 @@ func (t *missedTracker) PrioritySuggestions(now time.Time) []operatorSuggestion 
 		list = append(list, ranked{key: key, opp: opp})
 	}
 	sort.SliceStable(list, func(i, j int) bool {
+		wi := 0.0
+		if p, ok := t.priorDayLeaders[list[i].key]; ok && priorDayLeaderGenuine(p) {
+			wi += 0.35
+		}
+		if list[i].opp.MomentumStableOrUp {
+			wi += 0.10
+		}
+		if list[i].opp.VolumeTrendUp {
+			wi += 0.08
+		}
+		wj := 0.0
+		if p, ok := t.priorDayLeaders[list[j].key]; ok && priorDayLeaderGenuine(p) {
+			wj += 0.35
+		}
+		if list[j].opp.MomentumStableOrUp {
+			wj += 0.10
+		}
+		if list[j].opp.VolumeTrendUp {
+			wj += 0.08
+		}
+		if wi != wj {
+			return wi > wj
+		}
 		if list[i].opp.TopNCount == list[j].opp.TopNCount {
 			return list[i].opp.BestRank > list[j].opp.BestRank
 		}
@@ -1066,11 +1313,21 @@ func structureTrailDistance(ref, friction float64) float64 {
 func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDeadSessionTrading bool, preEODEntryBlockMin int, localMaintNow time.Time, maintEOD maintenanceWindow, postSLCooldown time.Duration, paper *paperTrader, execMgr *liveExecManager, safety safetyConfig, lastOrderAt time.Time, lastOrderBySymbol map[string]time.Time, lastOrderBySymbolSide map[string]time.Time, orderCountByDay, orderCountByHour map[string]int, symbolStopoutLockUntil map[string]time.Time) string {
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	_ = preEODEntryBlockMin
-	_ = localMaintNow
 	_ = maintEOD
 	_ = allowDeadSessionTrading
+	if window, active := activeMaintenanceWindow(localMaintNow, true, runtimeMaintenanceWindows()...); active {
+		return blockedWindowReason(window)
+	}
 	if postSLCooldown > 0 && hasRecentStopLoss(raw, c.Side, now, postSLCooldown, paper, execMgr) {
 		return "POST_SL_COOLDOWN"
+	}
+	if execMgr != nil {
+		if reason := execMgr.degradedEntryReason(now, c.Entry.Symbol); reason != "" {
+			return reason
+		}
+		if execMgr.ladderCfg.OneSymbolOnly && !execMgr.HasActiveSymbol(c.Entry.Symbol) && execMgr.ActiveCount() > 0 {
+			return "one_symbol_only_active"
+		}
 	}
 	if !pureMode {
 		if reason := safetyReject(safety, c, localMaintNow, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
@@ -1081,6 +1338,35 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 		return "already_active_in_exec_state"
 	}
 	return ""
+}
+
+func oneSymbolOnlyEarlyReject(c candidate, execMgr *liveExecManager) string {
+	if execMgr == nil || !execMgr.ladderCfg.OneSymbolOnly {
+		return ""
+	}
+	if execMgr.ActiveCount() <= 0 || execMgr.HasActiveSymbol(c.Entry.Symbol) {
+		return ""
+	}
+	return "one_symbol_only_active"
+}
+
+func prefilterCandidatesBeforeExpensiveWork(cands []candidate, execMgr *liveExecManager) ([]candidate, map[string]string) {
+	if len(cands) == 0 {
+		return cands, nil
+	}
+	filtered := make([]candidate, 0, len(cands))
+	rejected := map[string]string{}
+	for _, c := range cands {
+		if reason := oneSymbolOnlyEarlyReject(c, execMgr); reason != "" {
+			rejected[strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))] = reason
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	if len(rejected) == 0 {
+		return cands, nil
+	}
+	return filtered, rejected
 }
 
 func paperMarkLastPrices(m symbolMeta, ob aster.OrderBook, model string, divBps float64) (float64, float64) {

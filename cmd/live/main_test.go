@@ -4157,3 +4157,65 @@ func TestProtectiveStopValid(t *testing.T) {
 		t.Fatalf("expected short protective stop below mark to be invalid")
 	}
 }
+
+func TestCandidateSelectionRankPriorDayBoostTieBreak(t *testing.T) {
+	base := candidate{FinalRank: 88.0}
+	boosted := base
+	boosted.PriorDayLeaderBoost = 0.60
+	if candidateSelectionRank(boosted) <= candidateSelectionRank(base) {
+		t.Fatalf("expected prior-day boost to improve tie-break rank")
+	}
+}
+
+func TestPersistenceEligibilityScoreIncludesPriorDayBoost(t *testing.T) {
+	c := candidate{
+		CombinedScore:        0.38,
+		PersistenceSeenCount: 1,
+		PersistenceTopNCount: 0,
+	}
+	base := persistenceEligibilityScore(c)
+	c.PriorDayLeaderBoost = 0.55
+	boosted := persistenceEligibilityScore(c)
+	if boosted <= base {
+		t.Fatalf("expected prior-day boost to lift persistence score, base=%.3f boosted=%.3f", base, boosted)
+	}
+}
+
+func TestStarterLaneQualityReadyAllowsPriorDayLeaderPreference(t *testing.T) {
+	c := candidate{
+		Strat:               "continuation_fast_starter",
+		PriorDayLeaderBoost: 0.60,
+		LastClose:           1.05,
+		SessionVWAP:         1.02,
+		EMA9:                1.02,
+		Entry: inplay.Entry{
+			State:          inplay.StateInPlay,
+			ScoreSlope:     0.08,
+			ExhaustionRisk: 1.2,
+		},
+	}
+	if !starterLaneQualityReady(c) {
+		t.Fatal("expected prior-day leader preference to satisfy starter quality")
+	}
+}
+
+func TestAmplifierDoesNotBypassHardBlocks(t *testing.T) {
+	c := candidate{
+		Entry:               inplay.Entry{Symbol: "BTCUSDT", CurrentGrade: "A"},
+		Side:                "BUY",
+		Strat:               "elite_starter",
+		Conf:                0.92,
+		FinalRank:           90,
+		PriorDayLeaderBoost: 0.80,
+	}
+	summary := newEligibilitySummary(c)
+	summary.StarterAllowed = true
+	addEligibilityBlock(&summary, "max_open_positions")
+	chooseFinalDecision(&summary, ladderPlan{})
+	if summary.FinalDecision != "reject" {
+		t.Fatalf("expected hard blocker to force reject despite amplifier, got %s (%s)", summary.FinalDecision, summary.FinalReason)
+	}
+	if summary.FinalReason != "max_open_positions" {
+		t.Fatalf("expected hard blocker reason to remain primary, got %q", summary.FinalReason)
+	}
+}
