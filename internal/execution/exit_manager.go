@@ -23,7 +23,6 @@ type Config struct {
 	TightenAfterConfirm    bool
 	RequireStructureLoss   bool
 	ProfitLockTightenR     float64
-	StarterStabilizeBars   int
 }
 
 type Manager struct {
@@ -48,9 +47,6 @@ type ProtectInput struct {
 	HitTP2            bool
 	HitTP3            bool
 	WeakSponsorStreak int
-	EntryReason       string
-	StarterEntry      bool
-	AdvancedReady     bool
 }
 
 type ProtectDecision struct {
@@ -108,9 +104,6 @@ func NewManager(cfg Config) *Manager {
 	if cfg.ProfitLockTightenR <= 0 {
 		cfg.ProfitLockTightenR = 0.35
 	}
-	if cfg.StarterStabilizeBars <= 0 {
-		cfg.StarterStabilizeBars = 6
-	}
 	return &Manager{cfg: cfg}
 }
 
@@ -139,11 +132,6 @@ func (m *Manager) FrontRunTarget(side string, target float64, frictions ...float
 func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	dec := ProtectDecision{}
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
-		return dec
-	}
-	if starterInitialManageOnly(in, m.cfg.StarterStabilizeBars) {
-		// Keep starter trades simple at first attach: let initial stop stand, no early trailing/tightening.
-		dec.Reason = "STARTER_INITIAL_PROTECT_ONLY"
 		return dec
 	}
 	if in.LiqSpike && in.UnrealizedPct > 0 {
@@ -198,19 +186,6 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		}
 	}
 	return dec
-}
-
-func starterInitialManageOnly(in ProtectInput, stabilizeBars int) bool {
-	if stabilizeBars <= 0 {
-		stabilizeBars = 6
-	}
-	if !(in.StarterEntry || IsStarterEntryReason(in.EntryReason)) {
-		return false
-	}
-	if in.AdvancedReady || in.HitTP1 {
-		return false
-	}
-	return in.BarsHeld < stabilizeBars
 }
 
 func tightenToR(side string, entry, stop, r float64) float64 {

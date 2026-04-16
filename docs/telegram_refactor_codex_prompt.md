@@ -1,6 +1,6 @@
 # Telegram Refactor Prompt (Codex-Ready)
 
-Refactor the Telegram subsystem out of `cmd/live/main.go` into `internal/notify/telegram.go`.
+Refactor the Telegram subsystem out of `cmd/live-lite/main.go` into `internal/notify/telegram.go`.
 
 Important:
 - Treat this as a refactor/design task, not a description of the current package layout.
@@ -9,7 +9,7 @@ Important:
 
 ## Current State
 
-Telegram is currently implemented inline inside `cmd/live/main.go`.
+Telegram is currently implemented inline inside `cmd/live-lite/main.go`.
 
 Main pieces:
 - `newTelegramSink()`
@@ -62,7 +62,7 @@ Current command behavior:
 - `/closeall`
 
 Current command handling facts:
-- `/status` reads from `liveStatusStore`
+- `/status` reads from `liveLiteStatusStore`
 - `/pause` writes `LIVE_PAUSE_FILE`
 - `/resume` removes `LIVE_PAUSE_FILE`
 - `/close SYMBOL` calls `execMgr.ForceCloseSymbol(...)` and/or `paper.ForceCloseSymbol(...)`
@@ -110,7 +110,7 @@ type Service interface {
 ## Required Refactor
 
 1. Extract Telegram sink
-Move these responsibilities out of `cmd/live/main.go`:
+Move these responsibilities out of `cmd/live-lite/main.go`:
 - config loading for Telegram credentials
 - message sending
 - dedupe behavior
@@ -184,7 +184,7 @@ Example output format:
 
 ## Message Trigger Map To Preserve
 
-These existing call sites in `cmd/live/main.go` should continue to emit notifications after refactor:
+These existing call sites in `cmd/live-lite/main.go` should continue to emit notifications after refactor:
 - startup message
 - boot reconcile complete
 - hourly digest
@@ -222,6 +222,6 @@ These existing call sites in `cmd/live/main.go` should continue to emit notifica
 
 Produce:
 - `internal/notify/telegram.go`
-- minimal integration changes in `cmd/live/main.go`
+- minimal integration changes in `cmd/live-lite/main.go`
 - no behavior regressions in runtime messaging
 - asynchronous delivery so Telegram latency does not stall execution

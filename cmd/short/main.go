@@ -243,11 +243,7 @@ func main() {
 		}
 	}()
 
-	scannerSec := envInt("SCANNER_SEC", 10)
-	if scannerSec <= 0 {
-		scannerSec = 10
-	}
-	tick := time.NewTicker(time.Duration(scannerSec) * time.Second)
+	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
 	for {
 		runOnce(st, asterClient, trk)

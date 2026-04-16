@@ -65,7 +65,7 @@ export interface DashboardData {
     active: string[];
     rows: AssetRow[];
   };
-  live?: {
+  liveLite?: {
     generated?: string;
     dryRun?: boolean;
     liveEnabled?: boolean;

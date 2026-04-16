@@ -1,30 +1,5 @@
 # Live-Lite Environment Knobs
 
-## Live Routing Policy
-
-Session labels are retained for logging, analytics, and review only.
-
-They do not:
-- block entries
-- enable entries
-- boost or reduce live confidence
-- select a strategy lane
-- define preferred or non-preferred trading hours
-
-Allowed live entry producers:
-- momentum_ignite_long
-- momentum_ignite_short
-- continuation_fast
-- impulsive_long_starter
-- impulsive_short_starter
-
-Removed from live routing:
-- early_dev_entry
-- heating_starter_entry
-- persistence_entry
-- all guerilla lanes
-- all session-conditioned entry paths
-
 Generated from `/Users/victorogbebor/2026/go-machine/cmd/live-lite/main.go` on 2026-03-14.
 
 Total unique env knobs referenced by `live-lite`: **407**
@@ -52,17 +27,13 @@ Notes:
 - `LIVE_MIN_AVAILABLE_USDT`: default `LIVE_RESERVE_USDT + LIVE_TRADE_MARGIN_USDT`
 - `LIVE_RESERVE_PCT`: default `50.0`
 - `LIVE_RESERVE_USDT`: default `5`
-- `LIVE_SCAN_SEC`: default `20`
+- `LIVE_SCAN_SEC`: default `30`
 - `LIVE_SHOW_ACCOUNT`: default `true`
 - `LIVE_STRATEGY_TOP_N`: default `3`
 - `LIVE_TRADE_MARGIN_MAX_USDT`: default `200.0`
 - `LIVE_TRADE_MARGIN_MIN_USDT`: default `5.0`
 - `LIVE_TRADE_MARGIN_PCT`: default `10.0`
 - `LIVE_TRADE_MARGIN_USDT`: default `100`
-- `LIVE_IMPORT_AUTO_MANAGE_ENABLE`: default `false`
-- `LIVE_IMPORT_REQUIRE_PROTECTION`: default `true`
-- `LIVE_IMPORT_PROTECT_TIMEOUT_SEC`: default `15`
-- `LIVE_IMPORT_BLOCK_IF_UNPROTECTED`: default `true`
 - `LIVE_TRADE_SLOTS`: default `5`
 
 ## In-Play Tracker And Ranking
@@ -324,18 +295,6 @@ Notes:
 - `LIVE_TRIGGER_PRICE_PROTECT`: default `true`
 - `LIVE_TP_FRONT_RUN_PCT`: default `0.001`
 - `LIVE_TRAIL_AFTER_TP`: default `3`
-- `LIVE_ADD_MIN_RR_LEFT`: default `1.5`
-  Bot-native add gate. Blocks adds when the current move has too little reward left to the next target.
-- `LIVE_ADD_MAX_EXTENSION_ATR`: default `1.35`
-  Bot-native extension cap from the latest reclaim/base.
-- `LIVE_ADD_MAX_DIRECTIONAL_PCT`: default `6.0`
-  Bot-native directional move cap before the bot waits for reset instead of adding.
-- `LIVE_IMPORTED_ADD_MIN_RR_LEFT`: default `1.5`
-  Imported/manual-managed add gate after handoff.
-- `LIVE_IMPORTED_ADD_MAX_EXTENSION_ATR`: default `1.10`
-  Stricter extension cap for imported trades so the bot does not late-chase.
-- `LIVE_IMPORTED_ADD_MAX_EXT_PCT`: default `2.0`
-  Percent move cap from the handoff anchor before imported adds must wait for reset.
 - `LIVE_TRAIL_ATR_MULT_CONT`: default `2.6`
 - `LIVE_TRAIL_ATR_MULT_REV`: default `1.9`
 - `LIVE_TRAIL_PCT_MIN`: default `1.0`
@@ -343,24 +302,6 @@ Notes:
 - `LIVE_TRAIL_STEP_BPS`: default `10.0`
 - `LIVE_TRAIL_STOP_PCT`: default `1.50`
 - `LIVE_TRAIL_STOP_PCT_TP3`: default `3.25`
-- `LIVE_MANUAL_PROTECTION_MIN_GAP_PCT`: default `0.0035`
-  Minimum gap from live mark when legalizing imported/manual-managed stop orders after immediate-trigger rejections.
-- `LIVE_DEGRADED_BLOCK_NEW_ENTRIES`: default `true`
-  Blocks fresh entries while any managed live trade is still unprotected or degraded.
-- `LIVE_IMPORT_FORCE_CLOSE_ON_PROTECT_FAIL`: default `true`
-  Force-closes imported/manual-managed trades if the bot cannot attach legal protection after retries.
-- `LIVE_CONTINUATION_PROTECTION_MIN_R`: default `1.25`
-  Bot-native trades wait for more proof before moving into tighter protection logic.
-- `LIVE_IMPORTED_PROTECTION_MIN_R`: default `0.35`
-  Imported/manual-managed trades can arm protection earlier from the handoff state.
-- `LIVE_RUNNER_PRESERVE_PCT`: default `0.25`
-  Minimum runner share to preserve once the bot has built enough size.
-- `LIVE_RUNNER_CAPTURE_FAIL_MIN_MFE_R`: default `2.0`
-  Flags trades that had strong open edge but poor realized capture.
-- `LIVE_RUNNER_CAPTURE_FAIL_MAX_CAPTURE_RATIO`: default `0.25`
-- `LIVE_RUNNER_CAPTURE_FAIL_MAX_RETURN_PCT`: default `1.0`
-- `LIVE_IMPORTED_TRAIL_MIN_R`: default `1.5`
-  Imported/manual-managed winners can begin runner-style trailing once they have enough open edge from the handoff.
 
 ## Strategy Routing: Ignite Continuation Reversal Exhaustion
 

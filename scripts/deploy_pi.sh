@@ -9,7 +9,7 @@ SERVICES=(
 LEGACY_SERVICES=(
   aster-tape
   aster-whale
-  aster-live
+  aster-live-lite
 )
 
 cd "${REPO_DIR}"
@@ -20,17 +20,17 @@ sudo chown -R "$(id -u):$(id -g)" /opt/aster || true
 
 go build -o "${BIN_DIR}/tape" ./cmd/tape
 go build -o "${BIN_DIR}/whale" ./cmd/whale
-go build -o "${BIN_DIR}/live" ./cmd/live
+go build -o "${BIN_DIR}/live-lite" ./cmd/live-lite
 go build -o "${BIN_DIR}/liqs" ./cmd/liqs
 go build -o "${BIN_DIR}/oflow" ./cmd/oflow
 go build -o "${BIN_DIR}/long" ./cmd/long
 go build -o "${BIN_DIR}/short" ./cmd/short
-chmod +x "${BIN_DIR}/tape" "${BIN_DIR}/whale" "${BIN_DIR}/live" "${BIN_DIR}/liqs" "${BIN_DIR}/oflow" "${BIN_DIR}/long" "${BIN_DIR}/short"
+chmod +x "${BIN_DIR}/tape" "${BIN_DIR}/whale" "${BIN_DIR}/live-lite" "${BIN_DIR}/liqs" "${BIN_DIR}/oflow" "${BIN_DIR}/long" "${BIN_DIR}/short"
 
 echo "[deploy] installing unit files"
 sudo cp systemd/aster-tape.service /etc/systemd/system/
 sudo cp systemd/aster-whale.service /etc/systemd/system/
-sudo cp systemd/aster-live.service /etc/systemd/system/
+sudo cp systemd/aster-live-lite.service /etc/systemd/system/
 sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
 sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
 sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/

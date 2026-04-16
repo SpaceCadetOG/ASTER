@@ -1,5 +1,5 @@
 [Unit]
-Description=Aster Live Runner
+Description=Aster Live Lite Runner
 After=network-online.target
 Wants=network-online.target
 Conflicts=go-machine.service
@@ -9,8 +9,8 @@ Type=simple
 User=traderbot
 Group=traderbot
 WorkingDirectory=/opt/aster
-EnvironmentFile=-/opt/aster/env/live.env
-ExecStart=/usr/bin/flock -n /tmp/aster-live.lock /opt/aster/bin/live
+EnvironmentFile=-/opt/aster/env/live-lite.env
+ExecStart=/usr/bin/flock -n /tmp/aster-live-lite.lock /opt/aster/bin/live-lite
 Restart=always
 RestartSec=2
 StartLimitIntervalSec=0

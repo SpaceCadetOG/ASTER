@@ -8,24 +8,6 @@ import (
 	"go-machine/internal/notify"
 )
 
-type accountHealthSummary struct {
-	State                 string
-	SignedUserDataBackoff bool
-}
-
-func entriesBlockedByAccountHealth(summary accountHealthSummary) (string, bool) {
-	if summary.State == "failed" {
-		return "account_health_failed", true
-	}
-	if summary.State == "degraded" || summary.State == "partial" {
-		return "account_health_degraded", true
-	}
-	if summary.SignedUserDataBackoff {
-		return "signed_user_data_backoff", true
-	}
-	return "", false
-}
-
 func fillEpsilon(q float64) float64 {
 	return maxFloat(1e-9, mathAbs(q)*0.0005)
 }
@@ -51,15 +33,13 @@ func (m *liveExecManager) transitionPendingToOpen(now time.Time, p *livePosition
 	p.RemainingQty = qty
 	p.State = execOpen
 	p.UpdatedAt = now
-	updateManagePhase(p, false)
-	refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 	if strings.TrimSpace(p.EntrySource) == "" {
 		p.EntrySource = "BOT"
 	}
 	if err := m.placeInitialBrackets(p); err != nil {
 		return true, err
 	}
-	fmt.Printf("live: entry live %s reason=%s qty=%.6f avg=%.6f\n", p.Symbol, reason, p.FilledQty, p.EntryPrice)
+	fmt.Printf("live-lite: entry live %s reason=%s qty=%.6f avg=%.6f\n", p.Symbol, reason, p.FilledQty, p.EntryPrice)
 	if m.tg != nil {
 		title := "ENTRY FILLED"
 		if !strings.EqualFold(reason, "ENTRY_FILLED") {
@@ -93,7 +73,7 @@ func (m *liveExecManager) syncPendingEntryFromRemote(p *livePosition) (float64, 
 		if amt < 0 {
 			side = "SELL"
 		}
-		if !strings.EqualFold(normalizePositionSide(side), normalizePositionSide(p.Side)) {
+		if !strings.EqualFold(side, p.Side) {
 			continue
 		}
 		entry := mapFloat(row["entryPrice"])
@@ -110,7 +90,10 @@ func (m *liveExecManager) closePendingWithoutFill(now time.Time, p *livePosition
 	if p == nil {
 		return false, nil
 	}
-	markLivePositionClosed(p, now, reason)
+	p.State = execClosed
+	p.CloseReason = reason
+	p.ClosedAt = now
+	p.UpdatedAt = now
 	_ = m.logFill(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	return true, nil
@@ -128,12 +111,11 @@ type remotePositionView struct {
 	QtyAbs     float64
 	EntryPrice float64
 	MarkPrice  float64
-	Margin     float64
 }
 
 func remotePositionForSide(rows []map[string]any, side string) remotePositionView {
 	view := remotePositionView{}
-	side = normalizePositionSide(side)
+	side = strings.ToUpper(strings.TrimSpace(side))
 	for _, row := range rows {
 		amt := mapFloat(row["positionAmt"])
 		if mathAbs(amt) <= 1e-10 {
@@ -143,33 +125,15 @@ func remotePositionForSide(rows []map[string]any, side string) remotePositionVie
 		if amt < 0 {
 			rowSide = "SELL"
 		}
-		if side != "" && !strings.EqualFold(normalizePositionSide(rowSide), side) {
+		if side != "" && !strings.EqualFold(rowSide, side) {
 			continue
 		}
 		view.QtyAbs = mathAbs(amt)
 		view.EntryPrice = mapFloat(row["entryPrice"])
 		view.MarkPrice = mapFloat(row["markPrice"])
-		view.Margin = maxFloat(mapFloat(row["isolatedWallet"]), mapFloat(row["positionInitialMargin"]))
 		return view
 	}
 	return view
-}
-
-func derivedAddFillPrice(currentEntry, currentQty float64, view remotePositionView) float64 {
-	if view.EntryPrice <= 0 || view.QtyAbs <= currentQty {
-		return view.EntryPrice
-	}
-	deltaQty := view.QtyAbs - currentQty
-	if deltaQty <= 0 {
-		return view.EntryPrice
-	}
-	totalCost := view.EntryPrice * view.QtyAbs
-	oldCost := currentEntry * currentQty
-	fillPx := (totalCost - oldCost) / deltaQty
-	if fillPx <= 0 {
-		return view.EntryPrice
-	}
-	return fillPx
 }
 
 func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition, fillPx float64, reason string) (bool, error) {
@@ -177,11 +141,14 @@ func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition
 		return false, nil
 	}
 	_ = m.cancelRemainingExits(p)
+	p.State = execClosed
 	p.CloseReason = reason
+	p.ClosedAt = now
+	p.UpdatedAt = now
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("📪", "POSITION CLOSED",
 			fmt.Sprintf("<b>%s</b>", p.Symbol),
-			fmt.Sprintf("<b>Reason:</b> %s", reason),
+			fmt.Sprintf("<b>Reason:</b> %s", p.CloseReason),
 		))
 	}
 	if fillPx <= 0 {
@@ -193,11 +160,9 @@ func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition
 	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, p.RemainingQty)
 	p.RealizedPnL += pnl
 	_ = m.addDayRealized(now, pnl)
-	_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
-	m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
-	markLivePositionClosed(p, now, reason)
+	_ = m.logFill(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
+	m.sendFillReceipt(now, p, "CLOSE", p.CloseReason, p.RemainingQty, fillPx, pnl, pct)
 	p.RemainingQty = 0
-	m.maybeSweepTradeProfit(now, p)
 	return true, nil
 }
 
@@ -213,12 +178,6 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		p.EntryPrice = view.EntryPrice
 	}
 	if view.QtyAbs <= 1e-10 {
-		if p.PendingExitOrderID > 0 {
-			reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT_FILLED")
-			m.clearPendingExit(p)
-			changed, err := m.closeFromRemoteSnapshot(now, p, view.MarkPrice, reason)
-			return changed, true, err
-		}
 		changed, err := m.closeFromRemoteSnapshot(now, p, view.MarkPrice, "POSITION_FLAT_REMOTE")
 		return changed, true, err
 	}
@@ -231,24 +190,6 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		return true, false, m.ensureExitOrders(p)
 	}
 	if view.QtyAbs > p.RemainingQty+eps {
-		if p.PendingAddOrderID > 0 {
-			deltaQty := view.QtyAbs - p.RemainingQty
-			deltaMargin := 0.0
-			if view.Margin > p.Margin {
-				deltaMargin = view.Margin - p.Margin
-			}
-			reason := "ADD_RECOVERED_REMOTE"
-			if strings.EqualFold(strings.TrimSpace(p.PendingAddEntryReason), "continuation_fast") {
-				reason = "CONFIRMED_ADD"
-			}
-			if err := m.applyAddFill(now, p, deltaQty, derivedAddFillPrice(p.EntryPrice, p.RemainingQty, view), deltaMargin, reason); err != nil {
-				return true, false, err
-			}
-			p.PendingAddFilledQty = p.PendingAddQty
-			m.clearPendingAdd(p)
-			p.UnknownExitChecks = 0
-			return true, false, nil
-		}
 		p.RemainingQty = view.QtyAbs
 		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
 		p.UpdatedAt = now
@@ -266,19 +207,6 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		}
 		if fillPx <= 0 {
 			fillPx = p.EntryPrice
-		}
-		if p.PendingExitOrderID > 0 {
-			if err := m.applyPendingExitProgress(now, p, delta, fillPx, false); err != nil {
-				return true, false, err
-			}
-			p.UnknownExitChecks = 0
-			if p.RemainingQty <= fillEpsilon(p.Qty) {
-				reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT_FILLED")
-				m.clearPendingExit(p)
-				changed, err := m.closeFromRemoteSnapshot(now, p, fillPx, reason)
-				return changed, true, err
-			}
-			return true, false, nil
 		}
 		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, delta)
 		p.RealizedPnL += pnl
@@ -300,55 +228,6 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 	}
 	p.UnknownExitChecks = 0
 	return false, false, nil
-}
-
-func (m *liveExecManager) applyPendingExitProgress(now time.Time, p *livePosition, deltaQty, fillPx float64, final bool) error {
-	if p == nil || deltaQty <= 0 {
-		return nil
-	}
-	p.PendingExitFilledQty += deltaQty
-	p.RemainingQty = maxFloat(0, p.RemainingQty-deltaQty)
-	p.UpdatedAt = now
-	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, deltaQty)
-	p.RealizedPnL += pnl
-	dayRealized := m.addDayRealized(now, pnl)
-	reason := firstNonEmpty(p.PendingExitReason, "LIMIT_EXIT")
-	action := firstNonEmpty(p.PendingExitAction, "CLOSE")
-	title := "LIMIT EXIT PARTIAL"
-	fillAction := "CLOSE"
-	if strings.EqualFold(action, "FORCE_CLOSE") {
-		title = "FORCE CLOSE PARTIAL"
-		fillAction = "FORCE_CLOSE"
-	}
-	if final {
-		title = "LIMIT EXIT FILLED"
-		if strings.EqualFold(action, "FORCE_CLOSE") {
-			title = "FORCE CLOSE FILLED"
-		}
-	}
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("✅", title,
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", deltaQty, fmtPrice(fillPx)),
-			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-		))
-	}
-	_ = m.logFill(now, p, fillAction, reason, deltaQty, fillPx, pnl, pct)
-	m.sendFillReceipt(now, p, fillAction, reason, deltaQty, fillPx, pnl, pct)
-	if p.RemainingQty <= fillEpsilon(p.Qty) {
-		m.clearPendingExit(p)
-		markLivePositionClosed(p, now, reason)
-		p.RemainingQty = 0
-		m.maybeSweepTradeProfit(now, p)
-		return nil
-	}
-	if final {
-		m.clearPendingExit(p)
-		if err := m.ensureExitOrders(p); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage int, deltaQty, fillPx float64, final bool) error {
@@ -429,7 +308,9 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 		p.StopOrderID = 0
 		reason = "STOP_HIT"
 		title = "STOP HIT"
-		markLivePositionClosed(p, now, "STOP_HIT")
+		p.State = execClosed
+		p.CloseReason = "STOP_HIT"
+		p.ClosedAt = now
 	}
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("🛑", title,
@@ -443,7 +324,6 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 	if p.State != execClosed {
 		return m.placeOrReplaceStop(p)
 	}
-	m.maybeSweepTradeProfit(now, p)
 	return nil
 }
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ATTACH_SESSION="${TMUX_ATTACH_SESSION:-aster-live}"
+ATTACH_SESSION="${TMUX_ATTACH_SESSION:-aster-live-lite}"
 WRAPPER_SERVICE="aster-modules-tmux"
-LEGACY_SERVICES=(aster-live aster-tape aster-whale aster-liqs aster-oflow aster-long aster-short)
+LEGACY_SERVICES=(aster-live-lite aster-tape aster-whale aster-liqs aster-oflow aster-long aster-short)
 
 echo "[aster] stopping legacy services to avoid duplicate runners..."
 sudo systemctl disable --now "${LEGACY_SERVICES[@]}" 2>/dev/null || true

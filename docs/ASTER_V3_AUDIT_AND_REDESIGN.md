@@ -16,30 +16,30 @@ Timezone baseline: America/Chicago
   - Router and gating in `internal/strategies/router.go`.
   - Signal schema in `internal/strategies/types.go`.
 - Paper/live execution:
-  - Unified runtime in `cmd/live/main.go`.
+  - Unified runtime in `cmd/live-lite/main.go`.
   - Exchange execution adapter in `adapters/aster/execution_rest.go`.
 - Backtesting:
   - Engine in `internal/backtest/engine.go`.
   - CLI in `cmd/backtest/main.go`.
 - Ops/reporting:
-  - Maintenance windows, payout manager, state persistence, Telegram commands in `cmd/live/main.go`.
+  - Maintenance windows, payout manager, state persistence, Telegram commands in `cmd/live-lite/main.go`.
 
 ### Evidence table
 | Claim | Supporting file/metric | Confidence | Failure mode / caveat |
 |---|---|---:|---|
-| Session-tagged digest/status exists | `cmd/live/main.go` (`sessionTag`, hourly digest output paths) | 0.95 | Formatting still dense in long tables |
-| Pre-EOD sweep exists | `cmd/live/main.go` (`ApplyPreEODExit`, `LIVE_PRE_EOD_EXIT_*`) | 0.95 | Can close good trades early if momentum proxy noisy |
-| Daily payout flow exists with state machine | `cmd/live/main.go` (`payoutManager`, states `IDLE/PENDING_CLOSE/DONE/DONE_FALLBACK`) | 0.95 | Live payout action is alert/debit flow, not on-chain transfer |
-| Telegram commands exist | `cmd/live/main.go` (`/help`, `/status`, `/balance`, `/positions`, `/pause`, `/resume`, `/close SYMBOL`, `/closeall`) | 0.95 | No auth layer beyond chat-id allowlist |
-| Fill journaling exists | `cmd/live/main.go` (`LIVE_TRADES_FILE`, logFill/sendFillReceipt) | 0.90 | Funding impact and modeled slippage not complete in live journals |
-| Stale timer-exit architecture is absent | `rg` on `cmd/live/main.go` shows no stale-exit path | 0.90 | Momentum/pre-EOD exits can still behave similarly if thresholds too tight |
+| Session-tagged digest/status exists | `cmd/live-lite/main.go` (`sessionTag`, hourly digest output paths) | 0.95 | Formatting still dense in long tables |
+| Pre-EOD sweep exists | `cmd/live-lite/main.go` (`ApplyPreEODExit`, `LIVE_PRE_EOD_EXIT_*`) | 0.95 | Can close good trades early if momentum proxy noisy |
+| Daily payout flow exists with state machine | `cmd/live-lite/main.go` (`payoutManager`, states `IDLE/PENDING_CLOSE/DONE/DONE_FALLBACK`) | 0.95 | Live payout action is alert/debit flow, not on-chain transfer |
+| Telegram commands exist | `cmd/live-lite/main.go` (`/help`, `/status`, `/balance`, `/positions`, `/pause`, `/resume`, `/close SYMBOL`, `/closeall`) | 0.95 | No auth layer beyond chat-id allowlist |
+| Fill journaling exists | `cmd/live-lite/main.go` (`LIVE_TRADES_FILE`, logFill/sendFillReceipt) | 0.90 | Funding impact and modeled slippage not complete in live journals |
+| Stale timer-exit architecture is absent | `rg` on `cmd/live-lite/main.go` shows no stale-exit path | 0.90 | Momentum/pre-EOD exits can still behave similarly if thresholds too tight |
 | Backtest costs modeled partially | `internal/backtest/engine.go` has fee/slippage bps | 0.90 | Funding, liquidation distance, L2 depth slippage missing |
 | Current backtests show weak edge on sample set | `out/backtests/summary.json` (e.g., PF < 1, negative Sharpe/AvgR) | 0.92 | Sample-specific; still a valid warning |
 
 ## 2. Working Components (with evidence)
 
 1. Runtime controls and safety rails are materially improved.
-- Evidence: maintenance windows + force-flat + warmup + reserve lock + cooldowns in `cmd/live/main.go`.
+- Evidence: maintenance windows + force-flat + warmup + reserve lock + cooldowns in `cmd/live-lite/main.go`.
 - Why it works: deterministic scheduler + explicit entry gating + persistent state files (`out/paper_state.json`, `out/live_exec_state.json`, `out/payout_state.json`).
 
 2. Paper/live operational parity improved at decision layer.
@@ -50,7 +50,7 @@ Timezone baseline: America/Chicago
 - Evidence: `LevelAtHeaviestInRange`, `FirstSignificantOpposingLevel`, nearest HVN/LVN fields in `internal/features/volume_profile.go`.
 
 4. Command + status surface is now serviceable.
-- Evidence: Telegram handlers and `/api/status` endpoints in `cmd/live/main.go`.
+- Evidence: Telegram handlers and `/api/status` endpoints in `cmd/live-lite/main.go`.
 
 ## 3. Broken Components (root cause + fix)
 
@@ -71,7 +71,7 @@ Timezone baseline: America/Chicago
   - No liquidation-distance rejection in entry pipeline.
   - Orderbook filter is entry-side only (`orderbookSupportsEntry`), no exit-quality gate.
 - Root cause: strategy-first evolution, risk-shell not centralized.
-- Fix: implement centralized `RiskShellApprove()` called by backtest and live before any entry.
+- Fix: implement centralized `RiskShellApprove()` called by backtest and live-lite before any entry.
 
 3. Session multiplier can distort signal quality.
 - Evidence: `UseSessionRegimeRisk` + `SessionRiskMultiplier()` in `router.go`, `session_clock.go`, and scanner labels in `internal/sessions/sessions.go`.
@@ -150,7 +150,7 @@ Timezone baseline: America/Chicago
 7. Risk Shell
 - Current: spread/orderbook entry filter + reserve gates + cooldowns.
 - Target add:
-  - unified risk shell package used by backtest and live.
+  - unified risk shell package used by backtest and live-lite.
 
 8. Execution/Trade Mgmt
 - Current: stops/TP/trailing/BE implemented, reconciliation exists.
@@ -345,7 +345,7 @@ Position/risk controls:
 ## Immediate Code-Level Priorities (next commit set)
 
 1. Add `internal/risk/shell.go` and call it from:
-- `cmd/live/main.go` before `PlaceOrder`
+- `cmd/live-lite/main.go` before `PlaceOrder`
 - `internal/backtest/engine.go` before scheduling entries
 
 2. Remove score multiplier influence while retaining session tags:
@@ -357,7 +357,7 @@ Position/risk controls:
 - emit per-trade `funding_cost` and `liq_buffer_ok`
 
 4. Tighten anti-overtrading controls:
-- per-hour cap and stopout lock in candidate acceptance path in `cmd/live/main.go`.
+- per-hour cap and stopout lock in candidate acceptance path in `cmd/live-lite/main.go`.
 
 5. Keep unchanged by requirement:
 - no stale timer-exit architecture

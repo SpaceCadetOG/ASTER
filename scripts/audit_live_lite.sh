@@ -5,14 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SINCE_DATE="${1:-2026-03-08}"
-OUT_FILE="/tmp/live-audit-${SINCE_DATE}-to-now.log"
-SUMMARY_FILE="/tmp/live-audit-summary-${SINCE_DATE}.txt"
+OUT_FILE="/tmp/live-lite-audit-${SINCE_DATE}-to-now.log"
+SUMMARY_FILE="/tmp/live-lite-audit-summary-${SINCE_DATE}.txt"
 
 shopt -s nullglob
 selected=()
-for f in logs/live-*.log; do
+for f in logs/live-lite-*.log; do
   base="$(basename "$f")"
-  day="${base#live-}"
+  day="${base#live-lite-}"
   day="${day%.log}"
   if [[ "$day" > "$SINCE_DATE" || "$day" == "$SINCE_DATE" ]]; then
     selected+=("$f")
@@ -21,7 +21,7 @@ done
 
 if [[ ${#selected[@]} -eq 0 ]]; then
   echo "no matching log files found in ./logs for since=${SINCE_DATE}" >&2
-  echo "tip: start runtime with scripts/run_live_safe_logged.sh for conservative live validation" >&2
+  echo "tip: start runtime with scripts/run_live_lite_safe_logged.sh for conservative live validation" >&2
   exit 1
 fi
 

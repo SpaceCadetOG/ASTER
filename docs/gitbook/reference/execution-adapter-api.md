@@ -53,4 +53,4 @@ type SymbolMeta struct {
 
 ## Margin mode
 
-Current live standard is isolated margin, enforced in live execution path.
+Current live standard is isolated margin, enforced in live-lite execution path.

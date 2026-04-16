@@ -12,6 +12,6 @@ aster_auth_mode: "hmac"
 # aster_private_key: "0x..."
 # aster_chain_id: 1666
 
-# Optional telegram keys used by cmd/live
+# Optional telegram keys used by cmd/live-lite
 telegram_bot_token: "123456:ABCDEF..."
 telegram_chat_id: "123456789"

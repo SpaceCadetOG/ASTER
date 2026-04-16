@@ -1,7 +1,6 @@
 # Execution Guide (`cmd/exec`)
 
 This guide covers the tested CLI flow for placing and canceling futures orders on Aster mainnet.
-The primary live auth path is Aster Pro / Futures V3 agent auth.
 
 ## 1) Prerequisites
 
@@ -9,15 +8,13 @@ The primary live auth path is Aster Pro / Futures V3 agent auth.
 - Credentials file: `/Users/victorogbebor/2026/go-machine/.aster.yaml`
 - Mainnet base URL: `https://fapi.asterdex.com`
 
-Minimum `.aster.yaml` for mainnet agent auth:
+Minimum `.aster.yaml` for mainnet HMAC:
 
 ```yaml
-aster_auth_mode: agent
+aster_auth_mode: hmac
 aster_base_url: https://fapi.asterdex.com
-aster_user: 0xYOUR_MAIN_WALLET
-aster_signer: 0xYOUR_APPROVED_API_WALLET
-aster_private_key: 0xYOUR_SIGNER_PRIVATE_KEY
-aster_chain_id: 1666
+aster_api_key: YOUR_API_KEY
+aster_api_secret: YOUR_API_SECRET
 ```
 
 ## 2) Check Balance
@@ -26,7 +23,7 @@ USDT only:
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=balance \
 EXEC_ASSETS=USDT \
@@ -37,7 +34,7 @@ Check best bid/ask snapshot:
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=orderbook \
 EXEC_SYMBOL=ETHUSDT \
@@ -48,7 +45,7 @@ Quote sizing preview before place:
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=quote \
 EXEC_SYMBOL=ETHUSDT \
@@ -65,7 +62,7 @@ go run ./cmd/exec
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=place \
 EXEC_SYMBOL=ETHUSDT \
@@ -84,7 +81,7 @@ go run ./cmd/exec
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=place \
 EXEC_SYMBOL=ETHUSDT \
@@ -111,7 +108,7 @@ from the returned JSON.
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=cancel \
 EXEC_SYMBOL=ETHUSDT \
@@ -124,7 +121,7 @@ go run ./cmd/exec
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=cancel \
 EXEC_SYMBOL=ETHUSDT \
@@ -139,7 +136,7 @@ go run ./cmd/exec
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=status \
 EXEC_SYMBOL=ETHUSDT \
@@ -151,7 +148,7 @@ go run ./cmd/exec
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=status \
 EXEC_SYMBOL=ETHUSDT \
@@ -178,7 +175,7 @@ Dry run:
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=flatten \
 EXEC_SYMBOL=ETHUSDT \
@@ -191,7 +188,7 @@ Live:
 
 ```bash
 ASTER_CONFIG=/Users/victorogbebor/2026/go-machine/.aster.yaml \
-ASTER_AUTH_MODE=agent \
+ASTER_AUTH_MODE=hmac \
 EXEC_BASE_URL=https://fapi.asterdex.com \
 EXEC_ACTION=flatten \
 EXEC_SYMBOL=ETHUSDT \
@@ -208,12 +205,8 @@ go run ./cmd/exec
 - `Precision is over the maximum defined for this asset`
   - Ensure latest code is used (symbol meta matching + trimmed numeric formatting fixes are included).
 
-- `Signature check failed`
-  - Verify `aster_user` is the main wallet, `aster_signer` is the approved API wallet, and `aster_private_key` derives to `aster_signer`.
-  - Run `EXEC_ACTION=auth_check` and inspect `last_trace.canonical_msg` vs `last_trace.sent_query`.
-
 - `Invalid API-key, IP, or permissions`
-  - Only relevant when you intentionally force legacy `ASTER_AUTH_MODE=hmac`.
+  - Verify key/secret, API permissions, and IP whitelist (including VPN egress IP).
 
 ## 10) Live-Lite Runtime Ops (Dual Maintenance)
 
@@ -231,7 +224,7 @@ go run ./cmd/exec
     - `LIVE_TG_DAILY_REPORT_MIN=0`
     - `LIVE_TG_DAILY_REPORT_DAY_OFFSET=0`
 
-Recommended env overrides in `/opt/aster/env/live.env`:
+Recommended env overrides in `/opt/aster/env/live-lite.env`:
 
 ```bash
 LIVE_PURE_MODE=1
@@ -393,7 +386,7 @@ LIVE_REVERSAL_VOL_SPIKE_MIN=3.0
 Paper continuity:
 
 - Paper trader state is persisted to `LIVE_PAPER_STATE_FILE`.
-- Restarting `cmd/live` restores open paper positions, balance, and day stats from that file.
+- Restarting `cmd/live-lite` restores open paper positions, balance, and day stats from that file.
 - Paper fills now use live orderbook depth and regime-aware slippage; funding is applied per symbol each funding interval.
 - `LIVE_MULTI_ASSET_MODE=1` forces cross margin behavior (entry margin type set to `CROSSED`).
 - Payout cycle defaults to daily and executes at `16:00 CT` with a hard deadline by `16:15 CT`.

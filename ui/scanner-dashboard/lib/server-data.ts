@@ -229,7 +229,7 @@ export async function buildDashboardData(): Promise<DashboardData> {
   const sessionTags = [...new Set([...(longSnap?.Active || []), ...(shortSnap?.Active || [])])];
 
   const modules: ModuleCardData[] = [
-    moduleCard("live", "live", `${liveBase}/api/status`, Boolean(liveStatus), "Status API connected", "Status API unavailable"),
+    moduleCard("live-lite", "live-lite", `${liveBase}/api/status`, Boolean(liveStatus), "Status API connected", "Status API unavailable"),
     moduleCard("long", "long scanner", `${longBase}/api/status`, Boolean(longSnap), "Long scanner connected", "Long scanner unavailable"),
     moduleCard("short", "short scanner", `${shortBase}/api/status`, Boolean(shortSnap), "Short scanner connected", "Short scanner unavailable"),
     moduleCard("oflow", "oflow", `${oflowBase}/api/status`, Boolean(oflowStatus), "Flow status connected", "Flow status unavailable"),
@@ -299,7 +299,7 @@ export async function buildDashboardData(): Promise<DashboardData> {
         narrative: r.narrative
       }))
     },
-    live: liveStatus
+    liveLite: liveStatus
       ? {
           generated: liveStatus.generated,
           dryRun: liveStatus.dry_run,
