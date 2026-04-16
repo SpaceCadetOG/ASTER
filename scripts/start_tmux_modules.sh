@@ -20,7 +20,6 @@ start_one() {
   ASTER_WORKDIR="${WORKDIR}" ASTER_ENV_FILE="${envfile}" "${SCRIPTDIR}/tmux_module_runner.sh" "${session}" "${cmd}"
 }
 
-<<<<<<< HEAD
 start_one "aster-live" "/opt/aster/env/live.env" "${SCRIPTDIR}/run_live_logged.sh" "bash ./scripts/run_live_logged.sh"
 start_one "aster-long" "/opt/aster/env/long.env" "${SCRIPTDIR}/run_long_logged.sh" "bash ./scripts/run_long_logged.sh"
 start_one "aster-short" "/opt/aster/env/short.env" "${SCRIPTDIR}/run_short_logged.sh" "bash ./scripts/run_short_logged.sh"
