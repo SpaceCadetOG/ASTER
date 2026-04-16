@@ -217,20 +217,20 @@ export function DashboardShell() {
 
           {tab === "live" ? (
             <div className="panel">
-              <h3>Live-Lite Portal</h3>
+              <h3>Live Portal</h3>
               <div className="row" style={{ gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 8 }}>
-                <MetricTile label="Mode" value={data.liveLite?.dryRun ? "DRY_RUN" : "LIVE"} />
-                <MetricTile label="Available USDT" value={`${(data.liveLite?.availableUSDT || 0).toFixed(4)}`} />
+                <MetricTile label="Mode" value={data.live?.dryRun ? "DRY_RUN" : "LIVE"} />
+                <MetricTile label="Available USDT" value={`${(data.live?.availableUSDT || 0).toFixed(4)}`} />
                 <MetricTile
                   label="Top"
-                  value={`${data.liveLite?.topSymbol || "-"} ${data.liveLite?.topSide || ""} ${(data.liveLite?.topScore || 0).toFixed(2)}`}
+                  value={`${data.live?.topSymbol || "-"} ${data.live?.topSide || ""} ${(data.live?.topScore || 0).toFixed(2)}`}
                 />
-                <MetricTile label="Exec Open" value={String(data.liveLite?.execOpen || 0)} />
-                <MetricTile label="Exec Pending" value={String(data.liveLite?.execPending || 0)} />
-                <MetricTile label="Exec Closed" value={String(data.liveLite?.execClosed || 0)} />
+                <MetricTile label="Exec Open" value={String(data.live?.execOpen || 0)} />
+                <MetricTile label="Exec Pending" value={String(data.live?.execPending || 0)} />
+                <MetricTile label="Exec Closed" value={String(data.live?.execClosed || 0)} />
               </div>
               <div className="terminal-strip" style={{ marginTop: 10 }}>
-                {`paper=${data.liveLite?.paperSummary || "n/a"}\npayout_cycle=${data.liveLite?.payoutCycleID || "n/a"} next=${data.liveLite?.payoutNextAt || "n/a"}\ngenerated=${data.liveLite?.generated || "n/a"}`}
+                {`paper=${data.live?.paperSummary || "n/a"}\npayout_cycle=${data.live?.payoutCycleID || "n/a"} next=${data.live?.payoutNextAt || "n/a"}\ngenerated=${data.live?.generated || "n/a"}`}
               </div>
             </div>
           ) : null}

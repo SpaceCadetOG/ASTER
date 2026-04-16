@@ -24,7 +24,7 @@ Typical query params:
 - `tf` (e.g. `5m`)
 - `n`, plus endpoint-specific tuning params.
 
-## Live-lite status API (`cmd/live-lite`)
+## Live status API (`cmd/live`)
 
 Default bind:
 - `LIVE_STATUS_ADDR=:8787`

@@ -23,6 +23,11 @@ type PositionCard struct {
 	Symbol           string
 	Side             string
 	Source           string
+	Status           string
+	ManageState      string
+	Managed          bool
+	Protected        bool
+	NextAction       string
 	Qty              float64
 	EntryPrice       float64
 	MarkPrice        float64
@@ -39,10 +44,28 @@ type PositionCard struct {
 }
 
 type ScanItem struct {
-	Symbol string
-	Grade  string
-	Score  float64
+	Symbol    string
+	Side      string
+	Grade     string
+	Score     float64
+	Slope     float64
+	State     string
+	Price     float64
+	DayUTC    float64
+	UTC4h     float64
+	UTC1h     float64
+	VolumeUSD float64
 }
+
+const (
+	ManageStateDetected            = "DETECTED"
+	ManageStateAwaitingOperator    = "AWAITING_OPERATOR"
+	ManageStateAdopted             = "ADOPTED"
+	ManageStateAttachingProtection = "ATTACHING_PROTECTION"
+	ManageStateProtected           = "PROTECTED"
+	ManageStateDegraded            = "DEGRADED"
+	ManageStateForceCloseTriggered = "FORCE_CLOSE_TRIGGERED"
+)
 
 func BuildSessionPulseHTML(p PulseSnapshot) string {
 	title := strings.TrimSpace(p.Title)
@@ -65,9 +88,15 @@ func BuildSessionPulseHTML(p PulseSnapshot) string {
 }
 
 func BuildPositionCard(p PositionCard) string {
-	direction := "🟢 BUY"
-	if strings.EqualFold(strings.TrimSpace(p.Side), "SELL") {
-		direction = "🔴 SELL"
+	direction := "🟢 LONG"
+	if strings.EqualFold(strings.TrimSpace(p.Side), "SELL") || strings.EqualFold(strings.TrimSpace(p.Side), "SHORT") {
+		direction = "🔴 SHORT"
+	}
+	statusBanner := ""
+	if p.Managed && !p.Protected {
+		statusBanner = "<b>🟥 UNPROTECTED MANAGED TRADE</b>\n"
+	} else if p.Managed && p.Protected {
+		statusBanner = "<b>🟢 MANAGED + PROTECTED</b>\n"
 	}
 	setup := strings.TrimSpace(p.Setup)
 	if setup == "" {
@@ -84,23 +113,43 @@ func BuildPositionCard(p PositionCard) string {
 	if p.Qty > 0 {
 		pnlLine = fmt.Sprintf("• <b>PnL:</b> %s$%.2f | <b>Qty:</b> %.6f | <b>Lev:</b> %dx", pnlEmoji(p.UnrealizedPnL), p.UnrealizedPnL, p.Qty, p.Leverage)
 	}
-	setupLine := fmt.Sprintf("• <b>Setup:</b> <code>%s</code> (Conf: %.0f%%) | <b>Age:</b> %dm", setup, p.Confluence*100.0, p.AgeMin)
-	if strings.TrimSpace(p.Source) != "" || p.SpreadBps > 0 {
-		parts := make([]string, 0, 2)
+	setupLine := fmt.Sprintf("• <b>Setup:</b> <code>%s</code> | <b>Age:</b> %dm", setup, p.AgeMin)
+	if strings.TrimSpace(p.Source) != "" || strings.TrimSpace(p.Status) != "" || p.SpreadBps > 0 {
+		parts := make([]string, 0, 5)
+		managed := "NO"
+		if p.Managed {
+			managed = "YES"
+		}
+		exchangeStop := "NO"
+		if p.Protected {
+			exchangeStop = "LIVE"
+		}
 		if strings.TrimSpace(p.Source) != "" {
 			parts = append(parts, fmt.Sprintf("<b>Src:</b> %s", strings.ToUpper(strings.TrimSpace(p.Source))))
+		}
+		if strings.TrimSpace(p.ManageState) != "" {
+			parts = append(parts, fmt.Sprintf("<b>Manage:</b> %s", strings.ToUpper(strings.TrimSpace(p.ManageState))))
+		}
+		parts = append(parts, fmt.Sprintf("<b>Managed:</b> %s", managed))
+		parts = append(parts, fmt.Sprintf("<b>Exchange Stop:</b> %s", exchangeStop))
+		if strings.TrimSpace(p.Status) != "" {
+			parts = append(parts, fmt.Sprintf("<b>Protection:</b> %s", strings.ToUpper(strings.TrimSpace(p.Status))))
 		}
 		if p.SpreadBps > 0 {
 			parts = append(parts, fmt.Sprintf("<b>Spread:</b> %.1fbps", p.SpreadBps))
 		}
 		setupLine = setupLine + " | " + strings.Join(parts, " | ")
 	}
+	if strings.TrimSpace(p.NextAction) != "" {
+		setupLine = setupLine + " | " + fmt.Sprintf("<b>Next:</b> %s", p.NextAction)
+	}
 	return strings.TrimSpace(fmt.Sprintf(
-		"<b>📦 ACTIVE: %s (%s)</b>\n"+
+		"%s<b>📦 ACTIVE: %s (%s)</b>\n"+
 			"%s\n"+
 			"%s\n"+
 			"%s\n"+
 			"• <b>Safety:</b> SL: %.4f | TP: %.4f",
+		statusBanner,
 		strings.ToUpper(strings.TrimSpace(p.Symbol)), direction,
 		priceLine, pnlLine, setupLine, p.StopLoss, p.TakeProfit,
 	))
@@ -109,13 +158,37 @@ func BuildPositionCard(p PositionCard) string {
 func BuildScannerSnapshotHTML(longs, shorts []ScanItem, bias string) string {
 	return strings.TrimSpace(fmt.Sprintf(
 		"<b>📡 TOP SCANS</b>\n"+
-			"• <b>LONG:</b> %s\n"+
-			"• <b>SHORT:</b> %s\n"+
+			"%s\n"+
+			"%s\n"+
 			"⚡ <b>Bias:</b> %s",
-		renderScanLine(longs),
-		renderScanLine(shorts),
+		renderScanSectionCompact("LONG", longs, 3),
+		renderScanSectionCompact("SHORT", shorts, 3),
 		biasLabel(bias),
 	))
+}
+
+func BuildManagementStatusCard(state, symbol, side string, lines ...string) string {
+	icon, title := managementStateHeader(state)
+	headline := strings.TrimSpace(fmt.Sprintf("%s <b>%s</b>", icon, title))
+	var b strings.Builder
+	b.WriteString(headline)
+	if strings.TrimSpace(symbol) != "" {
+		s := strings.ToUpper(strings.TrimSpace(symbol))
+		dir := strings.ToUpper(strings.TrimSpace(side))
+		if dir != "" {
+			fmt.Fprintf(&b, "\n• <b>Trade:</b> %s %s", s, dir)
+		} else {
+			fmt.Fprintf(&b, "\n• <b>Trade:</b> %s", s)
+		}
+	}
+	for _, l := range lines {
+		s := strings.TrimSpace(l)
+		if s == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n• %s", s)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func pnlEmoji(v float64) string {
@@ -125,15 +198,109 @@ func pnlEmoji(v float64) string {
 	return "🟢 "
 }
 
-func renderScanLine(items []ScanItem) string {
+func renderScanSection(items []ScanItem) string {
 	if len(items) == 0 {
 		return "(none)"
 	}
 	parts := make([]string, 0, len(items))
-	for _, it := range items {
-		parts = append(parts, fmt.Sprintf("%s (<b>%s</b> · <b>%.0f</b>)", shortSymbol(it.Symbol), strings.TrimSpace(it.Grade), it.Score))
+	for i, it := range items {
+		side := strings.ToUpper(strings.TrimSpace(it.Side))
+		if side == "" {
+			side = "?"
+		}
+		state := strings.ToLower(strings.TrimSpace(it.State))
+		if state == "" {
+			state = "n/a"
+		}
+		price := "n/a"
+		if it.Price > 0 {
+			price = formatScanPrice(it.Price)
+		}
+		dayUTC := "n/a"
+		if it.DayUTC != 0 {
+			dayUTC = fmt.Sprintf("%+.1f%%", it.DayUTC)
+		}
+		utc4h := "n/a"
+		if it.UTC4h != 0 {
+			utc4h = fmt.Sprintf("%+.1f%%", it.UTC4h)
+		}
+		utc1h := "n/a"
+		if it.UTC1h != 0 {
+			utc1h = fmt.Sprintf("%+.1f%%", it.UTC1h)
+		}
+		vol := "n/a"
+		if it.VolumeUSD > 0 {
+			vol = humanUSD(it.VolumeUSD)
+		}
+		parts = append(parts, fmt.Sprintf(
+			"%d) <b>%s</b> [%s] g=<b>%s</b> score=<b>%.0f</b> slope=%+.3f state=%s px=%s day=%s 4h=%s 1h=%s vol=%s",
+			i+1,
+			shortSymbol(it.Symbol),
+			side,
+			strings.TrimSpace(it.Grade),
+			it.Score,
+			it.Slope,
+			state,
+			price,
+			dayUTC,
+			utc4h,
+			utc1h,
+			vol,
+		))
 	}
-	return strings.Join(parts, " | ")
+	return strings.Join(parts, "\n")
+}
+
+func renderScanSectionCompact(label string, items []ScanItem, topN int) string {
+	if topN <= 0 {
+		topN = 3
+	}
+	if len(items) == 0 {
+		return fmt.Sprintf("• <b>%s:</b> (none)", strings.ToUpper(strings.TrimSpace(label)))
+	}
+	n := len(items)
+	if n > topN {
+		n = topN
+	}
+	parts := make([]string, 0, n+1)
+	parts = append(parts, fmt.Sprintf("• <b>%s:</b>", strings.ToUpper(strings.TrimSpace(label))))
+	for i := 0; i < n; i++ {
+		it := items[i]
+		price := "n/a"
+		if it.Price > 0 {
+			price = formatScanPrice(it.Price)
+		}
+		parts = append(parts, fmt.Sprintf("  %d) <b>%s</b> g=<b>%s</b> s=<b>%.0f</b> st=%s px=%s",
+			i+1,
+			shortSymbol(it.Symbol),
+			strings.TrimSpace(it.Grade),
+			it.Score,
+			strings.ToLower(strings.TrimSpace(it.State)),
+			price,
+		))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func managementStateHeader(state string) (string, string) {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case ManageStateDetected:
+		return "🔎", "DETECTED"
+	case ManageStateAwaitingOperator:
+		return "🟡", "AWAITING OPERATOR"
+	case ManageStateAdopted:
+		return "🤝", "ADOPTED"
+	case ManageStateAttachingProtection:
+		return "🛠️", "ATTACHING PROTECTION"
+	case ManageStateProtected:
+		return "🟢", "PROTECTED"
+	case ManageStateDegraded:
+		return "🟥", "DEGRADED (UNPROTECTED)"
+	case ManageStateForceCloseTriggered:
+		return "🛑", "FORCE CLOSE TRIGGERED"
+	default:
+		return "ℹ️", strings.ToUpper(strings.TrimSpace(state))
+	}
 }
 
 func openPosLabel(openCount, openCap int) string {
@@ -161,6 +328,34 @@ func biasLabel(b string) string {
 		return "🔴 SHORT"
 	default:
 		return "🟡 NEUTRAL"
+	}
+}
+
+func formatScanPrice(v float64) string {
+	switch {
+	case v >= 1000:
+		return fmt.Sprintf("%.2f", v)
+	case v >= 1:
+		return fmt.Sprintf("%.4f", v)
+	default:
+		return fmt.Sprintf("%.6f", v)
+	}
+}
+
+func humanUSD(v float64) string {
+	av := v
+	if av < 0 {
+		av = -av
+	}
+	switch {
+	case av >= 1_000_000_000:
+		return fmt.Sprintf("%.2fB", v/1_000_000_000)
+	case av >= 1_000_000:
+		return fmt.Sprintf("%.2fM", v/1_000_000)
+	case av >= 1_000:
+		return fmt.Sprintf("%.2fK", v/1_000)
+	default:
+		return fmt.Sprintf("%.0f", v)
 	}
 }
 

@@ -15,29 +15,37 @@ const (
 )
 
 type HybridStopConfig struct {
-	Enabled           bool
-	TemplateMode      string
-	ATRMultCont       float64
-	ATRMultPullback   float64
-	ATRMultReversal   float64
-	ATRMultMeanRevert float64
-	SweepBufferBps    float64
-	MinWidthPct       float64
-	MaxWidthPct       float64
-	MinRRToTP1        float64
+	Enabled               bool
+	TemplateMode          string
+	ATRMultCont           float64
+	ATRMultPullback       float64
+	ATRMultReversal       float64
+	ATRMultMeanRevert     float64
+	SweepBufferBps        float64
+	MinWidthPct           float64
+	MaxWidthPct           float64
+	MinRRToTP1            float64
+	SoftRejectEnable      bool
+	SoftRejectMaxWidthPct float64
+	SoftRejectMinRRToTP1  float64
 }
 
 type HybridStopInput struct {
-	Side          string
-	Entry         float64
-	SignalStop    float64
-	StructureLow  float64
-	StructureHigh float64
-	SessionVWAP   float64
-	EMA9          float64
-	ATR           float64
-	TargetPrice   float64
-	Template      StopTemplate
+	Side           string
+	Entry          float64
+	SignalStop     float64
+	StructureLow   float64
+	StructureHigh  float64
+	SessionVWAP    float64
+	EMA9           float64
+	ATR            float64
+	TargetPrice    float64
+	Template       StopTemplate
+	EliteCandidate bool
+	EntryReason    string
+	StarterEntry   bool
+	AdvancedReady  bool
+	HitTP1         bool
 }
 
 type HybridStopResult struct {
@@ -49,20 +57,24 @@ type HybridStopResult struct {
 	StopDistanceR   float64
 	Rejected        bool
 	RejectReason    string
+	StarterOnly     bool
 }
 
 func DefaultHybridStopConfig() HybridStopConfig {
 	return HybridStopConfig{
-		Enabled:           false,
-		TemplateMode:      "off",
-		ATRMultCont:       1.35,
-		ATRMultPullback:   1.10,
-		ATRMultReversal:   1.65,
-		ATRMultMeanRevert: 1.20,
-		SweepBufferBps:    18,
-		MinWidthPct:       0.25,
-		MaxWidthPct:       8.00,
-		MinRRToTP1:        1.00,
+		Enabled:               false,
+		TemplateMode:          "off",
+		ATRMultCont:           1.35,
+		ATRMultPullback:       1.10,
+		ATRMultReversal:       1.65,
+		ATRMultMeanRevert:     1.20,
+		SweepBufferBps:        18,
+		MinWidthPct:           0.25,
+		MaxWidthPct:           8.00,
+		MinRRToTP1:            1.00,
+		SoftRejectEnable:      false,
+		SoftRejectMaxWidthPct: 12.0,
+		SoftRejectMinRRToTP1:  0.65,
 	}
 }
 
@@ -82,6 +94,21 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	}
 	if res.Template == "" {
 		res.Template = StopTemplateReclaimPullback
+	}
+	if starterInitialProtectionMode(in) {
+		stopPrice := starterSimpleInitialStop(side, in.Entry, in.SignalStop, cfg.MinWidthPct/100.0, cfg.MaxWidthPct/100.0)
+		if stopPrice <= 0 {
+			res.Rejected = true
+			res.RejectReason = "hybrid_stop_missing_anchor"
+			return res
+		}
+		dist := math.Abs(in.Entry - stopPrice)
+		res.StopPrice = stopPrice
+		res.StopReason = "starter_simple_initial_stop"
+		res.StopDistanceR = dist
+		res.StopDistancePct = (dist / in.Entry) * 100.0
+		res.StarterOnly = true
+		return res
 	}
 	minWidthPct := cfg.MinWidthPct / 100.0
 	maxWidthPct := cfg.MaxWidthPct / 100.0
@@ -147,17 +174,20 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 		reason += "+min_width"
 	}
 	if maxWidthPct > 0 && distPct > maxWidthPct {
-		res.Rejected = true
-		res.RejectReason = "hybrid_stop_too_wide"
-		return res
+		if side == "BUY" {
+			stopPrice = in.Entry * (1 - maxWidthPct)
+		} else {
+			stopPrice = in.Entry * (1 + maxWidthPct)
+		}
+		dist = math.Abs(in.Entry - stopPrice)
+		distPct = dist / in.Entry
+		reason += "+max_width"
 	}
 	if in.TargetPrice > 0 && cfg.MinRRToTP1 > 0 {
 		reward := math.Abs(in.TargetPrice - in.Entry)
 		rr := reward / maxFloat(dist, 1e-9)
-		if rr < cfg.MinRRToTP1 {
-			res.Rejected = true
-			res.RejectReason = "hybrid_stop_rr_too_low"
-			return res
+		if rrBelowMinimum(rr, cfg.MinRRToTP1) {
+			reason += "+rr_low"
 		}
 	}
 
@@ -166,6 +196,89 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	res.StopDistanceR = dist
 	res.StopDistancePct = distPct * 100.0
 	return res
+}
+
+func IsStarterEntryReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "impulsive_long_starter", "impulsive_short_starter":
+		return true
+	default:
+		return false
+	}
+}
+
+func starterInitialProtectionMode(in HybridStopInput) bool {
+	if !(in.StarterEntry || IsStarterEntryReason(in.EntryReason)) {
+		return false
+	}
+	if in.AdvancedReady || in.HitTP1 {
+		return false
+	}
+	return true
+}
+
+func starterSimpleInitialStop(side string, entry, signalStop, minWidthPct, maxWidthPct float64) float64 {
+	if entry <= 0 {
+		return 0
+	}
+	minWidthPct = maxFloat(minWidthPct, 0.0035)
+	if maxWidthPct <= 0 {
+		maxWidthPct = DefaultHybridStopConfig().MaxWidthPct / 100.0
+	}
+	if maxWidthPct < minWidthPct {
+		maxWidthPct = minWidthPct
+	}
+	stop := 0.0
+	switch strings.ToUpper(strings.TrimSpace(side)) {
+	case "BUY":
+		if signalStop > 0 && signalStop < entry {
+			stop = signalStop
+		} else {
+			stop = entry * (1 - minWidthPct)
+		}
+		distPct := math.Abs(entry-stop) / entry
+		if distPct < minWidthPct {
+			stop = entry * (1 - minWidthPct)
+		}
+		if distPct > maxWidthPct {
+			stop = entry * (1 - maxWidthPct)
+		}
+	case "SELL":
+		if signalStop > 0 && signalStop > entry {
+			stop = signalStop
+		} else {
+			stop = entry * (1 + minWidthPct)
+		}
+		distPct := math.Abs(entry-stop) / entry
+		if distPct < minWidthPct {
+			stop = entry * (1 + minWidthPct)
+		}
+		if distPct > maxWidthPct {
+			stop = entry * (1 + maxWidthPct)
+		}
+	}
+	return stop
+}
+
+func appendRejectReason(cur, reason string) string {
+	if reason == "" {
+		return cur
+	}
+	if cur == "" {
+		return reason
+	}
+	if strings.Contains(cur, reason) {
+		return cur
+	}
+	return cur + "," + reason
+}
+
+func rrBelowMinimum(rr, minRR float64) bool {
+	if minRR <= 0 {
+		return false
+	}
+	const rrTol = 1e-6
+	return rr+rrTol < minRR
 }
 
 func atrMultForTemplate(cfg HybridStopConfig, template StopTemplate) float64 {

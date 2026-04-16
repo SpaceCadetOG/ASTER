@@ -1,13 +1,16 @@
-# ASTER Trading Bot API Documentation
+# ASTER Trading Bot Documentation
 
-This is the GitBook-style API and system documentation for the ASTER crypto perps project.
+This GitBook documents the current ASTER trading system as it runs today.
+
+The production runtime is `cmd/live`. It consumes scanner output, applies the
+risk shell, manages live and paper execution, handles Telegram operations, and
+maintains the perp account on the Pi.
 
 It covers:
-- Runtime architecture and module boundaries.
-- CLI APIs (`cmd/*`) and their env contracts.
-- HTTP APIs (scanner UI/API + live-lite status API).
-- Telegram command API.
-- Core internal interfaces (signals, snapshots, risk shell, backtest outputs).
-- Ops and deployment contracts for Pi/systemd/tmux.
+- End-to-end architecture and module boundaries.
+- How the `live` runtime scans, enters, protects, trails, exits, and re-enters.
+- Manual trade handoff with `/manage SYMBOL y` and protection attach behavior.
+- Funds maintenance, leverage, sizing, logging, and Pi deployment.
+- CLI, HTTP, Telegram, and internal reference contracts.
 
-Use [`SUMMARY.md`](./SUMMARY.md) as the table of contents.
+Use [SUMMARY.md](./SUMMARY.md) as the table of contents.

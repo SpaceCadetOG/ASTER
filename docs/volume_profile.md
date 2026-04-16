@@ -48,7 +48,7 @@ Use with existing tape/whale/scanner:
 2. If scanner weakens and price loses POC + stays below VAL, bias short.
 3. Treat HVN as likely pause/rotation zones; LVN as likely rejection/travel zones.
 
-## Strategy integration (backtest + live-lite)
+## Strategy integration (backtest + live)
 
 Volume profile rules are now integrated into router-driven strategy selection:
 
@@ -70,7 +70,7 @@ Backtest env knobs:
 - `BT_EVENT_LOCKOUT_MIN` default `0`
 - `BT_MAX_CORRELATED_POS` default `1`
 
-Live-lite env knobs:
+Live env knobs:
 
 - `LIVE_STOP_MODE` default `hybrid`
 - `LIVE_TARGET_MODE` default `hybrid`

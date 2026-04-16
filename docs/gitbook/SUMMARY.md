@@ -2,6 +2,7 @@
 
 - [ASTER Trading Bot API Documentation](README.md)
 - [Architecture Overview](architecture/overview.md)
+- [Developer Guide](guides/developer-guide.md)
 - [Data Models](reference/data-models.md)
 - [Strategy and Signal API](reference/strategy-signal-api.md)
 - [Risk Shell API](reference/risk-shell-api.md)

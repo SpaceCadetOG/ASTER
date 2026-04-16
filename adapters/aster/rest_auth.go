@@ -11,12 +11,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	gethmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
 type RESTAuth struct {
@@ -32,12 +35,19 @@ type RESTAuth struct {
 	timeSkew   int64 // serverTime - localTime (ms)
 	recvWindow int64
 	userAgent  string
+	configErr  error
+
+	authModeSource   string
+	authModeExplicit bool
 
 	nonceMu   sync.Mutex
 	lastNonce int64
 
 	metaMu    sync.RWMutex
 	metaCache map[string]SymbolMeta
+
+	traceMu   sync.RWMutex
+	lastTrace AgentAuthTrace
 }
 
 type APIError struct {
@@ -55,7 +65,27 @@ type RESTAuthConfig struct {
 	PrivateKey string
 	AuthMode   string // hmac|agent|auto
 	ChainID    int64
+	ChainIDSet bool
 	BaseURL    string
+}
+
+type AgentAuthTrace struct {
+	Method            string `json:"method"`
+	Path              string `json:"path"`
+	PrimaryType       string `json:"primary_type"`
+	DomainName        string `json:"domain_name"`
+	DomainVersion     string `json:"domain_version"`
+	DomainChainID     int64  `json:"domain_chain_id"`
+	DomainContract    string `json:"domain_verifying_contract"`
+	User              string `json:"user"`
+	Signer            string `json:"signer"`
+	Nonce             string `json:"nonce"`
+	CanonicalMsg      string `json:"canonical_msg"`
+	SentQuery         string `json:"sent_query"`
+	SignatureFormat   string `json:"signature_format"`
+	RecoveredSigner   string `json:"recovered_signer"`
+	Attempt           string `json:"attempt"`
+	OccurredAtRFC3339 string `json:"occurred_at"`
 }
 
 func (e *APIError) Error() string {
@@ -80,20 +110,13 @@ func NewRESTAuthWithConfig(cfg RESTAuthConfig) *RESTAuth {
 	} else if v := strings.TrimSpace(os.Getenv("ASTER_BASE_URL")); v != "" {
 		baseURL = strings.TrimRight(v, "/")
 	}
-	mode := strings.ToLower(strings.TrimSpace(cfg.AuthMode))
-	if mode == "" || mode == "auto" {
-		if strings.TrimSpace(cfg.User) != "" && strings.TrimSpace(cfg.Signer) != "" && strings.TrimSpace(cfg.PrivateKey) != "" {
-			mode = "agent"
-		} else {
-			mode = "hmac"
-		}
-	}
+	mode, source, explicit, cfgErr := resolveAuthMode(cfg)
 	chainID := cfg.ChainID
-	if chainID == 0 {
+	if chainID == 0 && mode != "agent" {
 		// Mainnet default from Aster API v3 docs.
 		chainID = 1666
 	}
-	return &RESTAuth{
+	r := &RESTAuth{
 		key:        strings.TrimSpace(cfg.APIKey),
 		secret:     strings.TrimSpace(cfg.APISecret),
 		user:       strings.TrimSpace(cfg.User),
@@ -106,6 +129,104 @@ func NewRESTAuthWithConfig(cfg RESTAuthConfig) *RESTAuth {
 		recvWindow: 5000,
 		userAgent:  "go-machine/aster-rest",
 		metaCache:  make(map[string]SymbolMeta),
+		configErr:  cfgErr,
+
+		authModeSource:   source,
+		authModeExplicit: explicit,
+	}
+	if r.configErr == nil && r.isAgentMode() {
+		r.configErr = r.validateAgentConfig()
+	}
+	return r
+}
+
+func resolveAuthMode(cfg RESTAuthConfig) (mode, source string, explicit bool, err error) {
+	hasHMAC := strings.TrimSpace(cfg.APIKey) != "" && strings.TrimSpace(cfg.APISecret) != ""
+	hasAgentTriplet := strings.TrimSpace(cfg.User) != "" && strings.TrimSpace(cfg.Signer) != "" && strings.TrimSpace(cfg.PrivateKey) != ""
+	requested := strings.ToLower(strings.TrimSpace(cfg.AuthMode))
+	if requested == "" {
+		requested = "auto"
+	}
+	explicit = requested != "auto"
+	switch requested {
+	case "agent":
+		if !hasAgentTriplet {
+			return "agent", "explicit:agent", true, fmt.Errorf("agent auth mode requires ASTER_USER, ASTER_SIGNER, and ASTER_PRIVATE_KEY")
+		}
+		if !cfg.ChainIDSet || cfg.ChainID <= 0 {
+			return "agent", "explicit:agent", true, fmt.Errorf("agent auth mode requires ASTER_CHAIN_ID")
+		}
+		return "agent", "explicit:agent", true, nil
+	case "hmac":
+		if !hasHMAC {
+			return "hmac", "explicit:hmac", true, fmt.Errorf("hmac auth mode requires ASTER_API_KEY and ASTER_API_SECRET")
+		}
+		return "hmac", "explicit:hmac", true, nil
+	case "auto":
+		if hasAgentTriplet {
+			if !cfg.ChainIDSet || cfg.ChainID <= 0 {
+				return "agent", "auto:agent", false, fmt.Errorf("auto-selected agent auth requires ASTER_CHAIN_ID")
+			}
+			return "agent", "auto:agent", false, nil
+		}
+		if hasHMAC {
+			return "hmac", "auto:hmac", false, nil
+		}
+		return "hmac", "auto:none", false, fmt.Errorf("missing credentials: provide agent wallet fields or legacy HMAC credentials")
+	default:
+		return "hmac", "invalid", true, fmt.Errorf("unknown auth mode %q (expected agent, hmac, or auto)", requested)
+	}
+}
+
+func (r *RESTAuth) validateAgentConfig() error {
+	if r.user == "" || r.signer == "" || r.privateKey == "" {
+		return fmt.Errorf("agent auth requires user/signer/private_key")
+	}
+	if r.chainID <= 0 {
+		return fmt.Errorf("agent auth requires positive chainID")
+	}
+	derived, err := deriveAddressFromPrivateKey(r.privateKey)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(derived, r.signer) {
+		return fmt.Errorf("signer_private_key_mismatch: derived=%s configured=%s", derived, r.signer)
+	}
+	return nil
+}
+
+func deriveAddressFromPrivateKey(privateKey string) (string, error) {
+	keyHex := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(privateKey, "0x"), "0X"))
+	if keyHex == "" {
+		return "", fmt.Errorf("empty private key")
+	}
+	priv, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid private key: %w", err)
+	}
+	return crypto.PubkeyToAddress(priv.PublicKey).Hex(), nil
+}
+
+func maskAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if len(addr) <= 12 {
+		return addr
+	}
+	return addr[:6] + "..." + addr[len(addr)-4:]
+}
+
+func envBoolRaw(name string, fallback bool) bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if raw == "" {
+		return fallback
+	}
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
 	}
 }
 
@@ -123,6 +244,68 @@ func (r *RESTAuth) BaseURL() string {
 
 func (r *RESTAuth) AuthMode() string {
 	return r.authMode
+}
+
+func (r *RESTAuth) AuthModeSource() string {
+	return r.authModeSource
+}
+
+func (r *RESTAuth) AuthModeExplicit() bool {
+	return r.authModeExplicit
+}
+
+func (r *RESTAuth) ConfigError() error {
+	return r.configErr
+}
+
+func (r *RESTAuth) ChainID() int64 {
+	return r.chainID
+}
+
+func (r *RESTAuth) MaskedUser() string {
+	return maskAddress(r.user)
+}
+
+func (r *RESTAuth) MaskedSigner() string {
+	return maskAddress(r.signer)
+}
+
+func (r *RESTAuth) authDebugEnabled() bool {
+	return envBoolRaw("ASTER_AUTH_DEBUG", false)
+}
+
+func (r *RESTAuth) LastAgentAuthTrace() AgentAuthTrace {
+	r.traceMu.RLock()
+	defer r.traceMu.RUnlock()
+	return r.lastTrace
+}
+
+func (r *RESTAuth) setLastAgentAuthTrace(trace AgentAuthTrace) {
+	r.traceMu.Lock()
+	r.lastTrace = trace
+	r.traceMu.Unlock()
+	if r.authDebugEnabled() {
+		b, _ := json.Marshal(trace)
+		fmt.Fprintf(os.Stderr, "aster-auth-debug %s\n", string(b))
+	}
+}
+
+func (r *RESTAuth) StartupAuthSummary() map[string]any {
+	out := map[string]any{
+		"auth_mode":      r.authMode,
+		"auth_source":    r.authModeSource,
+		"auth_explicit":  r.authModeExplicit,
+		"base_url":       r.baseURL,
+		"chain_id":       r.chainID,
+		"user":           r.MaskedUser(),
+		"signer":         r.MaskedSigner(),
+		"has_hmac_creds": strings.TrimSpace(r.key) != "" && strings.TrimSpace(r.secret) != "",
+		"has_agent":      strings.TrimSpace(r.user) != "" && strings.TrimSpace(r.signer) != "" && strings.TrimSpace(r.privateKey) != "",
+	}
+	if r.configErr != nil {
+		out["config_error"] = r.configErr.Error()
+	}
+	return out
 }
 
 func (r *RESTAuth) SetAgentAuth(user, signer, privateKey string, chainID int64) {
@@ -265,11 +448,18 @@ func (r *RESTAuth) doSignedPOST(path string, vals url.Values) ([]byte, error) {
 	return r.doSigned(http.MethodPost, path, vals)
 }
 
+func (r *RESTAuth) doSignedPUT(path string, vals url.Values) ([]byte, error) {
+	return r.doSigned(http.MethodPut, path, vals)
+}
+
 func (r *RESTAuth) doSignedDELETE(path string, vals url.Values) ([]byte, error) {
 	return r.doSigned(http.MethodDelete, path, vals)
 }
 
 func (r *RESTAuth) doSigned(method, path string, vals url.Values) ([]byte, error) {
+	if r.configErr != nil {
+		return nil, r.configErr
+	}
 	if r.authMode == "agent" {
 		return r.doSignedAgent(method, path, vals)
 	}
@@ -287,10 +477,11 @@ func (r *RESTAuth) doSigned(method, path string, vals url.Values) ([]byte, error
 
 func (r *RESTAuth) doSignedAgent(method, path string, vals url.Values) ([]byte, error) {
 	u := r.baseURL + path
-	payload, err := r.signAndEncodeAgent(cloneValues(vals))
+	payload, trace, err := r.signAndEncodeAgent(cloneValues(vals), method, path, true)
 	if err != nil {
 		return nil, err
 	}
+	r.setLastAgentAuthTrace(trace)
 
 	var req *http.Request
 	switch method {
@@ -308,99 +499,205 @@ func (r *RESTAuth) doSignedAgent(method, path string, vals url.Values) ([]byte, 
 	if r.userAgent != "" {
 		req.Header.Set("User-Agent", r.userAgent)
 	}
-	return r.do(req, method, path)
+	b, err := r.do(req, method, path)
+	if err == nil {
+		return b, nil
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok || !strings.Contains(apiErr.Body, "Signature check failed") {
+		return nil, err
+	}
+	payload, trace, sigErr := r.signAndEncodeAgent(cloneValues(vals), method, path, false)
+	if sigErr != nil {
+		return nil, err
+	}
+	trace.Attempt = "retry_after_signature_check_failed"
+	r.setLastAgentAuthTrace(trace)
+	switch method {
+	case http.MethodGet, http.MethodDelete:
+		req, sigErr = http.NewRequest(method, u+"?"+payload, nil)
+	default:
+		req, sigErr = http.NewRequest(method, u, strings.NewReader(payload))
+		if sigErr == nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+	}
+	if sigErr != nil {
+		return nil, err
+	}
+	if r.userAgent != "" {
+		req.Header.Set("User-Agent", r.userAgent)
+	}
+	b, finalErr := r.do(req, method, path)
+	if finalErr == nil {
+		trace.Attempt = "fallback_succeeded_after_signature_check_failed"
+		r.setLastAgentAuthTrace(trace)
+		return b, nil
+	}
+	return nil, finalErr
 }
 
-func (r *RESTAuth) signAndEncodeAgent(vals url.Values) (string, error) {
+func (r *RESTAuth) signAndEncodeAgent(vals url.Values, method, path string, legacyV bool) (string, AgentAuthTrace, error) {
+	trace := AgentAuthTrace{
+		Method:            method,
+		Path:              path,
+		PrimaryType:       "Message",
+		DomainName:        "AsterSignTransaction",
+		DomainVersion:     "1",
+		DomainChainID:     r.chainID,
+		DomainContract:    "0x0000000000000000000000000000000000000000",
+		User:              r.MaskedUser(),
+		Signer:            r.MaskedSigner(),
+		OccurredAtRFC3339: time.Now().UTC().Format(time.RFC3339),
+	}
 	if vals == nil {
 		vals = url.Values{}
 	}
 	if r.user == "" || r.signer == "" || r.privateKey == "" {
-		return "", fmt.Errorf("agent auth requires user/signer/private_key")
+		return "", trace, fmt.Errorf("agent auth requires user/signer/private_key")
 	}
 
 	nonce := r.nextNonceUS()
 	nonceStr := strconv.FormatInt(nonce, 10)
-	vals.Set("nonce", nonceStr)
-	vals.Set("user", r.user)
-	vals.Set("signer", r.signer)
-	vals.Del("signature")
-
-	// Per docs: convert API params to strings and sort ASCII by key.
-	// Build business query first (without auth fields), then combine with nonce/user/signer.
-	signVals := url.Values{}
-	for k, v := range vals {
-		if len(v) == 0 {
-			continue
-		}
-		kk := strings.TrimSpace(k)
-		if kk == "" {
-			continue
-		}
-		if kk == "nonce" || kk == "user" || kk == "signer" || kk == "signature" {
-			continue
-		}
-		signVals.Set(kk, v[0])
-	}
-
-	base := signVals.Encode() // ASCII-sorted by url.Values.Encode
-	msg := "user=" + r.user + "&signer=" + r.signer + "&nonce=" + nonceStr
-	if base != "" {
-		msg = base + "&" + msg
-	}
-	sig, err := r.signAgentViaPython(msg, nonceStr)
+	canonicalVals := normalizeSignedValues(vals)
+	canonicalVals.Set("nonce", nonceStr)
+	canonicalVals.Set("user", r.user)
+	canonicalVals.Set("signer", r.signer)
+	msg := encodeCanonicalQuery(canonicalVals)
+	trace.Nonce = nonceStr
+	trace.CanonicalMsg = msg
+	sig, recovered, err := r.signAgent(msg, legacyV)
 	if err != nil {
-		return "", err
+		return "", trace, err
 	}
-	vals.Set("signature", sig)
-	return vals.Encode(), nil
+	trace.RecoveredSigner = recovered
+	if legacyV {
+		trace.SignatureFormat = "v=27/28"
+		trace.Attempt = "initial"
+	} else {
+		trace.SignatureFormat = "v=0/1"
+		trace.Attempt = "fallback"
+	}
+	if !strings.EqualFold(recovered, r.signer) {
+		return "", trace, fmt.Errorf("signer_private_key_mismatch: recovered=%s configured=%s", recovered, r.signer)
+	}
+	wire := msg
+	if wire != "" {
+		wire += "&"
+	}
+	wire += "signature=" + url.QueryEscape(sig)
+	trace.SentQuery = wire
+	return wire, trace, nil
 }
 
-func (r *RESTAuth) signAgentViaPython(msg, nonceStr string) (string, error) {
-	scriptPath := filepath.Join("scripts", "aster_agent_sign.py")
-	if _, err := os.Stat(scriptPath); err != nil {
-		return "", fmt.Errorf("agent signer script missing at %s: %w", scriptPath, err)
-	}
-
-	py := strings.TrimSpace(os.Getenv("ASTER_PYTHON"))
-	candidates := []string{}
-	if py != "" {
-		candidates = append(candidates, py)
-	}
-	candidates = append(candidates, filepath.Join("venv", "bin", "python3"), "python3", "python")
-
-	var lastErr error
-	input := map[string]string{
-		"msg":         msg,
-		"user":        r.user,
-		"signer":      r.signer,
-		"private_key": r.privateKey,
-		"nonce":       nonceStr,
-		"chain_id":    strconv.FormatInt(r.chainID, 10),
-	}
-	in, _ := json.Marshal(input)
-
-	for _, exe := range candidates {
-		cmd := exec.Command(exe, scriptPath)
-		cmd.Stdin = bytes.NewReader(in)
-		var out bytes.Buffer
-		var stderr bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			lastErr = fmt.Errorf("%s: %v (%s)", exe, err, strings.TrimSpace(stderr.String()))
+func normalizeSignedValues(vals url.Values) url.Values {
+	out := url.Values{}
+	for k, vv := range vals {
+		key := strings.TrimSpace(k)
+		if key == "" || key == "signature" {
 			continue
 		}
-		sig := strings.TrimSpace(out.String())
-		if strings.HasPrefix(strings.ToLower(sig), "0x") && len(sig) > 10 {
-			return sig, nil
+		cleaned := make([]string, 0, len(vv))
+		for _, v := range vv {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				cleaned = append(cleaned, v)
+			}
 		}
-		lastErr = fmt.Errorf("%s returned invalid signature: %q", exe, sig)
+		if len(cleaned) == 0 {
+			continue
+		}
+		sort.Strings(cleaned)
+		out[key] = cleaned
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no python runtime available for agent signing")
+	return out
+}
+
+func encodeCanonicalQuery(vals url.Values) string {
+	if len(vals) == 0 {
+		return ""
 	}
-	return "", lastErr
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		encodedKey := url.QueryEscape(k)
+		for _, v := range vals[k] {
+			parts = append(parts, encodedKey+"="+url.QueryEscape(v))
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+func (r *RESTAuth) signAgent(msg string, legacyV bool) (string, string, error) {
+	keyHex := strings.TrimSpace(strings.TrimPrefix(r.privateKey, "0x"))
+	keyHex = strings.TrimSpace(strings.TrimPrefix(keyHex, "0X"))
+	if keyHex == "" {
+		return "", "", fmt.Errorf("agent auth requires private_key")
+	}
+	priv, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid agent private key: %w", err)
+	}
+	hash, err := asterAgentTypedDataHash(msg, r.chainID)
+	if err != nil {
+		return "", "", err
+	}
+	sig, err := crypto.Sign(hash, priv)
+	if err != nil {
+		return "", "", fmt.Errorf("sign agent payload: %w", err)
+	}
+	recoverySig := append([]byte(nil), sig...)
+	pub, err := crypto.SigToPub(hash, recoverySig)
+	if err != nil {
+		return "", "", fmt.Errorf("recover signer: %w", err)
+	}
+	recovered := crypto.PubkeyToAddress(*pub).Hex()
+	if legacyV {
+		// Match eth_account output used by the previous Python helper.
+		sig[64] += 27
+	}
+	return "0x" + hex.EncodeToString(sig), recovered, nil
+}
+
+func asterAgentTypedDataHash(msg string, chainID int64) ([]byte, error) {
+	if strings.TrimSpace(msg) == "" {
+		return nil, fmt.Errorf("agent signing message cannot be empty")
+	}
+	if chainID <= 0 {
+		return nil, fmt.Errorf("agent signing chain id must be positive")
+	}
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"Message": []apitypes.Type{
+				{Name: "msg", Type: "string"},
+			},
+		},
+		PrimaryType: "Message",
+		Domain: apitypes.TypedDataDomain{
+			Name:              "AsterSignTransaction",
+			Version:           "1",
+			ChainId:           gethmath.NewHexOrDecimal256(chainID),
+			VerifyingContract: "0x0000000000000000000000000000000000000000",
+		},
+		Message: apitypes.TypedDataMessage{
+			"msg": msg,
+		},
+	}
+	hash, _, err := apitypes.TypedDataAndHash(typedData)
+	if err != nil {
+		return nil, fmt.Errorf("hash agent typed data: %w", err)
+	}
+	return hash, nil
 }
 
 func (r *RESTAuth) doSignedAttempt(method, path string, vals url.Values, includeNonce bool) ([]byte, error) {

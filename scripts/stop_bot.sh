@@ -3,7 +3,7 @@ set -euo pipefail
 
 SESSION="${TMUX_SESSION_NAME:-aster}"
 SERVICES=(
-  aster-live-lite
+  aster-live
   aster-tape
   aster-whale
   aster-liqs

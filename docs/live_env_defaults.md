@@ -25,13 +25,13 @@ Removed from live routing:
 - all guerilla lanes
 - all session-conditioned entry paths
 
-Generated from `/Users/victorogbebor/2026/go-machine/cmd/live-lite/main.go` on 2026-03-14.
+Generated from `/Users/victorogbebor/2026/go-machine/cmd/live/main.go` on 2026-03-14.
 
-Total unique env knobs referenced by `live-lite`: **407**
+Total unique env knobs referenced by `live`: **407**
 
 Notes:
 - Defaults shown exactly as the code uses them, with a few expression-based defaults normalized for readability.
-- `LIVE_PAPER_*` knobs only affect the paper simulator that runs inside `live-lite` when `LIVE_DRY_RUN=true` and `LIVE_PAPER_ENABLE=true`.
+- `LIVE_PAPER_*` knobs only affect the paper simulator that runs inside `live` when `LIVE_DRY_RUN=true` and `LIVE_PAPER_ENABLE=true`.
 - Shared exit knobs are read by both the live executor and the paper engine.
 
 ## Core Runtime And Sizing
@@ -39,8 +39,8 @@ Notes:
 - `LIVE_ALLOW_SHORTS`: default `true`
 - `LIVE_DRY_RUN`: default `true`
 - `LIVE_ENABLE_LIVE_TRADING`: default `false`
-- For cautious real-money validation, prefer `scripts/run_live_lite_safe_logged.sh`.
-- For normal live trading with anti-churn guards still enforced, prefer `scripts/run_live_lite_balanced_logged.sh`.
+- For cautious real-money validation, prefer `scripts/run_live_safe_logged.sh`.
+- For normal live trading with anti-churn guards still enforced, prefer `scripts/run_live_balanced_logged.sh`.
 - `LIVE_ENTRY_OFFSET_BPS`: default `2`
 - `LIVE_GRADE_TOP_N`: default `6`
 - `LIVE_KILL_CLOSE_POSITIONS`: default `false`

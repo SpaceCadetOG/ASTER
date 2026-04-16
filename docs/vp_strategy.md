@@ -61,7 +61,7 @@ Backtest:
 - `BT_EVENT_LOCKOUT_MIN`
 - `BT_MAX_CORRELATED_POS`
 
-Live-lite:
+Live:
 
 - `LIVE_STOP_MODE`
 - `LIVE_TARGET_MODE`

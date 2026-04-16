@@ -1,11 +1,19 @@
 # Environment Variables
 
 Primary reference file:
-- `systemd/env/live-lite.env.example`
+- `systemd/env/live.env.example`
 
-## Live-lite core
+## Live core
+- `ASTER_AUTH_MODE`
+- `ASTER_USER`
+- `ASTER_SIGNER`
+- `ASTER_PRIVATE_KEY`
+- `ASTER_CHAIN_ID`
+- `ASTER_BASE_URL`
+- `ASTER_AUTH_DEBUG`
 - `LIVE_DRY_RUN`
 - `LIVE_ENABLE_LIVE_TRADING`
+- `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH`
 - `LIVE_PURE_MODE`
 - `LIVE_SCAN_SEC`
 - `LIVE_MIN_GRADE`
