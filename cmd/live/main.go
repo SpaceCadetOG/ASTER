@@ -2329,6 +2329,7 @@ func main() {
 			wallSignals = watcher.WallSignals()
 		}
 		filtered := make([]candidate, 0, len(cands))
+		paperSimpleMode := paper != nil && paper.enabled
 		for idx, c := range cands {
 			rawCandidate := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 			if ws, ok := wallSignals[rawCandidate]; ok {
@@ -2418,46 +2419,132 @@ func main() {
 				})
 				continue
 			}
-			if guardReason := continuationGuardReason(c, entryQualityCfg); guardReason != "" {
-				recordCandidateDecision(cmdCtx, c, guardReason)
-				rememberRecentReject(recentRejects, now, c, guardReason, acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{guardReason},
-				})
-				continue
+			if !paperSimpleMode {
+				if guardReason := continuationGuardReason(c, entryQualityCfg); guardReason != "" {
+					recordCandidateDecision(cmdCtx, c, guardReason)
+					rememberRecentReject(recentRejects, now, c, guardReason, acceptanceCfg)
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      rawCandidate,
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						Discovery:   c.DiscoveryScore,
+						Trigger:     c.TriggerScore,
+						Execution:   c.ExecutionScore,
+						Combined:    c.CombinedScore,
+						GateAllow:   &f,
+						GateReasons: []string{guardReason},
+					})
+					continue
+				}
 			}
-			if directionReason := directionalConflictRejectReason(c); directionReason != "" {
-				recordCandidateDecision(cmdCtx, c, directionReason)
-				rememberRecentReject(recentRejects, now, c, directionReason, acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{directionReason},
-				})
+			if !paperSimpleMode {
+				if directionReason := directionalConflictRejectReason(c); directionReason != "" {
+					recordCandidateDecision(cmdCtx, c, directionReason)
+					rememberRecentReject(recentRejects, now, c, directionReason, acceptanceCfg)
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      rawCandidate,
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						Discovery:   c.DiscoveryScore,
+						Trigger:     c.TriggerScore,
+						Execution:   c.ExecutionScore,
+						Combined:    c.CombinedScore,
+						GateAllow:   &f,
+						GateReasons: []string{directionReason},
+					})
+					continue
+				}
+			}
+			if !paperSimpleMode {
+				if dominanceReason := sideDominanceRejectReason(c, cands); dominanceReason != "" {
+					recordCandidateDecision(cmdCtx, c, dominanceReason)
+					rememberRecentReject(recentRejects, now, c, dominanceReason, acceptanceCfg)
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      rawCandidate,
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						Discovery:   c.DiscoveryScore,
+						Trigger:     c.TriggerScore,
+						Execution:   c.ExecutionScore,
+						Combined:    c.CombinedScore,
+						GateAllow:   &f,
+						GateReasons: []string{dominanceReason},
+					})
+					continue
+				}
+			}
+			if !paperSimpleMode {
+				if churnReason := churnRejectReason(sessionChurns, now, c); churnReason != "" {
+					recordCandidateDecision(cmdCtx, c, churnReason)
+					rememberRecentReject(recentRejects, now, c, churnReason, acceptanceCfg)
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      rawCandidate,
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						Discovery:   c.DiscoveryScore,
+						Trigger:     c.TriggerScore,
+						Execution:   c.ExecutionScore,
+						Combined:    c.CombinedScore,
+						GateAllow:   &f,
+						GateReasons: []string{churnReason},
+					})
+					continue
+				}
+			}
+			c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
+			if paperSimpleMode {
+				pdec := decideSimplePaperEntryNow(c, currentAccountHealth())
+				logSimplePaperDecision(c, pdec)
+				if !pdec.Allowed {
+					recordCandidateDecision(cmdCtx, c, pdec.Reason)
+					rememberRecentReject(recentRejects, now, c, pdec.Reason, acceptanceCfg)
+					f := false
+					eventLog.Emit(stats.Event{
+						Timestamp:   now,
+						Type:        "GATE_DECISION",
+						Symbol:      rawCandidate,
+						Side:        c.Side,
+						Strategy:    c.Strat,
+						Score:       c.Entry.CurrentScore,
+						Slope:       c.Entry.ScoreSlope,
+						Discovery:   c.DiscoveryScore,
+						Trigger:     c.TriggerScore,
+						Execution:   c.ExecutionScore,
+						Combined:    c.CombinedScore,
+						GateAllow:   &f,
+						GateReasons: []string{pdec.Reason},
+					})
+					continue
+				}
+				c.Strat = "entry_now_" + strings.ToLower(strings.TrimSpace(pdec.Side))
+				c.Conf = clamp(maxFloat(c.Conf, 0.55), 0, 0.92)
+				c.RejectReason = ""
+				c.QualityReasons = append(c.QualityReasons, "paper_simple:"+pdec.Reason)
+				if pdec.PullbackPreferred {
+					c.QualityReasons = append(c.QualityReasons, "paper_simple:pullback_preferred")
+				}
+				recordCandidateDecision(cmdCtx, c, "")
+				filtered = append(filtered, c)
 				continue
 			}
 			if dominanceReason := sideDominanceRejectReason(c, cands); dominanceReason != "" {
@@ -2481,28 +2568,6 @@ func main() {
 				})
 				continue
 			}
-			if churnReason := churnRejectReason(sessionChurns, now, c); churnReason != "" {
-				recordCandidateDecision(cmdCtx, c, churnReason)
-				rememberRecentReject(recentRejects, now, c, churnReason, acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{churnReason},
-				})
-				continue
-			}
-			c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
 			minQuality := minQualityForStrategy(c, entryQualityCfg)
 			minConf := minEntryConfForStrategy(c, entryQualityCfg)
 			if c.TradeQuality < minQuality {
@@ -11672,6 +11737,15 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
 			return nil, fmt.Errorf("symbol loss cooldown active")
+		}
+	}
+	if p.enabled {
+		dec := decideSimplePaperEntryNow(c, currentAccountHealth())
+		if !dec.Allowed {
+			return nil, fmt.Errorf("paper simple entry rejected: %s", firstNonEmpty(dec.Reason, "no_simple_entry"))
+		}
+		if dec.Side != "" {
+			c.Strat = "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Side))
 		}
 	}
 	m := meta[raw]

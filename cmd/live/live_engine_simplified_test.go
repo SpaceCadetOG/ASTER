@@ -25,6 +25,19 @@ func baseSimpleLongCandidate() candidate {
 	}
 }
 
+func baseSimplePaperLongCandidate() candidate {
+	c := baseSimpleLongCandidate()
+	c.Entry.CurrentGrade = "A"
+	c.Entry.CurrentScore = 92
+	c.Entry.ScoreSlope = 0.04 // advisory only for paper path
+	c.Entry.State = inplay.StateInPlay
+	c.DayUTC24h = 7.2
+	c.VolumeRatio = 1.25
+	c.FinalRank = 96
+	c.Entry.Rank = 2.0
+	return c
+}
+
 func withHealthyAccountProvider(t *testing.T) {
 	t.Helper()
 	setLiveEntryAccountHealthProvider(func() accountHealthSummary {
@@ -199,5 +212,63 @@ func TestManualStopRetryCandidatesBoundedLadder(t *testing.T) {
 	cands := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
 	if len(cands) != 4 {
 		t.Fatalf("expected base + 3 retries, got %d (%#v)", len(cands), cands)
+	}
+}
+
+func TestDecideSimplePaperEntryNowStrongLeaderPasses(t *testing.T) {
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected allowed paper long entry, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowEliteBalancedStillAllowed(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.Entry.CurrentScore = 101
+	c.Entry.State = inplay.StateBalanced
+	c.Entry.ScoreSlope = -0.03
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed {
+		t.Fatalf("expected elite balanced leader to stay tradable, got %+v", dec)
+	}
+	if !dec.PullbackPreferred {
+		t.Fatalf("expected pullback preference for >=100 score, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowLowScoreFails(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.Entry.CurrentScore = 80
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "low_score" {
+		t.Fatalf("expected low_score reject, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowResetMoveFails(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.DayUTC24h = 3.2
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "reset_move_below_threshold" {
+		t.Fatalf("expected reset threshold reject, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowDownsideShortPasses(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.Side = "SELL"
+	c.Entry.State = inplay.StateCooling
+	c.Entry.CurrentGrade = "A"
+	c.DayUTC24h = -8.4
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Side != "SHORT" || dec.Reason != "paper_entry_now_short" {
+		t.Fatalf("expected allowed downside short, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowAccountHealthBlocked(t *testing.T) {
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
+	if dec.Allowed || dec.Reason != "account_health_degraded" {
+		t.Fatalf("expected degraded block, got %+v", dec)
 	}
 }

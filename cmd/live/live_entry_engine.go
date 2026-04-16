@@ -16,6 +16,13 @@ type SimpleEntryDecision struct {
 	Reason  string
 }
 
+type SimplePaperDecision struct {
+	Allowed           bool
+	Side              string
+	Reason            string
+	PullbackPreferred bool
+}
+
 var liveEntryAccountHealthProvider = func() accountHealthSummary {
 	return accountHealthSummary{State: "healthy"}
 }
@@ -194,6 +201,140 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePaperDecision {
+	side := simpleEntrySide(c.Side)
+	if side == "" {
+		return SimplePaperDecision{Allowed: false, Reason: "side_unknown"}
+	}
+	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: reason}
+	}
+	if reason := simpleOperationalBlockReason(c); reason != "" {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: reason}
+	}
+	if hardReason, blocked := hardBlockEntry(c); blocked {
+		// Directional conflict is advisory in paper validation mode.
+		if hardReason != "directional_dayutc_conflict" {
+			return SimplePaperDecision{Allowed: false, Side: side, Reason: hardReason}
+		}
+	}
+	if !simpleEntryLeaderEligible(c) {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: "not_top_leader"}
+	}
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue("B") {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: "grade_below_high_b"}
+	}
+	if c.Entry.CurrentScore < envFloat("LIVE_PAPER_SIMPLE_MIN_SCORE", 85.0) {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: "low_score"}
+	}
+	if !paperSimpleVolumeOK(c) {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: "volume_not_rising_or_strong"}
+	}
+	moveMin := envFloat("LIVE_PAPER_SIMPLE_MOVE_MIN_PCT", 5.0)
+	dayMove := c.DayUTC24h
+	if side == "LONG" {
+		if dayMove < moveMin {
+			return SimplePaperDecision{Allowed: false, Side: side, Reason: "reset_move_below_threshold"}
+		}
+		if !paperSimpleLongStateOK(c) {
+			return SimplePaperDecision{Allowed: false, Side: side, Reason: "state_not_long_ready"}
+		}
+		return SimplePaperDecision{
+			Allowed:           true,
+			Side:              side,
+			Reason:            "paper_entry_now_long",
+			PullbackPreferred: c.Entry.CurrentScore >= envFloat("LIVE_PAPER_SIMPLE_PULLBACK_SCORE", 100.0),
+		}
+	}
+	if !paperSimpleShortAllowed(c, moveMin) {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: "short_not_ready"}
+	}
+	return SimplePaperDecision{
+		Allowed:           true,
+		Side:              side,
+		Reason:            "paper_entry_now_short",
+		PullbackPreferred: false,
+	}
+}
+
+func simpleOperationalBlockReason(c candidate) string {
+	blockers := []string{
+		"account_health_failed",
+		"account_health_degraded",
+		"signed_user_data_backoff",
+		"symbol_cooldown",
+		"symbol_loss_cooldown",
+		"stopout_lock",
+		"position_conflict",
+		"opposite_position_open",
+		"max_orders_per_day",
+		"max_orders_per_hour",
+		"pause_file_active",
+		"risk_shell_reject",
+		"insufficient_balance",
+		"insufficient_usable_balance",
+		"available_balance_hard_failure",
+	}
+	reject := strings.ToLower(strings.TrimSpace(c.RejectReason))
+	if reject == "" {
+		return ""
+	}
+	for _, token := range blockers {
+		if strings.Contains(reject, token) {
+			return token
+		}
+	}
+	return ""
+}
+
+func paperSimpleVolumeOK(c candidate) bool {
+	minStrong := envFloat("LIVE_PAPER_SIMPLE_MIN_VOL_RATIO", 1.0)
+	if c.VolumeRatio >= minStrong {
+		return true
+	}
+	// Advisory fallback: keep high-conviction movers tradable even when volume ratio is noisy.
+	return c.Entry.Momentum || c.Entry.CurrentScore >= envFloat("LIVE_PAPER_SIMPLE_STRONG_SCORE_FALLBACK", 95.0)
+}
+
+func paperSimpleLongStateOK(c candidate) bool {
+	switch c.Entry.State {
+	case inplay.StateInPlay, inplay.StateHeating:
+		return true
+	case inplay.StateBalanced:
+		// Balanced is advisory only for elite leaders in paper validation mode.
+		return c.Entry.CurrentScore >= envFloat("LIVE_PAPER_SIMPLE_BALANCED_ELITE_SCORE", 95.0) && simpleEntryLeaderEligible(c)
+	default:
+		return false
+	}
+}
+
+func paperSimpleShortAllowed(c candidate, moveMin float64) bool {
+	downsideLeader := c.DayUTC24h <= -moveMin
+	weakeningNow := c.Entry.LongDemotionFlag ||
+		c.Entry.State == inplay.StateCooling ||
+		c.Entry.State == inplay.StateDumping ||
+		c.Entry.State == inplay.StateExhausted ||
+		(!c.Entry.Momentum && c.Entry.ScoreSlope < 0)
+	toppingLong := c.DayUTC24h >= moveMin && weakeningNow
+	return downsideLeader || toppingLong
+}
+
+func logSimplePaperDecision(c candidate, dec SimplePaperDecision) {
+	if !shouldLogSimpleDecision(c) {
+		return
+	}
+	log.Printf("SIMPLE_DECISION sym=%s side=%s score=%.2f slope=%.3f state=%s extended=%d exhausted=%d allowed=%d reason=%s",
+		strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+		firstNonEmpty(strings.ToUpper(strings.TrimSpace(dec.Side)), simpleEntrySide(c.Side)),
+		c.Entry.CurrentScore,
+		c.Entry.ScoreSlope,
+		strings.ToLower(strings.TrimSpace(string(c.Entry.State))),
+		boolInt(c.ExtensionATR >= envFloat("LIVE_TRUE_EXTENSION_ATR", 2.25)),
+		boolInt(candidateSpikeCandle(c) || (c.Entry.ExhaustionRisk >= envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5))),
+		boolInt(dec.Allowed),
+		firstNonEmpty(strings.TrimSpace(dec.Reason), "paper_no_simple_entry"))
 }
 
 func hardBlockEntry(c candidate) (string, bool) {
