@@ -44,6 +44,20 @@ func TestDecideSimpleEntryNowStrongLongPasses(t *testing.T) {
 	}
 }
 
+func TestDecideSimpleEntryNowStrongShortPasses(t *testing.T) {
+	c := baseSimpleLongCandidate()
+	c.Side = "SELL"
+	c.Entry.Symbol = "ETHUSDT"
+	c.Entry.State = inplay.StateHeating
+	c.Entry.CurrentScore = 91
+	c.Entry.ScoreSlope = 0.24
+	c.Entry.Rank = 1.5
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Side != "SHORT" || dec.Reason != "entry_now_short" {
+		t.Fatalf("expected allowed short entry_now, got %+v", dec)
+	}
+}
+
 func TestChoosePrimaryLiveSignalHardBlockWinsFirst(t *testing.T) {
 	withHealthyAccountProvider(t)
 	c := baseSimpleLongCandidate()
@@ -81,6 +95,30 @@ func TestChoosePrimaryLiveSignalLowScoreFails(t *testing.T) {
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
 	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
 		t.Fatalf("expected no_simple_entry for low score, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestDecideSimpleEntryNowBlocksCooldownStopoutAndPositionConflict(t *testing.T) {
+	base := baseSimpleLongCandidate()
+	cooldown := base
+	cooldown.RejectReason = "symbol_cooldown_active"
+	dec := decideSimpleEntryNow(cooldown, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "symbol_cooldown_active" {
+		t.Fatalf("expected cooldown block, got %+v", dec)
+	}
+
+	stopout := base
+	stopout.RejectReason = "symbol_stopout_lock_active"
+	dec = decideSimpleEntryNow(stopout, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "symbol_stopout_lock_active" {
+		t.Fatalf("expected stopout block, got %+v", dec)
+	}
+
+	conflict := base
+	conflict.RejectReason = "position_conflict_with_open_position"
+	dec = decideSimpleEntryNow(conflict, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "position_conflict" {
+		t.Fatalf("expected position conflict block, got %+v", dec)
 	}
 }
 
