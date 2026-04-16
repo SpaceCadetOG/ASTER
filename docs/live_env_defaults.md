@@ -52,7 +52,7 @@ Notes:
 - `LIVE_MIN_AVAILABLE_USDT`: default `LIVE_RESERVE_USDT + LIVE_TRADE_MARGIN_USDT`
 - `LIVE_RESERVE_PCT`: default `50.0`
 - `LIVE_RESERVE_USDT`: default `5`
-- `LIVE_SCAN_SEC`: default `30`
+- `LIVE_SCAN_SEC`: default `20`
 - `LIVE_SHOW_ACCOUNT`: default `true`
 - `LIVE_STRATEGY_TOP_N`: default `3`
 - `LIVE_TRADE_MARGIN_MAX_USDT`: default `200.0`

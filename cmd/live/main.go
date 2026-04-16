@@ -1198,7 +1198,7 @@ type payoutManager struct {
 }
 
 func main() {
-	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 10)) * time.Second
+	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 20)) * time.Second
 	dryRun := envBool("LIVE_DRY_RUN", true)
 	minGrade := envStr("LIVE_MIN_GRADE", "B")
 	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 0)
@@ -1757,7 +1757,7 @@ func main() {
 	runtimeLoop := newLiveRuntimeLoop()
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
-	runtimeLoop.startScannerWorker(runtimeCtx, 5*time.Second, func(now time.Time) (liveScannerSnapshot, bool) {
+	runtimeLoop.startScannerWorker(runtimeCtx, scanEvery, func(now time.Time) (liveScannerSnapshot, bool) {
 		mkts := client.FetchAllMarkets()
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
