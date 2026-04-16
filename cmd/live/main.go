@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -80,6 +79,7 @@ type candidate struct {
 	ExecutionScore         float64
 	CombinedScore          float64
 	TradeQuality           float64
+	SessionLabel           string
 	QualityReasons         []string
 	LifecycleStage         string
 	LifecycleScans         int
@@ -1015,6 +1015,9 @@ type liveExecManager struct {
 	transferManager      TransferManager
 	accountReportCfg     accountReportConfig
 	accountReport        accountReport
+	entryBlockActive     bool
+	entryBlockReason     string
+	healthyAccountReads  int
 	lastTransferStatus   string
 	lastRemoteImportAt   time.Time
 	lastFundsCheckAt     time.Time
@@ -1291,17 +1294,17 @@ func main() {
 		ReversalShortMinSlope:   envFloat("LIVE_REVERSAL_SHORT_MIN_SLOPE", 0.25),
 	}
 	entryQualityCfg := entryQualityConfig{
-		EnableMetaGate:          envBool("LIVE_META_GATE_ENABLE", true),
+		EnableMetaGate:          envBool("LIVE_META_GATE_ENABLE", false),
 		MinQuality:              envFloat("LIVE_META_MIN_QUALITY", 0.52),
 		MinQualityCont:          envFloat("LIVE_META_MIN_QUALITY_CONT", envFloat("LIVE_META_MIN_QUALITY", 0.52)),
 		MinQualityIgnite:        envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.50)),
 		MinQualityRev:           envFloat("LIVE_META_MIN_QUALITY_REV", min(envFloat("LIVE_META_MIN_QUALITY", 0.52), 0.48)),
-		RequireStrategyMatch:    envBool("LIVE_REQUIRE_STRATEGY_MATCH", true),
-		MinEntryConf:            envFloat("LIVE_MIN_ENTRY_CONF", 0.48),
-		MinEntryConfCont:        envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.48)),
-		MinEntryConfIgnite:      envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.45)),
+		RequireStrategyMatch:    envBool("LIVE_REQUIRE_STRATEGY_MATCH", false),
+		MinEntryConf:            envFloat("LIVE_MIN_ENTRY_CONF", 0.42),
+		MinEntryConfCont:        envFloat("LIVE_MIN_ENTRY_CONF_CONT", envFloat("LIVE_MIN_ENTRY_CONF", 0.44)),
+		MinEntryConfIgnite:      envFloat("LIVE_MIN_ENTRY_CONF_IGNITE", envFloat("LIVE_MIN_ENTRY_CONF", 0.42)),
 		MinEntryConfRev:         envFloat("LIVE_MIN_ENTRY_CONF_REV", min(envFloat("LIVE_MIN_ENTRY_CONF", 0.48), 0.40)),
-		PersistenceOverride:     envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", true),
+		PersistenceOverride:     envBool("LIVE_PERSISTENCE_OVERRIDE_ENABLE", false),
 		PersistMinQuality:       envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_QUALITY", 0.50),
 		PersistMinScans:         envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SCANS", 3),
 		PersistMinScore:         envFloat("LIVE_PERSISTENCE_OVERRIDE_MIN_SCORE", 80.0),
@@ -1320,7 +1323,7 @@ func main() {
 		DayUTCMaturityBrake:     envBool("LIVE_DAYUTC_MATURITY_BRAKE_ENABLE", false),
 		DayUTCMaturityPct:       envFloat("LIVE_DAYUTC_MATURITY_BRAKE_PCT", 25.0),
 		RequireFreshPullback:    envBool("LIVE_REQUIRE_PULLBACK_AFTER_EXTREME_DAYUTC", false),
-		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
+		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", false),
 		PersistSoftMetaMin:      envFloat("LIVE_PERSISTENCE_META_QUALITY_MIN", 0.45),
 		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
 		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
@@ -1611,6 +1614,7 @@ func main() {
 	asiaMinGrade := envStr("LIVE_ASIA_MIN_GRADE", "B")
 	asiaStrongConfMin := envFloat("LIVE_ASIA_STRONG_CONF_MIN", 0.60)
 	asiaMinSlope := envFloat("LIVE_ASIA_MIN_SLOPE", 0.01)
+	_, _, _, _ = asiaQualityEnable, asiaMinGrade, asiaStrongConfMin, asiaMinSlope
 	paper := newPaperTrader(dryRun, reserveUSDT, maxOpenPos)
 	if paper != nil {
 		paper.featureCache = featureCache
@@ -1698,10 +1702,6 @@ func main() {
 		}())),
 	))
 
-	reconEvery := time.Duration(envInt("LIVE_RECON_SEC", 10)) * time.Second
-	if reconEvery <= 0 {
-		reconEvery = 10 * time.Second
-	}
 	requireShadowDays := envInt("LIVE_REQUIRE_PAPER_DAYS", 0)
 	shadowEquityFile := envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")
 	shadowWarnAt := time.Time{}
@@ -1729,10 +1729,6 @@ func main() {
 		}
 		return active
 	}
-	lastScanAt := time.Time{}
-	cachedLongInPlay := []inplay.Entry{}
-	cachedShortInPlay := []inplay.Entry{}
-	cachedMetaBySymbol := map[string]symbolMeta{}
 	dayStartEq := map[string]float64{}
 	killDay := map[string]bool{}
 	lastDayUTCResetKey := ""
@@ -1758,9 +1754,131 @@ func main() {
 		execMgr.eventLog = eventLog
 	}
 	externalFlowFeed := flowfeed.NewFileFeed(flowFeedPath, flowFeedTTL)
-	for {
-		cycleStart := time.Now()
-		now := cycleStart.UTC()
+	runtimeLoop := newLiveRuntimeLoop()
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+	runtimeLoop.startScannerWorker(runtimeCtx, 5*time.Second, func(now time.Time) (liveScannerSnapshot, bool) {
+		mkts := client.FetchAllMarkets()
+		longRows := market.ScoreAndFilter(mkts)
+		shortRows := market.ScoreAndFilterShort(mkts)
+		longRows = filterBlockedScored(longRows, safety.blockSymbols)
+		shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
+		if discoveryCfg.Enabled {
+			baseLongRows := append([]market.Scored(nil), longRows...)
+			baseShortRows := append([]market.Scored(nil), shortRows...)
+			candleBySymbol := buildDiscoveryCandles(featureCache, longRows, shortRows, discoveryCfg)
+			snaps := discovery.BuildSnapshots(longRows, candleBySymbol)
+			universe := discovery.SelectUniverse(snaps, discoveryCfg)
+			if len(universe) > 0 {
+				longRows = filterUniverseRows(longRows, universe)
+				shortRows = filterUniverseRows(shortRows, universe)
+				if len(longRows) == 0 && len(shortRows) == 0 {
+					longRows = baseLongRows
+					shortRows = baseShortRows
+				}
+			} else {
+				longRows = baseLongRows
+				shortRows = baseShortRows
+			}
+		}
+		metaBySymbol := buildSymbolMeta(longRows, shortRows)
+		longEligible, longConf := buildEligible(client, longRows, "long", gradeTopN)
+		shortEligible, shortConf := buildEligible(client, shortRows, "short", gradeTopN)
+		longTrk.Update(now, longEligible, longConf)
+		shortTrk.Update(now, shortEligible, shortConf)
+		return liveScannerSnapshot{
+			At:          now,
+			LongInPlay:  longTrk.Entries(),
+			ShortInPlay: shortTrk.Entries(),
+			MetaBySym:   metaBySymbol,
+		}, true
+	})
+	runtimeLoop.startWatcherWorker(runtimeCtx, time.Second, func(now time.Time, scan liveScannerSnapshot) (liveWatcherSnapshot, bool) {
+		longInPlay := append([]inplay.Entry(nil), scan.LongInPlay...)
+		shortInPlay := append([]inplay.Entry(nil), scan.ShortInPlay...)
+		metaBySymbol := copySymbolMetaMap(scan.MetaBySym)
+		watchSet := map[string]struct{}{}
+		for _, sym := range topNSymbolsFromEntries(longInPlay, 6) {
+			watchSet[sym] = struct{}{}
+		}
+		for _, sym := range topNSymbolsFromEntries(shortInPlay, 6) {
+			watchSet[sym] = struct{}{}
+		}
+		if paper != nil {
+			for _, sym := range paper.OpenSymbols() {
+				watchSet[sym] = struct{}{}
+			}
+		}
+		if execMgr != nil {
+			for _, sym := range execMgr.ActiveSymbols() {
+				watchSet[sym] = struct{}{}
+			}
+			for _, sym := range execMgr.PendingProtectionSymbols() {
+				watchSet[sym] = struct{}{}
+			}
+		}
+		watchExtra := make([]string, 0, len(watchSet))
+		for sym := range watchSet {
+			watchExtra = append(watchExtra, sym)
+		}
+		sort.Strings(watchExtra)
+		if watcher != nil {
+			watcher.SetSnapshot(longInPlay, shortInPlay, metaBySymbol, watchExtra, nil)
+			_ = watcher.Tick(now)
+			for raw, meta := range watcher.MetaSnapshot() {
+				cur := metaBySymbol[raw]
+				if meta.LastPrice > 0 {
+					cur.LastPrice = meta.LastPrice
+				}
+				if meta.Bid > 0 {
+					cur.Bid = meta.Bid
+				}
+				if meta.Ask > 0 {
+					cur.Ask = meta.Ask
+				}
+				metaBySymbol[raw] = cur
+			}
+			return liveWatcherSnapshot{
+				At:              now,
+				LongInPlay:      longInPlay,
+				ShortInPlay:     shortInPlay,
+				MetaBySym:       metaBySymbol,
+				FlowBySym:       watcher.FlowMetrics(),
+				WatchSymbols:    watchExtra,
+				WallSignalsBySy: watcher.WallSignals(),
+			}, true
+		}
+		return liveWatcherSnapshot{
+			At:           now,
+			LongInPlay:   longInPlay,
+			ShortInPlay:  shortInPlay,
+			MetaBySym:    metaBySymbol,
+			FlowBySym:    map[string]flowMetrics{},
+			WatchSymbols: watchExtra,
+		}, true
+	})
+	runtimeLoop.startAccountHealthWorker(runtimeCtx, 5*time.Second, func(now time.Time) accountHealthSummary {
+		if execMgr == nil {
+			return accountHealthSummary{State: "healthy"}
+		}
+		report := execMgr.ensureAccountReportFresh(now, 30*time.Second)
+		return accountHealthSummary{
+			State:                 strings.ToLower(strings.TrimSpace(report.Health)),
+			SignedUserDataBackoff: signedUserDataBackoffActive(now),
+		}
+	})
+	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 350)) * time.Millisecond
+	if decisionEvery < 250*time.Millisecond {
+		decisionEvery = 250 * time.Millisecond
+	}
+	if decisionEvery > 500*time.Millisecond {
+		decisionEvery = 500 * time.Millisecond
+	}
+	decisionTicker := time.NewTicker(decisionEvery)
+	defer decisionTicker.Stop()
+	for range decisionTicker.C {
+		cycleStart := time.Now().UTC()
+		now := cycleStart
 		resetKey := dayUTCResetKey(now)
 		if resetKey != lastDayUTCResetKey {
 			if lastDayUTCResetKey != "" {
@@ -1770,10 +1888,6 @@ func main() {
 				triggerMem = map[string]triggerMemory{}
 				recentRejects = map[string]recentRejectMemory{}
 				sessionChurns = map[string]*sessionChurn{}
-				cachedLongInPlay = nil
-				cachedShortInPlay = nil
-				cachedMetaBySymbol = map[string]symbolMeta{}
-				lastScanAt = time.Time{}
 				fmt.Printf("live: dayutc reset state cleared anchor=%s rolling24_context=preserved\n", resetKey)
 			}
 			lastDayUTCResetKey = resetKey
@@ -1789,11 +1903,6 @@ func main() {
 		cacheStatsStart := featureCache.statsSnapshot()
 		localMaintNow := now.In(maintLoc)
 		maintWindow, inMaint := activeMaintenanceWindow(localMaintNow, true, maintenanceWindows...)
-		watcherOnly := liveWakeReason == "watcher" && !lastScanAt.IsZero() && now.Sub(lastScanAt) < scanEvery && len(cachedMetaBySymbol) > 0
-		cycleMode := "scan"
-		if watcherOnly {
-			cycleMode = "watcher"
-		}
 		waitAndReport := func() {
 			cycleEnd := time.Now().UTC()
 			cacheStatsEnd := featureCache.statsSnapshot()
@@ -1802,7 +1911,7 @@ func main() {
 				Timestamp:         cycleEnd,
 				Type:              "METRICS_SNAPSHOT",
 				TF:                "1m",
-				Reason:            fmt.Sprintf("cycle_complete mode=%s wake=%s", cycleMode, liveWakeReason),
+				Reason:            "cycle_complete mode=decision_worker",
 				LoopMs:            float64(cycleEnd.Sub(cycleStart).Milliseconds()),
 				CacheHits:         cacheDelta.totalHits(),
 				CacheMisses:       cacheDelta.totalMisses(),
@@ -1816,9 +1925,7 @@ func main() {
 				CacheEntries:      cacheStatsEnd.CandleKeys + cacheStatsEnd.MicroKeys + cacheStatsEnd.EMAKeys,
 			})
 			if envBool("LIVE_PERF_LOG_ENABLE", false) {
-				fmt.Printf("live: perf mode=%s wake=%s loop_ms=%.1f cache_hits=%d cache_misses=%d candle=%d/%d micro=%d/%d ema=%d/%d entries=%d evictions=%d\n",
-					cycleMode,
-					liveWakeReason,
+				fmt.Printf("live: perf mode=decision_worker loop_ms=%.1f cache_hits=%d cache_misses=%d candle=%d/%d micro=%d/%d ema=%d/%d entries=%d evictions=%d\n",
 					float64(cycleEnd.Sub(cycleStart).Milliseconds()),
 					cacheDelta.totalHits(),
 					cacheDelta.totalMisses(),
@@ -1832,127 +1939,29 @@ func main() {
 					cacheDelta.Evictions,
 				)
 			}
-			waitForNextCycle(cycleStart, scanEvery, reconEvery, execMgr)
 		}
-		var longInPlay, shortInPlay []inplay.Entry
-		var metaBySymbol map[string]symbolMeta
-		if watcherOnly {
-			longInPlay = append([]inplay.Entry(nil), cachedLongInPlay...)
-			shortInPlay = append([]inplay.Entry(nil), cachedShortInPlay...)
-			metaBySymbol = copySymbolMetaMap(cachedMetaBySymbol)
-			if watcher != nil {
-				for raw, meta := range watcher.MetaSnapshot() {
-					cur := metaBySymbol[raw]
-					if meta.LastPrice > 0 {
-						cur.LastPrice = meta.LastPrice
-					}
-					if meta.Bid > 0 {
-						cur.Bid = meta.Bid
-					}
-					if meta.Ask > 0 {
-						cur.Ask = meta.Ask
-					}
-					metaBySymbol[raw] = cur
-				}
-			}
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "METRICS_SNAPSHOT",
-				Reason:    "watcher_recheck",
-			})
-		} else {
-			mkts := client.FetchAllMarkets()
-			longRows := market.ScoreAndFilter(mkts)
-			shortRows := market.ScoreAndFilterShort(mkts)
-			longRows = filterBlockedScored(longRows, safety.blockSymbols)
-			shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
-			if discoveryCfg.Enabled {
-				baseLongRows := append([]market.Scored(nil), longRows...)
-				baseShortRows := append([]market.Scored(nil), shortRows...)
-				candleBySymbol := buildDiscoveryCandles(featureCache, longRows, shortRows, discoveryCfg)
-				snaps := discovery.BuildSnapshots(longRows, candleBySymbol)
-				universe := discovery.SelectUniverse(snaps, discoveryCfg)
-				if len(universe) > 0 {
-					longRows = filterUniverseRows(longRows, universe)
-					shortRows = filterUniverseRows(shortRows, universe)
-					if len(longRows) == 0 && len(shortRows) == 0 {
-						fmt.Println("live: discovery_fallback_active reason=filtered_universe_empty")
-						eventLog.Emit(stats.Event{
-							Timestamp: now,
-							Type:      "METRICS_SNAPSHOT",
-							Reason:    "discovery_fallback_active:filtered_universe_empty",
-						})
-						longRows = baseLongRows
-						shortRows = baseShortRows
-					}
-				} else {
-					fmt.Println("live: discovery_fallback_active reason=empty_universe")
-					eventLog.Emit(stats.Event{
-						Timestamp: now,
-						Type:      "METRICS_SNAPSHOT",
-						Reason:    "discovery_fallback_active:empty_universe",
-					})
-					longRows = baseLongRows
-					shortRows = baseShortRows
-				}
-			}
-			metaBySymbol = buildSymbolMeta(longRows, shortRows)
-			cmdCtx.setMeta(metaBySymbol)
-			longEligible, longConf := buildEligible(client, longRows, "long", gradeTopN)
-			shortEligible, shortConf := buildEligible(client, shortRows, "short", gradeTopN)
-
-			longTrk.Update(now, longEligible, longConf)
-			shortTrk.Update(now, shortEligible, shortConf)
-
-			longInPlay = longTrk.Entries()
-			shortInPlay = shortTrk.Entries()
-			cachedLongInPlay = append([]inplay.Entry(nil), longInPlay...)
-			cachedShortInPlay = append([]inplay.Entry(nil), shortInPlay...)
-			cachedMetaBySymbol = copySymbolMetaMap(metaBySymbol)
-			lastScanAt = now
+		scanSnap, ok := runtimeLoop.latestScanner()
+		if !ok {
+			continue
 		}
+		watchSnap, wOK := runtimeLoop.latestWatcher()
+		if !wOK {
+			watchSnap = liveWatcherSnapshot{
+				At:          scanSnap.At,
+				LongInPlay:  append([]inplay.Entry(nil), scanSnap.LongInPlay...),
+				ShortInPlay: append([]inplay.Entry(nil), scanSnap.ShortInPlay...),
+				MetaBySym:   copySymbolMetaMap(scanSnap.MetaBySym),
+				FlowBySym:   map[string]flowMetrics{},
+			}
+		}
+		longInPlay := append([]inplay.Entry(nil), watchSnap.LongInPlay...)
+		shortInPlay := append([]inplay.Entry(nil), watchSnap.ShortInPlay...)
+		metaBySymbol := copySymbolMetaMap(watchSnap.MetaBySym)
 		cmdCtx.setMeta(metaBySymbol)
 		longCurrent := sideEntryMap(longInPlay)
 		shortCurrent := sideEntryMap(shortInPlay)
-		watchExtra := make([]string, 0, 8)
-		if watchCfg.WatchOpen && paper.enabled {
-			watchExtra = append(watchExtra, paper.OpenSymbols()...)
-		}
-		if watchCfg.WatchOpen && execMgr != nil {
-			watchExtra = append(watchExtra, execMgr.ActiveSymbols()...)
-		}
-		watchExtra = append(watchExtra, activeRecentRejectSymbols(now, recentRejects)...)
-		activeSuggestions := []operatorSuggestion(nil)
-		if cmdCtx != nil && envBool("LIVE_PRIORITY_WATCH_ENABLE", true) {
-			activeSuggestions = cmdCtx.activeSuggestions()
-			for _, s := range activeSuggestions {
-				watchExtra = append(watchExtra, s.Symbol)
-			}
-		}
-		if missed != nil {
-			persistPriority := missed.PrioritySuggestions(now)
-			if len(persistPriority) > 0 {
-				activeSuggestions = append(activeSuggestions, persistPriority...)
-				for _, s := range persistPriority {
-					watchExtra = append(watchExtra, s.Symbol)
-				}
-			}
-		}
-		sessionPriority := buildSessionPrioritySuggestions(now, longInPlay, shortInPlay)
-		if len(sessionPriority) > 0 {
-			activeSuggestions = append(activeSuggestions, sessionPriority...)
-			for _, s := range sessionPriority {
-				watchExtra = append(watchExtra, s.Symbol)
-			}
-		}
-		if watcher != nil {
-			watcher.SetSnapshot(longInPlay, shortInPlay, metaBySymbol, watchExtra, activeSuggestions)
-			_ = watcher.Tick(now)
-		}
-		flowMetricsBySymbol := map[string]flowMetrics{}
-		if watcher != nil {
-			flowMetricsBySymbol = watcher.FlowMetrics()
-		}
+		flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
+		wallSignals = copyWallSignalsMap(watchSnap.WallSignalsBySy)
 		momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
 		paperDepth := map[string]aster.OrderBook{}
 		if paper.enabled {
@@ -2278,6 +2287,21 @@ func main() {
 			waitAndReport()
 			continue
 		}
+		if healthSnap, ok := runtimeLoop.latestHealth(); ok {
+			if reason, blocked := entriesBlockedByAccountHealth(healthSnap.Summary); blocked {
+				statusStore.Set(liveStatus{
+					Generated:       now,
+					DryRun:          dryRun,
+					LiveEnabled:     safety.enableLiveTrading,
+					AvailableUSDT:   acct.AvailableUSDT,
+					TopDecision:     "blocked",
+					TopDecisionWhy:  reason,
+					TopRejectReason: reason,
+				})
+				waitAndReport()
+				continue
+			}
+		}
 
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(featureCache, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore, flowMetricsBySymbol)
@@ -2314,6 +2338,7 @@ func main() {
 					operatorSuggested = true
 				}
 			}
+			_ = operatorSuggested
 			c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, c.QualityReasons = computeEntryScoreBreakdown(c, entryQualityCfg)
 			c.StructureFresh = requiresFreshPullback(c)
 			c.QualityReasons = append(c.QualityReasons, triggerReasons...)
@@ -2458,167 +2483,14 @@ func main() {
 				})
 				continue
 			}
-			if !pureMode && asiaQualityEnable && !passesAsiaEntryQuality(now, c, asiaMinGrade, asiaStrongConfMin, asiaMinSlope) {
-				recordCandidateDecision(cmdCtx, c, "asia_quality_gate")
-				rememberRecentReject(recentRejects, now, c, "asia_quality_gate", acceptanceCfg)
-				deny := []string{"asia_quality_gate"}
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: deny,
-				})
-				continue
+			c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
+			minQuality := minQualityForStrategy(c, entryQualityCfg)
+			minConf := minEntryConfForStrategy(c, entryQualityCfg)
+			if c.TradeQuality < minQuality {
+				c.QualityReasons = append(c.QualityReasons, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
 			}
-			if entryQualityCfg.EnableMetaGate {
-				minQuality := minQualityForStrategy(c, entryQualityCfg)
-				minConf := minEntryConfForStrategy(c, entryQualityCfg)
-				persistOverride := qualifiesPersistenceOverride(c, entryQualityCfg)
-				if !operatorSuggested && (c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && !persistOverride {
-					recordCandidateDecision(cmdCtx, c, c.RejectReason)
-					rememberRecentReject(recentRejects, now, c, c.RejectReason, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{c.RejectReason},
-					})
-					continue
-				}
-				if entryQualityCfg.EnableScoreGate {
-					componentReject := ""
-					switch {
-					case c.DiscoveryScore < entryQualityCfg.MinDiscovery:
-						componentReject = fmt.Sprintf("discovery_score:%.2f<%.2f", c.DiscoveryScore, entryQualityCfg.MinDiscovery)
-					case c.TriggerScore < entryQualityCfg.MinTrigger:
-						componentReject = fmt.Sprintf("trigger_score:%.2f<%.2f", c.TriggerScore, entryQualityCfg.MinTrigger)
-					case c.ExecutionScore < entryQualityCfg.MinExecution:
-						componentReject = fmt.Sprintf("execution_score:%.2f<%.2f", c.ExecutionScore, entryQualityCfg.MinExecution)
-					}
-					if componentReject != "" && !persistOverride {
-						recordCandidateDecision(cmdCtx, c, componentReject)
-						rememberRecentReject(recentRejects, now, c, componentReject, acceptanceCfg)
-						f := false
-						eventLog.Emit(stats.Event{
-							Timestamp:   now,
-							Type:        "GATE_DECISION",
-							Symbol:      rawCandidate,
-							Side:        c.Side,
-							Strategy:    c.Strat,
-							Score:       c.Entry.CurrentScore,
-							Slope:       c.Entry.ScoreSlope,
-							Discovery:   c.DiscoveryScore,
-							Trigger:     c.TriggerScore,
-							Execution:   c.ExecutionScore,
-							Combined:    c.CombinedScore,
-							GateAllow:   &f,
-							GateReasons: append([]string{componentReject}, c.QualityReasons...),
-						})
-						continue
-					}
-				}
-				if c.TradeQuality < minQuality && !persistOverride {
-					if persistenceStrong(c, entryQualityCfg) && c.TradeQuality >= entryQualityCfg.PersistSoftMetaMin {
-						oldReject := fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)
-						c.QualityReasons = append(c.QualityReasons, "persistence_override")
-						c.QualityReasons = append(c.QualityReasons, "persistence_soft_override:"+oldReject)
-						c.Conf = maxFloat(c.Conf, 0.58)
-						fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
-							rawCandidate, c.Side, oldReject, firstNonEmpty(c.PersistenceReason, "strong_persistence"), ladderCfg.StarterUSDT)
-					} else {
-						recordCandidateDecision(cmdCtx, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
-						rememberRecentReject(recentRejects, now, c, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality), acceptanceCfg)
-						f := false
-						eventLog.Emit(stats.Event{
-							Timestamp:   now,
-							Type:        "GATE_DECISION",
-							Symbol:      rawCandidate,
-							Side:        c.Side,
-							Strategy:    c.Strat,
-							Score:       c.Entry.CurrentScore,
-							Slope:       c.Entry.ScoreSlope,
-							Discovery:   c.DiscoveryScore,
-							Trigger:     c.TriggerScore,
-							Execution:   c.ExecutionScore,
-							Combined:    c.CombinedScore,
-							GateAllow:   &f,
-							GateReasons: append([]string{fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality)}, c.QualityReasons...),
-						})
-						continue
-					}
-				}
-				if (c.TradeQuality < minQuality || c.RejectReason == "candidate_not_ready" || c.RejectReason == "candidate_expired") && persistOverride {
-					c.QualityReasons = append(c.QualityReasons, "persistence_override")
-				}
-				if c.Conf < minConf && !qualifiesConfOverride(c, entryQualityCfg) {
-					confReject := confidenceRejectReason(c, minConf)
-					recordCandidateDecision(cmdCtx, c, confReject)
-					rememberRecentReject(recentRejects, now, c, confReject, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{confReject},
-					})
-					continue
-				}
-				if c.Conf < minConf && qualifiesConfOverride(c, entryQualityCfg) {
-					confReject := confidenceRejectReason(c, minConf)
-					c.QualityReasons = append(c.QualityReasons, "conf_persistence_override")
-					fmt.Printf("live: conf override %s %s strat=%s reason=%s\n",
-						strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), c.Side, c.Strat, confReject)
-				}
-			}
-			if entryQualityCfg.RequireStrategyMatch && (strings.TrimSpace(c.Strat) == "" || strings.EqualFold(c.Strat, "none")) {
-				recordCandidateDecision(cmdCtx, c, "strategy_none_reject")
-				rememberRecentReject(recentRejects, now, c, "strategy_none_reject", acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{"strategy_none_reject"},
-				})
-				continue
+			if c.Conf < minConf {
+				c.QualityReasons = append(c.QualityReasons, confidenceRejectReason(c, minConf))
 			}
 			if !pureMode {
 				gateInput := buildGateInputWithCache(featureCache, c, gateCfg)
@@ -2923,7 +2795,7 @@ func main() {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
 		eligibility.StarterAllowed = starterLaneEligible(best) && starterLaneQualityReady(best)
-		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) && !strings.EqualFold(best.Strat, "early_dev_entry")
+		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat)
 		if starterLaneEligible(best) && !eligibility.StarterAllowed {
 			addEligibilityBlock(&eligibility, "starter_lane_needs_persistence_or_reset")
 		}
@@ -3318,15 +3190,6 @@ func main() {
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
 			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
-			waitAndReport()
-			continue
-		}
-		if reason := sessionEntryRejectReason(now, best, ladderPlan); reason != "" {
-			recordCandidateDecision(cmdCtx, best, reason)
-			addEligibilityBlock(&eligibility, reason)
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
 			continue
 		}
@@ -5507,8 +5370,16 @@ func (m *liveExecManager) degradedEntryReason(now time.Time, symbol string) stri
 		return degradedReconcileStaleReason
 	}
 	report := m.ensureAccountReportFresh(now.UTC(), 30*time.Second)
-	if accountHealthBlocksNewRisk(report) {
-		return degradedAccountHealthPartialReason
+	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{
+		State:                 strings.ToLower(strings.TrimSpace(report.Health)),
+		SignedUserDataBackoff: signedUserDataBackoffActive(now.UTC()),
+	}); blocked {
+		switch reason {
+		case "signed_user_data_backoff":
+			return degradedUserDataStaleReason
+		default:
+			return degradedAccountHealthPartialReason
+		}
 	}
 	if !m.userDataFresh() {
 		return degradedUserDataStaleReason
@@ -5646,36 +5517,6 @@ func qualifiesEarlyDevWatchEntry(e inplay.Entry) bool {
 		return false
 	}
 	return true
-}
-
-func buildSessionPrioritySuggestions(now time.Time, longInPlay, shortInPlay []inplay.Entry) []operatorSuggestion {
-	if sessionPhaseUTC(now) != sessionAsiaDev {
-		return nil
-	}
-	rows := make([]operatorSuggestion, 0, 4)
-	add := func(side string, entries []inplay.Entry) {
-		for _, e := range entries {
-			if !qualifiesEarlyDevWatchEntry(e) {
-				continue
-			}
-			rows = append(rows, operatorSuggestion{
-				Symbol:       strings.ToUpper(aster.RawSymbol(e.Symbol)),
-				Side:         side,
-				Source:       "asia_dev_watchlist",
-				PreferredLev: 0,
-				CreatedAt:    now,
-				ExpiresAt:    now.Add(20 * time.Minute),
-			})
-			if len(rows) >= 4 {
-				return
-			}
-		}
-	}
-	add("BUY", longInPlay)
-	if len(rows) < 4 {
-		add("SELL", shortInPlay)
-	}
-	return rows
 }
 
 func buildWatchSymbols(longInPlay, shortInPlay []inplay.Entry, extra []string, maxN int) []string {
@@ -8736,125 +8577,6 @@ func (m *liveExecManager) alignManualManagedLeverage(p *livePosition) {
 	}
 }
 
-func (m *liveExecManager) tryImmediateManualProtection(p *livePosition) {
-	if m == nil || p == nil || !manualManagedTrade(p) || m.rest == nil {
-		return
-	}
-	p.ProtectionPending = true
-	p.ProtectionRetryAfter = time.Time{}
-	p.ForceProtectionNow = true
-	_ = m.placeOrReplaceStopWithRetry(p)
-}
-
-func (m *liveExecManager) activateManualManagement(req manualManageRequest, now time.Time, reason string) (*livePosition, error) {
-	if m == nil {
-		return nil, fmt.Errorf("live execution manager unavailable")
-	}
-	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
-	if sym == "" {
-		return nil, fmt.Errorf("invalid symbol")
-	}
-	if err := m.validateManualManageRequest(req, now); err != nil {
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "MANUAL STATE CONFLICT",
-				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(req.Side)),
-				fmt.Sprintf("<b>Cause:</b> %s", summarizeOneLine(err.Error(), 140)),
-				"Bot management paused until the live/manual state matches again.",
-			))
-		}
-		_ = m.save()
-		return nil, err
-	}
-	if existing := m.positions[sym]; m.isActive(existing) {
-		if !strings.EqualFold(strings.TrimSpace(existing.Side), strings.TrimSpace(req.Side)) {
-			return nil, fmt.Errorf("active opposite-side state already exists for %s", sym)
-		}
-		if manualPassivePosition(existing) {
-			_ = syncImportedRemotePosition(existing, req.Qty, req.Entry, req.Margin, req.Leverage, now)
-			p := existing
-			currentMark := 0.0
-			if m.rest != nil {
-				if mark, err := m.currentMark(sym); err == nil && mark > 0 {
-					currentMark = mark
-				}
-			}
-			p.EntrySource = manualEntrySourceManaged
-			p.EntryReason = manualEntryReasonManaged
-			p.ManualManageState = manualManageStatePendingProtection
-			p.StarterOnly = false
-			p.AddLockedUntilConfirm = false
-			if currentMark > 0 {
-				p.ManageAnchorPrice = currentMark
-			}
-			if err := m.initializeBracketLevels(p); err != nil {
-				return nil, err
-			}
-			if currentMark > 0 {
-				m.reconstructManualManagedState(now, p, currentMark)
-			}
-			m.alignManualManagedLeverage(p)
-			armManualProtectionAfterReconstruct(now, p)
-			m.tryImmediateManualProtection(p)
-			m.mu.Lock()
-			delete(m.manualRequests, req.Key)
-			m.mu.Unlock()
-			_ = m.save()
-			return p, nil
-		}
-		m.mu.Lock()
-		delete(m.manualRequests, req.Key)
-		m.mu.Unlock()
-		return existing, nil
-	}
-	p := m.newImportedRemotePosition(sym, req.Side, req.Qty, req.Entry, req.Margin, req.Leverage, now, manualEntrySourceManaged)
-	currentMark := 0.0
-	if m.rest != nil {
-		if mark, err := m.currentMark(sym); err == nil && mark > 0 {
-			currentMark = mark
-		}
-	}
-	p.EntryReason = manualEntryReasonManaged
-	p.ManualManageState = manualManageStatePendingProtection
-	p.StarterOnly = false
-	p.AddLockedUntilConfirm = false
-	if currentMark > 0 {
-		p.ManageAnchorPrice = currentMark
-	}
-	if err := m.initializeBracketLevels(p); err != nil {
-		return nil, err
-	}
-	if currentMark > 0 {
-		m.reconstructManualManagedState(now, p, currentMark)
-	}
-	m.alignManualManagedLeverage(p)
-	armManualProtectionAfterReconstruct(now, p)
-	m.tryImmediateManualProtection(p)
-	m.positions[sym] = p
-	m.mu.Lock()
-	delete(m.manualRequests, req.Key)
-	m.mu.Unlock()
-	if m.tg != nil {
-		lines := []string{
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Entry:</b> %s", p.RemainingQty, fmtPrice(p.EntryPrice)),
-			fmt.Sprintf("<b>Managed As:</b> %s", p.EntryReason),
-		}
-		if currentMark > 0 {
-			lines = append(lines,
-				fmt.Sprintf("<b>Mark Now:</b> %s", fmtPrice(currentMark)),
-				fmt.Sprintf("<b>Stage:</b> %d | <b>TP Hit:</b> %v/%v/%v", p.ProtectionStage, p.HitTP1, p.HitTP2, p.HitTP3),
-				fmt.Sprintf("<b>Would Add If Rechecked:</b> %v", manualWouldAddCapital(p, currentMark, m.ladderCfg.MinAddPnLPct)),
-				fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(p)),
-			)
-		}
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAdopted, p.Symbol, p.Side, lines...))
-	}
-	_ = m.save()
-	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
-	m.sendFillReceipt(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
-	return p, nil
-}
-
 func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, now time.Time, reason string, keepRequest bool) (*livePosition, error) {
 	if m == nil {
 		return nil, fmt.Errorf("live execution manager unavailable")
@@ -8895,6 +8617,9 @@ func (m *liveExecManager) activatePassiveManualImport(req manualManageRequest, n
 }
 
 func (m *liveExecManager) placeOrReplaceStopWithRetry(p *livePosition) error {
+	if p != nil && manualManagedTrade(p) {
+		return m.placeOrReplaceStop(p)
+	}
 	var err error
 	for i := 0; i < m.recoverStopRetries; i++ {
 		err = m.placeOrReplaceStop(p)
@@ -8985,6 +8710,30 @@ func (m *liveExecManager) ActiveSymbols() []string {
 	seen := map[string]struct{}{}
 	for _, p := range m.positions {
 		if p == nil || !m.isActive(p) {
+			continue
+		}
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+		if raw == "" {
+			continue
+		}
+		if _, ok := seen[raw]; ok {
+			continue
+		}
+		seen[raw] = struct{}{}
+		out = append(out, raw)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m *liveExecManager) PendingProtectionSymbols() []string {
+	if m == nil || len(m.positions) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.positions))
+	seen := map[string]struct{}{}
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !p.ProtectionPending {
 			continue
 		}
 		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
@@ -9337,11 +9086,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	entryReason := c.Strat
 	if starterOnly && !strings.EqualFold(entryReason, "continuation_fast_starter") {
-		if strings.EqualFold(c.Strat, "early_dev_entry") {
-			entryReason = "early_dev_entry"
-		} else if strings.EqualFold(c.Strat, "persistence_entry") {
-			entryReason = "persistence_entry"
-		} else if strings.EqualFold(c.Strat, "impulsive_short_starter") {
+		if strings.EqualFold(c.Strat, "impulsive_short_starter") {
 			entryReason = "impulsive_short_starter"
 		} else if strings.EqualFold(c.Strat, "impulsive_long_starter") {
 			entryReason = "impulsive_long_starter"
@@ -10309,15 +10054,10 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 		return nil
 	}
 	minGapPct := envFloat("LIVE_STOP_LEGALIZE_MIN_GAP_PCT", envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035))
-	stepPct := envFloat("LIVE_STOP_LEGALIZE_STEP_PCT", 0.0030)
-	maxRetries := envInt("LIVE_STOP_LEGALIZE_MAX_RETRIES", 6)
-	if maxRetries < 1 {
-		maxRetries = 1
-	}
-	basePcts := make([]float64, 0, maxRetries+1)
-	basePcts = append(basePcts, maxFloat(0.0025, minGapPct))
-	for i := 1; i <= maxRetries; i++ {
-		basePcts = append(basePcts, maxFloat(0.0025, minGapPct+stepPct*float64(i)))
+	basePcts := []float64{
+		maxFloat(0.0025, minGapPct),
+		maxFloat(0.0025, minGapPct*1.5),
+		maxFloat(0.0025, minGapPct*2.0),
 	}
 	base := make([]float64, 0, len(basePcts)+1)
 	base = append(base, widenedProtectiveStop(side, entry, mark, tickSize))
@@ -10341,313 +10081,6 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 		}
 	}
 	return out
-}
-
-func normalizeManualProtectiveStop(symbol, side string, rest *aster.RESTAuth, entry, mark, stopPx, tickSize float64) (float64, float64, error) {
-	currentMark := mark
-	if currentMark <= 0 && rest != nil {
-		bid, ask, err := rest.BookTicker(symbol)
-		if err == nil {
-			currentMark = chooseProtectiveReference(side, bid, ask)
-		}
-	}
-	if protectiveStopExchangeSafe(side, entry, currentMark, stopPx, tickSize) {
-		return stopPx, currentMark, nil
-	}
-	for _, candidate := range manualStopRetryCandidates(side, entry, currentMark, tickSize) {
-		if !protectiveStopExchangeSafe(side, entry, currentMark, candidate, tickSize) {
-			continue
-		}
-		return candidate, currentMark, nil
-	}
-	return 0, currentMark, fmt.Errorf("no_exchange_safe_manual_stop")
-}
-
-func immediateTriggerAPIError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *aster.APIError
-	if errors.As(err, &apiErr) {
-		body := strings.ToLower(strings.TrimSpace(apiErr.Body))
-		return strings.Contains(body, "\"code\":-2021") || strings.Contains(body, "immediately trigger")
-	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(msg, "-2021") || strings.Contains(msg, "immediately trigger")
-}
-
-func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedStop, normalizedStop float64, cause string) {
-	if p == nil {
-		return
-	}
-	cause = strings.TrimSpace(cause)
-	if manageDebugLogging() {
-		fmt.Printf("live: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
-			p.Symbol,
-			p.Side,
-			fmtPrice(mark),
-			fmtPrice(p.EntryPrice),
-			fmtPrice(computedStop),
-			fmtPrice(normalizedStop),
-			cause,
-		)
-	}
-	if m != nil && m.tg != nil {
-		notifyTelegram := true
-		now := time.Now().UTC()
-		if envBool("LIVE_ALERT_SUPPRESSION_ENABLE", true) &&
-			p.ProtectionFailCount > 1 &&
-			!p.LastManageFailAt.IsZero() &&
-			now.Sub(p.LastManageFailAt) < manualProtectionAlertCooldown() &&
-			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), cause) {
-			notifyTelegram = false
-			p.ManageFailSuppressCount++
-		}
-		if !notifyTelegram {
-			return
-		}
-		suppressed := p.ManageFailSuppressCount
-		p.ManageFailSuppressCount = 0
-		state := notify.ManageStateAttachingProtection
-		switch strings.TrimSpace(p.ManualManageState) {
-		case manualManageStateForceClose:
-			state = notify.ManageStateForceCloseTriggered
-		case manualManageStateCritical:
-			state = notify.ManageStateDegraded
-		}
-		lines := []string{
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
-			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
-			fmt.Sprintf("<b>Cause:</b> %s", cause),
-			fmt.Sprintf("<b>Protection:</b> %s | <b>Retries:</b> %d/%d", manualProtectionStatus(p), p.ProtectionRetryCount, manualProtectionRetryBudget()),
-		}
-		if suppressed > 0 {
-			lines = append(lines, fmt.Sprintf("<b>Suppressed duplicates:</b> %d", suppressed))
-		}
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(state, p.Symbol, p.Side, lines...))
-	}
-}
-
-func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
-	if p.RemainingQty <= 0 {
-		return nil
-	}
-	if manualPassivePosition(p) {
-		return nil
-	}
-	now := time.Now().UTC()
-	if manualManagedTrade(p) {
-		forceNow := p.ForceProtectionNow
-		switch strings.TrimSpace(p.ManualManageState) {
-		case manualManageStateForceClose, manualManageStateCritical:
-			if m.shouldEmergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected")) {
-				return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
-			}
-			p.ManualManageState = manualManageStatePendingProtection
-		}
-		if p.ProtectionPending && !forceNow && !p.ProtectionRetryAfter.IsZero() && now.Before(p.ProtectionRetryAfter) {
-			return nil
-		}
-		if envBool("LIVE_MANUAL_PROTECTION_DEFER_UNTIL_CONVICTION", true) && !forceNow && !manualProtectionConvictionReady(p) {
-			if manualProtectionConvictionTimedOut(p, now) {
-				recordManualProtectionFailure(p, now, "awaiting_conviction_timeout")
-				m.handleManualProtectionFailure(p, "awaiting_conviction_timeout", now)
-				return nil
-			}
-			p.ManualManageState = manualManageStatePendingProtection
-			markProtectionPending(p, now, "awaiting_conviction")
-			return nil
-		}
-		p.ForceProtectionNow = false
-	}
-	prevStop := p.ProtectedStop
-	if prevStop <= 0 {
-		prevStop = p.StopPrice
-	}
-	oldStopOrderID := p.StopOrderID
-	meta, err := m.rest.SymbolMeta(p.Symbol, true)
-	if err != nil {
-		return err
-	}
-	qty, _, err := m.rest.RoundQty(p.Symbol, p.RemainingQty)
-	if err != nil {
-		return err
-	}
-	computedStop := p.StopPrice
-	protectiveEntry := manageAnchorPrice(p)
-	if protectiveEntry <= 0 {
-		protectiveEntry = p.EntryPrice
-	}
-	stopPx, _, err := m.rest.RoundPrice(p.Symbol, computedStop)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") {
-		mark, err := m.currentProtectiveReference(p.Symbol, p.Side)
-		if err != nil || mark <= 0 {
-			recordManualProtectionFailure(p, now, "mark_unavailable")
-			m.logManageFailedSafe(p, 0, computedStop, stopPx, "mark_unavailable")
-			m.handleManualProtectionFailure(p, "mark_unavailable", now)
-			if manualManagedTrade(p) {
-				return nil
-			}
-			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
-		}
-		computedStop = chooseManagedProtectiveStop(p.Side, protectiveEntry, mark, computedStop, p.ProtectedStop)
-		stopPx, _, err = m.rest.RoundPrice(p.Symbol, computedStop)
-		if err != nil {
-			return err
-		}
-		normalizedStop, normalizedMark, normErr := normalizeManualProtectiveStop(p.Symbol, p.Side, m.rest, protectiveEntry, mark, stopPx, meta.TickSize)
-		if normErr != nil || normalizedStop <= 0 {
-			recordManualProtectionFailure(p, now, "invalid_after_retry")
-			m.logManageFailedSafe(p, normalizedMark, computedStop, stopPx, "invalid_after_retry")
-			m.handleManualProtectionFailure(p, "invalid_after_retry", now)
-			if manualManagedTrade(p) {
-				return nil
-			}
-			return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
-				p.Symbol, p.Side, fmtPrice(normalizedMark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
-		}
-		stopPx = normalizedStop
-	}
-	if qty <= 0 || stopPx <= 0 {
-		return fmt.Errorf("invalid stop qty/price")
-	}
-	if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx); legalityReason != "" {
-		m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
-		if manualManagedTrade(p) {
-			recordManualProtectionFailure(p, now, legalityReason)
-			m.handleManualProtectionFailure(p, legalityReason, now)
-			return nil
-		}
-		return fmt.Errorf("%s", legalityReason)
-	} else {
-		qty = legalQty
-		stopPx = legalStop
-	}
-	p.StopPrice = stopPx
-	closeSide := "SELL"
-	if strings.EqualFold(p.Side, "SELL") {
-		closeSide = "BUY"
-	}
-	out, err := m.rest.ReplaceStopOrder(
-		p.Symbol,
-		closeSide,
-		oldStopOrderID,
-		qty,
-		stopPx,
-		meta.QtyPrecision,
-		meta.PricePrecision,
-	)
-	if err != nil {
-		if !strings.EqualFold(strings.TrimSpace(p.EntrySource), "BOT") && immediateTriggerAPIError(err) {
-			lastRetryStop := stopPx
-			retryPlaced := false
-			lastRetryMark := 0.0
-			retryOldStopID := int64(0)
-			for attempt := 0; attempt < 3 && !retryPlaced; attempt++ {
-				mark, markErr := m.currentProtectiveReference(p.Symbol, p.Side)
-				if markErr != nil || mark <= 0 {
-					recordManualProtectionFailure(p, now, "exchange_immediate_trigger_mark_unavailable")
-					m.logManageFailedSafe(p, 0, computedStop, stopPx, "exchange_immediate_trigger_mark_unavailable")
-					m.handleManualProtectionFailure(p, "exchange_immediate_trigger_mark_unavailable", now)
-					if manualManagedTrade(p) {
-						return nil
-					}
-					return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
-				}
-				lastRetryMark = mark
-				for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
-					retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
-					if roundErr != nil {
-						continue
-					}
-					if !protectiveStopExchangeSafe(p.Side, protectiveEntry, mark, retryStop, meta.TickSize) {
-						lastRetryStop = retryStop
-						continue
-					}
-					if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, retryStop); legalityReason != "" {
-						m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
-						lastRetryStop = retryStop
-						qty = legalQty
-						continue
-					} else {
-						retryStop = legalStop
-						qty = legalQty
-					}
-					lastRetryStop = retryStop
-					out, err = m.rest.ReplaceStopOrder(
-						p.Symbol,
-						closeSide,
-						retryOldStopID,
-						qty,
-						retryStop,
-						meta.QtyPrecision,
-						meta.PricePrecision,
-					)
-					if err == nil {
-						stopPx = retryStop
-						retryPlaced = true
-						break
-					}
-					if !immediateTriggerAPIError(err) {
-						break
-					}
-				}
-			}
-			if !retryPlaced {
-				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed")
-				m.logManageFailedSafe(p, lastRetryMark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
-				m.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
-				if manualManagedTrade(p) {
-					return nil
-				}
-				return fmt.Errorf("manage-failed-safe: stop placement retry failed symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s err=%v",
-					p.Symbol, p.Side, fmtPrice(lastRetryMark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(lastRetryStop), err)
-			}
-		} else {
-			return err
-		}
-	}
-	p.StopOrderID = mapInt64(out["orderId"])
-	p.ProtectedStop = stopPx
-	wasProtectionPending := p.ProtectionPending
-	clearProtectionPending(p)
-	if wasProtectionPending && m.tg != nil && manualManagedTrade(p) {
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateProtected, p.Symbol, p.Side,
-			fmt.Sprintf("<b>Exchange stop:</b> %s", fmtPrice(stopPx)),
-			fmt.Sprintf("<b>Order ID:</b> %d", p.StopOrderID),
-			"<b>Fresh entries remain blocked</b> until normal gates re-evaluate.",
-		))
-	}
-	stopChanged := prevStop <= 0 || math.Abs(prevStop-stopPx) > 1e-9
-	if stopChanged && manageDebugLogging() {
-		fmt.Printf("live: stop update %s %s old=%s new=%s trigger_ref=%s reason=%s source=%s\n",
-			p.Symbol,
-			p.Side,
-			fmtPrice(prevStop),
-			fmtPrice(stopPx),
-			strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
-			nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
-			nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
-		)
-	}
-	if stopChanged && m.eventLog != nil {
-		m.eventLog.Emit(stats.Event{
-			Timestamp:  time.Now().UTC(),
-			Type:       "STOP_UPDATE",
-			Symbol:     p.Symbol,
-			Side:       p.Side,
-			Source:     nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
-			EntryPx:    p.EntryPrice,
-			ExitPx:     stopPx,
-			TriggerRef: strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
-			Reason:     nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
-		})
-	}
-	return nil
 }
 
 func (m *liveExecManager) currentMark(symbol string) (float64, error) {
@@ -14131,7 +13564,7 @@ func strategyFamily(c candidate) string {
 
 func isStarterOnlyStrategyName(strat string) bool {
 	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
+	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
 		return true
 	default:
 		return false
@@ -14373,7 +13806,7 @@ func qualifiesImpulsiveShortStarter(c candidate, fails []string) (float64, []str
 
 func winnerAddStrategyReady(c candidate, manualCatchUp bool) bool {
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "guerilla_short_runner", "guerilla_long_runner", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return true
 	default:
 		_ = manualCatchUp
@@ -15389,22 +14822,9 @@ func qualifiesStructuredReentry(c candidate) bool {
 }
 
 func qualifiesEarlyDevEntry(c candidate, now time.Time) bool {
-	if sessionPhaseUTC(now) != sessionAsiaDev {
-		return false
-	}
-	if !qualifiesEliteStarterCandidate(c) {
-		return false
-	}
-	if candidateExhaustionActive(c) || strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") {
-		return false
-	}
-	if strings.EqualFold(c.Side, "BUY") && c.Entry.LongDemotionFlag {
-		return false
-	}
-	if strings.EqualFold(c.Side, "SELL") && c.Entry.ShortDemotionFlag {
-		return false
-	}
-	return c.Entry.Momentum || c.VolumeRatio >= envFloat("LIVE_STARTER_MIN_VOL_RATIO", 0.80) || hasFreshStructureReset(c)
+	_ = c
+	_ = now
+	return false
 }
 
 func qualifiesUTCOffHoursEntry(c candidate) bool {
@@ -15691,10 +15111,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 				return plan
 			}
 		}
-		if sessionLowLiquidity(sessionPhaseUTC(now)) {
-			plan.RejectReason = "pyramid_low_liquidity_window"
-			return plan
-		}
 		if activeSame.AddCount >= cfg.MaxAdds {
 			plan.RejectReason = "pyramid_add_cap"
 			return plan
@@ -15797,36 +15213,6 @@ func chaseRejectReason(c candidate, allowStructuredReset bool) string {
 	return ""
 }
 
-func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) string {
-	phase := sessionPhaseUTC(now)
-	if plan.IsAdd {
-		return ""
-	}
-	if plan.IsReentry {
-		if phase == sessionAsiaDev {
-			return "asia_dev_reentry_blocked"
-		}
-		return chaseRejectReason(c, true)
-	}
-	switch phase {
-	case sessionAsiaDev:
-		if !strings.EqualFold(c.Strat, "early_dev_entry") && !isStarterOnlyStrategyName(c.Strat) {
-			return "asia_dev_starter_only"
-		}
-	case sessionAsiaContinue:
-		return "asia_continue_no_fresh_entry"
-	case sessionUTCOffHours:
-		if !qualifiesUTCOffHoursEntry(c) {
-			return "utc_offhours_requires_a_grade"
-		}
-	case sessionNYOpen:
-		if strategyFamily(c) == "cont" && gradeValue(c.Entry.CurrentGrade) < gradeValue("A") && c.Conf < 0.55 {
-			return "ny_open_requires_strong_setup"
-		}
-	}
-	return chaseRejectReason(c, false)
-}
-
 func postWinCooldownRejectReason(now time.Time, c candidate, execMgr *liveExecManager) string {
 	if execMgr == nil || !execMgr.postWinCooldownCfg.Enable || execMgr.postWinCooldownCfg.Cooldown <= 0 {
 		return ""
@@ -15846,6 +15232,13 @@ func postWinCooldownRejectReason(now time.Time, c candidate, execMgr *liveExecMa
 		return ""
 	}
 	return "post_win_opposite_cooldown"
+}
+
+func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) string {
+	_ = now
+	_ = c
+	_ = plan
+	return ""
 }
 
 func lifecycleStageScore(stage string) float64 {
@@ -16125,7 +15518,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "early_dev_entry", "persistence_entry", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -16152,144 +15545,6 @@ func hybridStopInputForCandidate(c candidate, entry, tp1 float64) exitmgr.Hybrid
 	}
 }
 
-func qualifiesPersistenceOverride(c candidate, cfg entryQualityConfig) bool {
-	if !cfg.PersistenceOverride {
-		return false
-	}
-	if c.TriggerStage == "INVALIDATED" {
-		return false
-	}
-	if strategyFamily(c) == "rev" || strings.EqualFold(c.Strat, "mom_reversal") || strings.EqualFold(c.Strat, "mom_reversal_short") {
-		return false
-	}
-	minQuality := minQualityForStrategy(c, cfg)
-	if c.TradeQuality >= minQuality || c.TradeQuality < cfg.PersistMinQuality {
-		return false
-	}
-	if c.LifecycleScans < cfg.PersistMinScans {
-		return false
-	}
-	if c.Entry.CurrentScore < cfg.PersistMinScore {
-		return false
-	}
-	if gradeValue(c.Entry.CurrentGrade) < gradeValue(cfg.PersistMinGrade) {
-		return false
-	}
-	switch c.Entry.State {
-	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
-		return (c.Entry.ScoreSlope > 0 || c.Entry.Momentum) && triggerStageScore(c.TriggerStage) >= 0.72
-	default:
-		return false
-	}
-}
-
-func persistenceStrong(c candidate, cfg entryQualityConfig) bool {
-	if !cfg.PersistenceSoftOverride || !strings.EqualFold(c.Strat, "persistence_entry") {
-		return false
-	}
-	if candidateExhaustionActive(c) || candidateRapidExpansion(c) || candidateSpikeCandle(c) {
-		return false
-	}
-	if c.PersistenceSeenCount < maxInt(1, cfg.PersistSoftMinSeen) {
-		return false
-	}
-	if c.PersistenceTopNCount < maxInt(1, cfg.PersistSoftMinTopN) {
-		return false
-	}
-	if c.CombinedScore < envFloat("LIVE_PERSISTENCE_MIN_RANK", 0.70) {
-		return false
-	}
-	if c.Entry.CurrentScore < envFloat("LIVE_PERSISTENCE_STRONG_MIN_SCORE", 90.0) {
-		return false
-	}
-	if c.Conf < envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62) {
-		return false
-	}
-	if !candidatePriceConfirmsDirection(c) {
-		return false
-	}
-	if directionalConflictRejectReason(c) != "" {
-		return false
-	}
-	if classifyExhaustionRisk(c, c.Side) != "low" {
-		return false
-	}
-	if candidateExtendedForBotAdd(c) {
-		return false
-	}
-	if !continuationStructureConfirmed(c) && !hasFreshStructureReset(c) && !c.ReclaimHold && !c.RetestHold && !c.ClosedBreakHold {
-		return false
-	}
-	if c.OFISamples >= maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8)) {
-		tolerance := envFloat("LIVE_PERSISTENCE_OFI_TOLERANCE_Z", 0.10)
-		if strings.EqualFold(c.Side, "BUY") && c.OFIZ < -tolerance {
-			return false
-		}
-		if strings.EqualFold(c.Side, "SELL") && c.OFIZ > tolerance {
-			return false
-		}
-	}
-	if !c.PersistenceVolumeTrend && !envBool("LIVE_PERSISTENCE_ALLOW_STABLE_VOLUME", true) {
-		return false
-	}
-	if !c.PersistenceMomentum && !envBool("LIVE_PERSISTENCE_ALLOW_STABLE_MOMENTUM", true) {
-		return false
-	}
-	return true
-}
-
-func persistenceSoftBlock(reason string) bool {
-	reason = strings.ToLower(strings.TrimSpace(reason))
-	switch {
-	case strings.Contains(reason, "wall_not_persistent"):
-		return true
-	case strings.Contains(reason, "meta_quality"):
-		return true
-	default:
-		return false
-	}
-}
-
-func persistenceSoftBlocksOnly(reasons []string) bool {
-	if len(reasons) == 0 {
-		return false
-	}
-	for _, reason := range reasons {
-		if !persistenceSoftBlock(reason) {
-			return false
-		}
-	}
-	return true
-}
-
-func persistenceEntryEligible(c candidate) bool {
-	tmp := c
-	if strings.TrimSpace(tmp.Strat) == "" {
-		tmp.Strat = "persistence_entry"
-	}
-	cfg := entryQualityConfig{
-		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
-		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
-		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
-	}
-	return persistenceStrong(tmp, cfg)
-}
-
-func qualifiesConfOverride(c candidate, cfg entryQualityConfig) bool {
-	if c.Conf > 0 || !qualifiesPersistenceOverride(c, cfg) {
-		return false
-	}
-	if strategyFamily(c) == "rev" || strings.EqualFold(c.Strat, "mom_reversal") || strings.EqualFold(c.Strat, "mom_reversal_short") {
-		return false
-	}
-	switch c.Entry.State {
-	case inplay.StateHeating, inplay.StateInPlay, inplay.StatePumping:
-		return true
-	default:
-		return false
-	}
-}
-
 func confidenceRejectReason(c candidate, minConf float64) string {
 	base := fmt.Sprintf("conf:%.2f<%.2f", c.Conf, minConf)
 	if c.Conf > 0 {
@@ -16312,19 +15567,12 @@ func confidenceRejectReason(c candidate, minConf float64) string {
 }
 
 func passesAsiaEntryQuality(now time.Time, c candidate, asiaMinGrade string, asiaStrongConfMin float64, asiaMinSlope float64) bool {
-	switch sessionPhaseUTC(now) {
-	case sessionAsiaDev, sessionAsiaBreakout, sessionAsiaContinue:
-	default:
-		return true
-	}
-	if gradeValue(c.Entry.CurrentGrade) >= gradeValue(asiaMinGrade) {
-		return true
-	}
-	if (c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping) &&
-		(c.Entry.ScoreSlope >= asiaMinSlope || c.Entry.Momentum) {
-		return true
-	}
-	return c.Conf >= asiaStrongConfMin
+	_ = now
+	_ = c
+	_ = asiaMinGrade
+	_ = asiaStrongConfMin
+	_ = asiaMinSlope
+	return true
 }
 
 func rankWithStrategy(cache *featureRuntimeCache, in []candidate, topN int, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64, sortCfg rankSortConfig, rel reliability.Store, flow map[string]flowMetrics) []candidate {
@@ -16717,685 +15965,8 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 }
 
 func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
-	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
-	ofiMinSamples := envInt("LIVE_OFI_MIN_SAMPLES", 8)
-	if ofiMinSamples < 1 {
-		ofiMinSamples = 1
-	}
-	if resetName, resetConf, resetReasons := qualifiesResetImpulse(cand, now); resetName != "" {
-		cand.Strat = resetName
-		cand.Conf = resetConf
-		cand.Sig = strategies.Signal{
-			Active:       true,
-			Name:         resetName,
-			Side:         toFeatureSide(cand.Side),
-			Confidence:   resetConf,
-			RejectReason: "",
-			Reasons:      resetReasons,
-			Tags:         []string{"reset_impulse", "post_1900_breakout"},
-		}
-		cand.Sig = applySignalRiskGeometry(cand, resetName)
-		cand.RejectReason = ""
-		return cand
-	}
-	if qualifiesEarlyDevEntry(cand, now) {
-		baseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
-		confBoost := min(0.08, maxFloat(0.0, cand.Entry.ScoreSlope-envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02))*0.18)
-		cand.Strat = "early_dev_entry"
-		cand.Conf = clamp(baseConf-0.10+confBoost, 0.36, 0.60)
-		cand.Sig = strategies.Signal{
-			Active:     true,
-			Name:       "early_dev_entry",
-			Side:       toFeatureSide(cand.Side),
-			Confidence: cand.Conf,
-			Tags:       []string{"starter_only", "asia_dev", "watchlist_priority"},
-			Reasons: []string{
-				fmt.Sprintf("grade=%s", cand.Entry.CurrentGrade),
-				fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
-				fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
-			},
-		}
-		cand.Sig = applySignalRiskGeometry(cand, "early_dev_entry")
-		cand.RejectReason = ""
-		return cand
-	}
-	if envBool("LIVE_ENABLE_GUERILLA_LONG_RUNNER", true) && strings.EqualFold(cand.Side, "BUY") {
-		minScore := envFloat("LIVE_GUERILLA_LONG_MIN_SCORE", 110.0)
-		minSlope := envFloat("LIVE_GUERILLA_LONG_MIN_SLOPE", 0.30)
-		minVolRatio := envFloat("LIVE_GUERILLA_LONG_MIN_VOL_RATIO", 1.60)
-		minOFIZ := envFloat("LIVE_GUERILLA_LONG_MIN_OFI_Z", 0.70)
-		maxRank := envFloat("LIVE_GUERILLA_LONG_MAX_RANK", 1.25)
-		minDayUTC := envFloat("LIVE_GUERILLA_LONG_MIN_DAYUTC_PCT", 12.0)
-		maxExtATR := envFloat("LIVE_GUERILLA_LONG_MAX_EXT_ATR", 2.5)
-		minWallConf := envFloat("LIVE_GUERILLA_LONG_MIN_WALL_CONF", 0.55)
-		baseConf := envFloat("LIVE_GUERILLA_LONG_BASE_CONF", 0.72)
-
-		stateOK := continuationStateTrending(cand.Entry.State)
-		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
-		dayOK := minDayUTC <= 0 || cand.DayUTC24h >= minDayUTC
-		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
-		structureOK := cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
-		styleOK := cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "breakout_hold_long" || cand.Entry.Momentum
-		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ >= minOFIZ
-		wallOK := minWallConf <= 0 ||
-			(cand.WallConfidence >= minWallConf &&
-				(strings.EqualFold(cand.WallSide, "bid") || cand.WallBiasScore >= 0) &&
-				(strings.Contains(strings.ToLower(cand.WallMode), "defense") || strings.Contains(strings.ToLower(cand.WallMode), "consumption") || cand.WallStatus == "defended"))
-
-		if stateOK &&
-			rankOK &&
-			dayOK &&
-			extOK &&
-			styleOK &&
-			structureOK &&
-			ofiOK &&
-			wallOK &&
-			cand.Entry.CurrentScore >= minScore &&
-			cand.Entry.ScoreSlope >= minSlope &&
-			cand.VolumeRatio >= minVolRatio {
-			confBoost := min(0.22, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.35+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.10)
-			if cand.OFIZ > minOFIZ {
-				confBoost += min(0.06, (cand.OFIZ-minOFIZ)*0.08)
-			}
-			cand.Strat = "guerilla_long_runner"
-			cand.Conf = clamp(baseConf+confBoost, 0, 0.92)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "guerilla_long_runner",
-				Side:   toFeatureSide(cand.Side),
-				Reasons: []string{
-					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
-					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
-					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
-					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-					fmt.Sprintf("rank=%.2f", cand.Entry.Rank),
-					fmt.Sprintf("wall_conf=%.2f", cand.WallConfidence),
-				},
-				Tags: []string{"guerilla", "runner", "pyramid_ok"},
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "guerilla_long_runner")
-			cand.RejectReason = ""
-			return cand
-		}
-	}
-	if envBool("LIVE_ENABLE_GUERILLA_LONG_SNIPER", true) && strings.EqualFold(cand.Side, "BUY") {
-		minScore := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_SCORE", 78.0)
-		minSlope := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_SLOPE", 0.06)
-		minVolRatio := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_VOL_RATIO", 1.10)
-		minOFIZ := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_OFI_Z", 0.25)
-		maxRank := envFloat("LIVE_GUERILLA_LONG_SNIPER_MAX_RANK", 4.0)
-		minDayUTC := envFloat("LIVE_GUERILLA_LONG_SNIPER_MIN_DAYUTC_PCT", 6.0)
-		minFails := envInt("LIVE_GUERILLA_LONG_SNIPER_MIN_FAILS", 1)
-		maxExtATR := envFloat("LIVE_GUERILLA_LONG_SNIPER_MAX_EXT_ATR", 2.2)
-		baseConf := envFloat("LIVE_GUERILLA_LONG_SNIPER_BASE_CONF", 0.58)
-
-		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping || cand.Entry.State == inplay.StateCooling
-		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
-		dayOK := minDayUTC <= 0 || cand.DayUTC24h >= minDayUTC
-		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
-		structureOK := (cand.SessionVWAP > 0 && cand.LastClose >= cand.SessionVWAP) || (cand.EMA9 > 0 && cand.LastClose >= cand.EMA9)
-		failCount := maxInt(cand.Entry.FailedBreakdownCount, cand.Entry.FailedBreakLowCount)
-		failCount = maxInt(failCount, cand.Entry.FailedReclaimCount)
-		failOK := minFails <= 0 || failCount >= minFails
-		styleOK := cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "breakout_hold_long" ||
-			cand.Entry.EntryStyle == "momentum_ignite_long" || failOK
-		if cand.Entry.EntryStyle == "avoid_chase" && failCount < maxInt(2, minFails) {
-			styleOK = false
-		}
-		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ >= minOFIZ
-		wallOK := cand.WallConfidence <= 0 ||
-			(strings.EqualFold(cand.WallSide, "bid") || cand.WallBiasScore >= 0) ||
-			strings.Contains(strings.ToLower(cand.WallMode), "defense") ||
-			strings.Contains(strings.ToLower(cand.WallMode), "consumption")
-
-		if stateOK &&
-			rankOK &&
-			dayOK &&
-			extOK &&
-			styleOK &&
-			structureOK &&
-			failOK &&
-			ofiOK &&
-			wallOK &&
-			cand.Entry.CurrentScore >= minScore &&
-			cand.Entry.ScoreSlope >= minSlope &&
-			cand.VolumeRatio >= minVolRatio {
-			confBoost := min(0.18, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.30+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.08)
-			if cand.OFIZ > minOFIZ {
-				confBoost += min(0.05, (cand.OFIZ-minOFIZ)*0.08)
-			}
-			if failCount > 0 {
-				confBoost += min(0.06, float64(failCount)*0.02)
-			}
-			cand.Strat = "guerilla_long_sniper"
-			cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "guerilla_long_sniper",
-				Side:   toFeatureSide(cand.Side),
-				Reasons: []string{
-					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
-					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
-					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
-					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-					fmt.Sprintf("fails=%d", failCount),
-				},
-				Tags: []string{"guerilla", "sniper", "failed_breakdown"},
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "guerilla_long_sniper")
-			cand.RejectReason = ""
-			return cand
-		}
-	}
-	if envBool("LIVE_ENABLE_MOMENTUM_IGNITE", true) {
-		igniteMinScore := envFloat("LIVE_IGNITE_MIN_SCORE", 60.0)
-		igniteMinSlope := envFloat("LIVE_IGNITE_MIN_SLOPE", 0.08)
-		igniteMinVolRatio := envFloat("LIVE_IGNITE_MIN_VOL_RATIO", 1.00)
-		igniteMinOFIZ := envFloat("LIVE_IGNITE_MIN_OFI_Z", 0.60)
-		igniteBaseConf := envFloat("LIVE_IGNITE_BASE_CONF", 0.56)
-		igniteHeatMaxStateMin := envFloat("LIVE_IGNITE_HEATING_MAX_STATE_MIN", 14.0)
-		igniteInPlayMaxStateMin := envFloat("LIVE_IGNITE_INPLAY_MAX_STATE_MIN", 8.0)
-
-		structureOK := false
-		if strings.EqualFold(cand.Side, "BUY") {
-			aboveVWAP := cand.SessionVWAP > 0 && cand.LastClose >= cand.SessionVWAP
-			aboveEMA := cand.EMA9 > 0 && cand.LastClose >= cand.EMA9
-			structureOK = aboveVWAP || aboveEMA
-		} else {
-			belowVWAP := cand.SessionVWAP > 0 && cand.LastClose <= cand.SessionVWAP
-			belowEMA := cand.EMA9 > 0 && cand.LastClose <= cand.EMA9
-			structureOK = belowVWAP || belowEMA
-		}
-
-		freshStateOK := false
-		switch cand.Entry.State {
-		case inplay.StateHeating:
-			freshStateOK = cand.Entry.TimeInStateMin <= igniteHeatMaxStateMin
-		case inplay.StateInPlay:
-			freshStateOK = cand.Entry.TimeInStateMin <= igniteInPlayMaxStateMin
-		}
-
-		styleMatch := false
-		igniteName := ""
-		if strings.EqualFold(cand.Side, "BUY") {
-			styleMatch = cand.Entry.EntryStyle == "momentum_ignite_long"
-			igniteName = "momentum_ignite_long"
-		} else {
-			styleMatch = cand.Entry.EntryStyle == "momentum_ignite_short"
-			igniteName = "momentum_ignite_short"
-		}
-		ofiReady := !ofiEnabled || cand.OFISamples < ofiMinSamples
-		if !ofiReady {
-			if strings.EqualFold(cand.Side, "BUY") {
-				ofiReady = cand.OFIZ >= igniteMinOFIZ
-			} else {
-				ofiReady = cand.OFIZ <= -igniteMinOFIZ
-			}
-		}
-
-		if styleMatch &&
-			freshStateOK &&
-			cand.Entry.Momentum &&
-			cand.Entry.CurrentScore >= igniteMinScore &&
-			cand.Entry.ScoreSlope >= igniteMinSlope &&
-			cand.VolumeRatio >= igniteMinVolRatio &&
-			ofiReady &&
-			structureOK {
-			cand.Strat = igniteName
-			cand.Conf = clamp(igniteBaseConf+min(0.20, max(0.0, cand.Entry.ScoreSlope-igniteMinSlope)*0.35+max(0.0, cand.VolumeRatio-igniteMinVolRatio)*0.10), 0, 0.86)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   igniteName,
-				Side:   toFeatureSide(cand.Side),
-			}
-			cand.Sig = applySignalRiskGeometry(cand, igniteName)
-			cand.RejectReason = ""
-			return cand
-		}
-	}
-	if envBool("LIVE_ENABLE_GUERILLA_SHORT_SNIPER", true) && strings.EqualFold(cand.Side, "SELL") {
-		minScore := envFloat("LIVE_GUERILLA_SHORT_MIN_SCORE", 68.0)
-		minSlope := envFloat("LIVE_GUERILLA_SHORT_MIN_SLOPE", 0.04)
-		minVolRatio := envFloat("LIVE_GUERILLA_SHORT_MIN_VOL_RATIO", 1.00)
-		minOFIZ := envFloat("LIVE_GUERILLA_SHORT_MIN_OFI_Z", 0.25)
-		maxRank := envFloat("LIVE_GUERILLA_SHORT_MAX_RANK", 4.0)
-		minDayUTC := envFloat("LIVE_GUERILLA_SHORT_MIN_DAYUTC_PCT", 6.0)
-		minFails := envInt("LIVE_GUERILLA_SHORT_MIN_FAILS", 1)
-		maxExtATR := envFloat("LIVE_GUERILLA_SHORT_MAX_EXT_ATR", 2.2)
-		baseConf := envFloat("LIVE_GUERILLA_SHORT_BASE_CONF", 0.58)
-
-		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping || cand.Entry.State == inplay.StateCooling
-		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
-		dayOK := minDayUTC <= 0 || cand.DayUTC24h <= -minDayUTC
-		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
-		structureOK := (cand.SessionVWAP > 0 && cand.LastClose <= cand.SessionVWAP) || (cand.EMA9 > 0 && cand.LastClose <= cand.EMA9)
-		failCount := maxInt(cand.Entry.FailedBounceCount, cand.Entry.FailedReclaimCount)
-		failCount = maxInt(failCount, cand.Entry.FailedBreakdownCount)
-		failOK := minFails <= 0 || failCount >= minFails
-		styleOK := cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" ||
-			cand.Entry.EntryStyle == "leader_unwind_short" || cand.Entry.EntryStyle == "momentum_ignite_short" || failOK
-		if cand.Entry.EntryStyle == "avoid_chase" && failCount < maxInt(2, minFails) {
-			styleOK = false
-		}
-		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ <= -minOFIZ
-		wallOK := cand.WallConfidence <= 0 ||
-			(strings.EqualFold(cand.WallSide, "ask") || cand.WallBiasScore <= 0) ||
-			strings.Contains(strings.ToLower(cand.WallMode), "failure") ||
-			strings.Contains(strings.ToLower(cand.WallMode), "consumption")
-
-		if stateOK &&
-			rankOK &&
-			dayOK &&
-			extOK &&
-			styleOK &&
-			structureOK &&
-			failOK &&
-			ofiOK &&
-			wallOK &&
-			cand.Entry.CurrentScore >= minScore &&
-			cand.Entry.ScoreSlope >= minSlope &&
-			cand.VolumeRatio >= minVolRatio {
-			confBoost := min(0.18, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.30+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.08)
-			if cand.OFIZ < -minOFIZ {
-				confBoost += min(0.05, (-cand.OFIZ-minOFIZ)*0.08)
-			}
-			if failCount > 0 {
-				confBoost += min(0.06, float64(failCount)*0.02)
-			}
-			cand.Strat = "guerilla_short_sniper"
-			cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "guerilla_short_sniper",
-				Side:   toFeatureSide(cand.Side),
-				Reasons: []string{
-					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
-					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
-					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
-					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-					fmt.Sprintf("fails=%d", failCount),
-				},
-				Tags: []string{"guerilla", "sniper", "failed_bounce"},
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "guerilla_short_sniper")
-			cand.RejectReason = ""
-			return cand
-		}
-	}
-	if envBool("LIVE_ENABLE_GUERILLA_SHORT_RUNNER", true) && strings.EqualFold(cand.Side, "SELL") {
-		minScore := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_SCORE", 105.0)
-		minSlope := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_SLOPE", 0.28)
-		minVolRatio := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_VOL_RATIO", 1.50)
-		minOFIZ := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_OFI_Z", 0.65)
-		maxRank := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MAX_RANK", 1.25)
-		minDayUTC := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_DAYUTC_PCT", 12.0)
-		maxExtATR := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MAX_EXT_ATR", 2.5)
-		minWallConf := envFloat("LIVE_GUERILLA_SHORT_RUNNER_MIN_WALL_CONF", 0.55)
-		baseConf := envFloat("LIVE_GUERILLA_SHORT_RUNNER_BASE_CONF", 0.70)
-
-		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
-		rankOK := maxRank <= 0 || cand.Entry.Rank <= maxRank
-		dayOK := minDayUTC <= 0 || cand.DayUTC24h <= -minDayUTC
-		extOK := maxExtATR <= 0 || cand.ExtensionATR <= 0 || cand.ExtensionATR <= maxExtATR
-		structureOK := cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
-		styleOK := cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.Momentum
-		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples || cand.OFIZ <= -minOFIZ
-		wallOK := minWallConf <= 0 ||
-			(cand.WallConfidence >= minWallConf &&
-				(strings.EqualFold(cand.WallSide, "ask") || cand.WallBiasScore <= 0) &&
-				(strings.Contains(strings.ToLower(cand.WallMode), "defense") || strings.Contains(strings.ToLower(cand.WallMode), "consumption") || cand.WallStatus == "defended"))
-
-		if stateOK &&
-			rankOK &&
-			dayOK &&
-			extOK &&
-			styleOK &&
-			structureOK &&
-			ofiOK &&
-			wallOK &&
-			cand.Entry.CurrentScore >= minScore &&
-			cand.Entry.ScoreSlope >= minSlope &&
-			cand.VolumeRatio >= minVolRatio {
-			confBoost := min(0.22, maxFloat(0.0, cand.Entry.ScoreSlope-minSlope)*0.35+maxFloat(0.0, cand.VolumeRatio-minVolRatio)*0.10)
-			if cand.OFIZ < -minOFIZ {
-				confBoost += min(0.06, (-cand.OFIZ-minOFIZ)*0.08)
-			}
-			cand.Strat = "guerilla_short_runner"
-			cand.Conf = clamp(baseConf+confBoost, 0, 0.92)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "guerilla_short_runner",
-				Side:   toFeatureSide(cand.Side),
-				Reasons: []string{
-					fmt.Sprintf("score=%.2f", cand.Entry.CurrentScore),
-					fmt.Sprintf("slope=%.3f", cand.Entry.ScoreSlope),
-					fmt.Sprintf("vol_ratio=%.2f", cand.VolumeRatio),
-					fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-					fmt.Sprintf("rank=%.2f", cand.Entry.Rank),
-					fmt.Sprintf("wall_conf=%.2f", cand.WallConfidence),
-				},
-				Tags: []string{"guerilla", "runner", "pyramid_ok"},
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "guerilla_short_runner")
-			cand.RejectReason = ""
-			return cand
-		}
-	}
-	if envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
-		if strings.EqualFold(cand.Side, "BUY") {
-			if cand.Entry.LongDemotionFlag {
-				cand.Strat = "none"
-				cand.Conf = 0
-				cand.RejectReason = "long_demoted_reversal_watch"
-				return cand
-			}
-			if cand.Entry.EntryStyle == "avoid_chase" || cand.Entry.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
-				cand.Strat = "none"
-				cand.Conf = 0
-				cand.RejectReason = "avoid_chase_exhaustion"
-				return cand
-			}
-		} else if strings.EqualFold(cand.Side, "SELL") {
-			if cand.Entry.ShortDemotionFlag {
-				cand.Strat = "none"
-				cand.Conf = 0
-				cand.RejectReason = "short_demoted_reversal_watch"
-				return cand
-			}
-			if cand.Entry.EntryStyle == "avoid_chase" || cand.Entry.ExhaustionRisk >= envFloat("LIVE_EXHAUSTION_AVOID_CHASE_RISK", 4.5) {
-				cand.Strat = "none"
-				cand.Conf = 0
-				cand.RejectReason = "avoid_chase_exhaustion"
-				return cand
-			}
-		}
-		fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
-		fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
-		fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
-		fastMinOFIZ := envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35)
-		fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
-		lateStateMin := envFloat("LIVE_CONT_FAST_MAX_STATE_MIN", 18.0)
-		lateAPlusStateMin := envFloat("LIVE_CONT_FAST_APLUS_MAX_STATE_MIN", 28.0)
-		lateMinSlope := envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16)
-		lateMinVolRatio := envFloat("LIVE_CONT_FAST_LATE_MIN_VOL_RATIO", 1.35)
-		lateMinScore := envFloat("LIVE_CONT_FAST_LATE_MIN_SCORE", 90.0)
-		leaderUnwindShortMode := false
-		impulseQuality := classifyImpulseQuality(cand)
-		starterLane := classifyStarterLane(cand, cand.Side)
-		switch impulseQuality {
-		case "likely_exhaustion":
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "impulse_likely_exhaustion"
-			return cand
-		case "elite_breakout":
-			fastMinScore = maxFloat(fastMinScore, 72)
-			fastMinSlope = maxFloat(fastMinSlope, 0.04)
-			fastMinVolRatio = min(fastMinVolRatio, 0.95)
-			fastMinOFIZ = min(fastMinOFIZ, 0.10)
-		case "healthy_continuation":
-			fastMinScore = maxFloat(fastMinScore, 72)
-			fastMinSlope = maxFloat(fastMinSlope, 0.04)
-			fastMinVolRatio = maxFloat(fastMinVolRatio, 1.20)
-			fastMinOFIZ = min(fastMinOFIZ, 0.25)
-		case "extended_but_valid":
-			if starterLane == "reject" && !hasFreshStructureReset(cand) && !qualifiesEliteStarterCandidate(cand) && !starterStructureContextOK(cand) {
-				cand.Strat = "none"
-				cand.Conf = 0
-				cand.RejectReason = "extended_valid_wait_reset"
-				return cand
-			}
-		}
-		if strings.EqualFold(cand.Side, "SELL") {
-			leaderUnwindShortMode =
-				cand.Entry.CurrentScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SCORE", 88.0) &&
-					cand.Entry.DayUTCPct <= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_DAYUTC_PCT", -20.0) &&
-					(cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping) &&
-					(cand.Entry.ScoreSlope >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_SLOPE", 0.35) || cand.Entry.Momentum) &&
-					(cand.Entry.EntryStyle == "pullback_short" || cand.Entry.EntryStyle == "breakout_hold_short" || cand.Entry.EntryStyle == "momentum_ignite_short" || cand.Entry.EntryStyle == "leader_unwind_short") &&
-					cand.Entry.BearReversalScore >= envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_BEAR_SCORE", 3.0)
-			if leaderUnwindShortMode {
-				fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_VOL_RATIO", 0.80))
-				fastMinOFIZ = min(fastMinOFIZ, envFloat("LIVE_LEADER_UNWIND_SHORT_MIN_ABS_OFI_Z", 0.15))
-				lateStateMin = maxFloat(lateStateMin, envFloat("LIVE_LEADER_UNWIND_SHORT_MAX_STATE_MIN", 30.0))
-			}
-		}
-		stateOK := cand.Entry.State == inplay.StateHeating || cand.Entry.State == inplay.StateInPlay || cand.Entry.State == inplay.StatePumping
-		vwapEMAOK := false
-		if strings.EqualFold(cand.Side, "BUY") {
-			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose >= cand.SessionVWAP && cand.LastClose >= cand.EMA9
-		} else {
-			vwapEMAOK = cand.SessionVWAP > 0 && cand.EMA9 > 0 && cand.LastClose <= cand.SessionVWAP && cand.LastClose <= cand.EMA9
-		}
-		ofiOK := !ofiEnabled || cand.OFISamples < ofiMinSamples
-		if !ofiOK {
-			if strings.EqualFold(cand.Side, "BUY") {
-				ofiOK = cand.OFIZ >= fastMinOFIZ
-			} else {
-				ofiOK = cand.OFIZ <= -fastMinOFIZ
-			}
-		}
-		lateRejects := make([]string, 0, 3)
-		structureConfirmOK := !envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) || continuationStructureConfirmed(cand)
-		pullbackSetup := cand.SetupFamily == "micro_pullback_continuation" || cand.SetupFamily == "deep_pullback_reclaim" || cand.SetupFamily == "breakout_retest" ||
-			cand.Entry.EntryStyle == "pullback_long" || cand.Entry.EntryStyle == "pullback_short"
-		if pullbackSetup && structureConfirmOK {
-			fastMinVolRatio = min(fastMinVolRatio, envFloat("LIVE_PULLBACK_CONT_MIN_VOL_RATIO", 0.75))
-			fastBaseConf = maxFloat(fastBaseConf, envFloat("LIVE_PULLBACK_CONT_BASE_CONF", 0.54))
-			if ofiEnabled && cand.OFISamples >= ofiMinSamples {
-				minPullbackOFI := envFloat("LIVE_PULLBACK_CONT_MIN_ABS_OFI_Z", 0.10)
-				if strings.EqualFold(cand.Side, "BUY") {
-					ofiOK = cand.OFIZ >= -minPullbackOFI
-				} else {
-					ofiOK = cand.OFIZ <= minPullbackOFI
-				}
-			} else {
-				ofiOK = true
-			}
-		}
-		stateAgeLimit := lateStateMin
-		if gradeValue(cand.Entry.CurrentGrade) >= gradeValue("A+") {
-			stateAgeLimit = lateAPlusStateMin
-		}
-		if stateAgeLimit > 0 && cand.Entry.TimeInStateMin > stateAgeLimit {
-			if !cand.Entry.Momentum {
-				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_no_momentum:%.1f>%.1f", cand.Entry.TimeInStateMin, stateAgeLimit))
-			}
-			if cand.Entry.ScoreSlope < lateMinSlope {
-				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_slope:%.3f<%.3f", cand.Entry.ScoreSlope, lateMinSlope))
-			}
-			if cand.VolumeRatio < lateMinVolRatio {
-				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_vol_ratio:%.2f<%.2f", cand.VolumeRatio, lateMinVolRatio))
-			}
-			if gradeValue(cand.Entry.CurrentGrade) < gradeValue("A") && cand.Entry.CurrentScore < lateMinScore {
-				lateRejects = append(lateRejects, fmt.Sprintf("late_cycle_score:%.2f<%.2f", cand.Entry.CurrentScore, lateMinScore))
-			}
-		}
-		if stateOK &&
-			cand.Entry.CurrentScore >= fastMinScore &&
-			cand.Entry.ScoreSlope >= fastMinSlope &&
-			cand.VolumeRatio >= fastMinVolRatio &&
-			ofiOK &&
-			structureConfirmOK &&
-			len(lateRejects) == 0 &&
-			vwapEMAOK {
-			cand.Strat = "continuation_fast"
-			confBoost := min(0.22, (cand.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.30)
-			if leaderUnwindShortMode {
-				confBoost = maxFloat(confBoost, 0.06+min(0.10, maxFloat(0.0, math.Abs(cand.Entry.DayUTCPct)-20.0)*0.004))
-			}
-			cand.Conf = clamp(fastBaseConf+confBoost, 0, 0.90)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "continuation_fast",
-				Side:   toFeatureSide(cand.Side),
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "continuation_fast")
-			cand.RejectReason = ""
-			return cand
-		}
-		fails := make([]string, 0, 4)
-		if !stateOK {
-			fails = append(fails, "state_not_trending")
-		}
-		if cand.Entry.CurrentScore < fastMinScore {
-			fails = append(fails, fmt.Sprintf("score:%.2f<%.2f", cand.Entry.CurrentScore, fastMinScore))
-		}
-		if cand.Entry.ScoreSlope < fastMinSlope {
-			fails = append(fails, fmt.Sprintf("slope:%.3f<%.3f", cand.Entry.ScoreSlope, fastMinSlope))
-		}
-		if cand.VolumeRatio < fastMinVolRatio {
-			fails = append(fails, fmt.Sprintf("vol_ratio:%.2f<%.2f", cand.VolumeRatio, fastMinVolRatio))
-		}
-		if !ofiOK {
-			if strings.EqualFold(cand.Side, "BUY") {
-				fails = append(fails, fmt.Sprintf("ofi_z:%.2f<%.2f", cand.OFIZ, fastMinOFIZ))
-			} else {
-				fails = append(fails, fmt.Sprintf("ofi_z:%.2f>%.2f", cand.OFIZ, -fastMinOFIZ))
-			}
-		}
-		if !structureConfirmOK {
-			fails = append(fails, firstNonEmpty(cand.StructureReason, "continuation_no_structure_confirm"))
-		}
-		if !vwapEMAOK {
-			if strings.EqualFold(cand.Side, "BUY") {
-				fails = append(fails, "below_vwap_ema")
-			} else {
-				fails = append(fails, "above_vwap_ema")
-			}
-		}
-		fails = append(fails, lateRejects...)
-		persistCfg := entryQualityConfig{
-			PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
-			PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
-			PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
-		}
-		if conf, reasons, ok := qualifiesImpulsiveShortStarter(cand, fails); ok {
-			cand.Strat = "impulsive_short_starter"
-			cand.Conf = conf
-			cand.Sig = strategies.Signal{
-				Active:     true,
-				Name:       "impulsive_short_starter",
-				Side:       toFeatureSide(cand.Side),
-				Confidence: cand.Conf,
-				Tags:       []string{"starter_only", "impulse_short", "scanner_confidence"},
-				Reasons:    reasons,
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "impulsive_short_starter")
-			cand.RejectReason = ""
-			return cand
-		}
-		if conf, reasons, ok := qualifiesImpulsiveLongStarter(cand, fails); ok {
-			cand.Strat = "impulsive_long_starter"
-			cand.Conf = conf
-			cand.Sig = strategies.Signal{
-				Active:     true,
-				Name:       "impulsive_long_starter",
-				Side:       toFeatureSide(cand.Side),
-				Confidence: cand.Conf,
-				Tags:       []string{"starter_only", "impulse_long", "scanner_confidence"},
-				Reasons:    reasons,
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "impulsive_long_starter")
-			cand.RejectReason = ""
-			return cand
-		}
-		if persistenceStrong(cand, persistCfg) && persistenceSoftBlocksOnly(fails) {
-			cand.Strat = "persistence_entry"
-			cand.Conf = maxFloat(cand.Conf, envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62))
-			cand.Sig = strategies.Signal{
-				Active:     true,
-				Name:       "persistence_entry",
-				Side:       toFeatureSide(cand.Side),
-				Confidence: cand.Conf,
-				Tags:       []string{"starter_only", "persistence_soft_override"},
-				Reasons:    append([]string(nil), fails...),
-			}
-			cand.Sig = applySignalRiskGeometry(cand, "persistence_entry")
-			cand.RejectReason = ""
-			cand.QualityReasons = append(cand.QualityReasons, "persistence_override")
-			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
-				strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol)), cand.Side, strings.Join(fails, ","), firstNonEmpty(cand.PersistenceReason, "strong_persistence"), envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10)))
-			return cand
-		}
-		if envBool("LIVE_HEATING_STARTER_ENABLE", true) &&
-			cand.Entry.State == inplay.StateHeating &&
-			gradeValue(cand.Entry.CurrentGrade) >= gradeValue(envStr("LIVE_HEATING_STARTER_MIN_GRADE", "B")) &&
-			cand.Entry.CurrentScore >= envFloat("LIVE_HEATING_STARTER_MIN_SCORE", 85.0) &&
-			cand.PersistenceSeenCount >= maxInt(2, envInt("LIVE_HEATING_STARTER_MIN_SEEN", 2)) &&
-			len(lateRejects) == 0 {
-			hardFails := make([]string, 0, len(fails))
-			softFails := make([]string, 0, len(fails))
-			for _, fail := range fails {
-				if isSoftReject(fail) {
-					softFails = append(softFails, fail)
-				} else {
-					hardFails = append(hardFails, fail)
-				}
-			}
-			if len(hardFails) == 0 {
-				cand.Strat = "heating_starter_entry"
-				cand.Conf = clamp(maxFloat(cand.Conf, 0.54)+min(0.08, maxFloat(0.0, cand.Entry.ScoreSlope)*0.12), 0.52, 0.72)
-				cand.Sig = strategies.Signal{
-					Active:     true,
-					Name:       "heating_starter_entry",
-					Side:       toFeatureSide(cand.Side),
-					Confidence: cand.Conf,
-					Tags:       []string{"starter_only", "heating_fast_path"},
-					Reasons:    append([]string{}, softFails...),
-				}
-				cand.Sig = applySignalRiskGeometry(cand, "heating_starter_entry")
-				cand.RejectReason = strings.Join(softFails, ",")
-				return cand
-			}
-		}
-		if len(fails) == 0 {
-			fails = append(fails, "continuation_fast_not_ready")
-		}
-		if starterLane == "elite_starter" || qualifiesEliteStarterCandidate(cand) {
-			softRejects := make([]string, 0, len(fails))
-			hardRejects := make([]string, 0, len(fails))
-			for _, fail := range fails {
-				fail = strings.TrimSpace(fail)
-				if fail == "" {
-					continue
-				}
-				if continuationFastStarterSoftRejectAllowed(cand, fail) {
-					softRejects = append(softRejects, fail)
-				} else {
-					hardRejects = append(hardRejects, fail)
-				}
-			}
-			if len(softRejects) > 0 && len(hardRejects) == 0 {
-				confBoost := min(0.10, max(0.0, cand.Entry.ScoreSlope-fastMinSlope)*0.18)
-				cand.Strat = starterSubtypeName(cand)
-				cand.Conf = clamp((fastBaseConf-0.12)+confBoost, 0.35, fastBaseConf-0.02)
-				if cand.Conf <= 0 {
-					cand.Conf = 0.44
-				}
-				cand.Sig = strategies.Signal{
-					Active: true,
-					Name:   cand.Strat,
-					Side:   toFeatureSide(cand.Side),
-					Tags:   []string{"starter_only", "elite_soft_override", starterLane},
-					Reasons: append([]string{},
-						softRejects...,
-					),
-				}
-				cand.Sig = applySignalRiskGeometry(cand, cand.Strat)
-				cand.RejectReason = strings.Join(softRejects, ",")
-				return cand
-			}
-		}
-		cand.Strat = "none"
-		cand.Conf = 0
-		cand.RejectReason = strings.Join(fails, ",")
-		return cand
-	}
-	cand.Strat = "none"
-	cand.Conf = 0
-	cand.RejectReason = "continuation_fast_disabled"
-	return cand
+	cand.SessionLabel = string(sessionPhaseUTC(now.UTC()))
+	return choosePrimaryLiveSignal(cand, now)
 }
 
 func toFeatureSide(side string) features.Side {
@@ -19035,6 +17606,12 @@ func signedUserDataBackoffCheck(now time.Time) error {
 		return fmt.Errorf("signed user-data backoff active until %s", signedUserDataBackoffState.until.UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+func signedUserDataBackoffActive(now time.Time) bool {
+	signedUserDataBackoffState.mu.Lock()
+	defer signedUserDataBackoffState.mu.Unlock()
+	return now.Before(signedUserDataBackoffState.until)
 }
 
 func signedUserDataBackoffObserve(now time.Time, err error) {

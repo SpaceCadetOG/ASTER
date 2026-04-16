@@ -42,6 +42,10 @@ type HybridStopInput struct {
 	TargetPrice    float64
 	Template       StopTemplate
 	EliteCandidate bool
+	EntryReason    string
+	StarterEntry   bool
+	AdvancedReady  bool
+	HitTP1         bool
 }
 
 type HybridStopResult struct {
@@ -90,6 +94,21 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	}
 	if res.Template == "" {
 		res.Template = StopTemplateReclaimPullback
+	}
+	if starterInitialProtectionMode(in) {
+		stopPrice := starterSimpleInitialStop(side, in.Entry, in.SignalStop, cfg.MinWidthPct/100.0, cfg.MaxWidthPct/100.0)
+		if stopPrice <= 0 {
+			res.Rejected = true
+			res.RejectReason = "hybrid_stop_missing_anchor"
+			return res
+		}
+		dist := math.Abs(in.Entry - stopPrice)
+		res.StopPrice = stopPrice
+		res.StopReason = "starter_simple_initial_stop"
+		res.StopDistanceR = dist
+		res.StopDistancePct = (dist / in.Entry) * 100.0
+		res.StarterOnly = true
+		return res
 	}
 	minWidthPct := cfg.MinWidthPct / 100.0
 	maxWidthPct := cfg.MaxWidthPct / 100.0
@@ -177,6 +196,68 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	res.StopDistanceR = dist
 	res.StopDistancePct = distPct * 100.0
 	return res
+}
+
+func IsStarterEntryReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "impulsive_long_starter", "impulsive_short_starter":
+		return true
+	default:
+		return false
+	}
+}
+
+func starterInitialProtectionMode(in HybridStopInput) bool {
+	if !(in.StarterEntry || IsStarterEntryReason(in.EntryReason)) {
+		return false
+	}
+	if in.AdvancedReady || in.HitTP1 {
+		return false
+	}
+	return true
+}
+
+func starterSimpleInitialStop(side string, entry, signalStop, minWidthPct, maxWidthPct float64) float64 {
+	if entry <= 0 {
+		return 0
+	}
+	minWidthPct = maxFloat(minWidthPct, 0.0035)
+	if maxWidthPct <= 0 {
+		maxWidthPct = DefaultHybridStopConfig().MaxWidthPct / 100.0
+	}
+	if maxWidthPct < minWidthPct {
+		maxWidthPct = minWidthPct
+	}
+	stop := 0.0
+	switch strings.ToUpper(strings.TrimSpace(side)) {
+	case "BUY":
+		if signalStop > 0 && signalStop < entry {
+			stop = signalStop
+		} else {
+			stop = entry * (1 - minWidthPct)
+		}
+		distPct := math.Abs(entry-stop) / entry
+		if distPct < minWidthPct {
+			stop = entry * (1 - minWidthPct)
+		}
+		if distPct > maxWidthPct {
+			stop = entry * (1 - maxWidthPct)
+		}
+	case "SELL":
+		if signalStop > 0 && signalStop > entry {
+			stop = signalStop
+		} else {
+			stop = entry * (1 + minWidthPct)
+		}
+		distPct := math.Abs(entry-stop) / entry
+		if distPct < minWidthPct {
+			stop = entry * (1 + minWidthPct)
+		}
+		if distPct > maxWidthPct {
+			stop = entry * (1 + maxWidthPct)
+		}
+	}
+	return stop
 }
 
 func appendRejectReason(cur, reason string) string {

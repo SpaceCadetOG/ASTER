@@ -1,5 +1,30 @@
 # Live-Lite Environment Knobs
 
+## Live Routing Policy
+
+Session labels are retained for logging, analytics, and review only.
+
+They do not:
+- block entries
+- enable entries
+- boost or reduce live confidence
+- select a strategy lane
+- define preferred or non-preferred trading hours
+
+Allowed live entry producers:
+- momentum_ignite_long
+- momentum_ignite_short
+- continuation_fast
+- impulsive_long_starter
+- impulsive_short_starter
+
+Removed from live routing:
+- early_dev_entry
+- heating_starter_entry
+- persistence_entry
+- all guerilla lanes
+- all session-conditioned entry paths
+
 Generated from `/Users/victorogbebor/2026/go-machine/cmd/live-lite/main.go` on 2026-03-14.
 
 Total unique env knobs referenced by `live-lite`: **407**

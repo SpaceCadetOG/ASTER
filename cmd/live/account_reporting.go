@@ -520,6 +520,9 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 			m.accountReport.Health = "degraded"
 			m.accountReport.HealthDetail = err.Error()
 		}
+		m.entryBlockActive = true
+		m.entryBlockReason = "account_health_failed"
+		m.healthyAccountReads = 0
 		m.mu.Unlock()
 		fmt.Printf("ACCOUNT_HEALTH state=%s reason=%q\n", func() string {
 			if m.AccountReportSnapshot().Summary.Timestamp.IsZero() {
@@ -570,10 +573,28 @@ func (m *liveExecManager) refreshAccountReport(now time.Time, persist bool) {
 	}
 	m.mu.Lock()
 	m.accountReport = report
+	m.applyEntryBlockFromHealthLocked(report)
 	m.mu.Unlock()
 	if len(summary.MissingFields) > 0 {
 		fmt.Printf("ACCOUNT_HEALTH state=partial missing=%s\n", strings.Join(summary.MissingFields, ","))
 	}
+}
+
+func (m *liveExecManager) applyEntryBlockFromHealthLocked(report accountReport) {
+	if m == nil {
+		return
+	}
+	if report.Health == "healthy" {
+		m.healthyAccountReads++
+		if m.healthyAccountReads >= 2 {
+			m.entryBlockActive = false
+			m.entryBlockReason = ""
+		}
+		return
+	}
+	m.entryBlockActive = true
+	m.entryBlockReason = firstNonEmpty(report.HealthDetail, "account_health_degraded")
+	m.healthyAccountReads = 0
 }
 
 func formatAccountValue(v float64, missing bool) string {

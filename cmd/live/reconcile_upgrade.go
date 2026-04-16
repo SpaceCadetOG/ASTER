@@ -8,6 +8,24 @@ import (
 	"go-machine/internal/notify"
 )
 
+type accountHealthSummary struct {
+	State                 string
+	SignedUserDataBackoff bool
+}
+
+func entriesBlockedByAccountHealth(summary accountHealthSummary) (string, bool) {
+	if summary.State == "failed" {
+		return "account_health_failed", true
+	}
+	if summary.State == "degraded" || summary.State == "partial" {
+		return "account_health_degraded", true
+	}
+	if summary.SignedUserDataBackoff {
+		return "signed_user_data_backoff", true
+	}
+	return "", false
+}
+
 func fillEpsilon(q float64) float64 {
 	return maxFloat(1e-9, mathAbs(q)*0.0005)
 }

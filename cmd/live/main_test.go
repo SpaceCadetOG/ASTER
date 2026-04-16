@@ -1121,8 +1121,8 @@ func TestActivateManualManagementPromotesExistingPassiveImport(t *testing.T) {
 		tp3Frac:        0.34,
 	}
 	p, err := m.activateManualManagement(req, now, "MANUAL_APPROVED")
-	if err != nil {
-		t.Fatalf("unexpected manual manage error: %v", err)
+	if err == nil {
+		t.Fatalf("expected immediate protection attach failure when no exchange stop can be attached")
 	}
 	if p != passive {
 		t.Fatalf("expected in-place promotion of passive position")
@@ -1180,8 +1180,8 @@ func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing
 		tp2Frac:        0.33,
 		tp3Frac:        0.34,
 	}
-	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err != nil {
-		t.Fatalf("expected passive short import to promote cleanly, got %v", err)
+	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err == nil {
+		t.Fatalf("expected approval to fail when immediate stop attach is not live")
 	}
 }
 
@@ -1655,8 +1655,8 @@ func TestPullbackContinuationGetsConfidenceWithStructure(t *testing.T) {
 		LastClose:   10.4,
 		SessionVWAP: 10.2,
 		EMA9:        10.25,
-		VolumeRatio: 0.82,
-		OFIZ:        -0.05,
+		VolumeRatio: 1.25,
+		OFIZ:        0.45,
 		OFISamples:  10,
 		ReclaimHold: true,
 		Entry: inplay.Entry{
@@ -1768,6 +1768,7 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")
 	t.Setenv("LIVE_STARTER_MIN_VOL_RATIO", "0.80")
 	t.Setenv("LIVE_STARTER_ALLOW_BELOW_VWAP_EMA_SOFT", "1")
+	t.Setenv("LIVE_IMPULSIVE_LONG_MIN_DAYUTC_PCT", "0")
 	c := candidate{
 		Side:          "BUY",
 		CombinedScore: 0.83,
@@ -1783,11 +1784,13 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 			State:        inplay.StateInPlay,
 			CurrentScore: 94,
 			ScoreSlope:   0.14,
+			EntryStyle:   "pullback_long",
+			Momentum:     true,
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "elite_starter" {
-		t.Fatalf("expected elite_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "impulsive_long_starter" {
+		t.Fatalf("expected impulsive_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 	if got.Conf <= 0 {
 		t.Fatalf("expected starter confidence, got %.3f", got.Conf)
@@ -1807,6 +1810,7 @@ func TestApplySimpleContinuationFallbackEliteReclaimStarterAllowsSoftOFIAndVWAP(
 	t.Setenv("LIVE_ELITE_STARTER_MIN_SCORE", "95")
 	t.Setenv("LIVE_ELITE_STARTER_MAX_RANK", "2")
 	t.Setenv("LIVE_ELITE_STARTER_MIN_OFI_Z", "0.10")
+	t.Setenv("LIVE_IMPULSIVE_LONG_MIN_DAYUTC_PCT", "0")
 	c := candidate{
 		Side:          "BUY",
 		CombinedScore: 0.88,
@@ -1826,11 +1830,12 @@ func TestApplySimpleContinuationFallbackEliteReclaimStarterAllowsSoftOFIAndVWAP(
 			Rank:                 1.0,
 			FailedBreakdownCount: 1,
 			EntryStyle:           "pullback_long",
+			Momentum:             true,
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 0, 0, 0, time.UTC))
-	if got.Strat != "reclaim_long_starter" {
-		t.Fatalf("expected reclaim_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_live_entry_path" {
+		t.Fatalf("expected retired reclaim lane to stay disabled, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -2009,9 +2014,10 @@ func TestClassifyStarterLaneEliteLongReclaimPassesDirtyEarlySetup(t *testing.T) 
 	if got := classifyStarterLane(c, c.Side); got != "elite_starter" {
 		t.Fatalf("expected elite_starter, got %q", got)
 	}
+	t.Setenv("LIVE_IMPULSIVE_LONG_MIN_DAYUTC_PCT", "0")
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
-	if got.Strat != "reclaim_long_starter" {
-		t.Fatalf("expected reclaim_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_live_entry_path" {
+		t.Fatalf("expected retired reclaim lane to stay disabled, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -2041,9 +2047,10 @@ func TestClassifyStarterLaneEliteShortFailedBouncePassesDirtySetup(t *testing.T)
 	if got := classifyStarterLane(c, c.Side); got != "elite_starter" {
 		t.Fatalf("expected elite_starter, got %q", got)
 	}
+	t.Setenv("LIVE_IMPULSIVE_SHORT_MIN_DAYUTC_PCT", "0")
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
-	if got.Strat != "failed_bounce_short_starter" {
-		t.Fatalf("expected failed_bounce_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "impulsive_short_starter" {
+		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -2071,42 +2078,6 @@ func TestClassifyStarterLaneRejectsMediocreDirtyContinuation(t *testing.T) {
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
 	if got.Strat != "none" {
 		t.Fatalf("expected no strategy for mediocre dirty setup, got %q", got.Strat)
-	}
-}
-
-func TestPersistenceStrongRejectsExtensionAndExhaustion(t *testing.T) {
-	cfg := entryQualityConfig{PersistenceSoftOverride: true, PersistSoftMinSeen: 2, PersistSoftMinTopN: 1}
-	c := candidate{
-		Side:                   "BUY",
-		Strat:                  "persistence_entry",
-		CombinedScore:          0.82,
-		Conf:                   0.66,
-		VolumeRatio:            1.30,
-		OFIZ:                   0.20,
-		OFISamples:             12,
-		LastClose:              11.0,
-		SessionVWAP:            10.5,
-		EMA9:                   10.6,
-		ExtensionATR:           1.5,
-		PersistenceSeenCount:   3,
-		PersistenceTopNCount:   2,
-		PersistenceVolumeTrend: true,
-		PersistenceMomentum:    true,
-		ClosedBreakHold:        true,
-		Entry: inplay.Entry{
-			CurrentGrade: "A",
-			CurrentScore: 93,
-			ScoreSlope:   0.08,
-			State:        inplay.StateInPlay,
-		},
-	}
-	if persistenceStrong(c, cfg) {
-		t.Fatal("expected persistence to reject extended setup")
-	}
-	c.ExtensionATR = 0.9
-	c.Entry.ExhaustionRisk = 5.5
-	if persistenceStrong(c, cfg) {
-		t.Fatal("expected persistence to reject exhausted setup")
 	}
 }
 
@@ -2404,8 +2375,8 @@ func TestResolveLadderPlanAllowsAddForImpulsiveShortStarter(t *testing.T) {
 		},
 	}
 	plan := resolveLadderPlan(time.Date(2026, 3, 27, 3, 45, 0, 0, time.UTC), c, execMgr, meta)
-	if !plan.IsAdd {
-		t.Fatalf("expected impulsive short add plan, got %+v", plan)
+	if plan.IsAdd || plan.RejectReason != "starter_lane_no_adds" {
+		t.Fatalf("expected starter lane add block, got %+v", plan)
 	}
 }
 
@@ -2443,8 +2414,8 @@ func TestResolveLadderPlanAllowsAddForImpulsiveLongStarter(t *testing.T) {
 		},
 	}
 	plan := resolveLadderPlan(time.Date(2026, 3, 27, 3, 45, 0, 0, time.UTC), c, execMgr, meta)
-	if !plan.IsAdd {
-		t.Fatalf("expected impulsive long add plan, got %+v", plan)
+	if plan.IsAdd || plan.RejectReason != "starter_lane_no_adds" {
+		t.Fatalf("expected starter lane add block, got %+v", plan)
 	}
 }
 
@@ -3032,10 +3003,10 @@ func TestHasLiveProtectiveOrderRequiresRealOrderAndNoPendingProtection(t *testin
 
 func TestManualStopRetryCandidatesEscalateBeyondLegacyImmediateTriggerWidths(t *testing.T) {
 	candidates := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
-	if len(candidates) < 6 {
-		t.Fatalf("expected expanded retry ladder, got %d candidates: %#v", len(candidates), candidates)
+	if len(candidates) != 4 {
+		t.Fatalf("expected bounded 3-step widening ladder (+base), got %d candidates: %#v", len(candidates), candidates)
 	}
-	if candidates[len(candidates)-1] <= 1.02 {
+	if candidates[len(candidates)-1] <= 1.006 {
 		t.Fatalf("expected final retry candidate to widen materially, got %#v", candidates)
 	}
 }
@@ -3459,7 +3430,7 @@ func TestSessionTagUsesMajorMarketLabels(t *testing.T) {
 	}
 }
 
-func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
+func TestApplySimpleContinuationFallbackNoLegacyEarlyDevEntry(t *testing.T) {
 	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
 	t.Setenv("LIVE_STARTER_FINAL_RANK_MIN", "0.72")
 	t.Setenv("LIVE_CONT_FAST_MIN_SCORE", "65")
@@ -3485,8 +3456,8 @@ func TestApplySimpleContinuationFallbackEarlyDevEntry(t *testing.T) {
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 1, 15, 0, 0, time.UTC))
-	if got.Strat != "early_dev_entry" {
-		t.Fatalf("expected early_dev_entry, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat == "early_dev_entry" {
+		t.Fatalf("expected early_dev_entry to be retired, got %q", got.Strat)
 	}
 }
 
@@ -3659,15 +3630,15 @@ func TestResolveLadderPlanRejectsAddWhenFixedSizeNoAddEnabled(t *testing.T) {
 	}
 }
 
-func TestSessionEntryRejectReasonBlocksFreshAsiaContinue(t *testing.T) {
+func TestSessionEntryRejectReasonDoesNotGateFreshEntry(t *testing.T) {
 	c := candidate{
 		Side:  "BUY",
 		Strat: "continuation_fast",
 		Entry: inplay.Entry{CurrentGrade: "A"},
 	}
 	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 5, 30, 0, 0, time.UTC), c, ladderPlan{})
-	if reason != "asia_continue_no_fresh_entry" {
-		t.Fatalf("expected asia continue fresh entry block, got %q", reason)
+	if reason != "" {
+		t.Fatalf("expected no session-gating reject, got %q", reason)
 	}
 }
 
@@ -3691,7 +3662,7 @@ func TestSessionEntryRejectReasonAllowsOffHoursAGradeEntry(t *testing.T) {
 	}
 }
 
-func TestSessionEntryRejectReasonBlocksOffHoursWeakEntry(t *testing.T) {
+func TestSessionEntryRejectReasonDoesNotGateOffHoursWeakEntry(t *testing.T) {
 	c := candidate{
 		Side:          "BUY",
 		Strat:         "continuation_fast",
@@ -3706,8 +3677,8 @@ func TestSessionEntryRejectReasonBlocksOffHoursWeakEntry(t *testing.T) {
 		},
 	}
 	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 21, 30, 0, 0, time.UTC), c, ladderPlan{})
-	if reason != "utc_offhours_requires_a_grade" {
-		t.Fatalf("expected off-hours weak entry block, got %q", reason)
+	if reason != "" {
+		t.Fatalf("expected no off-hours gating reject, got %q", reason)
 	}
 }
 
@@ -4005,128 +3976,6 @@ func TestPerpTopupTargetUsesFloorGuard(t *testing.T) {
 	}
 	if got := perpTopupTarget(151, cfg); got != 0 {
 		t.Fatalf("expected no topup above floor, got %.2f", got)
-	}
-}
-
-func TestPersistenceSoftBlockMatchesExpectedReasons(t *testing.T) {
-	if !persistenceSoftBlock("wall_not_persistent") {
-		t.Fatalf("expected wall_not_persistent to be soft")
-	}
-	if !persistenceSoftBlock("meta_quality:0.45<0.52") {
-		t.Fatalf("expected meta_quality to be soft")
-	}
-	if persistenceSoftBlock("continuation_no_structure_confirm") {
-		t.Fatalf("expected continuation_no_structure_confirm to stay hard under stricter persistence routing")
-	}
-	if persistenceSoftBlock("min_available_usdt") {
-		t.Fatalf("expected min_available_usdt to remain hard")
-	}
-}
-
-func TestPersistenceStrongRequiresEvidence(t *testing.T) {
-	cfg := entryQualityConfig{
-		PersistenceSoftOverride: true,
-		PersistSoftMinSeen:      3,
-		PersistSoftMinTopN:      2,
-	}
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
-	c := candidate{
-		Strat:                  "persistence_entry",
-		Side:                   "BUY",
-		CombinedScore:          0.82,
-		Conf:                   0.65,
-		PersistenceSeenCount:   3,
-		PersistenceTopNCount:   2,
-		PersistenceVolumeTrend: true,
-		PersistenceMomentum:    true,
-		LastClose:              1.02,
-		SessionVWAP:            1.01,
-		EMA9:                   1.01,
-		ReclaimHold:            true,
-		Entry: inplay.Entry{
-			State:        inplay.StateHeating,
-			CurrentScore: 92,
-		},
-	}
-	if !persistenceStrong(c, cfg) {
-		t.Fatalf("expected strong persistence candidate to qualify")
-	}
-	c.PersistenceTopNCount = 1
-	if persistenceStrong(c, cfg) {
-		t.Fatalf("expected insufficient topN evidence to fail")
-	}
-}
-
-func TestPersistenceSoftBlocksOnly(t *testing.T) {
-	if !persistenceSoftBlocksOnly([]string{"wall_not_persistent", "meta_quality:0.50<0.58"}) {
-		t.Fatalf("expected supported soft blockers to pass")
-	}
-	if persistenceSoftBlocksOnly([]string{"below_vwap_ema", "min_available_usdt"}) {
-		t.Fatalf("expected mixed soft/hard blockers to fail")
-	}
-}
-
-func TestPersistenceStrongRejectsVWAPConflict(t *testing.T) {
-	cfg := entryQualityConfig{
-		PersistenceSoftOverride: true,
-		PersistSoftMinSeen:      3,
-		PersistSoftMinTopN:      2,
-	}
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
-	c := candidate{
-		Strat:                  "persistence_entry",
-		CombinedScore:          0.84,
-		Conf:                   0.66,
-		PersistenceSeenCount:   3,
-		PersistenceTopNCount:   2,
-		PersistenceVolumeTrend: true,
-		PersistenceMomentum:    true,
-		LastClose:              0.99,
-		SessionVWAP:            1.01,
-		EMA9:                   1.01,
-		Entry: inplay.Entry{
-			State:        inplay.StateHeating,
-			CurrentScore: 93,
-		},
-	}
-	if persistenceStrong(c, cfg) {
-		t.Fatalf("expected vwap/ema conflict to block persistence entry")
-	}
-}
-
-func TestPersistenceStrongRejectsStrongOFIConflict(t *testing.T) {
-	cfg := entryQualityConfig{
-		PersistenceSoftOverride: true,
-		PersistSoftMinSeen:      3,
-		PersistSoftMinTopN:      2,
-	}
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_SCORE", "90")
-	t.Setenv("LIVE_PERSISTENCE_STRONG_MIN_CONF", "0.62")
-	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
-	t.Setenv("LIVE_PERSISTENCE_OFI_TOLERANCE_Z", "0.10")
-	c := candidate{
-		Strat:                  "persistence_entry",
-		Side:                   "BUY",
-		CombinedScore:          0.84,
-		Conf:                   0.66,
-		PersistenceSeenCount:   3,
-		PersistenceTopNCount:   2,
-		PersistenceVolumeTrend: true,
-		PersistenceMomentum:    true,
-		LastClose:              1.02,
-		SessionVWAP:            1.01,
-		EMA9:                   1.01,
-		OFISamples:             10,
-		OFIZ:                   -0.35,
-		Entry: inplay.Entry{
-			State:        inplay.StateHeating,
-			CurrentScore: 93,
-		},
-	}
-	if persistenceStrong(c, cfg) {
-		t.Fatalf("expected strong OFI disagreement to block persistence entry")
 	}
 }
 

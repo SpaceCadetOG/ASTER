@@ -491,7 +491,7 @@ func TestDeepQueuePreflightRejectsWallSpoofRisk(t *testing.T) {
 	}
 }
 
-func TestDeepQueuePreflightAllowsPersistenceEntryPastWallPersistence(t *testing.T) {
+func TestDeepQueuePreflightRejectsRetiredPersistenceEntry(t *testing.T) {
 	t.Setenv("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", "1")
 	t.Setenv("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", "3")
 	t.Setenv("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", "2")
@@ -514,7 +514,7 @@ func TestDeepQueuePreflightAllowsPersistenceEntryPastWallPersistence(t *testing.
 		MetaBySymbol: map[string]symbolMeta{"BTCUSDT": {LastPrice: 100}},
 		PureMode:     true,
 	})
-	if res.RejectReason != "" {
-		t.Fatalf("expected no reject for persistence_entry wall soft override, got %s", res.RejectReason)
+	if res.RejectReason == "" {
+		t.Fatalf("expected retired persistence entry lane to be rejected")
 	}
 }

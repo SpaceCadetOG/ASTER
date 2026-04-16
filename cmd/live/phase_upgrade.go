@@ -12,7 +12,6 @@ import (
 	"go-machine/internal/inplay"
 	"go-machine/internal/risk"
 	"go-machine/internal/stats"
-	"go-machine/internal/strategies"
 )
 
 type triggerState string
@@ -532,7 +531,7 @@ func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) 
 	st.VolumeTrendUp = volumeIncreasing(st.LastVolumeUSD, st.LastVolumeRatio, c, cfg.AllowStableVolume)
 	st.MomentumStableOrUp = momentumStableOrImproving(st.LastSlope, st.LastScore, c, cfg.AllowStableMomentum)
 	st.DirectionStable = directionPersistent(st.Side, c)
-	st.HadStarterSignal = st.HadStarterSignal || isStarterOnlyStrategyName(c.Strat) || strings.EqualFold(c.Strat, "early_dev_entry")
+	st.HadStarterSignal = st.HadStarterSignal || isStarterOnlyStrategyName(c.Strat)
 	st.HadEntrySignal = st.HadEntrySignal || (!strings.EqualFold(strings.TrimSpace(c.Strat), "") && !strings.EqualFold(c.Strat, "none"))
 	if strings.TrimSpace(c.RejectReason) != "" {
 		st.LastRejectReason = c.RejectReason
@@ -615,86 +614,9 @@ func (t *missedTracker) persistenceState(now time.Time, c candidate) (*Opportuni
 }
 
 func (t *missedTracker) PromoteCandidate(now time.Time, c candidate, execMgr *liveExecManager, log *stats.EventLogger) candidate {
-	c = t.applyPriorDayLeaderAmplifier(now, c)
-	st, ready, reasons := t.persistenceState(now, c)
-	if !ready || st == nil {
-		if st != nil && len(reasons) > 0 && strings.EqualFold(strings.TrimSpace(c.RejectReason), "") {
-			st.ReadyReason = strings.Join(reasons, ",")
-		}
-		return c
-	}
-	if execMgr != nil {
-		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
-		if execMgr.ActiveCount() > 0 && !execMgr.isActive(execMgr.positions[raw]) {
-			return c
-		}
-		if p, ok := execMgr.trackedPosition(raw); ok && p != nil && execMgr.isActive(p) {
-			return c
-		}
-	}
-	baseConf := clamp(0.46+float64(st.SeenCount)*0.02+float64(st.TopNCount)*0.03+maxFloat(0, c.CombinedScore-0.70)*0.15, 0.42, 0.68)
-	c.Conf = maxFloat(c.Conf, baseConf)
-	c.PersistenceSeenCount = st.SeenCount
-	c.PersistenceTopNCount = st.TopNCount
-	c.PersistenceBestRank = st.BestRank
-	c.PersistenceVolumeTrend = st.VolumeTrendUp
-	c.PersistenceMomentum = st.MomentumStableOrUp
-	if !persistenceEntryEligible(c) {
-		return c
-	}
-	reasonsText := []string{
-		fmt.Sprintf("seen=%d", st.SeenCount),
-		fmt.Sprintf("topn=%d", st.TopNCount),
-		fmt.Sprintf("best_rank=%.2f", st.BestRank),
-		fmt.Sprintf("volume_trend=%v", st.VolumeTrendUp),
-		fmt.Sprintf("momentum_trend=%v", st.MomentumStableOrUp),
-	}
-	if strings.TrimSpace(st.LastRejectReason) != "" {
-		reasonsText = append(reasonsText, "prior_reject="+st.LastRejectReason)
-	}
-	c.Strat = "persistence_entry"
-	c.Conf = maxFloat(baseConf, envFloat("LIVE_PERSISTENCE_STRONG_MIN_CONF", 0.62))
-	c.Sig = strategies.Signal{
-		Active:     true,
-		Name:       "persistence_entry",
-		Side:       toFeatureSide(c.Side),
-		Confidence: c.Conf,
-		Tags:       []string{"starter_only", "missed_opportunity_ready", "persistence_watch"},
-		Reasons:    reasonsText,
-	}
-	c.Sig = applySignalRiskGeometry(c, "persistence_entry")
-	c.RejectReason = ""
-	c.QualityReasons = append(c.QualityReasons, "missed_opportunity_ready")
-	c.PersistenceSeenCount = st.SeenCount
-	c.PersistenceTopNCount = st.TopNCount
-	c.PersistenceBestRank = st.BestRank
-	c.PersistenceVolumeTrend = st.VolumeTrendUp
-	c.PersistenceMomentum = st.MomentumStableOrUp
-	c.PersistenceReason = st.ReadyReason
-	st.HadStarterSignal = true
-	st.HadEntrySignal = true
-	st.ReadyAt = now
-	st.ReadyReason = strings.Join(reasonsText, ",")
-	if st.LastReadyLogAt.IsZero() || now.Sub(st.LastReadyLogAt) > 2*time.Minute {
-		fmt.Printf("MISSED_OPP_READY symbol=%s side=%s why_now=%s why_prev_no_longer_blocks=%s\n",
-			st.Symbol, st.Side, strings.Join(reasonsText, ";"), firstNonEmpty(st.LastRejectReason, "scanner_persistence"))
-		if log != nil {
-			log.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "MISSED_OPP_READY",
-				Symbol:    st.Symbol,
-				Side:      st.Side,
-				Strategy:  c.Strat,
-				Score:     c.Entry.CurrentScore,
-				Slope:     c.Entry.ScoreSlope,
-				Combined:  c.CombinedScore,
-				Reason:    st.ReadyReason,
-			})
-		}
-		st.LastReadyLogAt = now
-		fmt.Printf("PERSISTENCE_ENTRY symbol=%s side=%s starter=%.2f evidence=%s\n",
-			st.Symbol, st.Side, envFloat("LIVE_ENTRY_STARTER_USDT", 10), st.ReadyReason)
-	}
+	_ = now
+	_ = execMgr
+	_ = log
 	return c
 }
 
@@ -1125,12 +1047,6 @@ func relativePct(px, anchor float64) float64 {
 }
 
 func chooseExitProfile(c candidate) string {
-	if strings.EqualFold(c.Strat, "guerilla_long_runner") {
-		return "IMPULSE"
-	}
-	if strings.EqualFold(c.Strat, "guerilla_short_runner") {
-		return "IMPULSE"
-	}
 	switch c.SetupFamily {
 	case "reset_impulse_breakout":
 		return "IMPULSE"
@@ -1569,11 +1485,6 @@ type queueDeepPreflightResult struct {
 func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflightResult {
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	meta := ctx.MetaBySymbol[raw]
-	persistCfg := entryQualityConfig{
-		PersistenceSoftOverride: envBool("LIVE_PERSISTENCE_SOFT_OVERRIDE_ENABLE", true),
-		PersistSoftMinSeen:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_SEEN", 3),
-		PersistSoftMinTopN:      envInt("LIVE_PERSISTENCE_OVERRIDE_MIN_TOPN", 2),
-	}
 	if raw == "" {
 		return queueDeepPreflightResult{RejectReason: "empty_symbol"}
 	}
@@ -1591,12 +1502,7 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 		return queueDeepPreflightResult{RejectReason: "wall_consumption_not_confirmed"}
 	}
 	if c.WallConfidence > 0 && c.WallPersistence < time.Duration(envInt("LIVE_WALL_MIN_PERSIST_MS", 3000))*time.Millisecond {
-		if strings.EqualFold(c.Strat, "persistence_entry") || (persistenceStrong(c, persistCfg) && persistenceSoftBlock("wall_not_persistent")) {
-			fmt.Printf("PERSISTENCE_OVERRIDE symbol=%s side=%s old_reject=%s why=%s starter=%.2f\n",
-				raw, c.Side, "wall_not_persistent", firstNonEmpty(c.PersistenceReason, "strong_persistence"), envFloat("LIVE_ENTRY_STARTER_USDT", 10))
-		} else {
-			return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
-		}
+		return queueDeepPreflightResult{RejectReason: "wall_not_persistent"}
 	}
 	if ctx.OBFilterEnable {
 		ob := ctx.EntryDepth[raw]

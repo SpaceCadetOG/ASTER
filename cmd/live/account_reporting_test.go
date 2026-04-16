@@ -69,3 +69,34 @@ func TestAppendAndLoadAccountSnapshots(t *testing.T) {
 		t.Fatalf("unexpected snapshot records: %+v", records)
 	}
 }
+
+func TestApplyEntryBlockFromHealthLockedUsesHysteresis(t *testing.T) {
+	m := &liveExecManager{}
+
+	m.applyEntryBlockFromHealthLocked(accountReport{Health: "degraded", HealthDetail: "stale_account"})
+	if !m.entryBlockActive {
+		t.Fatalf("expected degraded health to block entries immediately")
+	}
+	if m.entryBlockReason == "" {
+		t.Fatalf("expected degraded block reason to be set")
+	}
+	if m.healthyAccountReads != 0 {
+		t.Fatalf("expected healthy reads reset on unhealthy report")
+	}
+
+	m.applyEntryBlockFromHealthLocked(accountReport{Health: "healthy"})
+	if !m.entryBlockActive {
+		t.Fatalf("expected one healthy read to keep block active")
+	}
+	if m.healthyAccountReads != 1 {
+		t.Fatalf("expected first healthy read to increment hysteresis counter, got %d", m.healthyAccountReads)
+	}
+
+	m.applyEntryBlockFromHealthLocked(accountReport{Health: "healthy"})
+	if m.entryBlockActive {
+		t.Fatalf("expected second consecutive healthy read to clear entry block")
+	}
+	if m.entryBlockReason != "" {
+		t.Fatalf("expected clear reason after hysteresis unlock, got %q", m.entryBlockReason)
+	}
+}

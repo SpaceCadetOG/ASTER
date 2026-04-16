@@ -73,7 +73,7 @@ func TestManualAssistResponseIncludesStarterAndBlockers(t *testing.T) {
 	msg := manualAssistResponse("SIRENUSDT", "LONG", operatorDecision{
 		Symbol:             "SIRENUSDT",
 		Side:               "LONG",
-		Strategy:           "heating_starter_entry",
+		Strategy:           "impulsive_long_starter",
 		RejectReason:       "vol_ratio:0.90<1.20,continuation_no_structure_confirm",
 		BlockerClass:       string(rejectClassSoftConfirm),
 		TopBlockers:        []string{"vol_ratio:0.90<1.20", "continuation_no_structure_confirm"},
