@@ -1663,12 +1663,13 @@ func TestPullbackContinuationGetsConfidenceWithStructure(t *testing.T) {
 			EntryStyle:   "pullback_long",
 			State:        inplay.StateHeating,
 			CurrentScore: 92,
-			ScoreSlope:   0.14,
+			ScoreSlope:   0.24,
+			Rank:         2.0,
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "continuation_fast" {
-		t.Fatalf("expected continuation_fast, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "entry_now_long" {
+		t.Fatalf("expected entry_now_long, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 	if got.Conf <= 0 {
 		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
@@ -1783,14 +1784,14 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 			CurrentGrade: "A",
 			State:        inplay.StateInPlay,
 			CurrentScore: 94,
-			ScoreSlope:   0.14,
+			ScoreSlope:   0.24,
 			EntryStyle:   "pullback_long",
 			Momentum:     true,
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "impulsive_long_starter" {
-		t.Fatalf("expected impulsive_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "entry_now_long" {
+		t.Fatalf("expected entry_now_long, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 	if got.Conf <= 0 {
 		t.Fatalf("expected starter confidence, got %.3f", got.Conf)
@@ -1834,8 +1835,8 @@ func TestApplySimpleContinuationFallbackEliteReclaimStarterAllowsSoftOFIAndVWAP(
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 0, 0, 0, time.UTC))
-	if got.RejectReason != "no_live_entry_path" {
-		t.Fatalf("expected retired reclaim lane to stay disabled, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -1873,11 +1874,8 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterWhenImpulseStro
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 27, 3, 37, 0, 0, time.UTC))
-	if got.Strat != "impulsive_short_starter" {
-		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
-	}
-	if got.Conf <= 0 {
-		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -1914,8 +1912,8 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveShortStarterOnFailedBounce(
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 9, 10, 0, 0, time.UTC))
-	if got.Strat != "impulsive_short_starter" {
-		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -1953,11 +1951,8 @@ func TestApplySimpleContinuationFallbackUsesImpulsiveLongStarterWhenImpulseStron
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 27, 3, 37, 0, 0, time.UTC))
-	if got.Strat != "impulsive_long_starter" {
-		t.Fatalf("expected impulsive_long_starter, got %q reject=%q", got.Strat, got.RejectReason)
-	}
-	if got.Conf <= 0 {
-		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -2016,8 +2011,8 @@ func TestClassifyStarterLaneEliteLongReclaimPassesDirtyEarlySetup(t *testing.T) 
 	}
 	t.Setenv("LIVE_IMPULSIVE_LONG_MIN_DAYUTC_PCT", "0")
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
-	if got.RejectReason != "no_live_entry_path" {
-		t.Fatalf("expected retired reclaim lane to stay disabled, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -2049,8 +2044,8 @@ func TestClassifyStarterLaneEliteShortFailedBouncePassesDirtySetup(t *testing.T)
 	}
 	t.Setenv("LIVE_IMPULSIVE_SHORT_MIN_DAYUTC_PCT", "0")
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC))
-	if got.Strat != "impulsive_short_starter" {
-		t.Fatalf("expected impulsive_short_starter, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry, got %q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 

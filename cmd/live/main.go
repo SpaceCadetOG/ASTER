@@ -1754,6 +1754,11 @@ func main() {
 		execMgr.eventLog = eventLog
 	}
 	externalFlowFeed := flowfeed.NewFileFeed(flowFeedPath, flowFeedTTL)
+	terminalPrintEvery := time.Duration(envInt("LIVE_TERMINAL_PRINT_SEC", 20)) * time.Second
+	if terminalPrintEvery <= 0 {
+		terminalPrintEvery = 20 * time.Second
+	}
+	nextTerminalPrintAt := time.Now().UTC()
 	runtimeLoop := newLiveRuntimeLoop()
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
@@ -1867,6 +1872,12 @@ func main() {
 			SignedUserDataBackoff: signedUserDataBackoffActive(now),
 		}
 	})
+	setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+		if snap, ok := runtimeLoop.latestHealth(); ok {
+			return snap.Summary
+		}
+		return accountHealthSummary{State: "healthy"}
+	})
 	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 350)) * time.Millisecond
 	if decisionEvery < 250*time.Millisecond {
 		decisionEvery = 250 * time.Millisecond
@@ -1879,6 +1890,10 @@ func main() {
 	for range decisionTicker.C {
 		cycleStart := time.Now().UTC()
 		now := cycleStart
+		emitTerminal := !now.Before(nextTerminalPrintAt)
+		if emitTerminal {
+			nextTerminalPrintAt = now.Add(terminalPrintEvery)
+		}
 		resetKey := dayUTCResetKey(now)
 		if resetKey != lastDayUTCResetKey {
 			if lastDayUTCResetKey != "" {
@@ -2081,8 +2096,10 @@ func main() {
 			execMgr.ApplyMomentumExit(now, momBySymbol, flowMetricsBySymbol, externalFlow)
 		}
 		if !inMaint {
-			printScanHeader(localMaintNow)
-			printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
+			if emitTerminal {
+				printScanHeader(localMaintNow)
+				printUnifiedInPlay(longInPlay, shortInPlay, metaBySymbol)
+			}
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
 				Type:      "METRICS_SNAPSHOT",
@@ -2248,9 +2265,11 @@ func main() {
 			payoutMgr.maybeRun(now, localMaintNow, maintEOD, &maintState, paper, metaBySymbol, acct, execMgr, tg)
 		}
 		if paper.enabled && !inMaint {
-			fmt.Println(paper.ConsoleSummary(metaBySymbol))
-			for _, line := range paper.ConsolePositions(metaBySymbol) {
-				fmt.Println(line)
+			if emitTerminal {
+				fmt.Println(paper.ConsoleSummary(metaBySymbol))
+				for _, line := range paper.ConsolePositions(metaBySymbol) {
+					fmt.Println(line)
+				}
 			}
 			_ = paper.LogEquity(now, metaBySymbol)
 		}
@@ -2585,7 +2604,7 @@ func main() {
 					}
 				}
 			}
-			if verboseRejectLogging() {
+			if emitTerminal && verboseRejectLogging() {
 				if topReject != "" {
 					fmt.Printf("signal: none (%s)\n", topReject)
 				} else {
@@ -2598,7 +2617,7 @@ func main() {
 		if acceptanceCfg.MaxNewPositionsWindow > 0 && len(recentEntryAttempts) >= acceptanceCfg.MaxNewPositionsWindow {
 			st.TopRejectReason = "entry_window_limit"
 			statusStore.Set(st)
-			if verboseRejectLogging() {
+			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
 			waitAndReport()
@@ -2627,7 +2646,7 @@ func main() {
 		if len(queueCandidates) == 0 {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
 			statusStore.Set(st)
-			if verboseRejectLogging() {
+			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
 			waitAndReport()
@@ -2742,7 +2761,7 @@ func main() {
 		if !selected {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
 			statusStore.Set(st)
-			if verboseRejectLogging() {
+			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
 			waitAndReport()
@@ -2800,56 +2819,58 @@ func main() {
 			addEligibilityBlock(&eligibility, "starter_lane_needs_persistence_or_reset")
 		}
 		bestMeta := metaBySymbol[rawBest]
-		fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
-			best.Entry.Symbol,
-			best.Side,
-			best.Entry.CurrentGrade,
-			best.Entry.CurrentScore,
-			best.Entry.ScoreSlope,
-			best.Entry.Rank,
-			best.FinalRank,
-			best.Strat,
-			best.Conf,
-			best.TriggerState,
-			best.ExitProfile,
-			best.DiscoveryScore,
-			best.TriggerScore,
-			best.ExecutionScore,
-			best.CombinedScore,
-			bestMeta.DayUTC24h,
-			fmtPrice(bestMeta.OpenPrice),
-			fmtPrice(bestMeta.LastPrice),
-			marketHumanUSD(bestMeta.VolumeUSD),
-			best.OFIRaw,
-			best.OFIZ,
-			best.SpreadBps,
-			best.ATRPct*100.0,
-			best.WallMode,
-			best.WallStatus,
-			best.WallConfidence,
-			best.WallBiasScore,
-			best.WallSpoofRisk,
-			best.WallDistanceBps,
-			best.WallSizeRatio,
-			best.Entry.LongDemotionFlag,
-			best.Entry.ShortDemotionFlag,
-			best.Entry.ReversalWatchFlag,
-			best.Entry.IntradayReversalScore,
-			best.Entry.BullReversalScore,
-			best.Entry.DrawdownFromPeakPct,
-			best.Entry.DrawupFromTroughPct,
-			best.Entry.FailedReclaimCount,
-			best.Entry.FailedBounceCount,
-			best.Entry.FailedBreakdownCount,
-			best.Entry.FailedBreakLowCount,
-			best.Entry.EntryStyle,
-			best.Entry.MetaState,
-			best.StructureReason,
-			best.ClosedBreakHold,
-			best.ReclaimHold,
-			best.RetestHold,
-			best.ExtensionATR,
-		)
+		if emitTerminal {
+			fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
+				best.Entry.Symbol,
+				best.Side,
+				best.Entry.CurrentGrade,
+				best.Entry.CurrentScore,
+				best.Entry.ScoreSlope,
+				best.Entry.Rank,
+				best.FinalRank,
+				best.Strat,
+				best.Conf,
+				best.TriggerState,
+				best.ExitProfile,
+				best.DiscoveryScore,
+				best.TriggerScore,
+				best.ExecutionScore,
+				best.CombinedScore,
+				bestMeta.DayUTC24h,
+				fmtPrice(bestMeta.OpenPrice),
+				fmtPrice(bestMeta.LastPrice),
+				marketHumanUSD(bestMeta.VolumeUSD),
+				best.OFIRaw,
+				best.OFIZ,
+				best.SpreadBps,
+				best.ATRPct*100.0,
+				best.WallMode,
+				best.WallStatus,
+				best.WallConfidence,
+				best.WallBiasScore,
+				best.WallSpoofRisk,
+				best.WallDistanceBps,
+				best.WallSizeRatio,
+				best.Entry.LongDemotionFlag,
+				best.Entry.ShortDemotionFlag,
+				best.Entry.ReversalWatchFlag,
+				best.Entry.IntradayReversalScore,
+				best.Entry.BullReversalScore,
+				best.Entry.DrawdownFromPeakPct,
+				best.Entry.DrawupFromTroughPct,
+				best.Entry.FailedReclaimCount,
+				best.Entry.FailedBounceCount,
+				best.Entry.FailedBreakdownCount,
+				best.Entry.FailedBreakLowCount,
+				best.Entry.EntryStyle,
+				best.Entry.MetaState,
+				best.StructureReason,
+				best.ClosedBreakHold,
+				best.ReclaimHold,
+				best.RetestHold,
+				best.ExtensionATR,
+			)
+		}
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
 			tg.Sendf("%s", notify.BuildEventHTML("🎯", "TOP CANDIDATE",
@@ -9090,6 +9111,10 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			entryReason = "impulsive_short_starter"
 		} else if strings.EqualFold(c.Strat, "impulsive_long_starter") {
 			entryReason = "impulsive_long_starter"
+		} else if strings.EqualFold(c.Strat, "entry_now_short") {
+			entryReason = "entry_now_short"
+		} else if strings.EqualFold(c.Strat, "entry_now_long") {
+			entryReason = "entry_now_long"
 		} else if strings.EqualFold(c.Strat, "reclaim_long_starter") {
 			entryReason = "reclaim_long_starter"
 		} else if strings.EqualFold(c.Strat, "failed_bounce_short_starter") {
@@ -13564,7 +13589,7 @@ func strategyFamily(c candidate) string {
 
 func isStarterOnlyStrategyName(strat string) bool {
 	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
+	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "entry_now_long", "entry_now_short":
 		return true
 	default:
 		return false
@@ -15518,7 +15543,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "entry_now_long", "entry_now_short", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback

@@ -8,131 +8,127 @@ import (
 	"go-machine/internal/inplay"
 )
 
-func baseIgniteCandidate() candidate {
+func baseSimpleLongCandidate() candidate {
 	return candidate{
 		Side:        "BUY",
+		SpreadBps:   4,
+		FinalRank:   92,
 		LastClose:   101.0,
-		SessionVWAP: 100.0,
-		EMA9:        100.2,
-		VolumeRatio: 1.5,
-		OFIZ:        0.8,
-		OFISamples:  12,
-		Entry: inplay.Entry{
-			Symbol:         "BTCUSDT",
-			EntryStyle:     "momentum_ignite_long",
-			State:          inplay.StateHeating,
-			TimeInStateMin: 3,
-			Momentum:       true,
-			CurrentScore:   92,
-			ScoreSlope:     0.20,
-		},
-	}
-}
-
-func TestChoosePrimaryLiveSignalOrderHardBlockFirst(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "1")
-	c := baseIgniteCandidate()
-	c.ExtensionATR = 3.0
-	got := choosePrimaryLiveSignal(c, time.Now().UTC())
-	if got.RejectReason != "extended" {
-		t.Fatalf("expected hard block to win first, got strat=%q reject=%q", got.Strat, got.RejectReason)
-	}
-}
-
-func TestChoosePrimaryLiveSignalOrderIgniteBeforeOthers(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "1")
-	t.Setenv("LIVE_IGNITE_MIN_SCORE", "60")
-	t.Setenv("LIVE_IGNITE_MIN_SLOPE", "0.05")
-	t.Setenv("LIVE_IGNITE_MIN_VOL_RATIO", "1.00")
-	t.Setenv("LIVE_IGNITE_MIN_OFI_Z", "0.10")
-	got := choosePrimaryLiveSignal(baseIgniteCandidate(), time.Now().UTC())
-	if got.Strat != "momentum_ignite_long" {
-		t.Fatalf("expected ignite to win routing order, got strat=%q reject=%q", got.Strat, got.RejectReason)
-	}
-}
-
-func TestChoosePrimaryLiveSignalOrderContinuationBeforeStarter(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "0")
-	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
-	c := candidate{
-		Side:        "BUY",
-		LastClose:   101.0,
-		SessionVWAP: 100.0,
-		EMA9:        100.1,
-		VolumeRatio: 1.4,
-		OFIZ:        0.8,
-		OFISamples:  12,
-		ReclaimHold: true,
+		VolumeRatio: 0.60, // intentionally low: no longer a hard routing blocker
 		Entry: inplay.Entry{
 			Symbol:       "BTCUSDT",
 			State:        inplay.StateInPlay,
-			CurrentScore: 88,
-			ScoreSlope:   0.12,
+			CurrentScore: 92,
+			ScoreSlope:   0.26,
+			Rank:         2.0,
 		},
 	}
+}
+
+func withHealthyAccountProvider(t *testing.T) {
+	t.Helper()
+	setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+		return accountHealthSummary{State: "healthy"}
+	})
+	t.Cleanup(func() {
+		setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+			return accountHealthSummary{State: "healthy"}
+		})
+	})
+}
+
+func TestDecideSimpleEntryNowStrongLongPasses(t *testing.T) {
+	dec := decideSimpleEntryNow(baseSimpleLongCandidate(), accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected allowed long entry_now, got %+v", dec)
+	}
+}
+
+func TestChoosePrimaryLiveSignalHardBlockWinsFirst(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.ExtensionATR = 3.0
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
-	if got.Strat != "continuation_fast" {
-		t.Fatalf("expected continuation_fast when ignite is disabled, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "extended" {
+		t.Fatalf("expected hard block first, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
-func TestChoosePrimaryLiveSignalStarterPassesSoftRejects(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "0")
-	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "1")
-	t.Setenv("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", "1")
-	t.Setenv("LIVE_CONT_FAST_MIN_VOL_RATIO", "2.00") // force continuation fast reject by vol_ratio soft fail
-	c := candidate{
-		Side:        "BUY",
-		LastClose:   100.5,
-		SessionVWAP: 100.0,
-		EMA9:        100.1,
-		DayUTC24h:   24,
-		VolumeUSD:   10_000_000,
-		VolumeRatio: 0.75,
-		OFIZ:        0.05,
-		OFISamples:  12,
-		Entry: inplay.Entry{
-			Symbol:         "ETHUSDT",
-			State:          inplay.StateInPlay,
-			TimeInStateMin: 8,
-			CurrentScore:   105,
-			ScoreSlope:     0.20,
-			Rank:           1.8,
-			EntryStyle:     "pullback_long",
-			Momentum:       true,
-		},
-	}
+func TestChoosePrimaryLiveSignalHeatingStateCanEnter(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.Entry.State = inplay.StateHeating
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
-	if got.Strat != "impulsive_long_starter" {
-		t.Fatalf("expected starter path to pass soft rejects, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "entry_now_long" {
+		t.Fatalf("expected entry_now_long for heating leader, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
-func TestChoosePrimaryLiveSignalNoPath(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "0")
-	t.Setenv("LIVE_ENABLE_CONTINUATION_FAST", "0")
-	t.Setenv("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", "0")
-	t.Setenv("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", "0")
-	got := choosePrimaryLiveSignal(candidate{Side: "BUY", Entry: inplay.Entry{Symbol: "BTCUSDT"}}, time.Now().UTC())
-	if got.RejectReason != "no_live_entry_path" {
-		t.Fatalf("expected no_live_entry_path, got strat=%q reject=%q", got.Strat, got.RejectReason)
+func TestChoosePrimaryLiveSignalWeakSlopeFails(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.Entry.ScoreSlope = 0.05
+	got := choosePrimaryLiveSignal(c, time.Now().UTC())
+	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry for weak slope, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
-func TestSessionLabelMetadataOnlyDoesNotChangeRouting(t *testing.T) {
-	t.Setenv("LIVE_ENABLE_MOMENTUM_IGNITE", "1")
-	t.Setenv("LIVE_IGNITE_MIN_SCORE", "60")
-	t.Setenv("LIVE_IGNITE_MIN_SLOPE", "0.05")
-	t.Setenv("LIVE_IGNITE_MIN_VOL_RATIO", "1.00")
-	t.Setenv("LIVE_IGNITE_MIN_OFI_Z", "0.10")
-	a := baseIgniteCandidate()
+func TestChoosePrimaryLiveSignalLowScoreFails(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.Entry.CurrentScore = 70
+	got := choosePrimaryLiveSignal(c, time.Now().UTC())
+	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry for low score, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestChoosePrimaryLiveSignalExtendedFails(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.ExtensionATR = 2.5
+	got := choosePrimaryLiveSignal(c, time.Now().UTC())
+	if got.RejectReason != "extended" {
+		t.Fatalf("expected extended hard block, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestChoosePrimaryLiveSignalExhaustedFails(t *testing.T) {
+	withHealthyAccountProvider(t)
+	c := baseSimpleLongCandidate()
+	c.Entry.ExhaustionRisk = 6.5
+	got := choosePrimaryLiveSignal(c, time.Now().UTC())
+	if got.RejectReason != "exhausted" {
+		t.Fatalf("expected exhausted hard block, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestChoosePrimaryLiveSignalDegradedAccountHealthFails(t *testing.T) {
+	setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+		return accountHealthSummary{State: "degraded"}
+	})
+	t.Cleanup(func() {
+		setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+			return accountHealthSummary{State: "healthy"}
+		})
+	})
+	got := choosePrimaryLiveSignal(baseSimpleLongCandidate(), time.Now().UTC())
+	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
+		t.Fatalf("expected no_simple_entry when account health blocks entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestSessionLabelMetadataOnlyDoesNotChangeSimpleRouting(t *testing.T) {
+	withHealthyAccountProvider(t)
+	a := baseSimpleLongCandidate()
 	b := a
 	a.SessionLabel = "ASIA_DEV"
 	b.SessionLabel = "NY_OPEN"
 	gotA := choosePrimaryLiveSignal(a, time.Now().UTC())
 	gotB := choosePrimaryLiveSignal(b, time.Now().UTC())
 	if gotA.Strat != gotB.Strat {
-		t.Fatalf("expected session label to be metadata only, got %q vs %q", gotA.Strat, gotB.Strat)
+		t.Fatalf("expected session labels to be metadata-only, got %q vs %q", gotA.Strat, gotB.Strat)
 	}
 }
 
