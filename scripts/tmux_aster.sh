@@ -36,13 +36,13 @@ tmux send-keys -t "${SESSION}:gitaction.0" "cd ${WORKDIR} && git status -sb && e
 
 # Tab 2: live
 tmux new-window -t "${SESSION}" -n live
-tmux send-keys -t "${SESSION}:live.0" "$(pane_cmd "/opt/aster/env/live.env" "$(bin_or_fallback "${SCRIPTDIR}/run_live_logged.sh" "bash scripts/run_live_logged.sh")")" C-m
+tmux send-keys -t "${SESSION}:live.0" "$(pane_cmd "/opt/aster/env/live.env" "$(bin_or_fallback "${BINDIR}/live" "go run ./cmd/live")")" C-m
 
 # Tab 3: long/short split
 tmux new-window -t "${SESSION}" -n scanners
-tmux send-keys -t "${SESSION}:scanners.0" "$(pane_cmd "/opt/aster/env/long.env" "$(bin_or_fallback "${SCRIPTDIR}/run_long_logged.sh" "bash scripts/run_long_logged.sh")")" C-m
+tmux send-keys -t "${SESSION}:scanners.0" "$(pane_cmd "/opt/aster/env/long.env" "$(bin_or_fallback "${BINDIR}/long" "go run ./cmd/long")")" C-m
 tmux split-window -h -t "${SESSION}:scanners.0"
-tmux send-keys -t "${SESSION}:scanners.1" "$(pane_cmd "/opt/aster/env/short.env" "$(bin_or_fallback "${SCRIPTDIR}/run_short_logged.sh" "bash scripts/run_short_logged.sh")")" C-m
+tmux send-keys -t "${SESSION}:scanners.1" "$(pane_cmd "/opt/aster/env/short.env" "$(bin_or_fallback "${BINDIR}/short" "go run ./cmd/short")")" C-m
 tmux select-layout -t "${SESSION}:scanners" even-horizontal >/dev/null
 
 # Tab 4: cross split tape/whale/liqs/oflow

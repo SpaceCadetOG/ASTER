@@ -1198,7 +1198,7 @@ type payoutManager struct {
 }
 
 func main() {
-	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 5)) * time.Second
+	scanEvery := time.Duration(envInt("LIVE_SCAN_SEC", 20)) * time.Second
 	dryRun := envBool("LIVE_DRY_RUN", true)
 	minGrade := envStr("LIVE_MIN_GRADE", "B")
 	reserveUSDT := envFloat("LIVE_RESERVE_USDT", 0)
@@ -1878,7 +1878,7 @@ func main() {
 		}
 		return accountHealthSummary{State: "healthy"}
 	})
-	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 250)) * time.Millisecond
+	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 350)) * time.Millisecond
 	if decisionEvery < 250*time.Millisecond {
 		decisionEvery = 250 * time.Millisecond
 	}
@@ -8535,7 +8535,7 @@ func (m *liveExecManager) validateManualManageRequest(req manualManageRequest, n
 }
 
 func configuredLiveLeverage() int {
-	lev := envInt("LIVE_LEVERAGE_FIXED", 2)
+	lev := envInt("LIVE_LEVERAGE_FIXED", 3)
 	maxLev := envInt("LIVE_MAX_LEVERAGE", 20)
 	if maxLev < 1 {
 		maxLev = 20
@@ -19420,7 +19420,7 @@ func startupWarningLines(ladderCfg ladderConfig, safety safetyConfig, execMgr *l
 }
 
 func missedOpportunitiesEnabled() bool {
-	return envBool("LIVE_OPP_TRACK_ENABLE", true) || envBool("LIVE_PERSISTENCE_ENTRY_ENABLE", false)
+	return envBool("LIVE_OPP_TRACK_ENABLE", true) || envBool("LIVE_PERSISTENCE_ENTRY_ENABLE", true)
 }
 
 func allowedOperatorLeverage(raw string) (int, bool) {

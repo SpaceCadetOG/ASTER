@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -87,9 +88,6 @@ func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDec
 	if c.Entry.ScoreSlope < simpleMinSlope(side) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "weak_slope"}
 	}
-	if reason := simpleOperationalBlockReason(c); reason != "" {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason}
-	}
 	if c.ExtensionATR >= envFloat("LIVE_TRUE_EXTENSION_ATR", 2.25) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "extended"}
 	}
@@ -157,27 +155,6 @@ func simpleMinSlope(side string) float64 {
 	return envFloat("LIVE_SIMPLE_LONG_MIN_SLOPE", 0.20)
 }
 
-func simpleOperationalBlockReason(c candidate) string {
-	reason := strings.ToLower(strings.TrimSpace(firstNonEmpty(c.RejectReason, c.Sig.RejectReason)))
-	if reason == "" {
-		return ""
-	}
-	switch {
-	case strings.Contains(reason, "cooldown"):
-		return "symbol_cooldown_active"
-	case strings.Contains(reason, "stopout"):
-		return "symbol_stopout_lock_active"
-	case strings.Contains(reason, "position_conflict"), strings.Contains(reason, "already_in_position"), strings.Contains(reason, "in_position"):
-		return "position_conflict"
-	case strings.Contains(reason, "daily_loss"):
-		return "daily_loss_limit"
-	case strings.Contains(reason, "order_limit"), strings.Contains(reason, "orders_per"):
-		return "order_limit_exceeded"
-	default:
-		return ""
-	}
-}
-
 func logSimpleDecision(c candidate, allowed bool, reason string) {
 	if !shouldLogSimpleDecision(c) {
 		return
@@ -232,4 +209,172 @@ func hardBlockEntry(c candidate) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func tryMomentumIgnite(c candidate, now time.Time) (candidate, bool) {
+	if !envBool("LIVE_ENABLE_MOMENTUM_IGNITE", true) {
+		return c, false
+	}
+	if resetName, resetConf, resetReasons := qualifiesResetImpulse(c, now); resetName != "" {
+		c.Strat = resetName
+		c.Conf = resetConf
+		c.Sig = strategies.Signal{
+			Active:       true,
+			Name:         resetName,
+			Side:         toFeatureSide(c.Side),
+			Confidence:   resetConf,
+			RejectReason: "",
+			Reasons:      resetReasons,
+			Tags:         []string{"reset_impulse"},
+		}
+		c.Sig = applySignalRiskGeometry(c, resetName)
+		c.RejectReason = ""
+		return c, true
+	}
+
+	igniteMinScore := envFloat("LIVE_IGNITE_MIN_SCORE", 60.0)
+	igniteMinSlope := envFloat("LIVE_IGNITE_MIN_SLOPE", 0.08)
+	igniteMinVolRatio := envFloat("LIVE_IGNITE_MIN_VOL_RATIO", 1.00)
+	igniteMinOFIZ := envFloat("LIVE_IGNITE_MIN_OFI_Z", 0.60)
+	igniteBaseConf := envFloat("LIVE_IGNITE_BASE_CONF", 0.56)
+	igniteHeatMaxStateMin := envFloat("LIVE_IGNITE_HEATING_MAX_STATE_MIN", 14.0)
+	igniteInPlayMaxStateMin := envFloat("LIVE_IGNITE_INPLAY_MAX_STATE_MIN", 8.0)
+
+	structureOK := starterDirectionalContextOK(c)
+	freshStateOK := false
+	switch c.Entry.State {
+	case inplay.StateHeating:
+		freshStateOK = c.Entry.TimeInStateMin <= igniteHeatMaxStateMin
+	case inplay.StateInPlay:
+		freshStateOK = c.Entry.TimeInStateMin <= igniteInPlayMaxStateMin
+	}
+
+	styleMatch := false
+	igniteName := ""
+	if strings.EqualFold(c.Side, "BUY") {
+		styleMatch = c.Entry.EntryStyle == "momentum_ignite_long"
+		igniteName = "momentum_ignite_long"
+	} else {
+		styleMatch = c.Entry.EntryStyle == "momentum_ignite_short"
+		igniteName = "momentum_ignite_short"
+	}
+	ofiReady := c.OFISamples < maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	if !ofiReady {
+		if strings.EqualFold(c.Side, "BUY") {
+			ofiReady = c.OFIZ >= igniteMinOFIZ
+		} else {
+			ofiReady = c.OFIZ <= -igniteMinOFIZ
+		}
+	}
+	if !(styleMatch && freshStateOK && c.Entry.Momentum && c.Entry.CurrentScore >= igniteMinScore &&
+		c.Entry.ScoreSlope >= igniteMinSlope && c.VolumeRatio >= igniteMinVolRatio && ofiReady && structureOK) {
+		return c, false
+	}
+
+	c.Strat = igniteName
+	c.Conf = clamp(igniteBaseConf+min(0.20, max(0.0, c.Entry.ScoreSlope-igniteMinSlope)*0.35+max(0.0, c.VolumeRatio-igniteMinVolRatio)*0.10), 0, 0.86)
+	c.Sig = strategies.Signal{Active: true, Name: igniteName, Side: toFeatureSide(c.Side)}
+	c.Sig = applySignalRiskGeometry(c, igniteName)
+	c.RejectReason = ""
+	return c, true
+}
+
+func tryContinuationFast(c candidate, _ time.Time) (candidate, bool) {
+	if !envBool("LIVE_ENABLE_CONTINUATION_FAST", true) {
+		return c, false
+	}
+	if strings.EqualFold(c.Side, "BUY") && c.Entry.LongDemotionFlag {
+		return c, false
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.Entry.ShortDemotionFlag {
+		return c, false
+	}
+
+	fastMinScore := envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)
+	fastMinSlope := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+	fastMinVolRatio := envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)
+	fastMinOFIZ := envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35)
+	fastBaseConf := envFloat("LIVE_CONT_FAST_BASE_CONF", 0.58)
+	structureConfirmOK := continuationStructureConfirmed(c)
+	vwapEMAOK := starterDirectionalContextOK(c)
+	ofiOK := c.OFISamples < maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	if !ofiOK {
+		if strings.EqualFold(c.Side, "BUY") {
+			ofiOK = c.OFIZ >= fastMinOFIZ
+		} else {
+			ofiOK = c.OFIZ <= -fastMinOFIZ
+		}
+	}
+	stateOK := c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping
+
+	if stateOK &&
+		c.Entry.CurrentScore >= fastMinScore &&
+		c.Entry.ScoreSlope >= fastMinSlope &&
+		c.VolumeRatio >= fastMinVolRatio &&
+		ofiOK &&
+		structureConfirmOK &&
+		vwapEMAOK {
+		c.Strat = "continuation_fast"
+		c.Conf = clamp(fastBaseConf+min(0.22, (c.VolumeRatio-fastMinVolRatio)*0.08+max(0.0, c.Entry.ScoreSlope-fastMinSlope)*0.30), 0, 0.90)
+		c.Sig = strategies.Signal{Active: true, Name: "continuation_fast", Side: toFeatureSide(c.Side)}
+		c.Sig = applySignalRiskGeometry(c, "continuation_fast")
+		c.RejectReason = ""
+		return c, true
+	}
+	return c, false
+}
+
+func tryImpulsiveStarter(c candidate, _ time.Time) (candidate, bool) {
+	fails := make([]string, 0, 6)
+	if c.Entry.CurrentScore < envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0) {
+		fails = append(fails, fmt.Sprintf("score:%.2f<%.2f", c.Entry.CurrentScore, envFloat("LIVE_CONT_FAST_MIN_SCORE", 65.0)))
+	}
+	if c.Entry.ScoreSlope < envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02) {
+		fails = append(fails, fmt.Sprintf("slope:%.3f<%.3f", c.Entry.ScoreSlope, envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)))
+	}
+	if c.VolumeRatio < envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15) {
+		fails = append(fails, fmt.Sprintf("vol_ratio:%.2f<%.2f", c.VolumeRatio, envFloat("LIVE_CONT_FAST_MIN_VOL_RATIO", 1.15)))
+	}
+	if !continuationStructureConfirmed(c) {
+		fails = append(fails, firstNonEmpty(c.StructureReason, "continuation_no_structure_confirm"))
+	}
+	if !starterDirectionalContextOK(c) {
+		if strings.EqualFold(c.Side, "BUY") {
+			fails = append(fails, "below_vwap_ema")
+		} else {
+			fails = append(fails, "above_vwap_ema")
+		}
+	}
+
+	if conf, reasons, ok := qualifiesImpulsiveShortStarter(c, fails); ok && starterSoftRejectsOnly(c) {
+		c.Strat = "impulsive_short_starter"
+		c.Conf = conf
+		c.Sig = strategies.Signal{Active: true, Name: "impulsive_short_starter", Side: toFeatureSide(c.Side), Confidence: conf, Reasons: reasons, Tags: []string{"starter_only"}}
+		c.Sig = applySignalRiskGeometry(c, "impulsive_short_starter")
+		c.RejectReason = ""
+		return c, true
+	}
+	if conf, reasons, ok := qualifiesImpulsiveLongStarter(c, fails); ok && starterSoftRejectsOnly(c) {
+		c.Strat = "impulsive_long_starter"
+		c.Conf = conf
+		c.Sig = strategies.Signal{Active: true, Name: "impulsive_long_starter", Side: toFeatureSide(c.Side), Confidence: conf, Reasons: reasons, Tags: []string{"starter_only"}}
+		c.Sig = applySignalRiskGeometry(c, "impulsive_long_starter")
+		c.RejectReason = ""
+		return c, true
+	}
+	return c, false
+}
+
+func starterSoftRejectsOnly(c candidate) bool {
+	if c.Entry.ScoreSlope <= -0.01 {
+		return false
+	}
+	if hardReason, blocked := hardBlockEntry(c); blocked {
+		_ = hardReason
+		return false
+	}
+	return c.Entry.Rank <= envFloat("LIVE_ELITE_STARTER_MAX_RANK", 2.0) ||
+		qualifiesEliteStarterCandidate(c) ||
+		starterStructureContextOK(c) ||
+		candidateDirectionalMovePct(c) >= envFloat("LIVE_STARTER_MIN_DIRECTIONAL_PCT", 3.0)
 }
