@@ -18,6 +18,10 @@ LOG_DATE_MODE="${ASTER_LOG_DATE_MODE:-trading_day}"
 LOG_CYCLE_HOUR="${ASTER_LOG_CYCLE_HOUR:-19}"
 LOG_CYCLE_MINUTE="${ASTER_LOG_CYCLE_MINUTE:-0}"
 LATEST_LINK="${LOG_DIR}/${PREFIX}-latest.log"
+NOISE_REGEX="${ASTER_TERMINAL_NOISE_REGEX:-SIMPLE_DECISION|live: perf mode=decision_worker|MISSED_OPP_EXPIRE}"
+HIDE_NOISE="${ASTER_TERMINAL_HIDE_NOISE:-0}"
+NOISE_LOG_ENABLE="${ASTER_NOISE_LOG_ENABLE:-0}"
+NOISE_LATEST_LINK="${LOG_DIR}/${PREFIX}-noise-latest.log"
 
 mkdir -p "$LOG_DIR"
 
@@ -70,6 +74,12 @@ open_log_for_key() {
   local key="$1"
   CURRENT_FILE="${LOG_DIR}/${PREFIX}-${key}.log"
   ln -sfn "$(basename "$CURRENT_FILE")" "$LATEST_LINK"
+  if [[ "$NOISE_LOG_ENABLE" == "1" ]]; then
+    NOISE_FILE="${LOG_DIR}/${PREFIX}-noise-${key}.log"
+    ln -sfn "$(basename "$NOISE_FILE")" "$NOISE_LATEST_LINK"
+  else
+    NOISE_FILE=""
+  fi
 }
 
 CURRENT_KEY="$(log_day_key)"
@@ -84,5 +94,18 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     open_log_for_key "$CURRENT_KEY"
     echo "rotated ${PREFIX} log to ${CURRENT_FILE}" >&2
   fi
-  printf '%s\n' "$line" | tee -a "$CURRENT_FILE"
+  printf '%s\n' "$line" >> "$CURRENT_FILE"
+
+  noisy=0
+  if [[ -n "$NOISE_REGEX" ]] && printf '%s\n' "$line" | grep -Eq "$NOISE_REGEX"; then
+    noisy=1
+    if [[ "$NOISE_LOG_ENABLE" == "1" && -n "$NOISE_FILE" ]]; then
+      printf '%s\n' "$line" >> "$NOISE_FILE"
+    fi
+  fi
+
+  if [[ "$HIDE_NOISE" == "1" && "$noisy" == "1" ]]; then
+    continue
+  fi
+  printf '%s\n' "$line"
 done

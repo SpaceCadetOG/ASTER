@@ -5,6 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 ENV_FILE="${ASTER_ENV_FILE:-/opt/aster/env/live.env}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e|--env)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "missing value for --env" >&2
+        exit 2
+      fi
+      ENV_FILE="$1"
+      shift
+      ;;
+    *)
+      echo "unknown arg: $1" >&2
+      echo "usage: $0 [--env /path/to/live.env]" >&2
+      exit 2
+      ;;
+  esac
+done
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -64,7 +82,13 @@ case "${launch_mode,,}" in
     ;;
 esac
 
-echo "starting ${mode_label} using $(basename "${ENV_FILE}")"
+echo "starting ${mode_label} using ${ENV_FILE}"
 echo "logs: ${LOG_DIR}/live-*.log"
+
+# Keep terminal readable while preserving full logs.
+export ASTER_TERMINAL_HIDE_NOISE="${ASTER_TERMINAL_HIDE_NOISE:-1}"
+export ASTER_NOISE_LOG_ENABLE="${ASTER_NOISE_LOG_ENABLE:-1}"
+export ASTER_TERMINAL_NOISE_REGEX="${ASTER_TERMINAL_NOISE_REGEX:-SIMPLE_DECISION|live: perf mode=decision_worker|MISSED_OPP_EXPIRE}"
+echo "noise logs: ${LOG_DIR}/live-noise-*.log"
 
 go run ./cmd/live 2>&1 | bash scripts/stream_to_rotating_log.sh live
