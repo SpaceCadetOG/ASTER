@@ -266,9 +266,42 @@ func TestDecideSimplePaperEntryNowDownsideShortPasses(t *testing.T) {
 	}
 }
 
+func TestDecideSimplePaperEntryNowSpreadRelaxedForPaperValidation(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.SpreadBps = 14.0 // > live default(10), but within paper relaxed cap
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected relaxed paper spread to allow entry, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowSpreadStillHardFailsWhenExtreme(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.SpreadBps = 45.0
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "spread_too_wide" {
+		t.Fatalf("expected extreme spread to still block, got %+v", dec)
+	}
+}
+
 func TestDecideSimplePaperEntryNowAccountHealthBlocked(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
 	if dec.Allowed || dec.Reason != "account_health_degraded" {
 		t.Fatalf("expected degraded block, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowPartialHealthAllowedByDefault(t *testing.T) {
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "partial"})
+	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected partial health to stay tradable in paper mode by default, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowPartialHealthCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", "1")
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "partial"})
+	if dec.Allowed || dec.Reason != "account_health_partial" {
+		t.Fatalf("expected partial health block with flag, got %+v", dec)
 	}
 }

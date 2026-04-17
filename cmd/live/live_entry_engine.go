@@ -208,7 +208,7 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 	if side == "" {
 		return SimplePaperDecision{Allowed: false, Reason: "side_unknown"}
 	}
-	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
+	if reason, blocked := entriesBlockedByPaperAccountHealth(acct); blocked {
 		return SimplePaperDecision{Allowed: false, Side: side, Reason: reason}
 	}
 	if reason := simpleOperationalBlockReason(c); reason != "" {
@@ -216,7 +216,8 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 	}
 	if hardReason, blocked := hardBlockEntry(c); blocked {
 		// Directional conflict is advisory in paper validation mode.
-		if hardReason != "directional_dayutc_conflict" {
+		if hardReason != "directional_dayutc_conflict" &&
+			!(hardReason == "spread_too_wide" && paperSpreadWithinValidationLimit(c)) {
 			return SimplePaperDecision{Allowed: false, Side: side, Reason: hardReason}
 		}
 	}
@@ -257,6 +258,28 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 		Reason:            "paper_entry_now_short",
 		PullbackPreferred: false,
 	}
+}
+
+func paperSpreadWithinValidationLimit(c candidate) bool {
+	liveMax := envFloat("LIVE_MAX_SPREAD_BPS", envFloat("LIVE_OB_MAX_SPREAD_BPS", 10))
+	paperMax := envFloat("LIVE_PAPER_MAX_SPREAD_BPS", maxFloat(20.0, liveMax*2.5))
+	return c.SpreadBps <= paperMax
+}
+
+func entriesBlockedByPaperAccountHealth(summary accountHealthSummary) (string, bool) {
+	if summary.State == "failed" {
+		return "account_health_failed", true
+	}
+	if summary.State == "degraded" {
+		return "account_health_degraded", true
+	}
+	if summary.State == "partial" && envBool("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", false) {
+		return "account_health_partial", true
+	}
+	if summary.SignedUserDataBackoff {
+		return "signed_user_data_backoff", true
+	}
+	return "", false
 }
 
 func simpleOperationalBlockReason(c candidate) string {

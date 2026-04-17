@@ -1238,8 +1238,11 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 		return "POST_SL_COOLDOWN"
 	}
 	if execMgr != nil {
-		if reason := execMgr.degradedEntryReason(now, c.Entry.Symbol); reason != "" {
-			return reason
+		paperMode := paper != nil && paper.enabled
+		if !paperMode {
+			if reason := execMgr.degradedEntryReason(now, c.Entry.Symbol); reason != "" {
+				return reason
+			}
 		}
 		if execMgr.ladderCfg.OneSymbolOnly && !execMgr.HasActiveSymbol(c.Entry.Symbol) && execMgr.ActiveCount() > 0 {
 			return "one_symbol_only_active"

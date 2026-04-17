@@ -2740,88 +2740,100 @@ func main() {
 				}
 			}
 		}
-		queueCtx := queueDeepPreflightCtx{
-			Now:                   now,
-			LocalMaintNow:         localMaintNow,
-			PureMode:              pureMode,
-			OBFilterEnable:        obFilterEnable,
-			EntryDepth:            prefetchedDepth,
-			OBLevels:              obLevels,
-			OBImbMin:              obImbMin,
-			OBMaxSpreadBps:        obMaxSpreadBps,
-			RiskShell:             riskShell,
-			RiskFallbackStopPct:   riskFallbackStopPct,
-			RiskHoldHours:         riskHoldHours,
-			LeverageMode:          leverageMode,
-			LeverageFixed:         leverageFixed,
-			LeverageMin:           leverageMin,
-			MaxLeverage:           safety.maxLeverage,
-			EffectiveReserve:      effectiveReserve,
-			EffectiveMargin:       effectiveMargin,
-			AvailableUSDT:         acct.AvailableUSDT,
-			MetaBySymbol:          metaBySymbol,
-			InMaint:               inMaint,
-			MaintWarmup:           maintWarmup,
-			MaintState:            &maintState,
-			Safety:                safety,
-			Acct:                  acct,
-			Paper:                 paper,
-			ReserveGate:           reserveGate,
-			EventLockoutMin:       eventLockoutMin,
-			CorrGroups:            corrGroups,
-			MaxCorrelatedExposure: maxCorrelatedExposure,
-			RequireShadowDays:     requireShadowDays,
-			ShadowEquityFile:      shadowEquityFile,
-			MaxOpenPos:            maxOpenPos,
-			MaxOpenPerSide:        maxOpenPerSide,
-			ExecMgr:               execMgr,
-		}
-		for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
-			reason := quickCandidateSelectionReject(
-				queueCandidates[i],
-				now,
-				pureMode,
-				allowDeadSessionTrading,
-				preEODEntryBlockMin,
-				localMaintNow,
-				maintEOD,
-				postSLCooldown,
-				paper,
-				execMgr,
-				safety,
-				lastOrderAt,
-				lastOrderBySymbol,
-				lastOrderBySymbolSide,
-				orderCountByDay,
-				orderCountByHour,
-				symbolStopoutLockUntil,
-			)
-			if reason != "" {
-				recordCandidateDecision(cmdCtx, queueCandidates[i], reason)
-				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), reason))
-				if missed != nil {
-					missed.Observe(now, queueCandidates[i], reason)
+		if paperSimpleMode {
+			for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
+				best = queueCandidates[i]
+				raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+				if ob, ok := prefetchedDepth[raw]; ok {
+					selectedDepth[raw] = ob
 				}
-				continue
+				selected = true
+				break
 			}
-			deepRes := deepQueuePreflight(queueCandidates[i], queueCtx)
-			if deepRes.RejectReason != "" {
-				recordCandidateDecision(cmdCtx, queueCandidates[i], deepRes.RejectReason)
-				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), deepRes.RejectReason))
-				if missed != nil {
-					missed.Observe(now, queueCandidates[i], deepRes.RejectReason)
+		} else {
+			queueCtx := queueDeepPreflightCtx{
+				Now:                   now,
+				LocalMaintNow:         localMaintNow,
+				PureMode:              pureMode,
+				OBFilterEnable:        obFilterEnable,
+				EntryDepth:            prefetchedDepth,
+				OBLevels:              obLevels,
+				OBImbMin:              obImbMin,
+				OBMaxSpreadBps:        obMaxSpreadBps,
+				RiskShell:             riskShell,
+				RiskFallbackStopPct:   riskFallbackStopPct,
+				RiskHoldHours:         riskHoldHours,
+				LeverageMode:          leverageMode,
+				LeverageFixed:         leverageFixed,
+				LeverageMin:           leverageMin,
+				MaxLeverage:           safety.maxLeverage,
+				EffectiveReserve:      effectiveReserve,
+				EffectiveMargin:       effectiveMargin,
+				AvailableUSDT:         acct.AvailableUSDT,
+				MetaBySymbol:          metaBySymbol,
+				InMaint:               inMaint,
+				MaintWarmup:           maintWarmup,
+				MaintState:            &maintState,
+				Safety:                safety,
+				Acct:                  acct,
+				Paper:                 paper,
+				ReserveGate:           reserveGate,
+				EventLockoutMin:       eventLockoutMin,
+				CorrGroups:            corrGroups,
+				MaxCorrelatedExposure: maxCorrelatedExposure,
+				RequireShadowDays:     requireShadowDays,
+				ShadowEquityFile:      shadowEquityFile,
+				MaxOpenPos:            maxOpenPos,
+				MaxOpenPerSide:        maxOpenPerSide,
+				ExecMgr:               execMgr,
+			}
+			for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
+				reason := quickCandidateSelectionReject(
+					queueCandidates[i],
+					now,
+					pureMode,
+					allowDeadSessionTrading,
+					preEODEntryBlockMin,
+					localMaintNow,
+					maintEOD,
+					postSLCooldown,
+					paper,
+					execMgr,
+					safety,
+					lastOrderAt,
+					lastOrderBySymbol,
+					lastOrderBySymbolSide,
+					orderCountByDay,
+					orderCountByHour,
+					symbolStopoutLockUntil,
+				)
+				if reason != "" {
+					recordCandidateDecision(cmdCtx, queueCandidates[i], reason)
+					selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), reason))
+					if missed != nil {
+						missed.Observe(now, queueCandidates[i], reason)
+					}
+					continue
 				}
-				continue
+				deepRes := deepQueuePreflight(queueCandidates[i], queueCtx)
+				if deepRes.RejectReason != "" {
+					recordCandidateDecision(cmdCtx, queueCandidates[i], deepRes.RejectReason)
+					selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), deepRes.RejectReason))
+					if missed != nil {
+						missed.Observe(now, queueCandidates[i], deepRes.RejectReason)
+					}
+					continue
+				}
+				best = queueCandidates[i]
+				selectedSpreadBps = deepRes.SpreadBps
+				selectedBookImb = deepRes.BookImb
+				raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+				if ob, ok := prefetchedDepth[raw]; ok {
+					selectedDepth[raw] = ob
+				}
+				selected = true
+				break
 			}
-			best = queueCandidates[i]
-			selectedSpreadBps = deepRes.SpreadBps
-			selectedBookImb = deepRes.BookImb
-			raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-			if ob, ok := prefetchedDepth[raw]; ok {
-				selectedDepth[raw] = ob
-			}
-			selected = true
-			break
 		}
 		if !selected {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
