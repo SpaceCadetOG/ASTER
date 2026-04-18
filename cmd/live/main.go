@@ -5319,22 +5319,11 @@ func runtimeMaintenanceWindows() []maintenanceWindow {
 		normalizeMaintenanceWindow(maintenanceWindow{
 			Name:      "MAINTENANCE",
 			Enabled:   envBool("LIVE_MAINT1_ENABLE", true),
-			StartHour: envInt("LIVE_MAINT1_START_HOUR", 0),
+			StartHour: envInt("LIVE_MAINT1_START_HOUR", 18),
 			StartMin:  envInt("LIVE_MAINT1_START_MIN", 0),
-			EndHour:   envInt("LIVE_MAINT1_END_HOUR", 1),
-			EndMin:    envInt("LIVE_MAINT1_END_MIN", 30),
+			EndHour:   envInt("LIVE_MAINT1_END_HOUR", 19),
+			EndMin:    envInt("LIVE_MAINT1_END_MIN", 0),
 			ForceFlat: false,
-		}),
-		normalizeMaintenanceWindow(maintenanceWindow{
-			Name:      "FORCE_FLAT",
-			Enabled:   envBool("LIVE_MAINT_EOD_ENABLE", true),
-			StartHour: envInt("LIVE_MAINT2_START_HOUR", 16),
-			StartMin:  envInt("LIVE_MAINT2_START_MIN", 0),
-			EndHour:   envInt("LIVE_MAINT2_END_HOUR", 18),
-			EndMin:    envInt("LIVE_MAINT2_END_MIN", 0),
-			ForceFlat: true,
-			HookPath:  envStr("LIVE_MAINT2_HOOK", ""),
-			HookTO:    time.Duration(envInt("LIVE_MAINT2_HOOK_TIMEOUT_SEC", 900)) * time.Second,
 		}),
 	}
 	out := make([]maintenanceWindow, 0, len(windows))
@@ -18015,6 +18004,10 @@ func regionStats(ts time.Time, venues ...majorMarketVenue) regionSessionStats {
 }
 
 func sessionTagFromMajorMarkets(ts time.Time) string {
+	switch ts.Weekday() {
+	case time.Saturday, time.Sunday:
+		return "WEEKEND"
+	}
 	asia := regionStats(ts,
 		majorMarketVenues[0], majorMarketVenues[1], majorMarketVenues[2], majorMarketVenues[3],
 		majorMarketVenues[4], majorMarketVenues[5], majorMarketVenues[6],
