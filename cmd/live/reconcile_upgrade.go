@@ -11,6 +11,7 @@ import (
 type accountHealthSummary struct {
 	State                 string
 	SignedUserDataBackoff bool
+	AsOf                  time.Time
 }
 
 func entriesBlockedByAccountHealth(summary accountHealthSummary) (string, bool) {
@@ -405,10 +406,9 @@ func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage 
 	}
 	_ = m.logFill(now, p, "TP", reason, deltaQty, fillPx, pnl, pct)
 	m.sendFillReceipt(now, p, "TP", reason, deltaQty, fillPx, pnl, pct)
-	if reason == "TP1_HIT" || reason == "TP2_HIT" {
-		if err := m.placeOrReplaceStop(p); err != nil {
-			return err
-		}
+	// Keep reduce-only stop quantity synchronized with remaining position after any TP fill.
+	if err := m.placeOrReplaceStop(p); err != nil {
+		return err
 	}
 	return nil
 }

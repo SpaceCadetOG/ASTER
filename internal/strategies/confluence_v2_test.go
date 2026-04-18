@@ -111,3 +111,44 @@ func TestCalculateConfluenceScore_BelowThreshold(t *testing.T) {
 		t.Fatalf("expected score <70, got %.2f", res.Score)
 	}
 }
+
+func TestCalculateConfluenceScore_RaisesAutoThresholdWhenFundingCrowdedLong(t *testing.T) {
+	now := time.Now().UTC()
+	candles := []features.Candle{
+		{Ts: now.Add(-90 * time.Minute), O: 100, H: 101, L: 99.5, C: 100.5, V: 1200},
+		{Ts: now.Add(-75 * time.Minute), O: 100.5, H: 104, L: 100.2, C: 103.8, V: 1600},
+		{Ts: now.Add(-60 * time.Minute), O: 103.8, H: 108, L: 103.2, C: 107.5, V: 1900},
+		{Ts: now.Add(-45 * time.Minute), O: 107.5, H: 110, L: 107.0, C: 109.5, V: 2000},
+		{Ts: now.Add(-30 * time.Minute), O: 109.5, H: 110.2, L: 105.8, C: 106.8, V: 1800},
+		{Ts: now.Add(-15 * time.Minute), O: 106.8, H: 108.4, L: 106.5, C: 108.1, V: 1700},
+	}
+	ctx := Context{
+		Candles:     candles,
+		FundingRate: 0.11, // 0.11%
+		Snapshot: features.Snapshot{
+			Candle: features.Candle{C: 108.1},
+			Flow: features.FlowState{
+				WhaleDelta1m:  450,
+				WhaleDeltaCum: 2000,
+			},
+			VP: features.VolumeProfile{
+				HVNs: []features.PriceVolume{{Price: 108.0, Volume: 100000}},
+			},
+		},
+	}
+	flow := OrderFlowSignal{
+		CumulativeDelta: 2000,
+		DeltaRising:     true,
+		HasStackedBuy:   true,
+	}
+	res := CalculateConfluenceScore(ctx, features.SideLong, flow)
+	if res.AutoMin != 90 {
+		t.Fatalf("expected crowded funding to raise auto min to 90, got %.2f", res.AutoMin)
+	}
+	if res.Score < 85 {
+		t.Fatalf("expected strong score basis, got %.2f", res.Score)
+	}
+	if res.Score < 90 && res.Tier == ConfluenceTierAutoEntry {
+		t.Fatalf("expected non-auto tier below crowded threshold, got score=%.2f tier=%s", res.Score, res.Tier)
+	}
+}

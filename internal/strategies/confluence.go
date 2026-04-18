@@ -53,6 +53,9 @@ type WeightedConfluence struct {
 	Approved    bool
 	Reason      string
 	Impulse     FibImpulse
+	Regime      string
+	AutoMin     float64
+	FundingPct  float64
 }
 
 type OrderFlowTrade struct {
@@ -199,8 +202,9 @@ func RunOrderFlowAggregator(
 
 func CalculateConfluenceScore(ctx Context, side features.Side, flow OrderFlowSignal) WeightedConfluence {
 	res := WeightedConfluence{
-		Reason: "below_min_score",
-		Tier:   ConfluenceTierIgnore,
+		Reason:  "below_min_score",
+		Tier:    ConfluenceTierIgnore,
+		AutoMin: confluenceAutoEntryMin,
 	}
 	c := ctx.Snapshot.Candle.C
 	if c <= 0 && len(ctx.Candles) > 0 {
@@ -240,7 +244,10 @@ func CalculateConfluenceScore(ctx Context, side features.Side, flow OrderFlowSig
 		}
 	}
 	res.Score = clamp(res.Score, 0, 100)
-	res.Tier = scoreTier(res.Score)
+	res.Regime = detectConfluenceRegime(ctx)
+	res.FundingPct = normalizeFundingPct(ctx.FundingRate)
+	res.AutoMin = requiredAutoEntryScore(ctx, side)
+	res.Tier = scoreTierWithRequired(res.Score, res.AutoMin)
 	res.Approved = res.Score >= confluenceMinScore
 	if res.Tier == ConfluenceTierAutoEntry {
 		res.Reason = "auto_entry"
@@ -251,14 +258,50 @@ func CalculateConfluenceScore(ctx Context, side features.Side, flow OrderFlowSig
 }
 
 func scoreTier(score float64) ConfluenceTier {
+	return scoreTierWithRequired(score, confluenceAutoEntryMin)
+}
+
+func scoreTierWithRequired(score, autoEntryMin float64) ConfluenceTier {
 	switch {
-	case score >= confluenceAutoEntryMin:
+	case score >= autoEntryMin:
 		return ConfluenceTierAutoEntry
 	case score >= confluenceWatchMin:
 		return ConfluenceTierWatchlist
 	default:
 		return ConfluenceTierIgnore
 	}
+}
+
+func detectConfluenceRegime(ctx Context) string {
+	switch ctx.Snapshot.Structure.Trend {
+	case features.TrendRange:
+		return "rotating"
+	case features.TrendBull, features.TrendBear:
+		return "trending"
+	default:
+		return "unknown"
+	}
+}
+
+func requiredAutoEntryScore(ctx Context, side features.Side) float64 {
+	autoMin := confluenceAutoEntryMin
+	crowdedMin := 90.0
+	fundingThresholdPct := 0.10
+	fundingPct := normalizeFundingPct(ctx.FundingRate)
+	if side == features.SideLong && fundingPct > fundingThresholdPct {
+		return crowdedMin
+	}
+	if side == features.SideShort && fundingPct < -fundingThresholdPct {
+		return crowdedMin
+	}
+	return autoMin
+}
+
+func normalizeFundingPct(rate float64) float64 {
+	if math.Abs(rate) <= 0.01 {
+		return rate * 100.0
+	}
+	return rate
 }
 
 func trendAligned(price, ema8, ema20 float64, side features.Side) bool {

@@ -24,6 +24,7 @@ import (
 	"go-machine/internal/data"
 	"go-machine/internal/discovery"
 	exitmgr "go-machine/internal/execution"
+	trailx "go-machine/internal/executor"
 	"go-machine/internal/features"
 	flowfeed "go-machine/internal/flow"
 	"go-machine/internal/gate"
@@ -860,6 +861,7 @@ type livePosition struct {
 	TrailCandidateStop      float64          `json:"trailCandidateStop,omitempty"`
 	TrailCandidateLevel     float64          `json:"trailCandidateLevel,omitempty"`
 	TrailCandidateAt        time.Time        `json:"trailCandidateAt,omitempty"`
+	TrailProtectedLastClose time.Time        `json:"trailProtectedLastClose,omitempty"`
 	VPSetup                 string           `json:"vpSetup,omitempty"`
 	VPLevel                 float64          `json:"vpLevel,omitempty"`
 	VPTargetLevel           float64          `json:"vpTargetLevel,omitempty"`
@@ -10539,6 +10541,9 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 	if p == nil || !p.TrailOn || p.RemainingQty <= 0 || mark <= 0 {
 		return false, nil
 	}
+	if envBool("LIVE_TRAIL_PROTECTED_15M_ENABLE", true) {
+		return m.updateProtectedTrailingStop(p, mark)
+	}
 	sideBuy := strings.EqualFold(p.Side, "BUY")
 	if p.TrailRef <= 0 {
 		p.TrailRef = p.EntryPrice
@@ -10604,6 +10609,73 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 	return true, nil
 }
 
+func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark float64) (bool, error) {
+	if m == nil || p == nil {
+		return false, nil
+	}
+	sideBuy := strings.EqualFold(p.Side, "BUY")
+	closed15m, err := m.trailingClosedBars15m(p.Symbol, envInt("LIVE_TRAIL_PROTECTED_15M_BARS", 48))
+	if err != nil || len(closed15m) < 20 {
+		return false, nil
+	}
+	trailState := trailx.NewTrailState(
+		p.Symbol,
+		trailSideForPosition(p.Side),
+		p.EntryPrice,
+		maxFloat(p.StopPrice, p.EntryPrice*0.0001),
+		trailx.TrailConfig{HardStopPct: envFloat("LIVE_HARD_STOP_PCT", trailx.DefaultHardStopPct)},
+	)
+	trailState.TacticalStop = p.StopPrice
+	trailState.Last15mClosedCandle = p.TrailProtectedLastClose
+	trailState.AdvancedReady = p.ProtectionStage >= protectionStageArmed
+	trailState.HitTP1 = p.HitTP1
+	upd := trailx.UpdateProtectedTrailOn15mClose(&trailState, closed15m, envFloat("LIVE_TRAIL_PROTECTED_15M_ATR_MULT", 1.5))
+	p.TrailProtectedLastClose = trailState.Last15mClosedCandle
+	if !upd.TacticalStopUpdated || upd.CurrentTacticalStop <= 0 {
+		return false, nil
+	}
+	newStop := upd.CurrentTacticalStop
+	threshold := p.StopPrice * (m.trailStepBps / 10000.0)
+	if threshold < 0 {
+		threshold = 0
+	}
+	improved := false
+	if sideBuy {
+		improved = newStop > p.StopPrice+threshold
+	} else {
+		improved = newStop < p.StopPrice-threshold
+	}
+	if !improved {
+		return false, nil
+	}
+	p.TrailRef = mark
+	p.TrailStop = newStop
+	p.StopReason = firstNonEmpty(upd.Reason, "tactical_trail_ema20_close")
+	p.StopPrice = newStop
+	if err := m.placeOrReplaceStop(p); err != nil {
+		return false, err
+	}
+	if !hasLiveProtectiveOrder(p) {
+		return false, nil
+	}
+	clearTrailCandidate(p)
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.BuildEventHTML("📈", "TRAIL MOVE",
+			fmt.Sprintf("<b>%s</b>", p.Symbol),
+			fmt.Sprintf("<b>Stop:</b> %s | <b>Mark:</b> %s", fmtPrice(p.StopPrice), fmtPrice(mark)),
+			fmt.Sprintf("<b>Mode:</b> 15m close EMA20-ATR"),
+		))
+	}
+	return true, nil
+}
+
+func trailSideForPosition(side string) trailx.TrailSide {
+	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
+		return trailx.SideSell
+	}
+	return trailx.SideBuy
+}
+
 func trailNeedsConfirmation() bool {
 	return envBool("LIVE_TRAIL_CONFIRM_ON_CLOSE", true)
 }
@@ -10660,6 +10732,45 @@ func trailingClosedBars(cache *featureRuntimeCache, symbol string, limit int) ([
 		return nil, nil
 	}
 	return bars[:len(bars)-1], nil
+}
+
+func (m *liveExecManager) trailingClosedBars15m(symbol string, limit int) ([]features.Candle, error) {
+	if m == nil {
+		return nil, fmt.Errorf("manager unavailable")
+	}
+	if limit < 24 {
+		limit = 24
+	}
+	var bars []types.Candle
+	var err error
+	if m.featureCache != nil {
+		bars, err = m.featureCache.candleSeries(symbol, types.TF15m, limit)
+	} else {
+		bars, err = aster.LoadCandles(symbol, types.TF15m, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	bars = types.EnsureSorted(append([]types.Candle(nil), bars...))
+	if len(bars) <= 1 {
+		return nil, nil
+	}
+	closed := bars[:len(bars)-1]
+	out := make([]features.Candle, 0, len(closed))
+	for _, b := range closed {
+		if b.C <= 0 || b.H <= 0 || b.L <= 0 || b.T.IsZero() {
+			continue
+		}
+		out = append(out, features.Candle{
+			Ts: b.T,
+			O:  b.O,
+			H:  b.H,
+			L:  b.L,
+			C:  b.C,
+			V:  b.V,
+		})
+	}
+	return out, nil
 }
 
 func trailCandidateConfirmedFromBars(sideBuy bool, bars []types.Candle, candidateAt time.Time, level float64) bool {

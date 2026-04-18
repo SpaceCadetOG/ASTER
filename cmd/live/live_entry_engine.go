@@ -11,9 +11,11 @@ import (
 )
 
 type SimpleEntryDecision struct {
-	Allowed bool
-	Side    string
-	Reason  string
+	Allowed           bool
+	Side              string
+	Reason            string
+	MarketSnapshotTs  time.Time
+	AccountSnapshotTs time.Time
 }
 
 type SimplePaperDecision struct {
@@ -48,7 +50,7 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 		return c
 	}
 
-	dec := decideSimpleEntryNow(c, currentAccountHealth())
+	dec := decideSimpleEntryNowAt(c, currentAccountHealth(), now)
 	if dec.Allowed {
 		signal := "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Side))
 		c.Strat = signal
@@ -76,47 +78,88 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 }
 
 func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDecision {
+	return decideSimpleEntryNowAt(c, acct, time.Now().UTC())
+}
+
+func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Time) SimpleEntryDecision {
 	side := simpleEntrySide(c.Side)
+	marketTs := candidateMarketSnapshotAt(c, now)
+	accountTs := accountSnapshotAt(acct, now)
 	if side == "" {
-		return SimpleEntryDecision{Allowed: false, Reason: "side_unknown"}
+		return SimpleEntryDecision{Allowed: false, Reason: "side_unknown", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+	}
+	if dataAge := now.Sub(marketTs); dataAge > time.Duration(envInt("LIVE_SIMPLE_MAX_DATA_AGE_SEC", 3))*time.Second {
+		return SimpleEntryDecision{
+			Allowed:           false,
+			Side:              side,
+			Reason:            "stale_data_skew",
+			MarketSnapshotTs:  marketTs,
+			AccountSnapshotTs: accountTs,
+		}
 	}
 	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if !simpleEntryLeaderEligible(c) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if confluenceScorePct, ok := candidateConfluenceScorePct(c); ok {
 		if confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
-			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "confluence_below_min"}
+			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "confluence_below_min", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 		}
 		if confluenceScorePct >= envFloat("LIVE_CONFLUENCE_WATCH_MIN_SCORE", 70.0) &&
 			confluenceScorePct < envFloat("LIVE_CONFLUENCE_AUTO_ENTRY_MIN_SCORE", 85.0) {
-			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "watchlist_wait_orderflow"}
+			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "watchlist_wait_orderflow", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 		}
 	}
 	if !simpleStateAllowed(c.Entry.State, side) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "state_not_allowed"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "state_not_allowed", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if c.Entry.CurrentScore < simpleMinScore(side) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "low_score"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "low_score", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if c.Entry.ScoreSlope < simpleMinSlope(side) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "weak_slope"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "weak_slope", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if c.ExtensionATR >= envFloat("LIVE_TRUE_EXTENSION_ATR", 2.25) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "extended"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "extended", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if candidateSpikeCandle(c) || c.Entry.ExhaustionRisk >= envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "exhausted"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "exhausted", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if c.SpreadBps > envFloat("LIVE_MAX_SPREAD_BPS", envFloat("LIVE_OB_MAX_SPREAD_BPS", 10)) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "spread_too_wide"}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "spread_too_wide", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	if reason := directionalConflictRejectReason(c); reason != "" {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason}
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
-	return SimpleEntryDecision{Allowed: true, Side: side, Reason: "entry_now_" + strings.ToLower(side)}
+	return SimpleEntryDecision{
+		Allowed:           true,
+		Side:              side,
+		Reason:            "entry_now_" + strings.ToLower(side),
+		MarketSnapshotTs:  marketTs,
+		AccountSnapshotTs: accountTs,
+	}
+}
+
+func candidateMarketSnapshotAt(c candidate, now time.Time) time.Time {
+	if !c.Entry.LastSeen.IsZero() {
+		return c.Entry.LastSeen
+	}
+	if !c.Entry.StateSince.IsZero() {
+		return c.Entry.StateSince
+	}
+	if !c.Entry.FirstSeen.IsZero() {
+		return c.Entry.FirstSeen
+	}
+	return now
+}
+
+func accountSnapshotAt(acct accountHealthSummary, now time.Time) time.Time {
+	if !acct.AsOf.IsZero() {
+		return acct.AsOf
+	}
+	return now
 }
 
 func candidateConfluenceScorePct(c candidate) (float64, bool) {

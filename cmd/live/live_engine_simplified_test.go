@@ -51,9 +51,21 @@ func withHealthyAccountProvider(t *testing.T) {
 }
 
 func TestDecideSimpleEntryNowStrongLongPasses(t *testing.T) {
-	dec := decideSimpleEntryNow(baseSimpleLongCandidate(), accountHealthSummary{State: "healthy"})
+	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = time.Now().UTC()
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy", AsOf: time.Now().UTC()})
 	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "entry_now_long" {
 		t.Fatalf("expected allowed long entry_now, got %+v", dec)
+	}
+}
+
+func TestDecideSimpleEntryNowBlocksStaleDataSkew(t *testing.T) {
+	now := time.Now().UTC()
+	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = now.Add(-4 * time.Second)
+	dec := decideSimpleEntryNowAt(c, accountHealthSummary{State: "healthy", AsOf: now}, now)
+	if dec.Allowed || dec.Reason != "stale_data_skew" {
+		t.Fatalf("expected stale_data_skew reject, got %+v", dec)
 	}
 }
 
