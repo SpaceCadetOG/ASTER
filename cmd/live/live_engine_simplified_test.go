@@ -248,9 +248,19 @@ func TestDecideSimplePaperEntryNowLowScoreFails(t *testing.T) {
 func TestDecideSimplePaperEntryNowResetMoveFails(t *testing.T) {
 	c := baseSimplePaperLongCandidate()
 	c.DayUTC24h = 3.2
+	t.Setenv("LIVE_PAPER_SIMPLE_MOVE_MIN_PCT", "5")
 	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
 	if dec.Allowed || dec.Reason != "reset_move_below_threshold" {
 		t.Fatalf("expected reset threshold reject, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowResetMoveDefaultPassesAtThirtyTwoBps(t *testing.T) {
+	c := baseSimplePaperLongCandidate()
+	c.DayUTC24h = 3.2
+	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected default 3%% reset threshold to allow, got %+v", dec)
 	}
 }
 
@@ -286,8 +296,16 @@ func TestDecideSimplePaperEntryNowSpreadStillHardFailsWhenExtreme(t *testing.T) 
 
 func TestDecideSimplePaperEntryNowAccountHealthBlocked(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
+	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected degraded to stay tradable in paper mode by default, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowDegradedHealthCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_BLOCK_ON_DEGRADED_HEALTH", "1")
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
 	if dec.Allowed || dec.Reason != "account_health_degraded" {
-		t.Fatalf("expected degraded block, got %+v", dec)
+		t.Fatalf("expected degraded block with flag, got %+v", dec)
 	}
 }
 
@@ -303,5 +321,13 @@ func TestDecideSimplePaperEntryNowPartialHealthCanBeBlockedByFlag(t *testing.T) 
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "partial"})
 	if dec.Allowed || dec.Reason != "account_health_partial" {
 		t.Fatalf("expected partial health block with flag, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowSignedBackoffCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_BLOCK_ON_SIGNED_BACKOFF", "1")
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy", SignedUserDataBackoff: true})
+	if dec.Allowed || dec.Reason != "signed_user_data_backoff" {
+		t.Fatalf("expected signed backoff block with flag, got %+v", dec)
 	}
 }

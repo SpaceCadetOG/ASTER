@@ -214,12 +214,8 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 	if reason := simpleOperationalBlockReason(c); reason != "" {
 		return SimplePaperDecision{Allowed: false, Side: side, Reason: reason}
 	}
-	if hardReason, blocked := hardBlockEntry(c); blocked {
-		// Directional conflict is advisory in paper validation mode.
-		if hardReason != "directional_dayutc_conflict" &&
-			!(hardReason == "spread_too_wide" && paperSpreadWithinValidationLimit(c)) {
-			return SimplePaperDecision{Allowed: false, Side: side, Reason: hardReason}
-		}
+	if hardReason, blocked := paperEntryStructureBlock(c); blocked {
+		return SimplePaperDecision{Allowed: false, Side: side, Reason: hardReason}
 	}
 	if !simpleEntryLeaderEligible(c) {
 		return SimplePaperDecision{Allowed: false, Side: side, Reason: "not_top_leader"}
@@ -233,7 +229,7 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 	if !paperSimpleVolumeOK(c) {
 		return SimplePaperDecision{Allowed: false, Side: side, Reason: "volume_not_rising_or_strong"}
 	}
-	moveMin := envFloat("LIVE_PAPER_SIMPLE_MOVE_MIN_PCT", 5.0)
+	moveMin := envFloat("LIVE_PAPER_SIMPLE_MOVE_MIN_PCT", 3.0)
 	dayMove := c.DayUTC24h
 	if side == "LONG" {
 		if dayMove < moveMin {
@@ -266,17 +262,37 @@ func paperSpreadWithinValidationLimit(c candidate) bool {
 	return c.SpreadBps <= paperMax
 }
 
+func paperEntryStructureBlock(c candidate) (string, bool) {
+	paperExt := envFloat("LIVE_PAPER_TRUE_EXTENSION_ATR", envFloat("LIVE_TRUE_EXTENSION_ATR", 2.25)*1.45)
+	if c.ExtensionATR >= paperExt {
+		return "extended", true
+	}
+	paperExhaust := envFloat("LIVE_PAPER_TRUE_EXHAUSTION_RISK", envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5)+1.5)
+	if candidateSpikeCandle(c) || c.Entry.ExhaustionRisk >= paperExhaust {
+		return "exhausted", true
+	}
+	if !paperSpreadWithinValidationLimit(c) {
+		return "spread_too_wide", true
+	}
+	if envBool("LIVE_PAPER_BLOCK_ON_DIRECTIONAL_CONFLICT", false) {
+		if reason := directionalConflictRejectReason(c); reason != "" {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
 func entriesBlockedByPaperAccountHealth(summary accountHealthSummary) (string, bool) {
 	if summary.State == "failed" {
 		return "account_health_failed", true
 	}
-	if summary.State == "degraded" {
+	if summary.State == "degraded" && envBool("LIVE_PAPER_BLOCK_ON_DEGRADED_HEALTH", false) {
 		return "account_health_degraded", true
 	}
 	if summary.State == "partial" && envBool("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", false) {
 		return "account_health_partial", true
 	}
-	if summary.SignedUserDataBackoff {
+	if summary.SignedUserDataBackoff && envBool("LIVE_PAPER_BLOCK_ON_SIGNED_BACKOFF", false) {
 		return "signed_user_data_backoff", true
 	}
 	return "", false

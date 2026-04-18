@@ -2291,7 +2291,8 @@ func main() {
 			acct.AvailableUSDT,
 			paper,
 		)
-		if inMaint {
+		paperIgnoresMaintenance := paper != nil && paper.enabled && envBool("LIVE_PAPER_IGNORE_MAINTENANCE", true)
+		if inMaint && !paperIgnoresMaintenance {
 			reason := blockedWindowReason(maintWindow)
 			fmt.Printf("live: %s window=%s session=%s\n", reason, maintWindow.Name, sessionTag(localMaintNow))
 			statusStore.Set(liveStatus{
@@ -2307,15 +2308,22 @@ func main() {
 			continue
 		}
 		if healthSnap, ok := runtimeLoop.latestHealth(); ok {
-			if reason, blocked := entriesBlockedByAccountHealth(healthSnap.Summary); blocked {
+			healthBlockReason := ""
+			healthBlocked := false
+			if paper != nil && paper.enabled {
+				healthBlockReason, healthBlocked = entriesBlockedByPaperAccountHealth(healthSnap.Summary)
+			} else {
+				healthBlockReason, healthBlocked = entriesBlockedByAccountHealth(healthSnap.Summary)
+			}
+			if healthBlocked {
 				statusStore.Set(liveStatus{
 					Generated:       now,
 					DryRun:          dryRun,
 					LiveEnabled:     safety.enableLiveTrading,
 					AvailableUSDT:   acct.AvailableUSDT,
 					TopDecision:     "blocked",
-					TopDecisionWhy:  reason,
-					TopRejectReason: reason,
+					TopDecisionWhy:  healthBlockReason,
+					TopRejectReason: healthBlockReason,
 				})
 				waitAndReport()
 				continue
@@ -3147,6 +3155,69 @@ func main() {
 		_ = inMaint
 		_ = maintWarmup
 		_ = maintState
+		if paper != nil && paper.enabled {
+			eventLog.Emit(stats.Event{
+				Timestamp:   now,
+				Type:        "INTENT",
+				Simulated:   true,
+				Symbol:      rawBest,
+				Side:        best.Side,
+				TF:          "1m",
+				Strategy:    best.Strat,
+				Score:       best.Entry.CurrentScore,
+				Slope:       best.Entry.ScoreSlope,
+				VolumeRatio: 0,
+				EntryPx:     best.Sig.Entry,
+				Reason:      "dry_run_intent",
+			})
+			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
+			if len(entryDepth) == 0 {
+				entryDepth = fetchOrderBooks(client, []string{rawBest}, envInt("LIVE_PAPER_OB_LEVELS", 20))
+			}
+			mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
+			pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth, currentEntryMap(longInPlay, shortInPlay))
+			if err != nil {
+				fmt.Println("paper enter skip:", err)
+			} else if pp != nil {
+				if missed != nil {
+					missed.MarkTraded(now, best)
+				}
+				markSessionEntry(sessionChurns, now, best)
+				recentEntryAttempts = append(recentEntryAttempts, now)
+				eventLog.Emit(stats.Event{
+					Timestamp:    now,
+					Type:         "POSITION_OPEN",
+					Simulated:    true,
+					Symbol:       pp.Symbol,
+					Side:         pp.Side,
+					TF:           "1m",
+					Strategy:     best.Strat,
+					TriggerState: best.TriggerState,
+					ExitProfile:  best.ExitProfile,
+					Score:        best.Entry.CurrentScore,
+					Slope:        best.Entry.ScoreSlope,
+					Discovery:    best.DiscoveryScore,
+					Trigger:      best.TriggerScore,
+					Execution:    best.ExecutionScore,
+					Combined:     best.CombinedScore,
+					StopDistPct:  pp.StopDistancePct,
+					EntryPx:      pp.Entry,
+					Reason:       "paper_enter",
+				})
+				tg.Sendf("🟦 <b>PAPER ENTER | %s %s</b>\n• <b>Margin:</b> $%.2f | <b>Lev:</b> %dx | <b>Grade:</b> %s | <b>Conf:</b> %.2f\n• <b>Setup:</b> <code>%s</code>\n• <b>Entry:</b> %s | <b>SL:</b> %s\n• <b>TP1:</b> %s | <b>TP2:</b> %s | <b>TP3:</b> %s",
+					pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
+					fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))
+			}
+			if tgVerbose {
+				tg.Sendf("%s", notify.BuildEventHTML("🧪", "DRY RUN INTENT",
+					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
+					fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
+					fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
+				))
+			}
+			waitAndReport()
+			continue
+		}
 		if rest == nil || dryRun {
 			eventLog.Emit(stats.Event{
 				Timestamp:   now,
@@ -3163,45 +3234,6 @@ func main() {
 				Reason:      "dry_run_intent",
 			})
 			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
-			if paper.enabled {
-				if len(entryDepth) == 0 {
-					entryDepth = fetchOrderBooks(client, []string{rawBest}, envInt("LIVE_PAPER_OB_LEVELS", 20))
-				}
-				mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
-				pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth, currentEntryMap(longInPlay, shortInPlay))
-				if err != nil {
-					fmt.Println("paper enter skip:", err)
-				} else if pp != nil {
-					if missed != nil {
-						missed.MarkTraded(now, best)
-					}
-					markSessionEntry(sessionChurns, now, best)
-					recentEntryAttempts = append(recentEntryAttempts, now)
-					eventLog.Emit(stats.Event{
-						Timestamp:    now,
-						Type:         "POSITION_OPEN",
-						Simulated:    true,
-						Symbol:       pp.Symbol,
-						Side:         pp.Side,
-						TF:           "1m",
-						Strategy:     best.Strat,
-						TriggerState: best.TriggerState,
-						ExitProfile:  best.ExitProfile,
-						Score:        best.Entry.CurrentScore,
-						Slope:        best.Entry.ScoreSlope,
-						Discovery:    best.DiscoveryScore,
-						Trigger:      best.TriggerScore,
-						Execution:    best.ExecutionScore,
-						Combined:     best.CombinedScore,
-						StopDistPct:  pp.StopDistancePct,
-						EntryPx:      pp.Entry,
-						Reason:       "paper_enter",
-					})
-					tg.Sendf("🟦 <b>PAPER ENTER | %s %s</b>\n• <b>Margin:</b> $%.2f | <b>Lev:</b> %dx | <b>Grade:</b> %s | <b>Conf:</b> %.2f\n• <b>Setup:</b> <code>%s</code>\n• <b>Entry:</b> %s | <b>SL:</b> %s\n• <b>TP1:</b> %s | <b>TP2:</b> %s | <b>TP3:</b> %s",
-						pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
-						fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))
-				}
-			}
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🧪", "DRY RUN INTENT",
 					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),

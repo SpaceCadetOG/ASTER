@@ -1228,17 +1228,19 @@ func structureTrailDistance(ref, friction float64) float64 {
 
 func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDeadSessionTrading bool, preEODEntryBlockMin int, localMaintNow time.Time, maintEOD maintenanceWindow, postSLCooldown time.Duration, paper *paperTrader, execMgr *liveExecManager, safety safetyConfig, lastOrderAt time.Time, lastOrderBySymbol map[string]time.Time, lastOrderBySymbolSide map[string]time.Time, orderCountByDay, orderCountByHour map[string]int, symbolStopoutLockUntil map[string]time.Time) string {
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+	paperMode := paper != nil && paper.enabled
 	_ = preEODEntryBlockMin
 	_ = maintEOD
 	_ = allowDeadSessionTrading
-	if window, active := activeMaintenanceWindow(localMaintNow, true, runtimeMaintenanceWindows()...); active {
-		return blockedWindowReason(window)
+	if !paperMode {
+		if window, active := activeMaintenanceWindow(localMaintNow, true, runtimeMaintenanceWindows()...); active {
+			return blockedWindowReason(window)
+		}
 	}
 	if postSLCooldown > 0 && hasRecentStopLoss(raw, c.Side, now, postSLCooldown, paper, execMgr) {
 		return "POST_SL_COOLDOWN"
 	}
 	if execMgr != nil {
-		paperMode := paper != nil && paper.enabled
 		if !paperMode {
 			if reason := execMgr.degradedEntryReason(now, c.Entry.Symbol); reason != "" {
 				return reason

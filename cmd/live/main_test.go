@@ -284,6 +284,73 @@ func TestPaperStateSaveLoad(t *testing.T) {
 	}
 }
 
+func TestPaperMaybeEnterActuallyOpensPosition(t *testing.T) {
+	t.Setenv("LIVE_PAPER_ENABLE", "1")
+	t.Setenv("LIVE_STOP_ENGINE_V2_ENABLE", "0")
+	t.Setenv("LIVE_PAPER_STATE_FILE", filepath.Join(t.TempDir(), "paper_state.json"))
+
+	setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+		return accountHealthSummary{State: "healthy"}
+	})
+	t.Cleanup(func() {
+		setLiveEntryAccountHealthProvider(func() accountHealthSummary {
+			return accountHealthSummary{State: "healthy"}
+		})
+	})
+
+	p := newPaperTrader(true, 0, 5)
+	if p == nil || !p.enabled {
+		t.Fatalf("expected enabled paper trader")
+	}
+
+	c := candidate{
+		Side:        "BUY",
+		SpreadBps:   4,
+		FinalRank:   96,
+		VolumeRatio: 1.25,
+		DayUTC24h:   8.2,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			State:        inplay.StateInPlay,
+			CurrentGrade: "A",
+			CurrentScore: 92,
+			ScoreSlope:   0.15,
+			Rank:         2.0,
+			Momentum:     true,
+		},
+	}
+
+	meta := map[string]symbolMeta{
+		"BTCUSDT": {
+			LastPrice: 100.0,
+			OpenPrice: 95.0,
+		},
+	}
+
+	pp, err := p.MaybeEnter(
+		time.Now().UTC(),
+		c,
+		0,
+		10.0,
+		2,
+		meta,
+		map[string]aster.OrderBook{},
+		map[string]inplay.Entry{},
+	)
+	if err != nil {
+		t.Fatalf("expected paper entry success, got err=%v", err)
+	}
+	if pp == nil {
+		t.Fatalf("expected non-nil paper position")
+	}
+	if pp.Symbol != "BTCUSDT" {
+		t.Fatalf("expected BTCUSDT, got %s", pp.Symbol)
+	}
+	if _, ok := p.positions["BTCUSDT"]; !ok {
+		t.Fatalf("expected position persisted in paper trader map")
+	}
+}
+
 func TestParseSymbolMinutesMap(t *testing.T) {
 	m := parseSymbolMinutesMap("BTCUSDT:480, ETHUSDT:240, bad, SOLUSDT:abc")
 	if len(m) != 2 {
