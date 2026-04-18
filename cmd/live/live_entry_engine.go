@@ -86,6 +86,15 @@ func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDec
 	if !simpleEntryLeaderEligible(c) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader"}
 	}
+	if confluenceScorePct, ok := candidateConfluenceScorePct(c); ok {
+		if confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
+			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "confluence_below_min"}
+		}
+		if confluenceScorePct >= envFloat("LIVE_CONFLUENCE_WATCH_MIN_SCORE", 70.0) &&
+			confluenceScorePct < envFloat("LIVE_CONFLUENCE_AUTO_ENTRY_MIN_SCORE", 85.0) {
+			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "watchlist_wait_orderflow"}
+		}
+	}
 	if !simpleStateAllowed(c.Entry.State, side) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "state_not_allowed"}
 	}
@@ -108,6 +117,27 @@ func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDec
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason}
 	}
 	return SimpleEntryDecision{Allowed: true, Side: side, Reason: "entry_now_" + strings.ToLower(side)}
+}
+
+func candidateConfluenceScorePct(c candidate) (float64, bool) {
+	if c.Sig.ConfluenceScore.TotalScore > 0 {
+		total := c.Sig.ConfluenceScore.TotalScore
+		if total <= 1 {
+			total *= 100
+		}
+		return total, true
+	}
+	if c.Sig.Confluence == nil {
+		return 0, false
+	}
+	total, ok := c.Sig.Confluence["total"]
+	if !ok || total <= 0 {
+		return 0, false
+	}
+	if total <= 1 {
+		total *= 100
+	}
+	return total, true
 }
 
 func simpleEntrySide(side string) string {
@@ -207,6 +237,15 @@ func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePap
 	side := simpleEntrySide(c.Side)
 	if side == "" {
 		return SimplePaperDecision{Allowed: false, Reason: "side_unknown"}
+	}
+	if envBool("LIVE_PAPER_SYNC_WITH_LIVE", true) {
+		liveDec := decideSimpleEntryNow(c, acct)
+		return SimplePaperDecision{
+			Allowed:           liveDec.Allowed,
+			Side:              liveDec.Side,
+			Reason:            firstNonEmpty(liveDec.Reason, "no_simple_entry"),
+			PullbackPreferred: c.Entry.CurrentScore >= envFloat("LIVE_PAPER_SIMPLE_PULLBACK_SCORE", 100.0),
+		}
 	}
 	if reason, blocked := entriesBlockedByPaperAccountHealth(acct); blocked {
 		return SimplePaperDecision{Allowed: false, Side: side, Reason: reason}

@@ -29,7 +29,7 @@ func baseSimplePaperLongCandidate() candidate {
 	c := baseSimpleLongCandidate()
 	c.Entry.CurrentGrade = "A"
 	c.Entry.CurrentScore = 92
-	c.Entry.ScoreSlope = 0.04 // advisory only for paper path
+	c.Entry.ScoreSlope = 0.26
 	c.Entry.State = inplay.StateInPlay
 	c.DayUTC24h = 7.2
 	c.VolumeRatio = 1.25
@@ -74,6 +74,24 @@ func TestChoosePrimaryLiveSignalHeatingStateCanEnter(t *testing.T) {
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
 	if got.Strat != "entry_now_long" {
 		t.Fatalf("expected entry_now_long for heating leader, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestDecideSimpleEntryNowConfluenceWatchlistWaits(t *testing.T) {
+	c := baseSimpleLongCandidate()
+	c.Sig.ConfluenceScore.TotalScore = 0.78
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy"})
+	if dec.Allowed || dec.Reason != "watchlist_wait_orderflow" {
+		t.Fatalf("expected watchlist wait for confluence 70-85, got %+v", dec)
+	}
+}
+
+func TestDecideSimpleEntryNowConfluenceAutoEntryAllows(t *testing.T) {
+	c := baseSimpleLongCandidate()
+	c.Sig.ConfluenceScore.TotalScore = 0.90
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy"})
+	if !dec.Allowed || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected auto-entry pass for confluence >=85, got %+v", dec)
 	}
 }
 
@@ -217,22 +235,19 @@ func TestManualStopRetryCandidatesBoundedLadder(t *testing.T) {
 
 func TestDecideSimplePaperEntryNowStrongLeaderPasses(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy"})
-	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "paper_entry_now_long" {
+	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "entry_now_long" {
 		t.Fatalf("expected allowed paper long entry, got %+v", dec)
 	}
 }
 
-func TestDecideSimplePaperEntryNowEliteBalancedStillAllowed(t *testing.T) {
+func TestDecideSimplePaperEntryNowFollowsLiveBalancedBlockByDefault(t *testing.T) {
 	c := baseSimplePaperLongCandidate()
 	c.Entry.CurrentScore = 101
 	c.Entry.State = inplay.StateBalanced
 	c.Entry.ScoreSlope = -0.03
 	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
-	if !dec.Allowed {
-		t.Fatalf("expected elite balanced leader to stay tradable, got %+v", dec)
-	}
-	if !dec.PullbackPreferred {
-		t.Fatalf("expected pullback preference for >=100 score, got %+v", dec)
+	if dec.Allowed || dec.Reason != "state_not_allowed" {
+		t.Fatalf("expected balanced to follow live block by default, got %+v", dec)
 	}
 }
 
@@ -245,43 +260,33 @@ func TestDecideSimplePaperEntryNowLowScoreFails(t *testing.T) {
 	}
 }
 
-func TestDecideSimplePaperEntryNowResetMoveFails(t *testing.T) {
-	c := baseSimplePaperLongCandidate()
-	c.DayUTC24h = 3.2
-	t.Setenv("LIVE_PAPER_SIMPLE_MOVE_MIN_PCT", "5")
-	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
-	if dec.Allowed || dec.Reason != "reset_move_below_threshold" {
-		t.Fatalf("expected reset threshold reject, got %+v", dec)
-	}
-}
-
-func TestDecideSimplePaperEntryNowResetMoveDefaultPassesAtThirtyTwoBps(t *testing.T) {
+func TestDecideSimplePaperEntryNowResetMoveNoLongerPrimaryGateInSyncMode(t *testing.T) {
 	c := baseSimplePaperLongCandidate()
 	c.DayUTC24h = 3.2
 	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
-	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
-		t.Fatalf("expected default 3%% reset threshold to allow, got %+v", dec)
+	if !dec.Allowed || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected sync mode to follow live entry gate, got %+v", dec)
 	}
 }
 
-func TestDecideSimplePaperEntryNowDownsideShortPasses(t *testing.T) {
+func TestDecideSimplePaperEntryNowDownsideShortMustMeetLiveStateByDefault(t *testing.T) {
 	c := baseSimplePaperLongCandidate()
 	c.Side = "SELL"
 	c.Entry.State = inplay.StateCooling
 	c.Entry.CurrentGrade = "A"
 	c.DayUTC24h = -8.4
 	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
-	if !dec.Allowed || dec.Side != "SHORT" || dec.Reason != "paper_entry_now_short" {
-		t.Fatalf("expected allowed downside short, got %+v", dec)
+	if dec.Allowed || dec.Reason != "state_not_allowed" {
+		t.Fatalf("expected short cooling state to follow live block by default, got %+v", dec)
 	}
 }
 
-func TestDecideSimplePaperEntryNowSpreadRelaxedForPaperValidation(t *testing.T) {
+func TestDecideSimplePaperEntryNowSpreadFollowsLiveByDefault(t *testing.T) {
 	c := baseSimplePaperLongCandidate()
-	c.SpreadBps = 14.0 // > live default(10), but within paper relaxed cap
+	c.SpreadBps = 14.0 // > live default(10)
 	dec := decideSimplePaperEntryNow(c, accountHealthSummary{State: "healthy"})
-	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
-		t.Fatalf("expected relaxed paper spread to allow entry, got %+v", dec)
+	if dec.Allowed || dec.Reason != "spread_too_wide" {
+		t.Fatalf("expected spread to follow live block by default, got %+v", dec)
 	}
 }
 
@@ -296,12 +301,21 @@ func TestDecideSimplePaperEntryNowSpreadStillHardFailsWhenExtreme(t *testing.T) 
 
 func TestDecideSimplePaperEntryNowAccountHealthBlocked(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
+	if dec.Allowed || dec.Reason != "account_health_degraded" {
+		t.Fatalf("expected degraded block in sync mode, got %+v", dec)
+	}
+}
+
+func TestDecideSimplePaperEntryNowDegradedHealthCanBeAllowedInLegacyPaperMode(t *testing.T) {
+	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
+	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
 	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
-		t.Fatalf("expected degraded to stay tradable in paper mode by default, got %+v", dec)
+		t.Fatalf("expected legacy paper mode to allow degraded by default, got %+v", dec)
 	}
 }
 
 func TestDecideSimplePaperEntryNowDegradedHealthCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
 	t.Setenv("LIVE_PAPER_BLOCK_ON_DEGRADED_HEALTH", "1")
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
 	if dec.Allowed || dec.Reason != "account_health_degraded" {
@@ -310,6 +324,7 @@ func TestDecideSimplePaperEntryNowDegradedHealthCanBeBlockedByFlag(t *testing.T)
 }
 
 func TestDecideSimplePaperEntryNowPartialHealthAllowedByDefault(t *testing.T) {
+	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "partial"})
 	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
 		t.Fatalf("expected partial health to stay tradable in paper mode by default, got %+v", dec)
@@ -317,6 +332,7 @@ func TestDecideSimplePaperEntryNowPartialHealthAllowedByDefault(t *testing.T) {
 }
 
 func TestDecideSimplePaperEntryNowPartialHealthCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
 	t.Setenv("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", "1")
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "partial"})
 	if dec.Allowed || dec.Reason != "account_health_partial" {
@@ -325,6 +341,7 @@ func TestDecideSimplePaperEntryNowPartialHealthCanBeBlockedByFlag(t *testing.T) 
 }
 
 func TestDecideSimplePaperEntryNowSignedBackoffCanBeBlockedByFlag(t *testing.T) {
+	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
 	t.Setenv("LIVE_PAPER_BLOCK_ON_SIGNED_BACKOFF", "1")
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy", SignedUserDataBackoff: true})
 	if dec.Allowed || dec.Reason != "signed_user_data_backoff" {

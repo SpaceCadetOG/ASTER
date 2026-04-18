@@ -3148,6 +3148,19 @@ func main() {
 				stopPx = entryPx * (1 + d)
 			}
 		}
+		if envBool("LIVE_RISK_SIZING_ENABLE", true) {
+			eq := accountEquity(acct)
+			if eq <= 0 {
+				eq = acct.AvailableUSDT
+			}
+			if sized := riskSizedMarginUSDT(entryPx, stopPx, maxInt(1, effectiveLev), eq); sized > 0 {
+				minStarter := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10.0))
+				if minStarter <= 0 {
+					minStarter = 10.0
+				}
+				effectiveMargin = maxFloat(minStarter, sized)
+			}
+		}
 		if !pureMode {
 			riskDec := risk.Approve(riskShell, risk.Input{
 				Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
@@ -9066,6 +9079,122 @@ func (m *liveExecManager) HadRecentStopLoss(symbol, side string, now time.Time, 
 	return false
 }
 
+func (m *liveExecManager) confluencePreferredLimitPrice(c candidate, mid float64) float64 {
+	if m == nil {
+		return 0
+	}
+	if !envBool("LIVE_CONFLUENCE_LIMIT_REF_ENABLE", true) {
+		return 0
+	}
+	side := toFeatureSide(c.Side)
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if raw == "" {
+		return 0
+	}
+	levelCandidates := make([]float64, 0, 4)
+	if fib50 := m.fib50Level(raw, side); fib50 > 0 {
+		levelCandidates = append(levelCandidates, fib50)
+	}
+	if c.Sig.VPLevel > 0 {
+		levelCandidates = append(levelCandidates, c.Sig.VPLevel)
+	}
+	if c.Sig.VPTargetLevel > 0 {
+		levelCandidates = append(levelCandidates, c.Sig.VPTargetLevel)
+	}
+	if c.Sig.Entry > 0 {
+		levelCandidates = append(levelCandidates, c.Sig.Entry)
+	}
+	if len(levelCandidates) == 0 {
+		return 0
+	}
+	maxDevBps := envFloat("LIVE_CONFLUENCE_LIMIT_MAX_DEV_BPS", 250.0)
+	best := 0.0
+	if side == features.SideLong {
+		// Prefer pullback entries below/near mid for longs.
+		bestBelow := 0.0
+		for _, px := range levelCandidates {
+			if px <= 0 {
+				continue
+			}
+			if px <= mid && (bestBelow == 0 || px > bestBelow) {
+				bestBelow = px
+			}
+		}
+		if bestBelow > 0 {
+			best = bestBelow
+		}
+	} else {
+		// Prefer pullback entries above/near mid for shorts.
+		bestAbove := 0.0
+		for _, px := range levelCandidates {
+			if px <= 0 {
+				continue
+			}
+			if px >= mid && (bestAbove == 0 || px < bestAbove) {
+				bestAbove = px
+			}
+		}
+		if bestAbove > 0 {
+			best = bestAbove
+		}
+	}
+	if best <= 0 {
+		best = levelCandidates[0]
+		minDist := math.Abs(levelCandidates[0] - mid)
+		for i := 1; i < len(levelCandidates); i++ {
+			d := math.Abs(levelCandidates[i] - mid)
+			if d < minDist {
+				minDist = d
+				best = levelCandidates[i]
+			}
+		}
+	}
+	if best <= 0 || mid <= 0 {
+		return 0
+	}
+	devBps := 10000.0 * math.Abs(best-mid) / mid
+	if maxDevBps > 0 && devBps > maxDevBps {
+		return 0
+	}
+	return best
+}
+
+func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 {
+	if m == nil {
+		return 0
+	}
+	limit := envInt("LIVE_CONFLUENCE_FIB_LOOKBACK_15M", 96)
+	if limit < 24 {
+		limit = 24
+	}
+	var bars []types.Candle
+	var err error
+	if m.featureCache != nil {
+		bars, err = m.featureCache.candleSeries(symbol, types.TF15m, limit)
+	} else {
+		bars, err = aster.LoadCandles(symbol, types.TF15m, limit)
+	}
+	if err != nil || len(bars) < 8 {
+		return 0
+	}
+	fc := make([]features.Candle, 0, len(bars))
+	for _, b := range bars {
+		fc = append(fc, features.Candle{
+			Ts: b.T,
+			O:  b.O,
+			H:  b.H,
+			L:  b.L,
+			C:  b.C,
+			V:  b.V,
+		})
+	}
+	imp, ok := strategies.DetectImpulseAndFib(fc, side, limit)
+	if !ok || imp.Level50 <= 0 {
+		return 0
+	}
+	return imp.Level50
+}
+
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
 	if m == nil || m.rest == nil {
 		return fmt.Errorf("execution manager not ready")
@@ -9102,6 +9231,9 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		price = mid * (1 - entryBps/10000.0)
 	} else {
 		price = mid * (1 + entryBps/10000.0)
+	}
+	if preferred := m.confluencePreferredLimitPrice(c, mid); preferred > 0 {
+		price = preferred
 	}
 	meta, err := m.rest.SymbolMeta(rawSym, true)
 	if err != nil {
@@ -17896,6 +18028,37 @@ func accountEquity(s accountSnapshot) float64 {
 		eq += p.Unreal
 	}
 	return eq
+}
+
+func riskSizedMarginUSDT(entry, stop float64, lev int, equity float64) float64 {
+	if entry <= 0 || stop <= 0 || lev <= 0 || equity <= 0 {
+		return 0
+	}
+	riskPct := math.Abs(entry-stop) / entry
+	if riskPct <= 0 {
+		return 0
+	}
+	riskPerTradePct := envFloat("LIVE_RISK_PER_TRADE_PCT", 1.0)
+	if riskPerTradePct <= 0 {
+		riskPerTradePct = 1.0
+	}
+	riskBudgetUSDT := equity * (riskPerTradePct / 100.0)
+	if riskBudgetUSDT <= 0 {
+		return 0
+	}
+	margin := riskBudgetUSDT / (float64(lev) * riskPct)
+	if !isFiniteFloat(margin) || margin <= 0 {
+		return 0
+	}
+	maxMargin := envFloat("LIVE_RISK_SIZING_MAX_MARGIN_USDT", 0)
+	if maxMargin > 0 && margin > maxMargin {
+		margin = maxMargin
+	}
+	return margin
+}
+
+func isFiniteFloat(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 func priceSanityGuardEnabled() bool {

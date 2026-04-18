@@ -327,66 +327,31 @@ func (r *Router) orderFlowHandshake(ctx Context, sig *Signal) bool {
 }
 
 func (r *Router) scoreConfluence(ctx Context, sig Signal) ConfluenceScore {
-	sc := clamp01(sig.Confidence)
-	fs := 0.5
-	reasons := make([]string, 0, 4)
-	if ctx.Snapshot.Flow.VolumeSpike {
-		fs += 0.2
-		reasons = append(reasons, "flow_volume_spike")
+	flowSignal := OrderFlowSignal{
+		CumulativeDelta: ctx.Snapshot.Flow.WhaleDeltaCum,
+		DeltaRising: (sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m > 0) ||
+			(sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m < 0),
 	}
-	if sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m > 0 {
-		fs += 0.2
-		reasons = append(reasons, "flow_whale_aligned")
+	w := CalculateConfluenceScore(ctx, sig.Side, flowSignal)
+	total := w.Score / 100.0
+	minRequired := r.cfg.MinConfluenceScore
+	if minRequired > 1 {
+		minRequired = minRequired / 100.0
 	}
-	if sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m < 0 {
-		fs += 0.2
-		reasons = append(reasons, "flow_whale_aligned")
+	reasons := []string{
+		"confluence_v2",
+		"tier:" + string(w.Tier),
 	}
-	if sig.Side == features.SideLong && ctx.Snapshot.Flow.WhaleDelta1m < 0 {
-		fs -= 0.2
-		reasons = append(reasons, "flow_whale_against")
+	if w.StackedFlow > 0 {
+		reasons = append(reasons, "stacked_imbalance_boost")
 	}
-	if sig.Side == features.SideShort && ctx.Snapshot.Flow.WhaleDelta1m > 0 {
-		fs -= 0.2
-		reasons = append(reasons, "flow_whale_against")
-	}
-	if fs < 0 {
-		fs = 0
-	}
-	if fs > 1 {
-		fs = 1
-	}
-	ss := 0.5
-	if sig.Side == features.SideLong && ctx.Snapshot.Structure.Trend == features.TrendBull {
-		ss += 0.25
-		reasons = append(reasons, "structure_trend_aligned")
-	}
-	if sig.Side == features.SideShort && ctx.Snapshot.Structure.Trend == features.TrendBear {
-		ss += 0.25
-		reasons = append(reasons, "structure_trend_aligned")
-	}
-	if ctx.Snapshot.Sweep != nil && ctx.Snapshot.Sweep.Strength > 0 {
-		ss += 0.15
-		reasons = append(reasons, "structure_sweep_active")
-	}
-	if ctx.Snapshot.VP.POCShare > 0.35 {
-		ss += 0.10
-		reasons = append(reasons, "structure_vp_concentration")
-	}
-	if ss < 0 {
-		ss = 0
-	}
-	if ss > 1 {
-		ss = 1
-	}
-	total := sc*r.cfg.StrategyWeight + fs*r.cfg.FlowWeight + ss*r.cfg.StructureWeight
 	return ConfluenceScore{
 		TotalScore:     total,
-		StrategyScore:  sc,
-		FlowScore:      fs,
-		StructureScore: ss,
+		StrategyScore:  (w.Trend + w.Fibonacci + w.VWAP) / 50.0,
+		FlowScore:      (w.OrderFlow + w.StackedFlow) / 35.0,
+		StructureScore: w.Volume / 25.0,
 		Reasons:        reasons,
-		Approved:       total >= r.cfg.MinConfluenceScore,
+		Approved:       total >= minRequired && (minRequired < 0.70 || w.Approved),
 	}
 }
 
