@@ -2220,16 +2220,37 @@ func main() {
 			}
 			if maintWindow.ForceFlat && maintState.FlatDoneDay[maintWindow.Name] != dayKey {
 				maintState.FlatDoneDay[maintWindow.Name] = dayKey
+				forceFlatWinners := envBool("LIVE_EOD_FORCE_FLAT_WINNERS", false)
+				liveClosed := 0
+				liveKeptWinners := 0
+				paperClosed := 0
+				paperKeptWinners := 0
 				if execMgr != nil {
-					_ = execMgr.ForceCloseAll("EOD_FORCE_FLAT")
+					if forceFlatWinners {
+						_ = execMgr.ForceCloseAll("EOD_FORCE_FLAT")
+					} else {
+						liveClosed, liveKeptWinners, _ = execMgr.ForceCloseNonWinners("EOD_FORCE_FLAT_NON_WINNERS")
+					}
 				}
 				if paper.enabled {
-					paper.ForceCloseAll(now, metaBySymbol, paperDepth, "EOD_FORCE_FLAT")
-					_ = paper.save()
+					if forceFlatWinners {
+						paper.ForceCloseAll(now, metaBySymbol, paperDepth, "EOD_FORCE_FLAT")
+						_ = paper.save()
+					} else {
+						paperClosed, paperKeptWinners = paper.ForceCloseNonWinners(now, metaBySymbol, paperDepth, "EOD_FORCE_FLAT_NON_WINNERS")
+					}
 				}
-				tg.Sendf("%s", notify.BuildEventHTML("✅", "MAINTENANCE FLAT COMPLETE",
-					fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
-				))
+				if forceFlatWinners {
+					tg.Sendf("%s", notify.BuildEventHTML("✅", "MAINTENANCE FLAT COMPLETE",
+						fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+					))
+				} else {
+					tg.Sendf("%s", notify.BuildEventHTML("✅", "MAINTENANCE RISK REDUCTION COMPLETE",
+						fmt.Sprintf("<b>Window:</b> %s", maintWindow.Name),
+						fmt.Sprintf("<b>Closed non-winners:</b> live=%d paper=%d", liveClosed, paperClosed),
+						fmt.Sprintf("<b>Kept winners open:</b> live=%d paper=%d", liveKeptWinners, paperKeptWinners),
+					))
+				}
 			}
 			if maintWindow.HookPath != "" && maintState.HookDoneDay[maintWindow.Name] != dayKey {
 				maintState.HookDoneDay[maintWindow.Name] = dayKey
@@ -6247,7 +6268,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if err != nil {
 		reportLoc = time.Local
 	}
-	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.25)
+	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.40)
 	maxStopPct := envFloat("LIVE_MAX_STOP_PCT", 8.0)
 	if maxStopPct < minStopPct {
 		maxStopPct = minStopPct
@@ -6281,7 +6302,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if harvestMaxStateMin < 0 {
 		harvestMaxStateMin = 0
 	}
-	maxTradesPerDay := envInt("LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY", 2)
+	maxTradesPerDay := envInt("LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY", 5)
 	if maxTradesPerDay < 0 {
 		maxTradesPerDay = 0
 	}
@@ -6589,7 +6610,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	if trailStepBps < 0 {
 		trailStepBps = 0
 	}
-	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.25)
+	minStopPct := envFloat("LIVE_MIN_STOP_PCT", 0.40)
 	maxStopPct := envFloat("LIVE_MAX_STOP_PCT", 8.0)
 	if maxStopPct < minStopPct {
 		maxStopPct = minStopPct
@@ -10712,6 +10733,49 @@ func (m *liveExecManager) ForceCloseAll(reason string) error {
 	return nil
 }
 
+func (m *liveExecManager) ForceCloseNonWinners(reason string) (int, int, error) {
+	if m == nil || m.rest == nil {
+		return 0, 0, nil
+	}
+	now := time.Now().UTC()
+	closed := 0
+	keptWinners := 0
+	for sym, p := range m.positions {
+		if p == nil || p.State == execClosed {
+			continue
+		}
+		mark, _ := m.currentMark(sym)
+		if mark <= 0 {
+			mark = p.LastMark
+		}
+		if mark <= 0 {
+			mark = p.EntryPrice
+		}
+		pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+		if pnl > 0 {
+			keptWinners++
+			continue
+		}
+		dayRealized := m.dayRealizedAt(now)
+		_ = m.cancelRemainingExits(p)
+		_, _ = m.rest.CancelAllOrders(sym)
+		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "FORCE_CLOSE"); err != nil {
+			continue
+		}
+		closed++
+		if m.tg != nil {
+			m.tg.Sendf("%s", notify.BuildEventHTML("⚠️", "FORCED CLOSE REQUESTED",
+				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
+				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
+				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
+				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
+			))
+		}
+	}
+	_ = m.save()
+	return closed, keptWinners, nil
+}
+
 func (m *liveExecManager) ForceCloseSymbol(symbol, reason string) (bool, error) {
 	if m == nil || m.rest == nil {
 		return false, nil
@@ -12333,6 +12397,35 @@ func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, d
 		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
 	}
 	_ = p.save()
+}
+
+func (p *paperTrader) ForceCloseNonWinners(now time.Time, meta map[string]symbolMeta, depth map[string]aster.OrderBook, reason string) (int, int) {
+	if p == nil || !p.enabled {
+		return 0, 0
+	}
+	closed := 0
+	keptWinners := 0
+	for raw, pos := range p.positions {
+		if pos == nil {
+			continue
+		}
+		mark := meta[raw].LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			mark = pos.Entry
+		}
+		pnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
+		if pnl > 0 {
+			keptWinners++
+			continue
+		}
+		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+		closed++
+	}
+	_ = p.save()
+	return closed, keptWinners
 }
 
 func (p *paperTrader) ForceCloseSymbol(now time.Time, symbol string, meta map[string]symbolMeta, depth map[string]aster.OrderBook, reason string) bool {
@@ -16289,7 +16382,7 @@ func distForStopMode(price, atr, pctFallback, pctFloor, atrMult float64, mode st
 		pctFallback = envFloat("LIVE_STOP_PCT", 3.0) / 100.0
 	}
 	if pctFloor <= 0 {
-		pctFloor = envFloat("LIVE_STOP_PCT_MIN", 0.25) / 100.0
+		pctFloor = envFloat("LIVE_STOP_PCT_MIN", 0.40) / 100.0
 	}
 	pctDist := price * maxFloat(pctFallback, pctFloor)
 	atrDist := 0.0
@@ -16325,7 +16418,7 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 		entryPx,
 		cand.ATR,
 		envFloat("LIVE_STOP_PCT", 3.0)/100.0,
-		envFloat("LIVE_STOP_PCT_MIN", 0.25)/100.0,
+		envFloat("LIVE_STOP_PCT_MIN", 0.40)/100.0,
 		stopATRMultForReason(name),
 		envStr("LIVE_STOP_MODE", "hybrid"),
 	)

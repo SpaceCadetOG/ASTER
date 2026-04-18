@@ -69,7 +69,7 @@ func DefaultHybridStopConfig() HybridStopConfig {
 		ATRMultReversal:       1.65,
 		ATRMultMeanRevert:     1.20,
 		SweepBufferBps:        18,
-		MinWidthPct:           0.25,
+		MinWidthPct:           0.40,
 		MaxWidthPct:           8.00,
 		MinRRToTP1:            1.00,
 		SoftRejectEnable:      false,
