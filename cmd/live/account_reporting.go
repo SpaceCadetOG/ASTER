@@ -584,7 +584,7 @@ func (m *liveExecManager) applyEntryBlockFromHealthLocked(report accountReport) 
 	if m == nil {
 		return
 	}
-	if report.Health == "healthy" {
+	if report.Health == "healthy" || report.Health == "partial" {
 		m.healthyAccountReads++
 		if m.healthyAccountReads >= 2 {
 			m.entryBlockActive = false
@@ -592,9 +592,14 @@ func (m *liveExecManager) applyEntryBlockFromHealthLocked(report accountReport) 
 		}
 		return
 	}
-	m.entryBlockActive = true
-	m.entryBlockReason = firstNonEmpty(report.HealthDetail, "account_health_degraded")
-	m.healthyAccountReads = 0
+	if report.Health == "failed" || report.Health == "degraded" {
+		m.entryBlockActive = true
+		m.entryBlockReason = firstNonEmpty(report.HealthDetail, "account_health_failed")
+		m.healthyAccountReads = 0
+		return
+	}
+	m.entryBlockActive = false
+	m.entryBlockReason = ""
 }
 
 func formatAccountValue(v float64, missing bool) string {

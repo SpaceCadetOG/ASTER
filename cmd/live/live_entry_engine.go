@@ -92,15 +92,6 @@ func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Tim
 	if dataAge := now.Sub(marketTs); dataAge > time.Duration(envInt("LIVE_SIMPLE_MAX_DATA_AGE_SEC", 3))*time.Second {
 		staleData = true
 	}
-	if staleData && envBool("LIVE_SIMPLE_BLOCK_ON_STALE_DATA", false) {
-		return SimpleEntryDecision{
-			Allowed:           false,
-			Side:              side,
-			Reason:            "stale_data_skew",
-			MarketSnapshotTs:  marketTs,
-			AccountSnapshotTs: accountTs,
-		}
-	}
 	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
@@ -377,9 +368,6 @@ func entriesBlockedByPaperAccountHealth(summary accountHealthSummary) (string, b
 	if summary.State == "failed" {
 		return "account_health_failed", true
 	}
-	if summary.State == "degraded" && envBool("LIVE_PAPER_BLOCK_ON_DEGRADED_HEALTH", false) {
-		return "account_health_degraded", true
-	}
 	if summary.State == "partial" && envBool("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", false) {
 		return "account_health_partial", true
 	}
@@ -392,7 +380,6 @@ func entriesBlockedByPaperAccountHealth(summary accountHealthSummary) (string, b
 func simpleOperationalBlockReason(c candidate) string {
 	blockers := []string{
 		"account_health_failed",
-		"account_health_degraded",
 		"signed_user_data_backoff",
 		"symbol_cooldown",
 		"symbol_loss_cooldown",

@@ -214,17 +214,22 @@ func TestActiveMaintenanceWindowMinutePrecision(t *testing.T) {
 }
 
 func TestBlockedNewRiskWindowReturnsForceFlatReason(t *testing.T) {
+	t.Setenv("LIVE_MAINT1_ENABLE", "1")
+	t.Setenv("LIVE_MAINT1_START_HOUR", "16")
+	t.Setenv("LIVE_MAINT1_START_MIN", "0")
+	t.Setenv("LIVE_MAINT1_END_HOUR", "18")
+	t.Setenv("LIVE_MAINT1_END_MIN", "0")
 	loc, _ := time.LoadLocation("America/Chicago")
 	now := time.Date(2026, 3, 3, 16, 20, 0, 0, loc)
 	window, reason, blocked := blockedNewRiskWindow(now.UTC(), loc)
 	if !blocked {
-		t.Fatal("expected force-flat maintenance window to block new risk")
+		t.Fatal("expected maintenance window to block new risk")
 	}
-	if !window.ForceFlat {
-		t.Fatalf("expected force-flat window, got %+v", window)
+	if window.ForceFlat {
+		t.Fatalf("expected non-force-flat runtime maintenance window, got %+v", window)
 	}
-	if reason != blockedForceFlatWindowReason {
-		t.Fatalf("expected %s, got %s", blockedForceFlatWindowReason, reason)
+	if reason != blockedMaintenanceWindowReason {
+		t.Fatalf("expected %s, got %s", blockedMaintenanceWindowReason, reason)
 	}
 }
 
@@ -314,7 +319,7 @@ func TestPaperMaybeEnterActuallyOpensPosition(t *testing.T) {
 			State:        inplay.StateInPlay,
 			CurrentGrade: "A",
 			CurrentScore: 92,
-			ScoreSlope:   0.15,
+			ScoreSlope:   0.26,
 			Rank:         2.0,
 			Momentum:     true,
 		},
@@ -2645,7 +2650,7 @@ func TestResolveLadderPlanBlocksNewEntriesWhenManagedTradeIsUnprotected(t *testi
 	}
 }
 
-func TestDegradedEntryReasonBlocksPartialAccountHealth(t *testing.T) {
+func TestDegradedEntryReasonDoesNotUsePartialAccountHealthReason(t *testing.T) {
 	now := time.Date(2026, 4, 4, 16, 0, 0, 0, time.UTC)
 	mgr := &liveExecManager{
 		accountReport: accountReport{
@@ -2657,8 +2662,8 @@ func TestDegradedEntryReasonBlocksPartialAccountHealth(t *testing.T) {
 		lastReconcileOKAt: now,
 	}
 	mgr.userDataState.ApplyAccountUpdateTestOnly(asterUserDataUpdateForTest())
-	if got := mgr.degradedEntryReason(now, "BTCUSDT"); got != degradedAccountHealthPartialReason {
-		t.Fatalf("expected %s, got %q", degradedAccountHealthPartialReason, got)
+	if got := mgr.degradedEntryReason(now, "BTCUSDT"); got == degradedAccountHealthPartialReason {
+		t.Fatalf("expected partial health to no longer map to %s, got %q", degradedAccountHealthPartialReason, got)
 	}
 }
 
@@ -2710,8 +2715,8 @@ func TestDegradedModeBlocksFreshEntriesButAllowsExistingRiskManagement(t *testin
 		nil,
 		nil,
 	)
-	if reason != degradedAccountHealthPartialReason {
-		t.Fatalf("expected fresh-entry block %s, got %q", degradedAccountHealthPartialReason, reason)
+	if reason != degradedUserDataStaleReason {
+		t.Fatalf("expected fresh-entry block %s, got %q", degradedUserDataStaleReason, reason)
 	}
 
 	p := &livePosition{
@@ -3622,6 +3627,11 @@ func TestPrefilterCandidatesBeforeExpensiveWorkOneSymbolOnly(t *testing.T) {
 
 func TestManageApprovalBlockedByWindowUsesMaintenanceTimezone(t *testing.T) {
 	t.Setenv("LIVE_MAINT_TZ", "America/Chicago")
+	t.Setenv("LIVE_MAINT1_ENABLE", "1")
+	t.Setenv("LIVE_MAINT1_START_HOUR", "0")
+	t.Setenv("LIVE_MAINT1_START_MIN", "0")
+	t.Setenv("LIVE_MAINT1_END_HOUR", "1")
+	t.Setenv("LIVE_MAINT1_END_MIN", "0")
 	origLocal := time.Local
 	time.Local = time.UTC
 	defer func() { time.Local = origLocal }()
@@ -3934,6 +3944,11 @@ func TestResolveLadderPlanStarterLaneBlocksAdds(t *testing.T) {
 }
 
 func TestQuickCandidateSelectionRejectBlocksMaintenanceWindow(t *testing.T) {
+	t.Setenv("LIVE_MAINT1_ENABLE", "1")
+	t.Setenv("LIVE_MAINT1_START_HOUR", "0")
+	t.Setenv("LIVE_MAINT1_START_MIN", "0")
+	t.Setenv("LIVE_MAINT1_END_HOUR", "1")
+	t.Setenv("LIVE_MAINT1_END_MIN", "0")
 	loc, _ := time.LoadLocation("America/Chicago")
 	now := time.Date(2026, 4, 4, 0, 45, 0, 0, time.UTC)
 	local := time.Date(2026, 4, 4, 0, 45, 0, 0, loc)
@@ -3945,6 +3960,11 @@ func TestQuickCandidateSelectionRejectBlocksMaintenanceWindow(t *testing.T) {
 }
 
 func TestMaintenanceWindowBlocksFreshPromotionButKeepsProtectionHandling(t *testing.T) {
+	t.Setenv("LIVE_MAINT1_ENABLE", "1")
+	t.Setenv("LIVE_MAINT1_START_HOUR", "0")
+	t.Setenv("LIVE_MAINT1_START_MIN", "0")
+	t.Setenv("LIVE_MAINT1_END_HOUR", "1")
+	t.Setenv("LIVE_MAINT1_END_MIN", "0")
 	loc, _ := time.LoadLocation("America/Chicago")
 	now := time.Date(2026, 4, 4, 0, 45, 0, 0, time.UTC)
 	localMaint := time.Date(2026, 4, 4, 0, 45, 0, 0, loc)

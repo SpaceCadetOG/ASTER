@@ -159,8 +159,8 @@ func TestChoosePrimaryLiveSignalDegradedAccountHealthFails(t *testing.T) {
 		})
 	})
 	got := choosePrimaryLiveSignal(baseSimpleLongCandidate(), time.Now().UTC())
-	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
-		t.Fatalf("expected no_simple_entry when account health blocks entry, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat == "none" {
+		t.Fatalf("expected degraded health to be non-blocking, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -178,8 +178,8 @@ func TestSessionLabelMetadataOnlyDoesNotChangeSimpleRouting(t *testing.T) {
 }
 
 func TestEntriesBlockedByAccountHealth(t *testing.T) {
-	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "degraded"}); !blocked || reason != "account_health_degraded" {
-		t.Fatalf("expected degraded block, got blocked=%v reason=%q", blocked, reason)
+	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "degraded"}); blocked || reason != "" {
+		t.Fatalf("expected degraded to be non-blocking, got blocked=%v reason=%q", blocked, reason)
 	}
 	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "failed"}); !blocked || reason != "account_health_failed" {
 		t.Fatalf("expected failed block, got blocked=%v reason=%q", blocked, reason)
@@ -315,25 +315,8 @@ func TestDecideSimplePaperEntryNowSpreadStillHardFailsWhenExtreme(t *testing.T) 
 
 func TestDecideSimplePaperEntryNowAccountHealthBlocked(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
-	if dec.Allowed || dec.Reason != "account_health_degraded" {
-		t.Fatalf("expected degraded block in sync mode, got %+v", dec)
-	}
-}
-
-func TestDecideSimplePaperEntryNowDegradedHealthCanBeAllowedInLegacyPaperMode(t *testing.T) {
-	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
-	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
-	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
-		t.Fatalf("expected legacy paper mode to allow degraded by default, got %+v", dec)
-	}
-}
-
-func TestDecideSimplePaperEntryNowDegradedHealthCanBeBlockedByFlag(t *testing.T) {
-	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
-	t.Setenv("LIVE_PAPER_BLOCK_ON_DEGRADED_HEALTH", "1")
-	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "degraded"})
-	if dec.Allowed || dec.Reason != "account_health_degraded" {
-		t.Fatalf("expected degraded block with flag, got %+v", dec)
+	if !dec.Allowed || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected degraded health to be non-blocking, got %+v", dec)
 	}
 }
 
