@@ -5525,16 +5525,11 @@ func (m *liveExecManager) degradedEntryReason(now time.Time, symbol string) stri
 		return degradedReconcileStaleReason
 	}
 	report := m.ensureAccountReportFresh(now.UTC(), 30*time.Second)
-	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{
+	if _, blocked := entriesBlockedByAccountHealth(accountHealthSummary{
 		State:                 strings.ToLower(strings.TrimSpace(report.Health)),
 		SignedUserDataBackoff: signedUserDataBackoffActive(now.UTC()),
 	}); blocked {
-		switch reason {
-		case "signed_user_data_backoff":
-			return degradedUserDataStaleReason
-		default:
-			return degradedAccountHealthPartialReason
-		}
+		return degradedAccountHealthPartialReason
 	}
 	if !m.userDataFresh() {
 		return degradedUserDataStaleReason

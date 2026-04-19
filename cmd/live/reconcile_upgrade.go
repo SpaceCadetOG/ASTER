@@ -18,9 +18,6 @@ func entriesBlockedByAccountHealth(summary accountHealthSummary) (string, bool) 
 	if summary.State == "failed" {
 		return "account_health_failed", true
 	}
-	if summary.SignedUserDataBackoff {
-		return "signed_user_data_backoff", true
-	}
 	return "", false
 }
 

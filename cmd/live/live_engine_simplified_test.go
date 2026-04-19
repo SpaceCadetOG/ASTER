@@ -184,8 +184,8 @@ func TestEntriesBlockedByAccountHealth(t *testing.T) {
 	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "failed"}); !blocked || reason != "account_health_failed" {
 		t.Fatalf("expected failed block, got blocked=%v reason=%q", blocked, reason)
 	}
-	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "healthy", SignedUserDataBackoff: true}); !blocked || reason != "signed_user_data_backoff" {
-		t.Fatalf("expected signed-user backoff block, got blocked=%v reason=%q", blocked, reason)
+	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "healthy", SignedUserDataBackoff: true}); blocked || reason != "" {
+		t.Fatalf("expected signed-user backoff to be non-blocking, got blocked=%v reason=%q", blocked, reason)
 	}
 	if reason, blocked := entriesBlockedByAccountHealth(accountHealthSummary{State: "healthy"}); blocked || reason != "" {
 		t.Fatalf("expected healthy clear, got blocked=%v reason=%q", blocked, reason)
@@ -337,11 +337,10 @@ func TestDecideSimplePaperEntryNowPartialHealthCanBeBlockedByFlag(t *testing.T) 
 	}
 }
 
-func TestDecideSimplePaperEntryNowSignedBackoffCanBeBlockedByFlag(t *testing.T) {
+func TestDecideSimplePaperEntryNowSignedBackoffIsNonBlocking(t *testing.T) {
 	t.Setenv("LIVE_PAPER_SYNC_WITH_LIVE", "0")
-	t.Setenv("LIVE_PAPER_BLOCK_ON_SIGNED_BACKOFF", "1")
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy", SignedUserDataBackoff: true})
-	if dec.Allowed || dec.Reason != "signed_user_data_backoff" {
-		t.Fatalf("expected signed backoff block with flag, got %+v", dec)
+	if !dec.Allowed || dec.Reason != "paper_entry_now_long" {
+		t.Fatalf("expected signed backoff to be non-blocking, got %+v", dec)
 	}
 }

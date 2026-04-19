@@ -371,16 +371,12 @@ func entriesBlockedByPaperAccountHealth(summary accountHealthSummary) (string, b
 	if summary.State == "partial" && envBool("LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH", false) {
 		return "account_health_partial", true
 	}
-	if summary.SignedUserDataBackoff && envBool("LIVE_PAPER_BLOCK_ON_SIGNED_BACKOFF", false) {
-		return "signed_user_data_backoff", true
-	}
 	return "", false
 }
 
 func simpleOperationalBlockReason(c candidate) string {
 	blockers := []string{
 		"account_health_failed",
-		"signed_user_data_backoff",
 		"symbol_cooldown",
 		"symbol_loss_cooldown",
 		"stopout_lock",
