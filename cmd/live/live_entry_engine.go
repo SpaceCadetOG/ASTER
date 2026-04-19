@@ -88,7 +88,11 @@ func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Tim
 	if side == "" {
 		return SimpleEntryDecision{Allowed: false, Reason: "side_unknown", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
+	staleData := false
 	if dataAge := now.Sub(marketTs); dataAge > time.Duration(envInt("LIVE_SIMPLE_MAX_DATA_AGE_SEC", 3))*time.Second {
+		staleData = true
+	}
+	if staleData && envBool("LIVE_SIMPLE_BLOCK_ON_STALE_DATA", false) {
 		return SimpleEntryDecision{
 			Allowed:           false,
 			Side:              side,
@@ -103,11 +107,12 @@ func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Tim
 	if !simpleEntryLeaderEligible(c) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
+	confluenceHardGate := envBool("LIVE_SIMPLE_CONFLUENCE_HARD_GATE", false)
 	if confluenceScorePct, ok := candidateConfluenceScorePct(c); ok {
-		if confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
+		if confluenceHardGate && confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
 			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "confluence_below_min", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 		}
-		if confluenceScorePct >= envFloat("LIVE_CONFLUENCE_WATCH_MIN_SCORE", 70.0) &&
+		if confluenceHardGate && confluenceScorePct >= envFloat("LIVE_CONFLUENCE_WATCH_MIN_SCORE", 70.0) &&
 			confluenceScorePct < envFloat("LIVE_CONFLUENCE_AUTO_ENTRY_MIN_SCORE", 85.0) {
 			return SimpleEntryDecision{Allowed: false, Side: side, Reason: "watchlist_wait_orderflow", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 		}
@@ -133,10 +138,14 @@ func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Tim
 	if reason := directionalConflictRejectReason(c); reason != "" {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
+	reason := "entry_now_" + strings.ToLower(side)
+	if staleData {
+		reason = reason + "_stale_warn"
+	}
 	return SimpleEntryDecision{
 		Allowed:           true,
 		Side:              side,
-		Reason:            "entry_now_" + strings.ToLower(side),
+		Reason:            reason,
 		MarketSnapshotTs:  marketTs,
 		AccountSnapshotTs: accountTs,
 	}

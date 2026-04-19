@@ -64,8 +64,8 @@ func TestDecideSimpleEntryNowBlocksStaleDataSkew(t *testing.T) {
 	c := baseSimpleLongCandidate()
 	c.Entry.LastSeen = now.Add(-4 * time.Second)
 	dec := decideSimpleEntryNowAt(c, accountHealthSummary{State: "healthy", AsOf: now}, now)
-	if dec.Allowed || dec.Reason != "stale_data_skew" {
-		t.Fatalf("expected stale_data_skew reject, got %+v", dec)
+	if !dec.Allowed || dec.Reason != "entry_now_long_stale_warn" {
+		t.Fatalf("expected stale data warning without hard block, got %+v", dec)
 	}
 }
 
@@ -91,17 +91,19 @@ func TestChoosePrimaryLiveSignalHeatingStateCanEnter(t *testing.T) {
 
 func TestDecideSimpleEntryNowConfluenceWatchlistWaits(t *testing.T) {
 	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = time.Now().UTC()
 	c.Sig.ConfluenceScore.TotalScore = 0.78
-	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy"})
-	if dec.Allowed || dec.Reason != "watchlist_wait_orderflow" {
-		t.Fatalf("expected watchlist wait for confluence 70-85, got %+v", dec)
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy", AsOf: time.Now().UTC()})
+	if !dec.Allowed || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected watchlist confluence to be advisory by default, got %+v", dec)
 	}
 }
 
 func TestDecideSimpleEntryNowConfluenceAutoEntryAllows(t *testing.T) {
 	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = time.Now().UTC()
 	c.Sig.ConfluenceScore.TotalScore = 0.90
-	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy"})
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy", AsOf: time.Now().UTC()})
 	if !dec.Allowed || dec.Reason != "entry_now_long" {
 		t.Fatalf("expected auto-entry pass for confluence >=85, got %+v", dec)
 	}
