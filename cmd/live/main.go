@@ -2921,11 +2921,8 @@ func main() {
 		if ladderCfg.StarterUSDT > 0 {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
-		eligibility.StarterAllowed = starterLaneEligible(best) && starterLaneQualityReady(best)
+		eligibility.StarterAllowed = starterLaneEligible(best)
 		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat)
-		if starterLaneEligible(best) && !eligibility.StarterAllowed {
-			addEligibilityBlock(&eligibility, "starter_lane_needs_persistence_or_reset")
-		}
 		bestMeta := metaBySymbol[rawBest]
 		if emitTerminal {
 			fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
@@ -3016,25 +3013,7 @@ func main() {
 			}
 		}
 		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
-			recordCandidateDecision(cmdCtx, best, "POST_SL_COOLDOWN")
-			addEligibilityBlock(&eligibility, "POST_SL_COOLDOWN")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"POST_SL_COOLDOWN",
-				},
-			})
-			waitAndReport()
-			continue
+			recordCandidateDecision(cmdCtx, best, "POST_SL_COOLDOWN_WARN")
 		}
 		_ = allowDeadSessionTrading
 		if !pureMode && !symbolCooldownSameSide.Allow(rawBest+"|"+strings.ToUpper(strings.TrimSpace(best.Side)), now) {
@@ -11927,17 +11906,12 @@ func (p *paperTrader) blocksSymbolTradeBudget(symbol string, now time.Time, c ca
 		p.symbolTradeDay[raw] = dayKey
 		p.symbolTradeCount[raw] = 0
 	}
-	if p.symbolTradeCount[raw] < p.maxTradesPerDay {
-		return false, ""
+	if p.symbolTradeCount[raw] >= p.maxTradesPerDay {
+		// Advisory-only: keep tracking budget saturation for logs/analysis, but do not hard-block entries.
+		return false, fmt.Sprintf("symbol trade budget advisory (%d/day)", p.maxTradesPerDay)
 	}
-	exceptional := strings.EqualFold(c.Entry.CurrentGrade, "A+") &&
-		(c.Entry.State == inplay.StateInPlay || c.Entry.State == inplay.StatePumping) &&
-		c.Entry.ScoreSlope >= envFloat("LIVE_PAPER_SYMBOL_REENTRY_EXCEPTION_SLOPE", 0.85) &&
-		c.Conf >= envFloat("LIVE_PAPER_SYMBOL_REENTRY_EXCEPTION_CONF", 0.78)
-	if exceptional {
-		return false, ""
-	}
-	return true, fmt.Sprintf("symbol trade budget reached (%d/day)", p.maxTradesPerDay)
+	_ = c
+	return false, ""
 }
 
 func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta map[string]symbolMeta, current map[string]inplay.Entry) (*paperPosition, string) {
@@ -12068,6 +12042,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	if blocked, reason := p.blocksSymbolTradeBudget(raw, now, c); blocked {
 		return nil, fmt.Errorf("%s", reason)
+	} else if strings.TrimSpace(reason) != "" {
+		fmt.Printf("paper enter advisory: %s\n", strings.TrimSpace(reason))
 	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
