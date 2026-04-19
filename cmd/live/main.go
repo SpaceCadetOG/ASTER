@@ -11537,13 +11537,13 @@ func (p *paperTrader) ConsolePositions(meta map[string]symbolMeta) []string {
 		return nil
 	}
 	lines := make([]string, 0, len(rows)+2)
-	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+-----+")
-	lines = append(lines, "  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | lev |")
+	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+---------+-----+")
+	lines = append(lines, "  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | uPnL%   | lev |")
 	for i := 0; i < len(rows); i++ {
 		r := rows[i]
 		lines = append(lines, formatConsolePositionLine("paper", r.sym, r.side, r.size, r.entry, r.mark, r.upnl, r.lev))
 	}
-	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+-----+")
+	lines = append(lines, "  +------+------------+-------+-----------+------------+------------+----------+---------+-----+")
 	return lines
 }
 
@@ -17466,13 +17466,13 @@ func printAccountSnapshot(snap accountSnapshot, realizedToday float64) {
 	if len(snap.Positions) == 0 {
 		return
 	}
-	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+-----+")
-	fmt.Println("  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | lev |")
+	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+---------+-----+")
+	fmt.Println("  | src  | symbol     | side  | qty       | entry      | mark       | uPnL     | uPnL%   | lev |")
 	for i := 0; i < len(snap.Positions); i++ {
 		p := snap.Positions[i]
 		fmt.Println(formatConsolePositionLine("live", p.Symbol, p.Side, p.SizeAbs, p.Entry, p.Mark, p.Unreal, int(p.Leverage)))
 	}
-	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+-----+")
+	fmt.Println("  +------+------------+-------+-----------+------------+------------+----------+---------+-----+")
 }
 
 func printScanHeader(now time.Time) {
@@ -17535,14 +17535,19 @@ func formatConsolePositionLine(scope, symbol, side string, size, entry, mark, up
 	if lev <= 0 {
 		lev = 1
 	}
+	denom := entry * size
+	upnlPct := 0.0
+	if denom > 0 {
+		upnlPct = (upnl / denom) * 100.0
+	}
 	pnlColor := "\033[37m"
 	if upnl > 0 {
 		pnlColor = "\033[32m"
 	} else if upnl < 0 {
 		pnlColor = "\033[31m"
 	}
-	return fmt.Sprintf("  | %-4s | %-10s | %-5s | %9.4f | %10s | %10s | %s%+8.2f%s | %3dx |",
-		scope, sym, strings.ToUpper(strings.TrimSpace(side)), size, fmtPrice(entry), fmtPrice(mark), pnlColor, upnl, market.ResetColor(), lev)
+	return fmt.Sprintf("  | %-4s | %-10s | %-5s | %9.4f | %10s | %10s | %s%+8.2f%s | %s%+7.2f%%%s | %3dx |",
+		scope, sym, strings.ToUpper(strings.TrimSpace(side)), size, fmtPrice(entry), fmtPrice(mark), pnlColor, upnl, market.ResetColor(), pnlColor, upnlPct, market.ResetColor(), lev)
 }
 
 func filterBalances(rows []aster.Balance, assets []string) []aster.Balance {
