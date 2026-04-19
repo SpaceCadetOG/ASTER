@@ -4401,6 +4401,16 @@ func beLockPriceBuffered(side string, entry, currentStop, beLockBps float64) flo
 	return be - buffer
 }
 
+func allowMoveToBreakEven(hitTP1 bool, unrealizedPct float64) bool {
+	if !envBool("LIVE_BE_REQUIRE_TP1_OR_MIN_UPNL", true) {
+		return true
+	}
+	if hitTP1 {
+		return true
+	}
+	return unrealizedPct >= envFloat("LIVE_BE_MIN_UPNL_PCT", 5.0)
+}
+
 func targetHit(side string, mark, target float64) bool {
 	if mark <= 0 || target <= 0 {
 		return false
@@ -4463,11 +4473,11 @@ func lockToRPrice(side string, entry, stop, r float64) float64 {
 	return entry - risk*r
 }
 
-func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mfeR float64, stage *protectionStage, firstProtectAt *time.Time, protectedStop *float64, beLockBps float64) (float64, bool) {
+func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mfeR float64, stage *protectionStage, firstProtectAt *time.Time, protectedStop *float64, beLockBps float64, allowBE bool) (float64, bool) {
 	stage1R, stage2R := liveProtectionLevels()
 	newStop := currentStop
 	changed := false
-	if mfeR >= stage1R {
+	if allowBE && mfeR >= stage1R {
 		be := beLockPriceBuffered(side, entry, currentStop, beLockBps)
 		if stop, ok := improvedStopPrice(side, newStop, be); ok {
 			newStop = stop
@@ -8448,12 +8458,14 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 	p.ManageAnchorPrice = mark
 	p.LastMark = mark
 	updateFavorableRLive(p, mark)
-	if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+	_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
+	allowBE := allowMoveToBreakEven(p.HitTP1, upct)
+	if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps, allowBE); tightened {
 		p.StopPrice = newStop
 	}
 	tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 	beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
-	if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
+	if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR && allowBE {
 		if be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps); be > 0 {
 			if stop, improved := improvedStopPrice(p.Side, p.StopPrice, be); improved {
 				p.StopPrice = stop
@@ -9764,8 +9776,10 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
+			_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+			allowBE := allowMoveToBreakEven(p.HitTP1, upct)
 			if shouldAdvanceProtection(p) {
-				if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+				if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps, allowBE); tightened {
 					p.StopPrice = newStop
 					if err := m.placeOrReplaceStop(p); err == nil {
 						changed = true
@@ -9787,7 +9801,6 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					p.Symbol, p.Side, sponsorSnap.Score, sponsorSnap.Slope, sponsorSnap.State, p.ConfluenceRefreshCount)
 				changed = true
 			}
-			_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 			if stop, tightened := applyPnLProtectiveStop(p.Side, p.EntryPrice, p.StopPrice, mark, upct); tightened {
 				p.StopReason = "PNL_PROTECT_LOCK"
 				p.StopPrice = stop
@@ -9797,7 +9810,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			}
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
-			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
+			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR && allowBE {
 				be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 					p.StopPrice = be
@@ -9835,7 +9848,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					WeakSponsorStreak: p.WeakSponsorStreak,
 				})
 				runnerState := currentRunnerState
-				if mv.MoveStopToBE {
+				if mv.MoveStopToBE && allowBE {
 					be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 						p.StopPrice = be
@@ -11144,7 +11157,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 					}
 				}
 			}
-			if dec.MoveStopToBE {
+			if dec.MoveStopToBE && allowMoveToBreakEven(p.HitTP1, upct) {
 				be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 					p.StopPrice = be
@@ -11203,7 +11216,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		}
 		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed) {
 			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (p.Sponsored || confluenceRefreshActive(now, p.LastConfluenceRefresh))) {
-				if stop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, maxFloat(p.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps); tightened {
+				if stop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, maxFloat(p.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps, allowMoveToBreakEven(p.HitTP1, upct)); tightened {
 					p.StopReason = "MOMENTUM_FADE_TIGHTEN"
 					p.StopPrice = stop
 					_ = m.placeOrReplaceStop(p)
@@ -12307,7 +12320,8 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
-		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps); tightened {
+		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
+		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
 			pos.Stop = newStop
 		}
 		updateGivebackMetrics(pos.MaxFavorableR, unrealizedRiskR(pos.Side, pos.Entry, pos.Stop, mark), &pos.CaptureRatio, &pos.MaxGivebackR)
@@ -12321,9 +12335,11 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		stopCheckPx := triggerPriceForRef(p.stopTriggerRef, markPx, lastPx)
 		tpCheckPx := triggerPriceForRef(p.tpTriggerRef, markPx, lastPx)
+		_, upctStop := realizedFromFill(pos.Side, pos.Entry, stopCheckPx, maxFloat(pos.Qty, 1))
+		allowBE := allowMoveToBreakEven(pos.HitTP1, upctStop)
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
 		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.10), tp1R)
-		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR {
+		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR && allowBE {
 			be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
 				pos.Stop = be
@@ -12346,14 +12362,14 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				BarsHeld:          int(now.Sub(pos.OpenedAt) / time.Minute),
 				StallBars:         pos.StallBars,
 				NearFriction:      p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
-				UnrealizedPct:     abs((stopCheckPx-pos.Entry)/maxFloat(pos.Entry, 1e-9)) * 100,
+				UnrealizedPct:     upctStop,
 				Sponsored:         pos.Sponsored,
 				HitTP1:            pos.HitTP1,
 				HitTP2:            pos.HitTP2,
 				HitTP3:            pos.HitTP3,
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 			})
-			if dec.MoveStopToBE {
+			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
 					pos.Stop = be
@@ -12370,13 +12386,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			}
 		}
 
-		// 1) Hard stop has highest priority.
-		if (sideBuy && stopCheckPx <= pos.Stop) || (!sideBuy && stopCheckPx >= pos.Stop) {
-			p.exitPortion(now, pos, "SL", stopCheckPx, pos.Qty, meta[raw], depth[raw])
-			continue
-		}
-
-		// 2) Scale-out targets.
+		// 1) Scale-out targets first so TP wins when TP/SL are both touched in one cycle.
 		if !pos.HitTP1 && p.hitPrice(sideBuy, tpCheckPx, frTP1) {
 			pos.HitTP1 = true
 			if p.tpRatchetOnly {
@@ -12445,6 +12455,12 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			}
 		}
 		if pos == nil {
+			continue
+		}
+
+		// 2) Hard stop after TP checks.
+		if (sideBuy && stopCheckPx <= pos.Stop) || (!sideBuy && stopCheckPx >= pos.Stop) {
+			p.exitPortion(now, pos, "SL", stopCheckPx, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
 
@@ -12546,7 +12562,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				HitTP3:            pos.HitTP3,
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 			})
-			if dec.MoveStopToBE {
+			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
 					pos.Stop = be
@@ -12575,7 +12591,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		}
 		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (pos.HitTP1 || pos.HitTP2 || pos.HitTP3 || pos.ProtectionStage >= protectionStageArmed) {
 			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (pos.Sponsored || confluenceRefreshActive(now, pos.LastConfluenceRefresh))) {
-				if stop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, maxFloat(pos.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps); tightened {
+				if stop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, maxFloat(pos.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upnlPct)); tightened {
 					pos.StopReason = "MOMENTUM_FADE_TIGHTEN"
 					pos.Stop = stop
 					changed = true

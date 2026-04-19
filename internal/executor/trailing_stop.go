@@ -10,6 +10,7 @@ import (
 
 const (
 	DefaultHardStopPct = 0.04
+	defaultBEArmMinPct = 0.05
 )
 
 type TrailSide string
@@ -90,9 +91,9 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 	}
 	st.Last15mClosedCandle = closed15m.Ts
 
-	// Breakeven move at >= 1R.
+	// Breakeven move at >= 1R, but only after TP1 or >=5% open gain.
 	if !st.BreakevenMoved && st.InitialRisk > 0 && closed15m.C > 0 {
-		if reachedOneR(st, closed15m.C) {
+		if reachedOneR(st, closed15m.C) && (st.HitTP1 || unrealizedPct(st, closed15m.C) >= defaultBEArmMinPct) {
 			st.BreakevenMoved = true
 			if strings.EqualFold(string(st.Side), "BUY") {
 				if st.EntryPrice > st.TacticalStop {
@@ -130,6 +131,16 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 	upd.CurrentTacticalStop = st.TacticalStop
 	upd.CurrentHardStop = st.HardStop
 	return upd
+}
+
+func unrealizedPct(st *TrailState, mark float64) float64 {
+	if st == nil || st.EntryPrice <= 0 || mark <= 0 {
+		return 0
+	}
+	if strings.EqualFold(string(st.Side), "BUY") {
+		return (mark - st.EntryPrice) / st.EntryPrice
+	}
+	return (st.EntryPrice - mark) / st.EntryPrice
 }
 
 // UpdateProtectedTrailOn15mClose computes the tactical anchor from closed 15m candles only.

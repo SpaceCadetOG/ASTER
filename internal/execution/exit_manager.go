@@ -24,6 +24,7 @@ type Config struct {
 	RequireStructureLoss   bool
 	ProfitLockTightenR     float64
 	StarterStabilizeBars   int
+	MinUPnLPctForBE        float64
 }
 
 type Manager struct {
@@ -111,6 +112,9 @@ func NewManager(cfg Config) *Manager {
 	if cfg.StarterStabilizeBars <= 0 {
 		cfg.StarterStabilizeBars = 6
 	}
+	if cfg.MinUPnLPctForBE <= 0 {
+		cfg.MinUPnLPctForBE = 5.0
+	}
 	return &Manager{cfg: cfg}
 }
 
@@ -187,8 +191,10 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		return dec
 	}
 	if in.WeakFlow && in.MFER >= m.cfg.WeakFlowArmBER {
-		dec.MoveStopToBE = true
-		dec.Reason = "WEAK_FLOW_BE"
+		if in.HitTP1 || in.UnrealizedPct >= m.cfg.MinUPnLPctForBE {
+			dec.MoveStopToBE = true
+			dec.Reason = "WEAK_FLOW_BE"
+		}
 	}
 	if in.StallBars >= m.cfg.StallBarsForTighten && in.NearFriction {
 		dec.TightenStop = true

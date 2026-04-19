@@ -17,7 +17,7 @@ func TestFrontRunTarget(t *testing.T) {
 func TestEvaluateProtectWeakFlowBE(t *testing.T) {
 	m := NewManager(Config{})
 	dec := m.EvaluateProtect(ProtectInput{
-		Side: "BUY", Entry: 100, Stop: 98, Mark: 101, MFER: 0.6, MAER: 0.2, WeakFlow: true, UnrealizedPct: 0.6,
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 101, MFER: 0.6, MAER: 0.2, WeakFlow: true, UnrealizedPct: 6.0,
 	})
 	if !dec.MoveStopToBE {
 		t.Fatalf("expected BE arm on weak flow")

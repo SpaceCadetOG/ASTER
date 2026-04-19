@@ -32,6 +32,7 @@ func TestUpdateTrail_OnlyOnNew15mClose(t *testing.T) {
 func TestUpdateTrail_MovesBreakevenAt1R(t *testing.T) {
 	now := time.Now().UTC()
 	st := NewTrailState("ETHUSDT", SideBuy, 100, 98, TrailConfig{})
+	st.HitTP1 = true
 	closeCandle := features.Candle{
 		Ts: now,
 		C:  102.5, // >1R from entry given risk=2
@@ -42,6 +43,22 @@ func TestUpdateTrail_MovesBreakevenAt1R(t *testing.T) {
 	}
 	if st.TacticalStop != 100 {
 		t.Fatalf("expected stop at breakeven (100), got %.4f", st.TacticalStop)
+	}
+}
+
+func TestUpdateTrail_DoesNotMoveBreakevenBeforeTP1OrMinPct(t *testing.T) {
+	now := time.Now().UTC()
+	st := NewTrailState("ETHUSDT", SideBuy, 100, 98, TrailConfig{})
+	closeCandle := features.Candle{
+		Ts: now,
+		C:  102.5, // 1R reached, but only +2.5% and TP1 not hit.
+	}
+	upd := UpdateTrail(&st, closeCandle, 99.5)
+	if upd.BreakevenMoved {
+		t.Fatalf("expected BE to remain off before TP1 or 5%% open gain")
+	}
+	if st.TacticalStop != 98 {
+		t.Fatalf("expected stop to remain initial (98), got %.4f", st.TacticalStop)
 	}
 }
 
