@@ -878,7 +878,7 @@ func (t *missedTracker) Update(now time.Time, meta map[string]symbolMeta, longCu
 			if ok {
 				if cur.State == inplay.StateExhausted {
 					expireReason = "exhaustion"
-				} else if cur.ScoreOffPeakPct > 20 || cur.FollowThroughDecayScore > 0.55 {
+				} else if volumeCollapseDetected(now, cur) {
 					expireReason = "volume_collapsed"
 				} else if cur.Rank > 0 && opp.BestRank > 0 && cur.Rank < opp.BestRank*0.70 {
 					expireReason = "rank_faded"
@@ -929,6 +929,28 @@ func forwardExcursionPct(side string, entry, px float64) float64 {
 		return ((px - entry) / entry) * 100.0
 	}
 	return ((entry - px) / entry) * 100.0
+}
+
+func volumeCollapseDetected(now time.Time, cur inplay.Entry) bool {
+	offPeakMax := envFloat("LIVE_VOLUME_COLLAPSE_OFFPEAK_MAX_PCT", 20.0)
+	decayMax := envFloat("LIVE_VOLUME_COLLAPSE_DECAY_MAX_SCORE", 0.55)
+	if isWeekendLocal(now) {
+		relax := envFloat("LIVE_WEEKEND_VOLUME_COLLAPSE_RELAX_MULT", 1.25)
+		if relax > 1 {
+			offPeakMax *= relax
+			decayMax = math.Min(0.99, decayMax*relax)
+		}
+	}
+	return cur.ScoreOffPeakPct > offPeakMax || cur.FollowThroughDecayScore > decayMax
+}
+
+func isWeekendLocal(ts time.Time) bool {
+	switch ts.Weekday() {
+	case time.Saturday, time.Sunday:
+		return true
+	default:
+		return false
+	}
 }
 
 func alternatePullbackExists(item *missedOpportunity, longCurrent, shortCurrent map[string]inplay.Entry) bool {
@@ -1238,7 +1260,9 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 		}
 	}
 	if postSLCooldown > 0 && hasRecentStopLoss(raw, c.Side, now, postSLCooldown, paper, execMgr) {
-		return "POST_SL_COOLDOWN"
+		if !shouldBypassWithFastLane(c, "POST_SL_COOLDOWN") {
+			return "POST_SL_COOLDOWN"
+		}
 	}
 	if execMgr != nil {
 		if !paperMode {
@@ -1252,7 +1276,9 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 	}
 	if !pureMode {
 		if reason := safetyReject(safety, c, localMaintNow, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
-			return reason
+			if !shouldBypassWithFastLane(c, reason) {
+				return reason
+			}
 		}
 	}
 	if execMgr != nil && execMgr.HasActiveSymbol(c.Entry.Symbol) {

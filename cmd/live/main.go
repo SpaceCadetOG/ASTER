@@ -3017,46 +3017,52 @@ func main() {
 		}
 		_ = allowDeadSessionTrading
 		if !pureMode && !symbolCooldownSameSide.Allow(rawBest+"|"+strings.ToUpper(strings.TrimSpace(best.Side)), now) {
-			recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
-			addEligibilityBlock(&eligibility, "symbol_cooldown_same_side")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"throttle_symbol_same_side_cooldown",
-				},
-			})
-			waitAndReport()
-			continue
+			if !shouldBypassWithFastLane(best, "symbol_cooldown_same_side") {
+				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
+				addEligibilityBlock(&eligibility, "symbol_cooldown_same_side")
+				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
+				statusStore.Set(st)
+				eventLog.Emit(stats.Event{
+					Timestamp: now,
+					Type:      "GATE_DECISION",
+					Symbol:    rawBest,
+					Side:      best.Side,
+					Strategy:  best.Strat,
+					Score:     best.Entry.CurrentScore,
+					Slope:     best.Entry.ScoreSlope,
+					GateAllow: boolPtr(false),
+					GateReasons: []string{
+						"throttle_symbol_same_side_cooldown",
+					},
+				})
+				waitAndReport()
+				continue
+			}
+			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_symbol_cooldown_same_side")
 		}
 		if !pureMode && !symbolCooldownFlipSide.Allow(rawBest, now) {
-			recordCandidateDecision(cmdCtx, best, "symbol_cooldown_flip_side")
-			addEligibilityBlock(&eligibility, "symbol_cooldown_flip_side")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"throttle_symbol_flip_side_cooldown",
-				},
-			})
-			waitAndReport()
-			continue
+			if !shouldBypassWithFastLane(best, "symbol_cooldown_flip_side") {
+				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_flip_side")
+				addEligibilityBlock(&eligibility, "symbol_cooldown_flip_side")
+				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
+				statusStore.Set(st)
+				eventLog.Emit(stats.Event{
+					Timestamp: now,
+					Type:      "GATE_DECISION",
+					Symbol:    rawBest,
+					Side:      best.Side,
+					Strategy:  best.Strat,
+					Score:     best.Entry.CurrentScore,
+					Slope:     best.Entry.ScoreSlope,
+					GateAllow: boolPtr(false),
+					GateReasons: []string{
+						"throttle_symbol_flip_side_cooldown",
+					},
+				})
+				waitAndReport()
+				continue
+			}
+			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_symbol_cooldown_flip_side")
 		}
 		if !pureMode && !intentDedupe.Allow(rawBest, best.Side, now) {
 			recordCandidateDecision(cmdCtx, best, "intent_dedupe")
@@ -3330,23 +3336,29 @@ func main() {
 			eligibility.StarterAllowed = false
 		}
 		if ladderPlan.RejectReason != "" {
-			recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
-			addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
-			waitAndReport()
-			continue
+			if !shouldBypassWithFastLane(best, ladderPlan.RejectReason) {
+				recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
+				addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
+				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
+				waitAndReport()
+				continue
+			}
+			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_"+ladderPlan.RejectReason)
 		}
 		if !ladderPlan.IsAdd {
 			if reason := postWinCooldownRejectReason(now, best, execMgr); reason != "" {
-				recordCandidateDecision(cmdCtx, best, reason)
-				addEligibilityBlock(&eligibility, reason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
-				waitAndReport()
-				continue
+				if !shouldBypassWithFastLane(best, reason) {
+					recordCandidateDecision(cmdCtx, best, reason)
+					addEligibilityBlock(&eligibility, reason)
+					finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+					statusStore.Set(st)
+					fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
+					waitAndReport()
+					continue
+				}
+				recordCandidateDecision(cmdCtx, best, "fastlane_bypass_"+reason)
 			}
 		}
 		if reason := activeWinnerRejectReason(now, best, execMgr, paper, metaBySymbol, longCurrent, shortCurrent); reason != "" {
@@ -4372,6 +4384,23 @@ func beLockPrice(side string, entry, beLockBps float64) float64 {
 	return entry * (1 + d)
 }
 
+func beLockPriceBuffered(side string, entry, currentStop, beLockBps float64) float64 {
+	be := beLockPrice(side, entry, beLockBps)
+	bufferR := envFloat("LIVE_BE_BUFFER_R", 0.0)
+	if bufferR <= 0 || entry <= 0 || currentStop <= 0 {
+		return be
+	}
+	risk := math.Abs(entry - currentStop)
+	if risk <= 0 {
+		return be
+	}
+	buffer := risk * bufferR
+	if strings.EqualFold(side, "SELL") {
+		return be + buffer
+	}
+	return be - buffer
+}
+
 func targetHit(side string, mark, target float64) bool {
 	if mark <= 0 || target <= 0 {
 		return false
@@ -4439,7 +4468,7 @@ func applyLiveProtectionState(now time.Time, side string, entry, currentStop, mf
 	newStop := currentStop
 	changed := false
 	if mfeR >= stage1R {
-		be := beLockPrice(side, entry, beLockBps)
+		be := beLockPriceBuffered(side, entry, currentStop, beLockBps)
 		if stop, ok := improvedStopPrice(side, newStop, be); ok {
 			newStop = stop
 			changed = true
@@ -8425,7 +8454,7 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 	tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 	beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
 	if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
-		if be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps); be > 0 {
+		if be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps); be > 0 {
 			if stop, improved := improvedStopPrice(p.Side, p.StopPrice, be); improved {
 				p.StopPrice = stop
 				p.ProtectedStop = stop
@@ -9769,7 +9798,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			tp1R := tp1RFromBracket(p.EntryPrice, p.StopPrice, p.TP1Price)
 			beArmR := beArmThreshold(envFloat("LIVE_BE_ARM_R", 1.35), tp1R)
 			if m.beLockBps > 0 && beArmR > 0 && p.MaxFavorableR >= beArmR {
-				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+				be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 					p.StopPrice = be
 					if err := m.placeOrReplaceStop(p); err == nil {
@@ -9807,7 +9836,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				})
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE {
-					be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+					be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 						p.StopPrice = be
 						_ = m.placeOrReplaceStop(p)
@@ -11116,7 +11145,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				}
 			}
 			if dec.MoveStopToBE {
-				be := beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
+				be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 					p.StopPrice = be
 					_ = m.placeOrReplaceStop(p)
@@ -12295,7 +12324,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
 		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.10), tp1R)
 		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR {
-			be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+			be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
 				pos.Stop = be
 			}
@@ -12325,7 +12354,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 			})
 			if dec.MoveStopToBE {
-				be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
 					pos.Stop = be
 				}
@@ -12363,7 +12392,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				}
 				pos.HitTP1 = true
 				if p.beLockBps > 0 {
-					pos.Stop = beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+					pos.Stop = beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				}
 			}
 		}
@@ -12518,7 +12547,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 			})
 			if dec.MoveStopToBE {
-				be := beLockPrice(pos.Side, pos.Entry, p.beLockBps)
+				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
 					pos.Stop = be
 				}
@@ -19650,6 +19679,45 @@ func isSoftReject(reason string) bool     { return classifyRejectReason(reason) 
 func isCapacityReject(reason string) bool { return classifyRejectReason(reason) == rejectClassCapacity }
 func isStateReject(reason string) bool {
 	return classifyRejectReason(reason) == rejectClassStateCooldown
+}
+
+func fastLaneCandidate(c candidate) bool {
+	if !envBool("LIVE_A_PLUS_FASTLANE_ENABLE", true) {
+		return false
+	}
+	minGrade := strings.TrimSpace(envStr("LIVE_A_PLUS_FASTLANE_MIN_GRADE", "A+"))
+	if minGrade == "" {
+		minGrade = "A+"
+	}
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue(minGrade) {
+		return false
+	}
+	minScore := envFloat("LIVE_A_PLUS_FASTLANE_MIN_SCORE", 120.0)
+	if c.Entry.CurrentScore < minScore {
+		return false
+	}
+	minSlope := envFloat("LIVE_A_PLUS_FASTLANE_MIN_SLOPE", -0.10)
+	if c.Entry.ScoreSlope < minSlope {
+		return false
+	}
+	return true
+}
+
+func fastLaneReasonEligible(reason string) bool {
+	raw := strings.ToLower(strings.TrimSpace(reason))
+	if raw == "" {
+		return false
+	}
+	return strings.Contains(raw, "cooldown") ||
+		strings.Contains(raw, "persistence") ||
+		strings.Contains(raw, "starter_waiting") ||
+		strings.Contains(raw, "starter_lane") ||
+		strings.Contains(raw, "reentry_") ||
+		strings.Contains(raw, "post_win_opposite_cooldown")
+}
+
+func shouldBypassWithFastLane(c candidate, reason string) bool {
+	return fastLaneCandidate(c) && fastLaneReasonEligible(reason)
 }
 
 func persistenceEligibilityScore(c candidate) float64 {
