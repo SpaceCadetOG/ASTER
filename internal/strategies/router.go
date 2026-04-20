@@ -3,6 +3,7 @@ package strategies
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"go-machine/internal/data"
 	"go-machine/internal/features"
@@ -383,5 +384,95 @@ func gradeValue(g string) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+// DefaultRouter is an additive intent router used by Slice A.
+// It does not replace the legacy Router/Eval path.
+type DefaultRouter struct {
+	confirmation ConfirmationEngine
+	strategies   []DetectStrategy
+}
+
+func NewDefaultRouter(confirm ConfirmationEngine) *DefaultRouter {
+	return &DefaultRouter{
+		confirmation: confirm,
+		strategies: []DetectStrategy{
+			ImpulseContinuationStrategy{},
+			AnchoredVWAPPullbackStrategy{},
+			VPRetestStrategy{},
+		},
+	}
+}
+
+func (r *DefaultRouter) Route(ctx StrategyContext) []*EntryIntent {
+	intents := make([]*EntryIntent, 0, len(r.strategies))
+	for _, strat := range r.strategies {
+		if strat == nil {
+			continue
+		}
+		intent, ok := strat.Detect(ctx)
+		if !ok || intent == nil {
+			continue
+		}
+		intents = append(intents, intent)
+	}
+	return intents
+}
+
+// SignalToEntryIntent wraps a legacy Signal into an explicit EntryIntent so
+// downstream systems always see a strategy id instead of an anonymous setup.
+func SignalToEntryIntent(sig Signal, ctx StrategyContext) *EntryIntent {
+	if !sig.Active {
+		return nil
+	}
+	side := SideLong
+	if sig.Side == features.SideShort {
+		side = SideShort
+	}
+	reasons := make([]string, 0, len(sig.Reasons)+1)
+	if sig.Name != "" {
+		reasons = append(reasons, sig.Name)
+	}
+	reasons = append(reasons, sig.Reasons...)
+	intent := &EntryIntent{
+		Strategy:        strategyIDFromSignal(sig.Name),
+		Symbol:          ctx.Symbol,
+		Side:            side,
+		Timeframe:       "1m",
+		Confidence:      sig.Confidence,
+		Score:           ctx.CandidateScore,
+		TriggerPrice:    sig.Entry,
+		Invalidation:    sig.Stop,
+		StopPrice:       sig.Stop,
+		TimeStopBars:    0,
+		ReasonCodes:     reasons,
+		RequiresConfirm: []string{},
+		Features:        map[string]float64{},
+		CreatedAt:       time.Now().UTC(),
+	}
+	if sig.TP1 > 0 {
+		intent.Targets = append(intent.Targets, Target{Label: "tp1", Price: sig.TP1, Size: 0.50})
+	}
+	if sig.TP2 > 0 {
+		intent.Targets = append(intent.Targets, Target{Label: "tp2", Price: sig.TP2, Size: 0.30})
+	}
+	if sig.TP3 > 0 {
+		intent.Targets = append(intent.Targets, Target{Label: "tp3", Price: sig.TP3, Size: 0.20})
+	}
+	return intent
+}
+
+func strategyIDFromSignal(name string) StrategyID {
+	low := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.Contains(low, "impulse"), strings.Contains(low, "breakout"), strings.Contains(low, "entry_now"):
+		return StrategyImpulseContinuation
+	case strings.Contains(low, "vwap"):
+		return StrategyAnchoredVWAPPullback
+	case strings.Contains(low, "vp"), strings.Contains(low, "volume_profile"), strings.Contains(low, "retest"):
+		return StrategyVPRetest
+	default:
+		return StrategyUnknown
 	}
 }

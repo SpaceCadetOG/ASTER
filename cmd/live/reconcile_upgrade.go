@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +14,121 @@ type accountHealthSummary struct {
 	State                 string
 	SignedUserDataBackoff bool
 	AsOf                  time.Time
+}
+
+type VenueOrderState string
+
+const (
+	VenueOrderPending  VenueOrderState = "pending"
+	VenueOrderAcked    VenueOrderState = "acked"
+	VenueOrderUnknown  VenueOrderState = "unknown"
+	VenueOrderRejected VenueOrderState = "rejected"
+	VenueOrderFilled   VenueOrderState = "filled"
+	VenueOrderCanceled VenueOrderState = "canceled"
+)
+
+type UnknownExecutionGuard struct {
+	Symbol      string
+	IntentID    string
+	State       VenueOrderState
+	FreezeUntil time.Time
+}
+
+func buildIntentID(symbol, strategyID string, trigger float64, now time.Time) string {
+	return fmt.Sprintf("%s|%s|%.6f|%d",
+		strings.ToUpper(strings.TrimSpace(symbol)),
+		strings.TrimSpace(strategyID),
+		trigger,
+		now.UTC().Unix()/5,
+	)
+}
+
+func (m *liveExecManager) handleUnknownExecution(symbol, intentID string) {
+	if m == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(symbol))
+	if raw == "" {
+		return
+	}
+	freezeSec := envIntRU("LIVE_EXEC_UNKNOWN_FREEZE_SEC", 8)
+	guard := UnknownExecutionGuard{
+		Symbol:      raw,
+		IntentID:    strings.TrimSpace(intentID),
+		State:       VenueOrderUnknown,
+		FreezeUntil: time.Now().UTC().Add(time.Duration(freezeSec) * time.Second),
+	}
+	m.mu.Lock()
+	if m.unknownExecGuards == nil {
+		m.unknownExecGuards = map[string]UnknownExecutionGuard{}
+	}
+	m.unknownExecGuards[raw] = guard
+	m.mu.Unlock()
+	logUnknownExecution(raw, guard.IntentID, "mark_unknown", "execution outcome ambiguous")
+}
+
+func (m *liveExecManager) isUnknownExecutionFrozen(symbol string) bool {
+	if m == nil {
+		return false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(symbol))
+	m.mu.RLock()
+	guard, ok := m.unknownExecGuards[raw]
+	m.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	return time.Now().UTC().Before(guard.FreezeUntil)
+}
+
+func (m *liveExecManager) clearUnknownExecutionGuard(symbol string) {
+	if m == nil {
+		return
+	}
+	raw := strings.ToUpper(strings.TrimSpace(symbol))
+	m.mu.Lock()
+	delete(m.unknownExecGuards, raw)
+	m.mu.Unlock()
+}
+
+func (m *liveExecManager) reconcileAfterUnknown(symbol, intentID string) string {
+	if m == nil || m.rest == nil {
+		return "not_ready"
+	}
+	raw := strings.ToUpper(strings.TrimSpace(symbol))
+	orderFound := false
+	if orders, err := m.rest.OpenOrders(raw); err == nil {
+		orderFound = len(orders) > 0
+	}
+	posFound := false
+	if rows, err := m.rest.PositionRisk(raw); err == nil {
+		view := remotePositionForSide(rows, "")
+		posFound = view.QtyAbs > 0
+	}
+	switch {
+	case orderFound:
+		logUnknownReconcile(raw, intentID, "order_found")
+		return "order_found"
+	case posFound:
+		logUnknownReconcile(raw, intentID, "position_found")
+		return "position_found"
+	default:
+		m.clearUnknownExecutionGuard(raw)
+		logUnknownReconcile(raw, intentID, "cleared")
+		return "cleared"
+	}
+}
+
+func envIntRU(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return i
 }
 
 func entriesBlockedByAccountHealth(summary accountHealthSummary) (string, bool) {

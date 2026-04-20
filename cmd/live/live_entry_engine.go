@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	flowpkg "go-machine/internal/flow"
+	"go-machine/internal/indicators"
 	"go-machine/internal/inplay"
 	"go-machine/internal/strategies"
 )
@@ -25,6 +27,12 @@ type SimplePaperDecision struct {
 	PullbackPreferred bool
 }
 
+type UnifiedEntryDecision struct {
+	Simple  SimpleEntryDecision
+	Entry   strategies.EntryDecision
+	Context strategies.StrategyContext
+}
+
 var liveEntryAccountHealthProvider = func() accountHealthSummary {
 	return accountHealthSummary{State: "healthy"}
 }
@@ -41,6 +49,386 @@ func currentAccountHealth() accountHealthSummary {
 	return liveEntryAccountHealthProvider()
 }
 
+func DecideEntry(ctx strategies.StrategyContext, router *strategies.DefaultRouter, confirmer strategies.ConfirmationEngine) strategies.EntryDecision {
+	if router == nil {
+		router = strategies.NewDefaultRouter(confirmer)
+	}
+	intents := router.Route(ctx)
+	if len(intents) == 0 {
+		return strategies.EntryDecision{
+			Allowed:      false,
+			RejectReason: "no_strategy_intent",
+			RejectCodes:  []string{"no_strategy_intent"},
+			FinalScore:   0,
+		}
+	}
+	for _, intent := range intents {
+		if intent == nil {
+			continue
+		}
+		cfx := strategies.ScoreConfluenceForIntent(ctx, intent)
+		intent.Score += cfx.Score
+		intent.ReasonCodes = append(intent.ReasonCodes, cfx.Reasons...)
+	}
+	best := chooseBestIntent(intents)
+	if best == nil {
+		return strategies.EntryDecision{
+			Allowed:      false,
+			RejectReason: "no_best_intent",
+			RejectCodes:  []string{"no_best_intent"},
+			FinalScore:   0,
+		}
+	}
+	hardBlocks := evaluateHardBlocks(ctx, best)
+	if len(hardBlocks) > 0 {
+		return strategies.EntryDecision{
+			Allowed:      false,
+			Intent:       best,
+			RejectReason: strings.Join(hardBlocks, ","),
+			RejectCodes:  append([]string(nil), hardBlocks...),
+			FinalScore:   best.Score,
+			HardBlocks:   append([]string(nil), hardBlocks...),
+		}
+	}
+	okFlow, flowBlocks := confirmIntent(ctx, best)
+	if !okFlow {
+		return strategies.EntryDecision{
+			Allowed:      false,
+			Intent:       best,
+			RejectReason: strings.Join(flowBlocks, ","),
+			RejectCodes:  append([]string(nil), flowBlocks...),
+			FinalScore:   best.Score,
+		}
+	}
+	if confirmer != nil {
+		ok, confirmBlocks := confirmer.Confirm(ctx, best)
+		if !ok {
+			return strategies.EntryDecision{
+				Allowed:      false,
+				Intent:       best,
+				RejectReason: strings.Join(confirmBlocks, ","),
+				RejectCodes:  append([]string(nil), confirmBlocks...),
+				FinalScore:   best.Score,
+			}
+		}
+	}
+	return strategies.EntryDecision{
+		Allowed:    true,
+		Intent:     best,
+		FinalScore: best.Score,
+	}
+}
+
+func confirmIntent(ctx strategies.StrategyContext, intent *strategies.EntryIntent) (bool, []string) {
+	if intent == nil {
+		return false, []string{"nil_intent"}
+	}
+	needsFlow := false
+	for _, req := range intent.RequiresConfirm {
+		if req == "flow_confirm" {
+			needsFlow = true
+			break
+		}
+	}
+	if !needsFlow {
+		return true, nil
+	}
+	if !envBool("LIVE_FLOW_CONFIRM_ENABLE", true) {
+		return true, nil
+	}
+	switch intent.Side {
+	case strategies.SideLong:
+		if (ctx.Flow.StackedImbalanceBull || ctx.Flow.AbsorptionBull || ctx.Flow.DeltaDivBull) &&
+			ctx.Flow.Confidence >= envFloat("LIVE_FLOW_MIN_CONFIDENCE", 0.55) {
+			return true, nil
+		}
+		return false, []string{"flow_confirm_missing"}
+	case strategies.SideShort:
+		if (ctx.Flow.StackedImbalanceBear || ctx.Flow.AbsorptionBear || ctx.Flow.DeltaDivBear) &&
+			ctx.Flow.Confidence >= envFloat("LIVE_FLOW_MIN_CONFIDENCE", 0.55) {
+			return true, nil
+		}
+		return false, []string{"flow_confirm_missing"}
+	default:
+		return false, []string{"flow_confirm_missing"}
+	}
+}
+
+func buildAnchoredVWAPSnapshot(candles []indicators.Candle, events []indicators.MarketEvent, markPrice float64) indicators.AnchoredVWAPSnapshot {
+	anchor := indicators.SelectPrimaryAnchor(candles, events)
+	return indicators.ComputeAnchoredVWAP(candles, anchor, markPrice)
+}
+
+func buildFlowSnapshot(trades []flowpkg.Trade, book flowpkg.OrderBook, candles []flowpkg.Candle) strategies.FlowSnapshot {
+	snap := flowpkg.BuildFlowSnapshot(trades, book, candles)
+	return strategies.FlowSnapshot{
+		Delta:                snap.Delta,
+		CumDelta:             snap.CumDelta,
+		DeltaDivBull:         snap.DeltaDivBull,
+		DeltaDivBear:         snap.DeltaDivBear,
+		AbsorptionBull:       snap.AbsorptionBull,
+		AbsorptionBear:       snap.AbsorptionBear,
+		StackedImbalanceBull: snap.StackedImbalanceBull,
+		StackedImbalanceBear: snap.StackedImbalanceBear,
+		UnfinishedBusinessUp: snap.UnfinishedBusinessUp,
+		UnfinishedBusinessDn: snap.UnfinishedBusinessDn,
+		Confidence:           snap.Confidence,
+		Summary:              snap.Summary,
+	}
+}
+
+func syntheticAVWAPCandles(c candidate, markPrice float64, now time.Time) []indicators.Candle {
+	if markPrice <= 0 {
+		return nil
+	}
+	baseVol := c.VolumeRatio
+	if baseVol <= 0 {
+		baseVol = 1
+	}
+	slope := c.SlowSlope
+	if slope > 1 {
+		slope = 1
+	}
+	if slope < -1 {
+		slope = -1
+	}
+	step := slope * 0.0008
+	out := make([]indicators.Candle, 0, 12)
+	for i := 0; i < 12; i++ {
+		k := float64(i - 11)
+		closePx := markPrice * (1.0 + step*k)
+		if closePx <= 0 {
+			closePx = markPrice
+		}
+		openPx := closePx * (1.0 - step*0.5)
+		highPx := max(closePx, openPx) * 1.0006
+		lowPx := min(closePx, openPx) * 0.9994
+		out = append(out, indicators.Candle{
+			Time:   now.Add(time.Duration(i-11) * time.Minute),
+			Open:   openPx,
+			High:   highPx,
+			Low:    lowPx,
+			Close:  closePx,
+			Volume: baseVol + float64(i)*0.05,
+		})
+	}
+	return out
+}
+
+func syntheticFlowTrades(c candidate, markPrice float64, now time.Time) []flowpkg.Trade {
+	if markPrice <= 0 {
+		return nil
+	}
+	size := max(1.0, mathAbs(c.OFIRaw))
+	isBuy := strings.EqualFold(strings.TrimSpace(c.Side), "BUY")
+	return []flowpkg.Trade{
+		{Time: now.Add(-2 * time.Second), Price: markPrice * 0.999, Size: size * 0.6, IsBuyAgg: isBuy, IsSellAgg: !isBuy},
+		{Time: now.Add(-1 * time.Second), Price: markPrice, Size: size * 0.4, IsBuyAgg: isBuy, IsSellAgg: !isBuy},
+	}
+}
+
+func syntheticFlowBook(markPrice float64) flowpkg.OrderBook {
+	if markPrice <= 0 {
+		return flowpkg.OrderBook{}
+	}
+	return flowpkg.OrderBook{
+		Bids: []flowpkg.BookLevel{
+			{Price: markPrice * 0.9995, Size: 120},
+			{Price: markPrice * 0.9990, Size: 70},
+			{Price: markPrice * 0.9985, Size: 40},
+		},
+		Asks: []flowpkg.BookLevel{
+			{Price: markPrice * 1.0005, Size: 110},
+			{Price: markPrice * 1.0010, Size: 65},
+			{Price: markPrice * 1.0015, Size: 35},
+		},
+	}
+}
+
+func syntheticFlowCandles(markPrice float64, now time.Time) []flowpkg.Candle {
+	if markPrice <= 0 {
+		return nil
+	}
+	return []flowpkg.Candle{
+		{Time: now.Add(-2 * time.Minute), Open: markPrice * 0.999, High: markPrice * 1.002, Low: markPrice * 0.998, Close: markPrice * 1.001, Volume: 100},
+		{Time: now.Add(-1 * time.Minute), Open: markPrice * 1.001, High: markPrice * 1.003, Low: markPrice * 0.999, Close: markPrice, Volume: 120},
+	}
+}
+
+func chooseBestIntent(intents []*strategies.EntryIntent) *strategies.EntryIntent {
+	if len(intents) == 0 {
+		return nil
+	}
+	best := intents[0]
+	for _, it := range intents[1:] {
+		if it == nil {
+			continue
+		}
+		if best == nil || it.Score > best.Score {
+			best = it
+		}
+	}
+	return best
+}
+
+func evaluateHardBlocks(ctx strategies.StrategyContext, intent *strategies.EntryIntent) []string {
+	var out []string
+	if isSpreadTooWide(ctx) {
+		out = append(out, "spread_too_wide")
+	}
+	if isLiquidityInsufficient(ctx) {
+		out = append(out, "insufficient_liquidity")
+	}
+	if isOrderLegalityBlocked(ctx, intent) {
+		out = append(out, "order_legality_block")
+	}
+	return out
+}
+
+func isSpreadTooWide(ctx strategies.StrategyContext) bool {
+	maxSpread := envFloat("LIVE_MAX_SPREAD_BPS", envFloat("LIVE_OB_MAX_SPREAD_BPS", 10))
+	return ctx.SpreadBps > maxSpread
+}
+
+func isLiquidityInsufficient(ctx strategies.StrategyContext) bool {
+	// Thin adapter for Slice A; live engine still uses deeper checks downstream.
+	return ctx.MarkPrice <= 0
+}
+
+func isOrderLegalityBlocked(ctx strategies.StrategyContext, intent *strategies.EntryIntent) bool {
+	if intent == nil {
+		return true
+	}
+	if intent.TriggerPrice <= 0 || intent.StopPrice <= 0 {
+		return true
+	}
+	return false
+}
+
+func strategyContextFromCandidate(c candidate, now time.Time) strategies.StrategyContext {
+	mark := c.LastClose
+	if mark <= 0 {
+		mark = c.SessionVWAP
+	}
+	if mark <= 0 {
+		mark = 1
+	}
+	side := strings.ToUpper(strings.TrimSpace(c.Side))
+	trend5 := "flat"
+	trend15 := "flat"
+	if c.FastSlope > 0 {
+		trend5 = "up"
+	} else if c.FastSlope < 0 {
+		trend5 = "down"
+	}
+	if c.SlowSlope > 0 {
+		trend15 = "up"
+	} else if c.SlowSlope < 0 {
+		trend15 = "down"
+	}
+	impulseUp := side == "BUY" && c.Entry.Momentum
+	impulseDown := side == "SELL" && c.Entry.Momentum
+	avwapCandles := syntheticAVWAPCandles(c, mark, now)
+	avwapSnap := buildAnchoredVWAPSnapshot(avwapCandles, nil, mark)
+	flowSnap := buildFlowSnapshot(syntheticFlowTrades(c, mark, now), syntheticFlowBook(mark), syntheticFlowCandles(mark, now))
+	return strategies.StrategyContext{
+		Symbol:         strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+		Now:            now,
+		MarkPrice:      mark,
+		IndexPrice:     mark,
+		LastPrice:      mark,
+		SpreadBps:      c.SpreadBps,
+		VolumeRatio:    c.VolumeRatio,
+		OIChangePct:    c.OFIZ,
+		CandidateScore: c.Entry.CurrentScore,
+		SessionVWAP:    c.SessionVWAP,
+		WeeklyVWAP:     c.SessionVWAP,
+		VWAPDistBps:    pctBps(mark, c.SessionVWAP),
+		AnchoredVWAP:   avwapSnap,
+		AVWAPLabel:     avwapSnap.Anchor.Label,
+		Flow: flowSnap,
+		Trend: strategies.TrendSnapshot{
+			TF5mDir:         trend5,
+			TF15mDir:        trend15,
+			Slope5m:         c.FastSlope,
+			Slope15m:        c.SlowSlope,
+			Compression:     c.Entry.State == inplay.StateBalanced || c.Entry.State == inplay.StateHeating,
+			ImpulseUp:       impulseUp,
+			ImpulseDown:     impulseDown,
+			BreakoutLevel:   mark,
+			BreakdownLevel:  mark,
+			CompressionHigh: mark * 1.001,
+			CompressionLow:  mark * 0.999,
+		},
+		MarketRegime: c.SessionLabel,
+		Raw:          c,
+	}
+}
+
+func pctBps(a, b float64) float64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	return ((a - b) / a) * 10000.0
+}
+
+func buildUnknownIntent(c candidate, ctx strategies.StrategyContext, now time.Time) *strategies.EntryIntent {
+	side := strategies.SideLong
+	if strings.EqualFold(strings.TrimSpace(c.Side), "SELL") {
+		side = strategies.SideShort
+	}
+	entry := c.LastClose
+	if entry <= 0 {
+		entry = ctx.MarkPrice
+	}
+	stop := c.LastClose
+	if stop <= 0 {
+		stop = entry
+	}
+	return &strategies.EntryIntent{
+		Strategy:     strategies.StrategyUnknown,
+		Symbol:       ctx.Symbol,
+		Side:         side,
+		Timeframe:    "1m",
+		Confidence:   c.Conf,
+		Score:        c.Entry.CurrentScore,
+		TriggerPrice: entry,
+		Invalidation: stop,
+		StopPrice:    stop,
+		Targets:      nil,
+		TimeStopBars: 0,
+		ReasonCodes:  []string{firstNonEmpty(c.Strat, "legacy_entry")},
+		Features: map[string]float64{
+			"candidate_score": c.Entry.CurrentScore,
+			"volume_ratio":    c.VolumeRatio,
+			"spread_bps":      c.SpreadBps,
+		},
+		CreatedAt: now,
+	}
+}
+
+func decideUnifiedEntryAt(c candidate, acct accountHealthSummary, now time.Time) UnifiedEntryDecision {
+	simple := decideSimpleEntryNowLegacyAt(c, acct, now)
+	ctx := strategyContextFromCandidate(c, now)
+	entry := DecideEntry(ctx, strategies.NewDefaultRouter(nil), nil)
+	if !simple.Allowed {
+		entry.Allowed = false
+		if simple.Reason != "" {
+			entry.RejectReason = simple.Reason
+			entry.RejectCodes = append(entry.RejectCodes, simple.Reason)
+		}
+		return UnifiedEntryDecision{Simple: simple, Entry: entry, Context: ctx}
+	}
+	if entry.Intent == nil {
+		entry.Intent = buildUnknownIntent(c, ctx, now)
+	}
+	entry.Allowed = true
+	if entry.FinalScore <= 0 {
+		entry.FinalScore = c.Entry.CurrentScore
+	}
+	return UnifiedEntryDecision{Simple: simple, Entry: entry, Context: ctx}
+}
+
 func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 	if reason, blocked := hardBlockEntry(c); blocked {
 		c.Strat = "none"
@@ -50,10 +438,14 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 		return c
 	}
 
-	dec := decideSimpleEntryNowAt(c, currentAccountHealth(), now)
-	if dec.Allowed {
-		signal := "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Side))
+	dec := decideUnifiedEntryAt(c, currentAccountHealth(), now)
+	if dec.Entry.Allowed && dec.Simple.Allowed {
+		signal := "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Simple.Side))
 		c.Strat = signal
+		if dec.Entry.Intent != nil {
+			c.StrategyID = string(dec.Entry.Intent.Strategy)
+			c.SetupFamily = c.StrategyID
+		}
 		c.Conf = clamp(0.50+min(0.30, max(0, c.Entry.CurrentScore-85.0)*0.01+max(0, c.Entry.ScoreSlope-0.20)*0.80), 0, 0.92)
 		c.Sig = strategies.Signal{
 			Active:       true,
@@ -61,19 +453,24 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 			Side:         toFeatureSide(c.Side),
 			Confidence:   c.Conf,
 			RejectReason: "",
-			Reasons:      []string{dec.Reason},
+			Reasons:      []string{dec.Simple.Reason},
 			Tags:         []string{"entry_now", "starter_only"},
+		}
+		if strings.TrimSpace(c.StrategyID) != "" {
+			c.Sig.SignalSource = append(c.Sig.SignalSource, c.StrategyID)
 		}
 		c.Sig = applySignalRiskGeometry(c, signal)
 		c.RejectReason = ""
-		logSimpleDecision(c, true, dec.Reason)
+		logSimpleDecision(c, true, dec.Simple.Reason)
+		logEntryAllow(dec.Entry, dec.Context)
 		return c
 	}
 
 	c.Strat = "none"
 	c.Conf = 0
 	c.RejectReason = "no_simple_entry"
-	logSimpleDecision(c, false, dec.Reason)
+	logSimpleDecision(c, false, firstNonEmpty(strings.TrimSpace(dec.Simple.Reason), strings.TrimSpace(dec.Entry.RejectReason), "no_simple_entry"))
+	logEntryReject(dec.Entry, dec.Context)
 	return c
 }
 
@@ -82,6 +479,15 @@ func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDec
 }
 
 func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Time) SimpleEntryDecision {
+	dec := decideUnifiedEntryAt(c, acct, now)
+	out := dec.Simple
+	if strings.TrimSpace(out.Reason) == "" {
+		out.Reason = firstNonEmpty(strings.TrimSpace(dec.Entry.RejectReason), "no_simple_entry")
+	}
+	return out
+}
+
+func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now time.Time) SimpleEntryDecision {
 	side := simpleEntrySide(c.Side)
 	marketTs := candidateMarketSnapshotAt(c, now)
 	accountTs := accountSnapshotAt(acct, now)
@@ -139,6 +545,37 @@ func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Tim
 		Reason:            reason,
 		MarketSnapshotTs:  marketTs,
 		AccountSnapshotTs: accountTs,
+	}
+}
+
+func logEntryReject(decision strategies.EntryDecision, ctx strategies.StrategyContext) {
+	strategyID := strategies.StrategyUnknown
+	symbol := ctx.Symbol
+	trigger := 0.0
+	stop := 0.0
+	score := decision.FinalScore
+	if decision.Intent != nil {
+		strategyID = decision.Intent.Strategy
+		symbol = decision.Intent.Symbol
+		trigger = decision.Intent.TriggerPrice
+		stop = decision.Intent.StopPrice
+		if score <= 0 {
+			score = decision.Intent.Score
+		}
+	}
+	log.Printf("entry_reject symbol=%s strategy_id=%s trigger=%.8f stop=%.8f score=%.2f hard_blocks=%q confirm_blocks=%q spread_bps=%.2f vwap_dist_bps=%.2f flow_summary=%q reject_reason=%q",
+		symbol, strategyID, trigger, stop, score, decision.HardBlocks, decision.RejectCodes, ctx.SpreadBps, ctx.VWAPDistBps, ctx.Flow.Summary, firstNonEmpty(decision.RejectReason, "rejected"))
+}
+
+func logEntryAllow(decision strategies.EntryDecision, ctx strategies.StrategyContext) {
+	if decision.Intent == nil {
+		return
+	}
+	log.Printf("entry_allow symbol=%s strategy_id=%s side=%s trigger=%.8f stop=%.8f score=%.2f spread_bps=%.2f vwap_dist_bps=%.2f flow_summary=%q",
+		decision.Intent.Symbol, decision.Intent.Strategy, decision.Intent.Side, decision.Intent.TriggerPrice, decision.Intent.StopPrice, decision.FinalScore, ctx.SpreadBps, ctx.VWAPDistBps, ctx.Flow.Summary)
+	if decision.Intent.Strategy == strategies.StrategyAnchoredVWAPPullback {
+		log.Printf("entry_avwap symbol=%s strategy_id=%s avwap_label=%q avwap=%.8f dev1_upper=%.8f dev1_lower=%.8f avwap_slope=%.8f",
+			ctx.Symbol, decision.Intent.Strategy, ctx.AVWAPLabel, ctx.AnchoredVWAP.VWAP, ctx.AnchoredVWAP.Dev1Upper, ctx.AnchoredVWAP.Dev1Lower, ctx.AnchoredVWAP.Slope)
 	}
 }
 

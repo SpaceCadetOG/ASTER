@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -44,6 +45,7 @@ type candidate struct {
 	Entry                  inplay.Entry
 	Side                   string // BUY/SELL
 	Strat                  string
+	StrategyID             string
 	SetupFamily            string
 	Conf                   float64
 	FinalRank              float64
@@ -655,6 +657,7 @@ type paperPosition struct {
 	MaxAdverseR            float64
 	LastMark               float64
 	EntryReason            string
+	EntryStrategyID        string
 	EntryGrade             string
 	EntryState             inplay.State
 	EntryTrigger           string
@@ -872,6 +875,7 @@ type livePosition struct {
 	CustomTP1R              float64          `json:"customTp1R,omitempty"`
 	CustomTP2R              float64          `json:"customTp2R,omitempty"`
 	EntryReason             string           `json:"entryReason,omitempty"`
+	EntryStrategyID         string           `json:"entryStrategyId,omitempty"`
 	EntrySource             string           `json:"entrySource,omitempty"`
 	EntryGrade              string           `json:"entryGrade,omitempty"`
 	EntryState              string           `json:"entryState,omitempty"`
@@ -1028,6 +1032,7 @@ type liveExecManager struct {
 	reconcileFailCount   int
 	legalityFailCount    map[string]int
 	symbolQuarantineTill map[string]time.Time
+	unknownExecGuards    map[string]UnknownExecutionGuard
 }
 
 type ladderConfig struct {
@@ -6768,6 +6773,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		manualRequests:       map[string]manualManageRequest{},
 		legalityFailCount:    map[string]int{},
 		symbolQuarantineTill: map[string]time.Time{},
+		unknownExecGuards:    map[string]UnknownExecutionGuard{},
 		ladderCfg:            ladderCfg,
 		fundsCfg:             fundsCfg,
 		reentryCfg:           reentryCfg,
@@ -9337,12 +9343,22 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	vals.Set("price", formatFloat(price, meta.PricePrecision))
 
 	now := time.Now().UTC()
+	intentID := buildIntentID(rawSym, firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), price, now)
+	if m.isUnknownExecutionFrozen(rawSym) {
+		logUnknownExecution(rawSym, intentID, "submit_skipped", "symbol frozen by unknown execution guard")
+		return fmt.Errorf("unknown_execution_frozen")
+	}
 	if hasExisting && m.isActive(existing) && starterOnly {
 		return fmt.Errorf("starter-only setup still needs confirmation before add")
 	}
 
 	out, err := m.rest.PlaceOrder(vals)
 	if err != nil {
+		if isAmbiguousVenueOutcome(err) {
+			m.handleUnknownExecution(rawSym, intentID)
+			time.Sleep(time.Duration(envInt("LIVE_EXEC_RECONCILE_AFTER_UNKNOWN_MS", 800)) * time.Millisecond)
+			_ = m.reconcileAfterUnknown(rawSym, intentID)
+		}
 		if isVenueOrderLegalityError(err) {
 			m.recordOrderLegalityFailure(rawSym, err.Error(), now)
 		}
@@ -9374,6 +9390,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		return nil
 	}
 	entryReason := c.Strat
+	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
 	if starterOnly && !strings.EqualFold(entryReason, "continuation_fast_starter") {
 		if strings.EqualFold(c.Strat, "impulsive_short_starter") {
 			entryReason = "impulsive_short_starter"
@@ -9424,6 +9441,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		VPTargetMode:          c.Sig.TargetMode,
 		RejectReason:          c.RejectReason,
 		EntryReason:           entryReason,
+		EntryStrategyID:       entryStrategyID,
 		EntrySource:           "BOT",
 		EntryGrade:            c.Entry.CurrentGrade,
 		EntryState:            string(c.Entry.State),
@@ -9846,6 +9864,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					HitTP2:            p.HitTP2,
 					HitTP3:            p.HitTP3,
 					WeakSponsorStreak: p.WeakSponsorStreak,
+					EntryReason:       p.EntryReason,
+					EntryStrategyID:   p.EntryStrategyID,
 				})
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
@@ -10235,8 +10255,18 @@ func (m *liveExecManager) placeReduceLimit(p *livePosition, qty, price float64) 
 	vals.Set("reduceOnly", "true")
 	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
 	vals.Set("price", formatFloat(price, meta.PricePrecision))
+	intentID := buildIntentID(p.Symbol, firstNonEmpty(strings.TrimSpace(p.EntryStrategyID), strings.TrimSpace(p.EntryReason)), price, time.Now().UTC())
+	if m.isUnknownExecutionFrozen(p.Symbol) {
+		logUnknownExecution(p.Symbol, intentID, "submit_skipped", "symbol frozen by unknown execution guard")
+		return 0, fmt.Errorf("unknown_execution_frozen")
+	}
 	out, err := m.rest.PlaceOrder(vals)
 	if err != nil {
+		if isAmbiguousVenueOutcome(err) {
+			m.handleUnknownExecution(p.Symbol, intentID)
+			time.Sleep(time.Duration(envInt("LIVE_EXEC_RECONCILE_AFTER_UNKNOWN_MS", 800)) * time.Millisecond)
+			_ = m.reconcileAfterUnknown(p.Symbol, intentID)
+		}
 		return 0, err
 	}
 	return mapInt64(out["orderId"]), nil
@@ -11148,6 +11178,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				HitTP2:            p.HitTP2,
 				HitTP3:            p.HitTP3,
 				WeakSponsorStreak: p.WeakSponsorStreak,
+				EntryReason:       p.EntryReason,
+				EntryStrategyID:   p.EntryStrategyID,
 			})
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
@@ -11426,8 +11458,18 @@ func (m *liveExecManager) submitCloseLimit(p *livePosition, qty float64, reason,
 	vals.Set("reduceOnly", "true")
 	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
 	vals.Set("price", formatFloat(price, meta.PricePrecision))
+	intentID := buildIntentID(p.Symbol, firstNonEmpty(strings.TrimSpace(p.EntryStrategyID), strings.TrimSpace(p.EntryReason)), price, time.Now().UTC())
+	if m.isUnknownExecutionFrozen(p.Symbol) {
+		logUnknownExecution(p.Symbol, intentID, "submit_skipped", "symbol frozen by unknown execution guard")
+		return fmt.Errorf("unknown_execution_frozen")
+	}
 	out, err := m.rest.PlaceOrder(vals)
 	if err != nil {
+		if isAmbiguousVenueOutcome(err) {
+			m.handleUnknownExecution(p.Symbol, intentID)
+			time.Sleep(time.Duration(envInt("LIVE_EXEC_RECONCILE_AFTER_UNKNOWN_MS", 800)) * time.Millisecond)
+			_ = m.reconcileAfterUnknown(p.Symbol, intentID)
+		}
 		return err
 	}
 	orderID := mapInt64(out["orderId"])
@@ -12101,6 +12143,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			c.Strat = "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Side))
 		}
 	}
+	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
 	m := meta[raw]
 	if m.LastPrice <= 0 {
 		return nil, fmt.Errorf("no price for %s", raw)
@@ -12270,6 +12313,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		TrailRef:         entry,
 		OpenedAt:         now,
 		EntryReason:      c.Strat,
+		EntryStrategyID:  entryStrategyID,
 		EntryGrade:       c.Entry.CurrentGrade,
 		EntryState:       c.Entry.State,
 		EntryTrigger:     c.TriggerState,
@@ -12368,6 +12412,8 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				HitTP2:            pos.HitTP2,
 				HitTP3:            pos.HitTP3,
 				WeakSponsorStreak: pos.WeakSponsorStreak,
+				EntryReason:       pos.EntryReason,
+				EntryStrategyID:   pos.EntryStrategyID,
 			})
 			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12561,6 +12607,8 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				HitTP2:            pos.HitTP2,
 				HitTP3:            pos.HitTP3,
 				WeakSponsorStreak: pos.WeakSponsorStreak,
+				EntryReason:       pos.EntryReason,
+				EntryStrategyID:   pos.EntryStrategyID,
 			})
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -18277,6 +18325,35 @@ func displayManageState(state string) string {
 	default:
 		return strings.ToUpper(strings.TrimSpace(state))
 	}
+}
+
+func isAmbiguousVenueOutcome(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(strings.TrimSpace(err.Error()))
+	if s == "" {
+		return false
+	}
+	return strings.Contains(s, "503") ||
+		strings.Contains(s, "service unavailable") ||
+		strings.Contains(s, "unknown") ||
+		strings.Contains(s, "timeout")
+}
+
+func logUnknownExecution(symbol, intentID, phase, detail string) {
+	log.Printf("exec_unknown symbol=%s intent_id=%s phase=%q detail=%q",
+		strings.ToUpper(strings.TrimSpace(symbol)),
+		strings.TrimSpace(intentID),
+		phase,
+		detail)
+}
+
+func logUnknownReconcile(symbol, intentID, result string) {
+	log.Printf("exec_unknown_reconcile symbol=%s intent_id=%s result=%q",
+		strings.ToUpper(strings.TrimSpace(symbol)),
+		strings.TrimSpace(intentID),
+		result)
 }
 
 func boolLabel(v bool) string {

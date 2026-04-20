@@ -4,7 +4,131 @@ import (
 	"time"
 
 	"go-machine/internal/features"
+	"go-machine/internal/indicators"
 )
+
+type StrategyID string
+
+const (
+	StrategyUnknown              StrategyID = "unknown"
+	StrategyImpulseContinuation  StrategyID = "impulse_continuation"
+	StrategyAnchoredVWAPPullback StrategyID = "anchored_vwap_pullback"
+	StrategyVPRetest             StrategyID = "vp_retest"
+)
+
+type Side string
+
+const (
+	SideLong  Side = "long"
+	SideShort Side = "short"
+)
+
+type VolumeProfileSnapshot struct {
+	POC           float64
+	ValueAreaHigh float64
+	ValueAreaLow  float64
+	NearestAbove  float64
+	NearestBelow  float64
+	WidthBps      float64
+	Shape         string
+	HasResistance bool
+	HasSupport    bool
+}
+
+type FlowSnapshot struct {
+	Delta                float64
+	CumDelta             float64
+	DeltaDivBull         bool
+	DeltaDivBear         bool
+	AbsorptionBull       bool
+	AbsorptionBear       bool
+	StackedImbalanceBull bool
+	StackedImbalanceBear bool
+	UnfinishedBusinessUp bool
+	UnfinishedBusinessDn bool
+	Confidence           float64
+	Summary              string
+}
+
+type TrendSnapshot struct {
+	TF1mDir          string
+	TF3mDir          string
+	TF5mDir          string
+	TF15mDir         string
+	Slope1m          float64
+	Slope5m          float64
+	Slope15m         float64
+	AboveVWAP        bool
+	AboveEMA20       bool
+	AboveEMA50       bool
+	BelowVWAP        bool
+	BelowEMA20       bool
+	BelowEMA50       bool
+	Compression      bool
+	ImpulseUp        bool
+	ImpulseDown      bool
+	BreakoutLevel    float64
+	BreakdownLevel   float64
+	CompressionHigh  float64
+	CompressionLow   float64
+}
+
+type Target struct {
+	Label string
+	Price float64
+	Size  float64
+}
+
+type EntryIntent struct {
+	Strategy        StrategyID
+	Symbol          string
+	Side            Side
+	Timeframe       string
+	Confidence      float64
+	Score           float64
+	TriggerPrice    float64
+	Invalidation    float64
+	StopPrice       float64
+	Targets         []Target
+	TimeStopBars    int
+	ReasonCodes     []string
+	RequiresConfirm []string
+	Features        map[string]float64
+	CreatedAt       time.Time
+}
+
+type StrategyContext struct {
+	Symbol         string
+	Now            time.Time
+	MarkPrice      float64
+	IndexPrice     float64
+	LastPrice      float64
+	SpreadBps      float64
+	VolumeRatio    float64
+	OIChangePct    float64
+	CandidateScore float64
+	SessionVWAP    float64
+	WeeklyVWAP     float64
+	VWAPDistBps    float64
+	AnchoredVWAP   indicators.AnchoredVWAPSnapshot
+	AVWAPLabel     string
+	VolumeProfile  VolumeProfileSnapshot
+	Flow           FlowSnapshot
+	Trend          TrendSnapshot
+	MarketRegime   string
+	WatchlistTier  string
+	AutoEntryTier  string
+	Raw            any
+}
+
+type EntryDecision struct {
+	Allowed      bool
+	Intent       *EntryIntent
+	RejectReason string
+	RejectCodes  []string
+	FinalScore   float64
+	HardBlocks   []string
+}
 
 type Signal struct {
 	Active          bool

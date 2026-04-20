@@ -91,9 +91,11 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 	}
 	st.Last15mClosedCandle = closed15m.Ts
 
-	// Breakeven move at >= 1R, but only after TP1 or >=5% open gain.
+	// Breakeven move only after real progression.
 	if !st.BreakevenMoved && st.InitialRisk > 0 && closed15m.C > 0 {
-		if reachedOneR(st, closed15m.C) && (st.HitTP1 || unrealizedPct(st, closed15m.C) >= defaultBEArmMinPct) {
+		maxR := maxRAtMark(st, closed15m.C)
+		if shouldMoveToBreakEven(st.Symbol, maxR, st.HitTP1, st.AdvancedReady) &&
+			(reachedOneR(st, closed15m.C) || unrealizedPct(st, closed15m.C) >= defaultBEArmMinPct) {
 			st.BreakevenMoved = true
 			if strings.EqualFold(string(st.Side), "BUY") {
 				if st.EntryPrice > st.TacticalStop {
@@ -111,8 +113,8 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 		}
 	}
 
-	// Tactical trailing to EMA20, 15m close only, and only after stabilization.
-	if (st.AdvancedReady || st.HitTP1) && ema20 > 0 {
+	// Tactical trailing to EMA20, 15m close only, and only after progression.
+	if shouldActivateTrail(st.Symbol, maxRAtMark(st, closed15m.C), st.HitTP1 || st.AdvancedReady, true) && ema20 > 0 {
 		if strings.EqualFold(string(st.Side), "BUY") {
 			if ema20 > st.TacticalStop {
 				st.TacticalStop = ema20
@@ -131,6 +133,43 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 	upd.CurrentTacticalStop = st.TacticalStop
 	upd.CurrentHardStop = st.HardStop
 	return upd
+}
+
+func shouldMoveToBreakEven(strategyID string, initialR float64, tp1Hit bool, structureValidated bool) bool {
+	minR := 1.0
+	if tp1Hit {
+		return true
+	}
+	if initialR >= minR && structureValidated {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(strategyID)) {
+	case "impulse_continuation", "anchored_vwap_pullback", "vp_retest":
+		return tp1Hit || (initialR >= minR && structureValidated)
+	default:
+		return tp1Hit || (initialR >= minR && structureValidated)
+	}
+}
+
+func shouldActivateTrail(strategyID string, maxR float64, tp1Hit bool, close15mValidated bool) bool {
+	switch strings.ToLower(strings.TrimSpace(strategyID)) {
+	case "impulse_continuation":
+		return tp1Hit || (close15mValidated && maxR >= 1.0)
+	case "anchored_vwap_pullback", "vp_retest":
+		return tp1Hit && close15mValidated
+	default:
+		return tp1Hit
+	}
+}
+
+func maxRAtMark(st *TrailState, mark float64) float64 {
+	if st == nil || st.EntryPrice <= 0 || st.InitialRisk <= 0 || mark <= 0 {
+		return 0
+	}
+	if strings.EqualFold(string(st.Side), "BUY") {
+		return (mark - st.EntryPrice) / st.InitialRisk
+	}
+	return (st.EntryPrice - mark) / st.InitialRisk
 }
 
 func unrealizedPct(st *TrailState, mark float64) float64 {

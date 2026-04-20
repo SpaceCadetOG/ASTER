@@ -50,6 +50,7 @@ type ProtectInput struct {
 	HitTP3            bool
 	WeakSponsorStreak int
 	EntryReason       string
+	EntryStrategyID   string
 	StarterEntry      bool
 	AdvancedReady     bool
 }
@@ -145,6 +146,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
 	}
+	plan := exitPlanForStrategy(firstNonEmptyExit(in.EntryStrategyID, in.EntryReason))
 	if starterInitialManageOnly(in, m.cfg.StarterStabilizeBars) {
 		// Keep starter trades simple at first attach: let initial stop stand, no early trailing/tightening.
 		dec.Reason = "STARTER_INITIAL_PROTECT_ONLY"
@@ -157,7 +159,11 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	if in.HitTP1 && !in.Sponsored && in.WeakSponsorStreak >= m.cfg.UnsponsoredWeakStreak {
 		dec.MoveStopToBE = true
 		dec.TightenStop = true
-		dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, m.cfg.UnsponsoredTightenR)
+		tightenR := m.cfg.UnsponsoredTightenR
+		if plan == "avwap_hold" || plan == "level_hold" {
+			tightenR *= 0.8
+		}
+		dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightenR)
 		if dec.Reason == "" {
 			dec.Reason = "RUNNER_UNSPONSORED_TIGHTEN"
 		}
@@ -206,6 +212,19 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	return dec
 }
 
+func exitPlanForStrategy(strategyID string) string {
+	switch strings.ToLower(strings.TrimSpace(strategyID)) {
+	case "impulse_continuation":
+		return "fast_runner"
+	case "anchored_vwap_pullback":
+		return "avwap_hold"
+	case "vp_retest":
+		return "level_hold"
+	default:
+		return "default"
+	}
+}
+
 func starterInitialManageOnly(in ProtectInput, stabilizeBars int) bool {
 	if stabilizeBars <= 0 {
 		stabilizeBars = 6
@@ -242,4 +261,13 @@ func maxFloat(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func firstNonEmptyExit(v ...string) string {
+	for _, x := range v {
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	}
+	return ""
 }

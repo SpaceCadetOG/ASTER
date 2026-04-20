@@ -3,7 +3,9 @@ package strategies
 import (
 	"context"
 	"math"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -259,6 +261,194 @@ func CalculateConfluenceScore(ctx Context, side features.Side, flow OrderFlowSig
 
 func scoreTier(score float64) ConfluenceTier {
 	return scoreTierWithRequired(score, confluenceAutoEntryMin)
+}
+
+type ConfluenceResult struct {
+	Score   float64
+	Reasons []string
+}
+
+func ScoreConfluenceForIntent(ctx StrategyContext, intent *EntryIntent) ConfluenceResult {
+	if intent == nil {
+		return ConfluenceResult{}
+	}
+	switch intent.Strategy {
+	case StrategyImpulseContinuation:
+		return scoreImpulseConfluence(ctx, intent)
+	case StrategyAnchoredVWAPPullback:
+		return scoreAVWAPConfluence(ctx, intent)
+	case StrategyVPRetest:
+		return scoreVPConfluence(ctx, intent)
+	default:
+		return scoreGenericConfluence(ctx, intent)
+	}
+}
+
+func scoreImpulseConfluence(ctx StrategyContext, intent *EntryIntent) ConfluenceResult {
+	score := 0.0
+	var reasons []string
+	if ctx.VolumeRatio >= envFloatCF("LIVE_CONF_IMPULSE_MIN_VOL_RATIO", 1.5) {
+		score += 20
+		reasons = append(reasons, "rvol_support")
+	}
+	if ctx.OIChangePct > 0 {
+		score += 10
+		reasons = append(reasons, "oi_expansion")
+	}
+	if ctx.Trend.Compression {
+		score += 20
+		reasons = append(reasons, "compression_quality")
+	}
+	if ctx.Trend.TF5mDir == "up" && intent.Side == SideLong {
+		score += 15
+		reasons = append(reasons, "tf5_align")
+	}
+	if ctx.Trend.TF15mDir == "up" && intent.Side == SideLong {
+		score += 15
+		reasons = append(reasons, "tf15_align")
+	}
+	if ctx.Trend.TF5mDir == "down" && intent.Side == SideShort {
+		score += 15
+		reasons = append(reasons, "tf5_align")
+	}
+	if ctx.Trend.TF15mDir == "down" && intent.Side == SideShort {
+		score += 15
+		reasons = append(reasons, "tf15_align")
+	}
+	if !ctx.VolumeProfile.HasResistance && intent.Side == SideLong {
+		score += 10
+		reasons = append(reasons, "no_near_overhead_vp_wall")
+	}
+	if !ctx.VolumeProfile.HasSupport && intent.Side == SideShort {
+		score += 10
+		reasons = append(reasons, "no_near_below_vp_wall")
+	}
+	return ConfluenceResult{Score: score, Reasons: reasons}
+}
+
+func scoreAVWAPConfluence(ctx StrategyContext, intent *EntryIntent) ConfluenceResult {
+	score := 0.0
+	var reasons []string
+	if !ctx.AnchoredVWAP.Valid {
+		return ConfluenceResult{}
+	}
+	if intent.Side == SideLong {
+		if ctx.AnchoredVWAP.Slope >= envFloatCF("LIVE_CONF_AVWAP_MIN_SLOPE", 0.0) {
+			score += 20
+			reasons = append(reasons, "avwap_slope_up")
+		}
+		if ctx.MarkPrice >= ctx.AnchoredVWAP.Dev1Lower && ctx.MarkPrice <= ctx.AnchoredVWAP.VWAP*1.0025 {
+			score += 20
+			reasons = append(reasons, "avwap_pullback_zone")
+		}
+		if ctx.Trend.TF5mDir == "up" {
+			score += 15
+			reasons = append(reasons, "tf5_align")
+		}
+		if ctx.Trend.TF15mDir == "up" {
+			score += 15
+			reasons = append(reasons, "tf15_align")
+		}
+		if ctx.MarkPrice >= ctx.WeeklyVWAP && ctx.WeeklyVWAP > 0 {
+			score += 10
+			reasons = append(reasons, "weekly_vwap_align")
+		}
+		if ctx.Flow.AbsorptionBull || ctx.Flow.StackedImbalanceBull || ctx.Flow.DeltaDivBull {
+			score += 15
+			reasons = append(reasons, "flow_confirmation")
+		}
+	}
+	if intent.Side == SideShort {
+		if ctx.AnchoredVWAP.Slope <= -envFloatCF("LIVE_CONF_AVWAP_MIN_SLOPE", 0.0) {
+			score += 20
+			reasons = append(reasons, "avwap_slope_down")
+		}
+		if ctx.MarkPrice <= ctx.AnchoredVWAP.Dev1Upper && ctx.MarkPrice >= ctx.AnchoredVWAP.VWAP*0.9975 {
+			score += 20
+			reasons = append(reasons, "avwap_pullback_zone")
+		}
+		if ctx.Trend.TF5mDir == "down" {
+			score += 15
+			reasons = append(reasons, "tf5_align")
+		}
+		if ctx.Trend.TF15mDir == "down" {
+			score += 15
+			reasons = append(reasons, "tf15_align")
+		}
+		if ctx.MarkPrice <= ctx.WeeklyVWAP && ctx.WeeklyVWAP > 0 {
+			score += 10
+			reasons = append(reasons, "weekly_vwap_align")
+		}
+		if ctx.Flow.AbsorptionBear || ctx.Flow.StackedImbalanceBear || ctx.Flow.DeltaDivBear {
+			score += 15
+			reasons = append(reasons, "flow_confirmation")
+		}
+	}
+	return ConfluenceResult{Score: score, Reasons: reasons}
+}
+
+func scoreVPConfluence(ctx StrategyContext, intent *EntryIntent) ConfluenceResult {
+	score := 0.0
+	var reasons []string
+	if ctx.VolumeProfile.POC > 0 {
+		score += 15
+		reasons = append(reasons, "vp_zone_present")
+	}
+	if ctx.VolumeProfile.WidthBps > 0 && ctx.VolumeProfile.WidthBps <= envFloatCF("LIVE_STRAT_VP_ZONE_WIDTH_BPS_MAX", 120.0) {
+		score += 10
+		reasons = append(reasons, "vp_zone_width_ok")
+	}
+	if intent.Side == SideLong && ctx.Trend.TF15mDir == "up" {
+		score += 15
+		reasons = append(reasons, "tf15_align")
+	}
+	if intent.Side == SideShort && ctx.Trend.TF15mDir == "down" {
+		score += 15
+		reasons = append(reasons, "tf15_align")
+	}
+	if ctx.Flow.Confidence >= envFloatCF("LIVE_CONF_VP_FLOW_MIN_CONF", 0.55) {
+		score += 15
+		reasons = append(reasons, "flow_support")
+	}
+	if intent.Side == SideLong && (ctx.Flow.AbsorptionBull || ctx.Flow.StackedImbalanceBull || ctx.Flow.DeltaDivBull) {
+		score += 15
+		reasons = append(reasons, "bull_confirmation")
+	}
+	if intent.Side == SideShort && (ctx.Flow.AbsorptionBear || ctx.Flow.StackedImbalanceBear || ctx.Flow.DeltaDivBear) {
+		score += 15
+		reasons = append(reasons, "bear_confirmation")
+	}
+	if ctx.VolumeRatio >= 1.0 {
+		score += 10
+		reasons = append(reasons, "volume_ratio_support")
+	}
+	return ConfluenceResult{Score: score, Reasons: reasons}
+}
+
+func scoreGenericConfluence(ctx StrategyContext, intent *EntryIntent) ConfluenceResult {
+	score := 0.0
+	var reasons []string
+	if ctx.CandidateScore > 0 {
+		score += ctx.CandidateScore * 0.25
+		reasons = append(reasons, "candidate_score")
+	}
+	if ctx.VolumeRatio > 1.0 {
+		score += 10
+		reasons = append(reasons, "volume_ratio")
+	}
+	return ConfluenceResult{Score: score, Reasons: reasons}
+}
+
+func envFloatCF(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func scoreTierWithRequired(score, autoEntryMin float64) ConfluenceTier {
