@@ -65,6 +65,18 @@ func (m *liveExecManager) handleUnknownExecution(symbol, intentID string) {
 	m.unknownExecGuards[raw] = guard
 	m.mu.Unlock()
 	logUnknownExecution(raw, guard.IntentID, "mark_unknown", "execution outcome ambiguous")
+	m.emitNotify(notify.Event{
+		Key:      "EXECUTION_UNKNOWN",
+		Title:    "EXECUTION UNKNOWN",
+		Class:    notify.ClassCritical,
+		Severity: notify.SeverityCritical,
+		Route:    notify.RouteCritical,
+		Symbol:   raw,
+		Message:  "entry frozen pending reconcile",
+		Metadata: map[string]string{
+			"intent_id": guard.IntentID,
+		},
+	})
 }
 
 func (m *liveExecManager) isUnknownExecutionFrozen(symbol string) bool {
@@ -99,11 +111,33 @@ func (m *liveExecManager) reconcileAfterUnknown(symbol, intentID string) string 
 	orderFound := false
 	if orders, err := m.rest.OpenOrders(raw); err == nil {
 		orderFound = len(orders) > 0
+	} else {
+		m.emitNotify(notify.Event{
+			Key:      "RECONCILE_FAILED",
+			Title:    "RECONCILE FAILED",
+			Class:    notify.ClassCritical,
+			Severity: notify.SeverityCritical,
+			Route:    notify.RouteCritical,
+			Symbol:   raw,
+			Message:  "remote open orders could not be fetched",
+			Metadata: map[string]string{"intent_id": intentID, "error": err.Error()},
+		})
 	}
 	posFound := false
 	if rows, err := m.rest.PositionRisk(raw); err == nil {
 		view := remotePositionForSide(rows, "")
 		posFound = view.QtyAbs > 0
+	} else {
+		m.emitNotify(notify.Event{
+			Key:      "RECONCILE_FAILED",
+			Title:    "RECONCILE FAILED",
+			Class:    notify.ClassCritical,
+			Severity: notify.SeverityCritical,
+			Route:    notify.RouteCritical,
+			Symbol:   raw,
+			Message:  "remote position state could not be fetched",
+			Metadata: map[string]string{"intent_id": intentID, "error": err.Error()},
+		})
 	}
 	switch {
 	case orderFound:

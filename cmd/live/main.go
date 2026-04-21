@@ -951,6 +951,8 @@ type liveExecManager struct {
 	mu                   sync.RWMutex
 	rest                 *aster.RESTAuth
 	tg                   *notify.Telegram
+	dispatcher           *notify.Dispatcher
+	notifyAccum          *notify.Accumulator
 	path                 string
 	tradesCSV            string
 	fillReceipt          bool
@@ -1460,15 +1462,29 @@ func main() {
 	}
 	modeCtrl := newRuntimeModeController(dryRun, safety.enableLiveTrading, dryRun)
 	tg := newTelegramSink()
+	notifyAccum := notify.NewAccumulator()
+	notifyDispatcher := notify.NewDispatcher(notify.TelegramRouteSender{Telegram: tg}, notifyAccum)
 	execMgr := newLiveExecManager(rest, tg)
+	if execMgr != nil {
+		execMgr.dispatcher = notifyDispatcher
+		execMgr.notifyAccum = notifyAccum
+	}
 	if execMgr != nil {
 		if nClosed, nImported, err := execMgr.ReconcileBootState(); err != nil {
 			fmt.Println("live: boot reconcile warning:", err)
 		} else if nClosed > 0 || nImported > 0 {
-			tg.Sendf("%s", notify.BuildEventHTML("🧩", "BOOT RECONCILE COMPLETE",
-				fmt.Sprintf("<b>Closed local:</b> %d", nClosed),
-				fmt.Sprintf("<b>Imported remote:</b> %d", nImported),
-			))
+			emitNotifyEvent(notifyDispatcher, notify.Event{
+				Key:      "BOOT_RECONCILE_COMPLETE",
+				Title:    "BOOT RECONCILE COMPLETE",
+				Class:    notify.ClassLifecycle,
+				Severity: notify.SeverityNotice,
+				Route:    notify.RouteNormal,
+				Message:  "boot reconcile completed",
+				Metadata: map[string]string{
+					"closed_local":    fmt.Sprintf("%d", nClosed),
+					"imported_remote": fmt.Sprintf("%d", nImported),
+				},
+			})
 		}
 		report := execMgr.ensureAccountReportFresh(time.Now().UTC(), 15*time.Second)
 		if !dryRun && !accountHealthAllowsLiveBoot(report) && !envBool("LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH", false) {
@@ -1521,13 +1537,15 @@ func main() {
 	sodReportMinute := envInt("LIVE_TG_SOD_REPORT_MIN", 0)
 	preUSReportHour := envInt("LIVE_TG_PRE_US_REPORT_HOUR", 8)
 	preUSReportMinute := envInt("LIVE_TG_PRE_US_REPORT_MIN", 0)
+	overnightReportHour, overnightReportMinute := parseHHMM(envStr("LIVE_TG_OVERNIGHT_REPORT_TIME", "07:00"), 7, 0)
+	dailyReportHour, dailyReportMinute := parseHHMM(envStr("LIVE_TG_DAILY_REPORT_TIME", "19:00"), 19, 0)
 	reportDayOffset := envInt("LIVE_TG_DAILY_REPORT_DAY_OFFSET", 0)
-	receiptEnable := envBool("LIVE_TG_DAILY_RECEIPT_ENABLE", true)
+	receiptEnable := envBool("LIVE_TG_DAILY_RECEIPT_ENABLE", false)
 	receiptLimit := envInt("LIVE_TG_DAILY_RECEIPT_LIMIT", 25)
 	if receiptLimit <= 0 {
 		receiptLimit = 25
 	}
-	liveReceiptEnable := envBool("LIVE_TG_DAILY_LIVE_RECEIPT_ENABLE", true)
+	liveReceiptEnable := envBool("LIVE_TG_DAILY_LIVE_RECEIPT_ENABLE", false)
 	liveReceiptLimit := envInt("LIVE_TG_DAILY_LIVE_RECEIPT_LIMIT", 25)
 	if liveReceiptLimit <= 0 {
 		liveReceiptLimit = 25
@@ -1551,6 +1569,12 @@ func main() {
 		preUSReportMinute = 0
 	}
 	hourlyEnable := envBool("LIVE_TG_HOURLY_ENABLE", true)
+	digestEnable := envBool("LIVE_TG_DIGEST_ENABLE", true)
+	overnightReportEnable := envBool("LIVE_TG_OVERNIGHT_REPORT_ENABLE", true)
+	dailyReportEnable := envBool("LIVE_TG_DAILY_REPORT_ENABLE", true)
+	sodEnable := envBool("LIVE_TG_SOD_ENABLE", false)
+	preUSEnable := envBool("LIVE_TG_PRE_US_ENABLE", false)
+	eodLegacyEnable := envBool("LIVE_TG_EOD_ENABLE", false)
 	hourlyTZName := envStr("LIVE_TG_HOURLY_TZ", "America/Chicago")
 	hourlyLoc, err := time.LoadLocation(hourlyTZName)
 	if err != nil {
@@ -1605,6 +1629,8 @@ func main() {
 	lastSODReportDay := ""
 	lastPreUSReportDay := ""
 	lastM2ReportDay := ""
+	lastOvernightReportDay := ""
+	last1900ReportDay := ""
 	lastHourlyKey := ""
 	lastPaperTradeUpdateSig := ""
 	lastLiveTradeUpdateSig := ""
@@ -1686,28 +1712,20 @@ func main() {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
 	fmt.Println()
-	tg.Sendf("%s", notify.BuildEventHTML("🚀", "LIVE STARTED",
-		fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
-		fmt.Sprintf("<b>Scan / Watch:</b> %s / %s", scanEvery, watchCfg.Every),
-		fmt.Sprintf("<b>Starter / Add / Max:</b> %.2f / %.2f / %.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT),
-		fmt.Sprintf("<b>Min Avail / Re-entry:</b> %.2f / %.2f", safety.minAvailUSDT, reentryCfg.SizeUSDT),
-		fmt.Sprintf("<b>Features:</b> one_symbol=%s | reentry=%s | persistence=%s | funds=%s | snapshots=%s",
-			boolState(ladderCfg.OneSymbolOnly), boolState(reentryCfg.Enable), boolState(missedOpportunitiesEnabled()),
-			boolState(execMgr != nil && execMgr.fundsCfg.Enable), boolState(execMgr != nil && execMgr.accountReportCfg.SnapshotEnable)),
-		func() string {
-			warnings := startupWarningLines(ladderCfg, safety, execMgr)
-			if len(warnings) == 0 {
-				return "<b>Boot warnings:</b> none"
-			}
-			return fmt.Sprintf("<b>Boot warnings:</b> %s", strings.Join(warnings, " | "))
-		}(),
-		fmt.Sprintf("<b>%s</b>", compactAccountSummaryLine(func() accountReport {
-			if execMgr == nil {
-				return accountReport{}
-			}
-			return execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)
-		}())),
-	))
+	emitNotifyEvent(notifyDispatcher, notify.Event{
+		Key:      "LIVE_STARTED",
+		Title:    "LIVE STARTED",
+		Class:    notify.ClassLifecycle,
+		Severity: notify.SeverityNotice,
+		Route:    notify.RouteNormal,
+		Message:  "live process started",
+		Metadata: map[string]string{
+			"mode":              modeLabel,
+			"scan_watch":        fmt.Sprintf("%s/%s", scanEvery, watchCfg.Every),
+			"starter_add_max":   fmt.Sprintf("%.2f/%.2f/%.2f", ladderCfg.StarterUSDT, ladderCfg.StepUSDT, ladderCfg.MaxTotalUSDT),
+			"min_avail_reentry": fmt.Sprintf("%.2f/%.2f", safety.minAvailUSDT, reentryCfg.SizeUSDT),
+		},
+	})
 
 	requireShadowDays := envInt("LIVE_REQUIRE_PAPER_DAYS", 0)
 	shadowEquityFile := envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")
@@ -2015,7 +2033,7 @@ func main() {
 					}
 				}
 				localNow := now.In(paper.reportLoc)
-				if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
+				if eodLegacyEnable && (localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute)) {
 					dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 					if dayKey != lastDailyReportDay {
 						tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
@@ -2033,7 +2051,7 @@ func main() {
 						lastDailyReportDay = dayKey
 					}
 				}
-				if localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute) {
+				if sodEnable && (localNow.Hour() > sodReportHour || (localNow.Hour() == sodReportHour && localNow.Minute() >= sodReportMinute)) {
 					dayKey := localNow.Format("2006-01-02")
 					if dayKey != lastSODReportDay {
 						if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
@@ -2074,7 +2092,7 @@ func main() {
 			}
 			if tg != nil && tg.Enabled() && execMgr != nil && liveReceiptEnable {
 				localNow := now.In(execMgr.reportLoc)
-				if localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute) {
+				if eodLegacyEnable && (localNow.Hour() > eodReportHour || (localNow.Hour() == eodReportHour && localNow.Minute() >= eodReportMinute)) {
 					dayKey := localNow.AddDate(0, 0, reportDayOffset).Format("2006-01-02")
 					if dayKey != lastDailyLiveReceiptDay {
 						tg.Sendf("%s", notify.BuildEventHTML("🧾", "EOD DAILY DISPATCH",
@@ -2113,16 +2131,17 @@ func main() {
 				TF:        "1m",
 				Reason:    fmt.Sprintf("long_inplay=%d short_inplay=%d", len(longInPlay), len(shortInPlay)),
 			})
-			if tg != nil && tg.Enabled() && hourlyEnable && ((paper != nil && paper.enabled) || execMgr != nil) && !inCriticalProtection {
+			if tg != nil && tg.Enabled() && hourlyEnable && digestEnable && ((paper != nil && paper.enabled) || execMgr != nil) && !inCriticalProtection {
 				hk := localMaintNow.Format("2006-01-02 15")
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-						tg.Sendf("%s", buildHourlyDigest(localMaintNow, paper, execMgr, missed, metaBySymbol, longInPlay, shortInPlay, digestLimit))
+						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						tg.Sendf("%s", tgPre(notifyAccum.RenderHourlyReport(localMaintNow, snap)))
 						lastPulseSentAt = now
 						lastHourlyKey = hk
 					}
 				}
-				if localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute) {
+				if preUSEnable && (localMaintNow.Hour() > preUSReportHour || (localMaintNow.Hour() == preUSReportHour && localMaintNow.Minute() >= preUSReportMinute)) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != lastPreUSReportDay {
 						if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
@@ -2130,6 +2149,26 @@ func main() {
 							lastPulseSentAt = now
 							lastPreUSReportDay = dayKey
 						}
+					}
+				}
+			}
+			if tg != nil && tg.Enabled() && digestEnable && overnightReportEnable && !inCriticalProtection {
+				if localMaintNow.Hour() > overnightReportHour || (localMaintNow.Hour() == overnightReportHour && localMaintNow.Minute() >= overnightReportMinute) {
+					dayKey := localMaintNow.Format("2006-01-02")
+					if dayKey != lastOvernightReportDay {
+						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						tg.Sendf("%s", tgPre(notifyAccum.RenderOvernightReport(localMaintNow, snap)))
+						lastOvernightReportDay = dayKey
+					}
+				}
+			}
+			if tg != nil && tg.Enabled() && digestEnable && dailyReportEnable && !inCriticalProtection {
+				if localMaintNow.Hour() > dailyReportHour || (localMaintNow.Hour() == dailyReportHour && localMaintNow.Minute() >= dailyReportMinute) {
+					dayKey := localMaintNow.Format("2006-01-02")
+					if dayKey != last1900ReportDay {
+						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						tg.Sendf("%s", tgPre(notifyAccum.RenderDailyReport(localMaintNow, snap)))
+						last1900ReportDay = dayKey
 					}
 				}
 			}
@@ -2212,7 +2251,7 @@ func main() {
 						maintWindow.StartHour, maintWindow.StartMin, maintWindow.EndHour, maintWindow.EndMin, maintLoc.String()),
 					fmt.Sprintf("<b>Session:</b> %s", sessionTag(localMaintNow)),
 				))
-				if paper.enabled && tg != nil && tg.Enabled() {
+				if eodLegacyEnable && paper.enabled && tg != nil && tg.Enabled() {
 					switch maintWindow.Name {
 					case "EOD":
 						if lastM2ReportDay != dayKey {
@@ -2983,12 +3022,24 @@ func main() {
 		}
 		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
 		if tgVerbose && topKey != lastTopKey {
-			tg.Sendf("%s", notify.BuildEventHTML("🎯", "TOP CANDIDATE",
-				fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-				fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
-				fmt.Sprintf("<b>Slope:</b> %+.3f | <b>Rank:</b> %.2f", best.Entry.ScoreSlope, best.Entry.Rank),
-				fmt.Sprintf("<b>Setup:</b> <code>%s</code> | <b>Conf:</b> %.2f", best.Strat, best.Conf),
-			))
+			emitNotifyEvent(notifyDispatcher, notify.Event{
+				Key:      "TOP_CANDIDATE",
+				Title:    "TOP CANDIDATE",
+				Class:    notify.ClassDiagnostic,
+				Severity: notify.SeverityDebug,
+				Route:    notify.RouteDebug,
+				Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+				Message:  "new top candidate",
+				Metadata: map[string]string{
+					"side":  best.Side,
+					"grade": best.Entry.CurrentGrade,
+					"score": fmt.Sprintf("%.2f", best.Entry.CurrentScore),
+					"slope": fmt.Sprintf("%+.3f", best.Entry.ScoreSlope),
+					"rank":  fmt.Sprintf("%.2f", best.Entry.Rank),
+					"setup": best.Strat,
+					"conf":  fmt.Sprintf("%.2f", best.Conf),
+				},
+			})
 			lastTopKey = topKey
 		}
 		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
@@ -3322,7 +3373,18 @@ func main() {
 			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
 				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
 				fmt.Println("live:", msg)
-				tg.Sendf("%s", notify.BuildEventHTML("⏳", "SHADOW GATE ACTIVE", fmt.Sprintf("<b>Requirement:</b> %s", msg)))
+				emitNotifyEvent(notifyDispatcher, notify.Event{
+					Key:      "SHADOW_GATE_ACTIVE",
+					Title:    "SHADOW GATE ACTIVE",
+					Class:    notify.ClassDigest,
+					Severity: notify.SeverityInfo,
+					Route:    notify.RouteDigest,
+					Symbol:   rawBest,
+					Message:  "shadow gate requirement active",
+					Metadata: map[string]string{
+						"detail": msg,
+					},
+				})
 				shadowWarnAt = now
 			}
 			waitAndReport()
@@ -3465,10 +3527,18 @@ func main() {
 			statusStore.Set(st)
 			fmt.Printf("live: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🔒", "RESERVE LOCK ACTIVE",
-					fmt.Sprintf("<b>Base:</b> %.2f below threshold", baseBal),
-					"<b>Entries:</b> paused until reserve recovers",
-				))
+				emitNotifyEvent(notifyDispatcher, notify.Event{
+					Key:      "RESERVE_LOCK_ACTIVE",
+					Title:    "RESERVE LOCK ACTIVE",
+					Class:    notify.ClassDigest,
+					Severity: notify.SeverityInfo,
+					Route:    notify.RouteDigest,
+					Symbol:   rawBest,
+					Message:  "reserve lock active",
+					Metadata: map[string]string{
+						"base": fmt.Sprintf("%.2f", baseBal),
+					},
+				})
 			}
 			waitAndReport()
 			continue
@@ -3638,10 +3708,19 @@ func main() {
 				Reason:       placeErr.Error(),
 			})
 			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("❌", "ORDER ERROR",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Error:</b> %v", placeErr),
-				))
+				emitNotifyEvent(notifyDispatcher, notify.Event{
+					Key:      "ORDER_ERROR",
+					Title:    "ORDER ERROR",
+					Class:    notify.ClassCritical,
+					Severity: notify.SeverityWarning,
+					Route:    notify.RouteCritical,
+					Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+					Message:  "order placement failed",
+					Metadata: map[string]string{
+						"side":  best.Side,
+						"error": strings.TrimSpace(placeErr.Error()),
+					},
+				})
 			}
 		} else {
 			if missed != nil {
@@ -3679,11 +3758,20 @@ func main() {
 			hourKey := time.Now().UTC().Format("2006-01-02T15")
 			orderCountByDay[dayKey]++
 			orderCountByHour[hourKey]++
-			tg.Sendf("%s", notify.BuildEventHTML("✅", "ORDER PLACED",
-				fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-				fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
-				fmt.Sprintf("<b>Grade:</b> %s", best.Entry.CurrentGrade),
-			))
+			emitNotifyEvent(notifyDispatcher, notify.Event{
+				Key:      "ORDER_PLACED",
+				Title:    "ORDER PLACED",
+				Class:    notify.ClassLifecycle,
+				Severity: notify.SeverityNotice,
+				Route:    notify.RouteNormal,
+				Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
+				Message:  "order accepted",
+				Metadata: map[string]string{
+					"side":   best.Side,
+					"margin": fmt.Sprintf("%.2f", effectiveMargin),
+					"grade":  best.Entry.CurrentGrade,
+				},
+			})
 		}
 
 		waitAndReport()
@@ -3715,6 +3803,82 @@ func buildHourlyDigest(now time.Time, p *paperTrader, m *liveExecManager, missed
 		return buildLiveDigest("Hourly Digest", now, m, missed, meta, longInPlay, shortInPlay)
 	}
 	return tgPre(fmt.Sprintf("Hourly Digest (%s) session=%s\nno active paper/live manager", now.Format("15:04 MST"), sessionTag(now)))
+}
+
+func parseHHMM(raw string, defHour, defMin int) (int, int) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defHour, defMin
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) != 2 {
+		return defHour, defMin
+	}
+	h, errH := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, errM := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return defHour, defMin
+	}
+	return h, m
+}
+
+func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liveExecManager, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) notify.Snapshot {
+	snap := notify.Snapshot{
+		Mode:              firstNonEmpty(strings.TrimSpace(modeLabel), "LIVE"),
+		Status:            fmt.Sprintf("session=%s", sessionTag(now)),
+		RealizedToday:     0,
+		UnrealizedNow:     0,
+		FeesFundingToday:  0,
+		OpenPositionLines: []string{},
+		WatchlistLines:    []string{},
+	}
+	if p != nil && p.enabled {
+		dayKey := now.In(p.reportLoc).Format("2006-01-02")
+		if ds := p.dayStats[dayKey]; ds != nil {
+			snap.RealizedToday = ds.Net
+			snap.FeesFundingToday = ds.Fees
+		}
+		for raw, pos := range p.positions {
+			if pos == nil {
+				continue
+			}
+			mark := meta[raw].LastPrice
+			upnl := 0.0
+			if mark > 0 {
+				if strings.EqualFold(pos.Side, "BUY") {
+					upnl = (mark - pos.Entry) * pos.Qty
+				} else {
+					upnl = (pos.Entry - mark) * pos.Qty
+				}
+			}
+			snap.UnrealizedNow += upnl
+			snap.OpenPositionLines = append(snap.OpenPositionLines, fmt.Sprintf("%s %s | strat=%s | uPnL=%+.2f", raw, pos.Side, firstNonEmpty(pos.EntryReason, "n/a"), upnl))
+		}
+	}
+	if m != nil {
+		live := m.LiveAccountSnapshot(8)
+		snap.RealizedToday = live.RealizedDay
+		snap.UnrealizedNow = live.OpenPnL
+		snap.FeesFundingToday = 0
+		if len(live.Positions) > 0 {
+			snap.OpenPositionLines = snap.OpenPositionLines[:0]
+			for _, pos := range live.Positions {
+				snap.OpenPositionLines = append(snap.OpenPositionLines,
+					fmt.Sprintf("%s %s | strat=%s | uPnL=%+.2f", pos.Symbol, pos.Side, firstNonEmpty(pos.EntryReason, "unknown"), pos.UnrealizedPnL))
+			}
+		}
+	}
+	longTop, shortTop, _ := topScanSnapshot(longInPlay, shortInPlay, meta, 3)
+	for _, row := range longTop {
+		snap.WatchlistLines = append(snap.WatchlistLines, fmt.Sprintf("%s in-play long", row.Symbol))
+	}
+	for _, row := range shortTop {
+		snap.WatchlistLines = append(snap.WatchlistLines, fmt.Sprintf("%s in-play short", row.Symbol))
+	}
+	if len(snap.WatchlistLines) > 6 {
+		snap.WatchlistLines = snap.WatchlistLines[:6]
+	}
+	return snap
 }
 
 func buildClassicDigest(label string, now time.Time, p *paperTrader, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) string {
@@ -7309,13 +7473,20 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 	m.recordTransferStatus(fmt.Sprintf("sweep %.2f from %s to spot", amount, p.Symbol))
 	fmt.Printf("live: profit sweep symbol=%s amount=%.2f realized=%.2f closed=%s\n",
 		p.Symbol, amount, p.RealizedPnL, now.UTC().Format(time.RFC3339))
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PROFIT SWEPT",
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Amount:</b> %.2f USDT", amount),
-			fmt.Sprintf("<b>Trade Realized:</b> %+.2f", p.RealizedPnL),
-		))
-	}
+	m.emitNotify(notify.Event{
+		Key:      "PROFIT_SWEPT",
+		Title:    "PROFIT SWEPT",
+		Class:    notify.ClassLifecycle,
+		Severity: notify.SeverityInfo,
+		Route:    notify.RouteNormal,
+		Symbol:   p.Symbol,
+		Message:  "profit swept to spot",
+		Metadata: map[string]string{
+			"side":          displayPositionSide(p.Side),
+			"amount":        fmt.Sprintf("%.2f", amount),
+			"trade_realized": fmt.Sprintf("%+.2f", p.RealizedPnL),
+		},
+	})
 }
 
 func (m *liveExecManager) MaintainPerpBalance(now time.Time) {
@@ -9380,13 +9551,21 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		_ = m.save()
 		fmt.Printf("live: add submitted %s %s qty=%s px=%s orderId=%d add_count=%d deployed=%.2f\n",
 			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("➕", "ADD SUBMITTED",
-				fmt.Sprintf("<b>%s %s</b>", rawSym, displayPositionSide(existing.Side)),
-				fmt.Sprintf("<b>Qty:</b> %s | <b>Limit:</b> %s", vals.Get("quantity"), vals.Get("price")),
-				fmt.Sprintf("<b>Deployed:</b> %.2f -> %.2f USDT", existing.DeployedMargin, existing.DeployedMargin+margin),
-			))
-		}
+		m.emitNotify(notify.Event{
+			Key:      "ADD_SUBMITTED",
+			Title:    "ADD SUBMITTED",
+			Class:    notify.ClassLifecycle,
+			Severity: notify.SeverityInfo,
+			Route:    notify.RouteNormal,
+			Symbol:   rawSym,
+			Message:  "additional size submitted",
+			Metadata: map[string]string{
+				"side":     displayPositionSide(existing.Side),
+				"qty":      vals.Get("quantity"),
+				"limit":    vals.Get("price"),
+				"deployed": fmt.Sprintf("%.2f->%.2f", existing.DeployedMargin, existing.DeployedMargin+margin),
+			},
+		})
 		return nil
 	}
 	entryReason := c.Strat
@@ -10646,12 +10825,19 @@ func (m *liveExecManager) updateTrailingStop(p *livePosition, mark float64) (boo
 		return false, nil
 	}
 	clearTrailCandidate(p)
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("📈", "TRAIL MOVE",
-			fmt.Sprintf("<b>%s</b>", p.Symbol),
-			fmt.Sprintf("<b>Stop:</b> %s | <b>Mark:</b> %s", fmtPrice(p.StopPrice), fmtPrice(mark)),
-		))
-	}
+	m.emitNotify(notify.Event{
+		Key:      "TRAIL_MOVE",
+		Title:    "TRAIL MOVE",
+		Class:    notify.ClassLifecycle,
+		Severity: notify.SeverityInfo,
+		Route:    notify.RouteNormal,
+		Symbol:   p.Symbol,
+		Message:  "trailing stop tightened",
+		Metadata: map[string]string{
+			"stop": fmtPrice(p.StopPrice),
+			"mark": fmtPrice(mark),
+		},
+	})
 	return true, nil
 }
 
@@ -10705,13 +10891,20 @@ func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark floa
 		return false, nil
 	}
 	clearTrailCandidate(p)
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("📈", "TRAIL MOVE",
-			fmt.Sprintf("<b>%s</b>", p.Symbol),
-			fmt.Sprintf("<b>Stop:</b> %s | <b>Mark:</b> %s", fmtPrice(p.StopPrice), fmtPrice(mark)),
-			fmt.Sprintf("<b>Mode:</b> 15m close EMA20-ATR"),
-		))
-	}
+	m.emitNotify(notify.Event{
+		Key:      "TRAIL_MOVE",
+		Title:    "TRAIL MOVE",
+		Class:    notify.ClassLifecycle,
+		Severity: notify.SeverityInfo,
+		Route:    notify.RouteNormal,
+		Symbol:   p.Symbol,
+		Message:  "protected trail updated",
+		Metadata: map[string]string{
+			"stop": fmtPrice(p.StopPrice),
+			"mark": fmtPrice(mark),
+			"mode": "15m_close_ema20_atr",
+		},
+	})
 	return true, nil
 }
 
@@ -11226,13 +11419,22 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 					continue
 				}
-				if m.tg != nil {
-					m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT SUBMITTED",
-						fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-						fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
-						fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-					))
-				}
+				m.emitNotify(notify.Event{
+					Key:      "MOMENTUM_EXIT_SUBMITTED",
+					Title:    "MOMENTUM EXIT SUBMITTED",
+					Class:    notify.ClassLifecycle,
+					Severity: notify.SeverityInfo,
+					Route:    notify.RouteNormal,
+					Symbol:   sym,
+					Message:  "momentum exit submitted",
+					Metadata: map[string]string{
+						"qty":  fmt.Sprintf("%.6f", p.PendingExitQty),
+						"px":   fmtPrice(p.PendingExitPrice),
+						"pnl":  fmt.Sprintf("%+.2f", pnl),
+						"upnl": fmt.Sprintf("%+.2f%%", pct),
+						"day":  fmt.Sprintf("%+.2f", dayRealized),
+					},
+				})
 				changed = true
 				continue
 			}
@@ -11267,13 +11469,22 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 			continue
 		}
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "MOMENTUM EXIT SUBMITTED",
-				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
-				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-			))
-		}
+		m.emitNotify(notify.Event{
+			Key:      "MOMENTUM_EXIT_SUBMITTED",
+			Title:    "MOMENTUM EXIT SUBMITTED",
+			Class:    notify.ClassLifecycle,
+			Severity: notify.SeverityInfo,
+			Route:    notify.RouteNormal,
+			Symbol:   sym,
+			Message:  "momentum exit submitted",
+			Metadata: map[string]string{
+				"qty":  fmt.Sprintf("%.6f", p.PendingExitQty),
+				"px":   fmtPrice(p.PendingExitPrice),
+				"pnl":  fmt.Sprintf("%+.2f", pnl),
+				"upnl": fmt.Sprintf("%+.2f%%", pct),
+				"day":  fmt.Sprintf("%+.2f", dayRealized),
+			},
+		})
 		changed = true
 	}
 	if changed {
@@ -11326,13 +11537,22 @@ func (m *liveExecManager) ApplyFundingExit(now time.Time, meta map[string]symbol
 		if err := m.submitCloseLimit(p, p.RemainingQty, "FUNDING", "CLOSE"); err != nil {
 			continue
 		}
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML("💸", "PRE-FUNDING EXIT SUBMITTED",
-				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
-				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-			))
-		}
+		m.emitNotify(notify.Event{
+			Key:      "PRE_FUNDING_EXIT_SUBMITTED",
+			Title:    "PRE-FUNDING EXIT SUBMITTED",
+			Class:    notify.ClassLifecycle,
+			Severity: notify.SeverityInfo,
+			Route:    notify.RouteNormal,
+			Symbol:   sym,
+			Message:  "funding-aware pre-exit submitted",
+			Metadata: map[string]string{
+				"qty":  fmt.Sprintf("%.6f", p.PendingExitQty),
+				"px":   fmtPrice(p.PendingExitPrice),
+				"pnl":  fmt.Sprintf("%+.2f", pnl),
+				"upnl": fmt.Sprintf("%+.2f%%", pct),
+				"day":  fmt.Sprintf("%+.2f", dayRealized),
+			},
+		})
 		changed = true
 	}
 	if changed {
@@ -11372,14 +11592,23 @@ func (m *liveExecManager) ApplyPreEODExit(now time.Time, mom map[string]momentum
 		if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
 			continue
 		}
-		if m.tg != nil {
-			m.tg.Sendf("%s", notify.BuildEventHTML(exitAlertEmoji(reason), "PRE-EOD EXIT SUBMITTED",
-				fmt.Sprintf("<b>%s %s</b>", sym, displayPositionSide(p.Side)),
-				fmt.Sprintf("<b>Qty:</b> %.6f | <b>Limit:</b> %s", p.PendingExitQty, fmtPrice(p.PendingExitPrice)),
-				fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%)", pnl, pct),
-				fmt.Sprintf("<b>Reason:</b> %s | <b>Day:</b> %+.2f", reason, dayRealized),
-			))
-		}
+		m.emitNotify(notify.Event{
+			Key:      "PRE_EOD_EXIT_SUBMITTED",
+			Title:    "PRE-EOD EXIT SUBMITTED",
+			Class:    notify.ClassLifecycle,
+			Severity: notify.SeverityInfo,
+			Route:    notify.RouteNormal,
+			Symbol:   sym,
+			Message:  "pre-EOD exit submitted",
+			Metadata: map[string]string{
+				"qty":    fmt.Sprintf("%.6f", p.PendingExitQty),
+				"px":     fmtPrice(p.PendingExitPrice),
+				"pnl":    fmt.Sprintf("%+.2f", pnl),
+				"upnl":   fmt.Sprintf("%+.2f%%", pct),
+				"reason": reason,
+				"day":    fmt.Sprintf("%+.2f", dayRealized),
+			},
+		})
 		changed = true
 	}
 	if changed {
@@ -19593,6 +19822,37 @@ func fmtPrice(v float64) string {
 
 func newTelegramSink() *notify.Telegram {
 	return notify.NewTelegramFromConfig(getConfigKV())
+}
+
+func emitNotifyEvent(dispatcher *notify.Dispatcher, event notify.Event) {
+	if dispatcher == nil {
+		return
+	}
+	_ = dispatcher.Emit(context.Background(), event)
+}
+
+func (m *liveExecManager) emitNotify(event notify.Event) {
+	if m == nil {
+		return
+	}
+	if event.Symbol == "" {
+		event.Symbol = strings.ToUpper(strings.TrimSpace(event.Symbol))
+	}
+	if m.dispatcher != nil {
+		_ = m.dispatcher.Emit(context.Background(), event)
+		return
+	}
+	if m.tg == nil {
+		return
+	}
+	lines := []string{}
+	if strings.TrimSpace(event.Message) != "" {
+		lines = append(lines, event.Message)
+	}
+	if v := strings.TrimSpace(event.Metadata["detail"]); v != "" {
+		lines = append(lines, v)
+	}
+	m.tg.Sendf("%s", notify.BuildEventHTML("ℹ️", firstNonEmpty(strings.TrimSpace(event.Title), "EVENT"), lines...))
 }
 
 func tgPre(msg string) string {
