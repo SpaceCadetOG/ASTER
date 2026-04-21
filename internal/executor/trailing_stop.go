@@ -137,6 +137,9 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 
 func shouldMoveToBreakEven(strategyID string, initialR float64, tp1Hit bool, structureValidated bool) bool {
 	minR := 1.0
+	if isFastMomentumStrategy(strategyID) {
+		minR = 0.75
+	}
 	if tp1Hit {
 		return true
 	}
@@ -144,7 +147,7 @@ func shouldMoveToBreakEven(strategyID string, initialR float64, tp1Hit bool, str
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(strategyID)) {
-	case "impulse_continuation", "anchored_vwap_pullback", "vp_retest":
+	case "impulse_continuation", "entry_now_long", "entry_now_short", "anchored_vwap_pullback", "vp_retest":
 		return tp1Hit || (initialR >= minR && structureValidated)
 	default:
 		return tp1Hit || (initialR >= minR && structureValidated)
@@ -152,6 +155,9 @@ func shouldMoveToBreakEven(strategyID string, initialR float64, tp1Hit bool, str
 }
 
 func shouldActivateTrail(strategyID string, maxR float64, tp1Hit bool, close15mValidated bool) bool {
+	if isFastMomentumStrategy(strategyID) {
+		return tp1Hit || maxR >= 1.0
+	}
 	switch strings.ToLower(strings.TrimSpace(strategyID)) {
 	case "impulse_continuation":
 		return tp1Hit || (close15mValidated && maxR >= 1.0)
@@ -159,6 +165,15 @@ func shouldActivateTrail(strategyID string, maxR float64, tp1Hit bool, close15mV
 		return tp1Hit && close15mValidated
 	default:
 		return tp1Hit
+	}
+}
+
+func isFastMomentumStrategy(strategyID string) bool {
+	switch strings.ToLower(strings.TrimSpace(strategyID)) {
+	case "impulse_continuation", "entry_now_long", "entry_now_short":
+		return true
+	default:
+		return false
 	}
 }
 

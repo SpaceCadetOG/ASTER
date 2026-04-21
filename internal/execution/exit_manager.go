@@ -2,6 +2,8 @@ package execution
 
 import (
 	"math"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -152,6 +154,28 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.Reason = "STARTER_INITIAL_PROTECT_ONLY"
 		return dec
 	}
+	wp := EvaluateWinnerProtection(
+		firstNonEmptyExit(in.EntryStrategyID, in.EntryReason),
+		in.Side,
+		in.Entry,
+		in.Stop,
+		in.Mark,
+		in.MFER,
+		in.HitTP1 || in.HitTP2 || in.HitTP3,
+		in.AdvancedReady || in.HitTP1,
+	)
+	if wp.MoveStop {
+		dec.MoveStopToBE = true
+		dec.TightenStop = true
+		dec.TightenToPrice = wp.NewStop
+		dec.Reason = firstNonEmptyExit(dec.Reason, wp.Reason)
+	}
+	if wp.TakePartial && wp.PartialFraction > 0 {
+		dec.PartialExitPct = wp.PartialFraction
+		if dec.Reason == "" {
+			dec.Reason = wp.Reason
+		}
+	}
 	if in.LiqSpike && in.UnrealizedPct > 0 {
 		dec.PartialExitPct = m.cfg.LiqSpikePartialPct
 		dec.Reason = "LIQ_SPIKE_PARTIAL"
@@ -208,6 +232,12 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		if dec.Reason == "" {
 			dec.Reason = "STALL_NEAR_FRICTION"
 		}
+	}
+	if mustProtectAfterProof(in.MFER) && !dec.MoveStopToBE && !dec.TightenStop {
+		dec.MoveStopToBE = true
+		dec.TightenStop = true
+		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.02)
+		dec.Reason = firstNonEmptyExit(dec.Reason, "proof_r_protect")
 	}
 	return dec
 }
@@ -270,4 +300,36 @@ func firstNonEmptyExit(v ...string) string {
 		}
 	}
 	return ""
+}
+
+func mustProtectAfterProof(maxR float64) bool {
+	return envBoolExit("LIVE_EXIT_PROTECT_AFTER_PROOF", true) &&
+		maxR >= envFloatExit("LIVE_EXIT_PROOF_R", 1.0)
+}
+
+func envFloatExit(key string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
+
+func envBoolExit(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }

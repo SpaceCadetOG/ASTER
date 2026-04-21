@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
+	"go-machine/adapters/aster"
+	exitmgr "go-machine/internal/execution"
 	flowpkg "go-machine/internal/flow"
 	"go-machine/internal/indicators"
 	"go-machine/internal/inplay"
@@ -36,6 +39,12 @@ type UnifiedEntryDecision struct {
 var liveEntryAccountHealthProvider = func() accountHealthSummary {
 	return accountHealthSummary{State: "healthy"}
 }
+
+var (
+	reentryGuardMu      sync.Mutex
+	reentryGuardBySym   = map[string]exitmgr.ReentryRecord{}
+	reentryGuardEnabled = true
+)
 
 func setLiveEntryAccountHealthProvider(fn func() accountHealthSummary) {
 	if fn == nil {
@@ -535,6 +544,9 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 	if reason := directionalConflictRejectReason(c); reason != "" {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
+	if block, reason := reentryGuardReject(c, side, now); block {
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+	}
 	reason := "entry_now_" + strings.ToLower(side)
 	if staleData {
 		reason = reason + "_stale_warn"
@@ -546,6 +558,54 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 		MarketSnapshotTs:  marketTs,
 		AccountSnapshotTs: accountTs,
 	}
+}
+
+func reentryGuardReject(c candidate, side string, now time.Time) (bool, string) {
+	if !reentryGuardEnabled {
+		return false, ""
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if sym == "" {
+		return false, ""
+	}
+	strategyID := strings.TrimSpace(c.StrategyID)
+	if strategyID == "" {
+		strategyID = strings.TrimSpace(c.Strat)
+	}
+	reentryGuardMu.Lock()
+	rec := reentryGuardBySym[sym]
+	reentryGuardMu.Unlock()
+	block, reason := exitmgr.ShouldBlockReentry(sym, strategyID, side, rec, now, c.Entry.CurrentScore)
+	return block, reason
+}
+
+func registerReentryLoss(symbol, strategyID, side string, score float64, now time.Time) {
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if sym == "" {
+		return
+	}
+	reentryGuardMu.Lock()
+	defer reentryGuardMu.Unlock()
+	rec := reentryGuardBySym[sym]
+	if !rec.LastLossTime.IsZero() && now.Sub(rec.LastLossTime) > time.Duration(envInt("LIVE_REENTRY_LOSS_COOLDOWN_MIN", 15))*time.Minute {
+		rec.LossCount = 0
+	}
+	rec.LastLossTime = now
+	rec.LossCount++
+	rec.LastStrategy = strings.TrimSpace(strategyID)
+	rec.LastSide = strings.TrimSpace(side)
+	rec.LastStopScore = score
+	reentryGuardBySym[sym] = rec
+}
+
+func clearReentryLoss(symbol string) {
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if sym == "" {
+		return
+	}
+	reentryGuardMu.Lock()
+	defer reentryGuardMu.Unlock()
+	delete(reentryGuardBySym, sym)
 }
 
 func logEntryReject(decision strategies.EntryDecision, ctx strategies.StrategyContext) {

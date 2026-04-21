@@ -683,6 +683,7 @@ type paperPosition struct {
 	ProtectedStop          float64
 	MaxGivebackR           float64
 	CaptureRatio           float64
+	OriginalStop           float64
 }
 
 type paperTrader struct {
@@ -776,6 +777,13 @@ type paperDayStats struct {
 	Fees    float64
 	Net     float64
 	Reasons map[string]int
+	WinnerRevertedToLossCount      int
+	WinnerRevertedToSmallLossCount int
+	SameSymbolReentryLossCount     int
+	StoppedAfterPositiveOpenCount  int
+	TradesHit1RButNotProtected     int
+	SumMaxROnLosers                float64
+	LosingTradesWithMaxR           int
 }
 
 type paperState struct {
@@ -4827,6 +4835,22 @@ func unrealizedRiskR(side string, entry, stop, mark float64) float64 {
 		return (mark - entry) / risk
 	}
 	return (entry - mark) / risk
+}
+
+func stopStillOriginal(stop, originalStop float64) bool {
+	if stop <= 0 || originalStop <= 0 {
+		return false
+	}
+	tol := math.Max(math.Abs(originalStop)*0.00005, 1e-9)
+	return math.Abs(stop-originalStop) <= tol
+}
+
+func winnerProofR() float64 {
+	return envFloat("LIVE_EXIT_PROOF_R", 1.0)
+}
+
+func protectAfterProofEnabled() bool {
+	return envBool("LIVE_EXIT_PROTECT_AFTER_PROOF", true)
 }
 
 func enforceTPProgression(side string, tp1, tp2, tp3 float64) (float64, float64, float64) {
@@ -10846,8 +10870,14 @@ func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark floa
 		return false, nil
 	}
 	sideBuy := strings.EqualFold(p.Side, "BUY")
-	closed15m, err := m.trailingClosedBars15m(p.Symbol, envInt("LIVE_TRAIL_PROTECTED_15M_BARS", 48))
-	if err != nil || len(closed15m) < 20 {
+	protectedTF := strings.ToLower(strings.TrimSpace(envStr("LIVE_TRAIL_PROTECTED_TF", "5m")))
+	protectedLimit := envInt("LIVE_TRAIL_PROTECTED_BARS", 0)
+	if protectedLimit <= 0 {
+		// Backward compatibility with older env names.
+		protectedLimit = envInt("LIVE_TRAIL_PROTECTED_15M_BARS", 48)
+	}
+	closedBars, err := m.trailingClosedBarsProtected(p.Symbol, protectedTF, protectedLimit)
+	if err != nil || len(closedBars) < 20 {
 		return false, nil
 	}
 	trailState := trailx.NewTrailState(
@@ -10861,7 +10891,11 @@ func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark floa
 	trailState.Last15mClosedCandle = p.TrailProtectedLastClose
 	trailState.AdvancedReady = p.ProtectionStage >= protectionStageArmed
 	trailState.HitTP1 = p.HitTP1
-	upd := trailx.UpdateProtectedTrailOn15mClose(&trailState, closed15m, envFloat("LIVE_TRAIL_PROTECTED_15M_ATR_MULT", 1.5))
+	atrMult := envFloat("LIVE_TRAIL_PROTECTED_ATR_MULT", 0)
+	if atrMult <= 0 {
+		atrMult = envFloat("LIVE_TRAIL_PROTECTED_15M_ATR_MULT", 1.5)
+	}
+	upd := trailx.UpdateProtectedTrailOn15mClose(&trailState, closedBars, atrMult)
 	p.TrailProtectedLastClose = trailState.Last15mClosedCandle
 	if !upd.TacticalStopUpdated || upd.CurrentTacticalStop <= 0 {
 		return false, nil
@@ -10902,7 +10936,7 @@ func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark floa
 		Metadata: map[string]string{
 			"stop": fmtPrice(p.StopPrice),
 			"mark": fmtPrice(mark),
-			"mode": "15m_close_ema20_atr",
+			"mode": protectedTF + "_close_ema20_atr",
 		},
 	})
 	return true, nil
@@ -10973,9 +11007,18 @@ func trailingClosedBars(cache *featureRuntimeCache, symbol string, limit int) ([
 	return bars[:len(bars)-1], nil
 }
 
-func (m *liveExecManager) trailingClosedBars15m(symbol string, limit int) ([]features.Candle, error) {
+func (m *liveExecManager) trailingClosedBarsProtected(symbol, timeframe string, limit int) ([]features.Candle, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager unavailable")
+	}
+	tf := types.TF5m
+	switch strings.ToLower(strings.TrimSpace(timeframe)) {
+	case "15m":
+		tf = types.TF15m
+	case "5m":
+		tf = types.TF5m
+	default:
+		tf = types.TF5m
 	}
 	if limit < 24 {
 		limit = 24
@@ -10983,9 +11026,9 @@ func (m *liveExecManager) trailingClosedBars15m(symbol string, limit int) ([]fea
 	var bars []types.Candle
 	var err error
 	if m.featureCache != nil {
-		bars, err = m.featureCache.candleSeries(symbol, types.TF15m, limit)
+		bars, err = m.featureCache.candleSeries(symbol, tf, limit)
 	} else {
-		bars, err = aster.LoadCandles(symbol, types.TF15m, limit)
+		bars, err = aster.LoadCandles(symbol, tf, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -12556,6 +12599,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		OpposingFriction: c.Sig.VPTargetLevel,
 		StopReason:       stopReason,
 		StopDistancePct:  stopDistancePct,
+		OriginalStop:     stop,
 	}
 	p.positions[raw] = pos
 	_ = p.save()
@@ -12596,6 +12640,10 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
 		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
 			pos.Stop = newStop
+		}
+		if pos.MaxFavorableR >= winnerProofR() && stopStillOriginal(pos.Stop, pos.OriginalStop) {
+			fmt.Printf("winner_unprotected_warning symbol=%s strategy_id=%s max_r=%.4f stop=%.8f original_stop=%.8f\n",
+				raw, firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason), "unknown"), pos.MaxFavorableR, pos.Stop, pos.OriginalStop)
 		}
 		updateGivebackMetrics(pos.MaxFavorableR, unrealizedRiskR(pos.Side, pos.Entry, pos.Stop, mark), &pos.CaptureRatio, &pos.MaxGivebackR)
 		prevSponsored := pos.Sponsored
@@ -12735,6 +12783,15 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 
 		// 2) Hard stop after TP checks.
 		if (sideBuy && stopCheckPx <= pos.Stop) || (!sideBuy && stopCheckPx >= pos.Stop) {
+			if protectAfterProofEnabled() && pos.MaxFavorableR >= winnerProofR() && stopStillOriginal(pos.Stop, pos.OriginalStop) {
+				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, maxFloat(p.beLockBps, 1.0))
+				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
+					pos.Stop = be
+					fmt.Printf("winner_reverted_unprotected symbol=%s strategy_id=%s max_r=%.4f old_stop=%.8f new_stop=%.8f\n",
+						raw, firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason), "unknown"), pos.MaxFavorableR, pos.OriginalStop, pos.Stop)
+					continue
+				}
+			}
 			p.exitPortion(now, pos, "SL", stopCheckPx, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
@@ -13040,6 +13097,42 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	pos.Realized += net
 	p.balance += net
 	p.recordDayStat(now, reason, gross, fee, net)
+	loc := p.reportLoc
+	if loc == nil {
+		loc = time.Local
+	}
+	dayKeyForStats := now.In(loc).Format("2006-01-02")
+	ds := p.dayStats[dayKeyForStats]
+	protectedAfterProof := pos.MaxFavorableR >= winnerProofR() && !stopStillOriginal(pos.Stop, pos.OriginalStop)
+	winnerRevertedUnprotected := pos.MaxFavorableR >= winnerProofR() && net < 0 && stopStillOriginal(pos.Stop, pos.OriginalStop)
+	if ds != nil && net < 0 {
+		ds.SumMaxROnLosers += pos.MaxFavorableR
+		ds.LosingTradesWithMaxR++
+		if pos.MaxFavorableR > 0 {
+			ds.StoppedAfterPositiveOpenCount++
+		}
+		if pos.MaxFavorableR >= winnerProofR() {
+			ds.WinnerRevertedToLossCount++
+			if net > -0.25 {
+				ds.WinnerRevertedToSmallLossCount++
+			}
+			if stopStillOriginal(pos.Stop, pos.OriginalStop) {
+				ds.TradesHit1RButNotProtected++
+			}
+		}
+	}
+	fmt.Printf("exit_audit symbol=%s strategy_id=%s exit_reason_raw=%q exit_reason_final=%q trigger_ref=%q display_mark_at_decision=%.8f stop_at_decision=%.8f max_r_seen=%.4f protected_after_proof=%t winner_reverted_unprotected=%t\n",
+		symbol,
+		firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason), "unknown"),
+		reasonU,
+		reasonU,
+		strings.ToLower(strings.TrimSpace(p.stopTriggerRef)),
+		exitPrice,
+		pos.Stop,
+		pos.MaxFavorableR,
+		protectedAfterProof,
+		winnerRevertedUnprotected,
+	)
 	if p.lastExitAt != nil {
 		p.lastExitAt[symbol] = now
 	}
@@ -13050,6 +13143,10 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		p.lastHarvestAt[symbol] = now
 	}
 	if net < 0 {
+		registerReentryLoss(symbol, firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason)), pos.Side, pos.CombinedScore, now)
+		if ds != nil {
+			ds.SameSymbolReentryLossCount++
+		}
 		if p.lossStreak != nil {
 			p.lossStreak[symbol] = p.lossStreak[symbol] + 1
 			if p.maxLossStreak > 0 && p.lossLock > 0 && p.lossStreak[symbol] >= p.maxLossStreak && p.lockUntil != nil {
@@ -13057,6 +13154,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 			}
 		}
 	} else {
+		clearReentryLoss(symbol)
 		if p.lossStreak != nil {
 			p.lossStreak[symbol] = 0
 		}
@@ -13279,9 +13377,19 @@ func (p *paperTrader) DailyReportMessage(dayKey string) (string, bool) {
 		reasons = append(reasons, fmt.Sprintf("%s=%d", k, v))
 	}
 	sort.Strings(reasons)
+	avgMaxROnLosers := 0.0
+	if ds.LosingTradesWithMaxR > 0 {
+		avgMaxROnLosers = ds.SumMaxROnLosers / float64(ds.LosingTradesWithMaxR)
+	}
 	return fmt.Sprintf(
-		"Paper Daily Report %s (%s)\ntrades=%d wins=%d losses=%d winRate=%.1f%%\ngross=%+.2f fees=%.2f net=%+.2f\nreasons: %s",
+		"Paper Daily Report %s (%s)\ntrades=%d wins=%d losses=%d winRate=%.1f%%\ngross=%+.2f fees=%.2f net=%+.2f\nreasons: %s\nwinner_protection: reverted_to_loss=%d reverted_to_small_loss=%d same_symbol_reentry_losses=%d stopped_after_positive_open=%d hit_1R_unprotected=%d avg_maxR_on_losers=%.2f",
 		dayKey, p.reportLoc.String(), ds.Trades, ds.Wins, ds.Losses, winRate, ds.Gross, ds.Fees, ds.Net, strings.Join(reasons, ", "),
+		ds.WinnerRevertedToLossCount,
+		ds.WinnerRevertedToSmallLossCount,
+		ds.SameSymbolReentryLossCount,
+		ds.StoppedAfterPositiveOpenCount,
+		ds.TradesHit1RButNotProtected,
+		avgMaxROnLosers,
 	), true
 }
 
