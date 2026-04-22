@@ -770,13 +770,13 @@ type paperTrader struct {
 }
 
 type paperDayStats struct {
-	Trades  int
-	Wins    int
-	Losses  int
-	Gross   float64
-	Fees    float64
-	Net     float64
-	Reasons map[string]int
+	Trades                         int
+	Wins                           int
+	Losses                         int
+	Gross                          float64
+	Fees                           float64
+	Net                            float64
+	Reasons                        map[string]int
 	WinnerRevertedToLossCount      int
 	WinnerRevertedToSmallLossCount int
 	SameSymbolReentryLossCount     int
@@ -7528,8 +7528,8 @@ func (m *liveExecManager) maybeSweepTradeProfit(now time.Time, p *livePosition) 
 		Symbol:   p.Symbol,
 		Message:  "profit swept to spot",
 		Metadata: map[string]string{
-			"side":          displayPositionSide(p.Side),
-			"amount":        fmt.Sprintf("%.2f", amount),
+			"side":           displayPositionSide(p.Side),
+			"amount":         fmt.Sprintf("%.2f", amount),
 			"trade_realized": fmt.Sprintf("%+.2f", p.RealizedPnL),
 		},
 	})
@@ -12162,6 +12162,61 @@ func paperDegradedHoldExitReason(now time.Time, pos *paperPosition, mark float64
 	return "NO_FOLLOW_THROUGH"
 }
 
+func paperAdvancedReady(pos *paperPosition) bool {
+	if pos == nil {
+		return false
+	}
+	if pos.HitTP1 || pos.HitTP2 || pos.HitTP3 {
+		return true
+	}
+	minR := envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35)
+	if minR > 0 && pos.MaxFavorableR >= minR {
+		return true
+	}
+	minHold := time.Duration(envInt("LIVE_EARLY_CONTINUATION_MIN_HOLD_MIN", 8)) * time.Minute
+	if minHold > 0 && !pos.OpenedAt.IsZero() && time.Since(pos.OpenedAt) >= minHold && pos.MaxFavorableR > 0 {
+		return true
+	}
+	if pos.Sponsored || confluenceRefreshActive(time.Now().UTC(), pos.LastConfluenceRefresh) {
+		return true
+	}
+	return false
+}
+
+func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *paperPosition, mark float64, dec exitmgr.ProtectDecision, meta map[string]symbolMeta, depth map[string]aster.OrderBook) bool {
+	if p == nil || pos == nil {
+		return false
+	}
+	changed := false
+	if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, maxFloat(0, pos.MaxFavorableR*100.0)) {
+		be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
+		if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
+			pos.StopReason = firstNonEmpty(dec.Reason, "WEAK_FLOW_BE")
+			pos.Stop = be
+			changed = true
+		}
+	}
+	if dec.TightenStop {
+		if (strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice < pos.Stop) {
+			pos.StopReason = firstNonEmpty(dec.Reason, "PROTECT_TIGHTEN")
+			pos.Stop = dec.TightenToPrice
+			changed = true
+		}
+	}
+	if dec.PartialExitPct > 0 && pos.Qty > 0 {
+		q := pos.Qty * dec.PartialExitPct
+		if q > 0 && q < pos.Qty {
+			p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), mark, q, meta[raw], depth[raw])
+			return true
+		}
+	}
+	if dec.FullExit {
+		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
+		return true
+	}
+	return changed
+}
+
 func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta, longCurrent, shortCurrent map[string]inplay.Entry) {
 	if p == nil || !p.enabled || !p.fundingEnabled || len(p.positions) == 0 || p.fundingEvery <= 0 {
 		return
@@ -12719,7 +12774,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				EntryReason:       pos.EntryReason,
 				EntryStrategyID:   pos.EntryStrategyID,
 				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
-				AdvancedReady:     pos.MaxFavorableR >= envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35) || pos.HitTP1 || pos.HitTP2 || pos.HitTP3,
+				AdvancedReady:     paperAdvancedReady(pos),
 			})
 			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12838,6 +12893,45 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 
 		if reason := paperDegradedHoldExitReason(now, pos, stopCheckPx, longCurrent, shortCurrent); reason != "" {
+			if p.exitManager != nil {
+				upnlPct := 0.0
+				if pos.Qty > 0 && stopCheckPx > 0 {
+					_, upnlPct = realizedFromFill(pos.Side, pos.Entry, stopCheckPx, pos.Qty)
+				}
+				weakFlow := strings.EqualFold(reason, "MOMENTUM_FADE")
+				if !weakFlow {
+					if cur, ok := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent); ok {
+						slopeMax := envFloat("LIVE_PAPER_DEGRADED_EXIT_SLOPE_MAX", 0.05)
+						weakFlow = paperTrendLikeState(cur.State) && cur.ScoreSlope <= slopeMax && !cur.Momentum
+					}
+				}
+				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+					Side:              pos.Side,
+					Entry:             pos.Entry,
+					Stop:              pos.Stop,
+					Mark:              stopCheckPx,
+					MFER:              pos.MaxFavorableR,
+					MAER:              pos.MaxAdverseR,
+					BarsHeld:          int(now.Sub(pos.OpenedAt) / time.Minute),
+					StallBars:         pos.StallBars,
+					WeakFlow:          weakFlow,
+					NearFriction:      false,
+					LiqSpike:          false,
+					UnrealizedPct:     upnlPct,
+					Sponsored:         pos.Sponsored,
+					HitTP1:            pos.HitTP1,
+					HitTP2:            pos.HitTP2,
+					HitTP3:            pos.HitTP3,
+					WeakSponsorStreak: pos.WeakSponsorStreak,
+					EntryReason:       pos.EntryReason,
+					EntryStrategyID:   pos.EntryStrategyID,
+					StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
+					AdvancedReady:     paperAdvancedReady(pos),
+				})
+				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
+					continue
+				}
+			}
 			p.exitPortion(now, pos, reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
@@ -12925,7 +13019,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				EntryReason:       pos.EntryReason,
 				EntryStrategyID:   pos.EntryStrategyID,
 				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
-				AdvancedReady:     pos.MaxFavorableR >= envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35) || pos.HitTP1 || pos.HitTP2 || pos.HitTP3,
+				AdvancedReady:     paperAdvancedReady(pos),
 			})
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)

@@ -201,10 +201,14 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.WeakFlow &&
 		in.UnrealizedPct <= profitGivebackPct &&
 		!(in.Sponsored && !in.HitTP3) {
-		if m.cfg.TightenAfterConfirm && (in.HitTP1 || in.HitTP2 || in.HitTP3 || in.AdvancedReady || earlyContinuationProtect(in)) {
+		if earlyContinuationProtect(in) {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
-			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, m.cfg.ProfitLockTightenR)
+			tightR := m.cfg.ProfitLockTightenR
+			if in.MFER < 0.75 {
+				tightR = envFloatXM("LIVE_PROFIT_GIVEBACK_TIGHTEN_R_EARLY", 0.05)
+			}
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
 			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
 			return dec
 		}
@@ -219,12 +223,21 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		if earlyContinuationProtect(in) {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
-			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.10))
+			tightR := envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.10)
+			if in.MFER < 0.5 {
+				tightR = envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_WEAK", 0.05)
+			}
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
 			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
 			return dec
 		}
-		dec.FullExit = true
-		dec.Reason = "NO_FOLLOW_THROUGH"
+		if in.MFER <= 0 {
+			dec.FullExit = true
+			dec.Reason = "NO_FOLLOW_THROUGH"
+			return dec
+		}
+		dec.MoveStopToBE = true
+		dec.Reason = "NO_FOLLOW_THROUGH_BE"
 		return dec
 	}
 	if in.WeakFlow && in.MFER >= m.cfg.WeakFlowArmBER {
@@ -245,6 +258,10 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.TightenStop = true
 		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.02)
 		dec.Reason = firstNonEmptyExit(dec.Reason, "proof_r_protect")
+	}
+	if in.MFER > 0.25 && in.UnrealizedPct < 0 {
+		dec.MoveStopToBE = true
+		dec.Reason = firstNonEmptyExit(dec.Reason, "PROTECT_BE_FALLBACK")
 	}
 	return dec
 }
@@ -315,11 +332,17 @@ func mustProtectAfterProof(maxR float64) bool {
 }
 
 func earlyContinuationProtect(in ProtectInput) bool {
-	minR := envFloatXM("LIVE_EARLY_CONTINUATION_MIN_R", 0.35)
-	if in.AdvancedReady || in.HitTP1 || in.HitTP2 || in.HitTP3 {
+	if in.AdvancedReady {
 		return true
 	}
+	if in.HitTP1 || in.HitTP2 || in.HitTP3 {
+		return true
+	}
+	minR := envFloatXM("LIVE_EARLY_CONTINUATION_MIN_R", 0.25)
 	if minR > 0 && in.MFER >= minR {
+		return true
+	}
+	if in.MFER > 0 && in.WeakFlow {
 		return true
 	}
 	return false

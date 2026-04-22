@@ -37,7 +37,7 @@ func TestEvaluateProtectLiqSpikePartial(t *testing.T) {
 func TestEvaluateProtectNoFollowThrough(t *testing.T) {
 	m := NewManager(Config{NoFollowThroughBars: 6, NoFollowThroughMinMFER: 0.3, NoFollowThroughMinMAER: 0.8})
 	dec := m.EvaluateProtect(ProtectInput{
-		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.6, BarsHeld: 8, MFER: 0.1, MAER: 1.0,
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.6, BarsHeld: 8, MFER: 0.0, MAER: 1.0,
 	})
 	if !dec.FullExit || dec.Reason != "NO_FOLLOW_THROUGH" {
 		t.Fatalf("expected full pre-stop invalidation exit, got %+v", dec)
@@ -82,8 +82,8 @@ func TestEvaluateProtectProfitGiveback(t *testing.T) {
 		WeakFlow:      true,
 		UnrealizedPct: 0.10,
 	})
-	if !dec.FullExit || dec.Reason != "PROFIT_GIVEBACK" {
-		t.Fatalf("expected profit giveback exit, got %+v", dec)
+	if dec.FullExit || !dec.MoveStopToBE || !dec.TightenStop || dec.Reason != "PROFIT_GIVEBACK_TIGHTEN" {
+		t.Fatalf("expected profit giveback tighten decision, got %+v", dec)
 	}
 }
 
