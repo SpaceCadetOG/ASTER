@@ -295,6 +295,7 @@ type liveAccountPosition struct {
 	SpreadBps        float64
 	UnrealizedPnL    float64
 	UnrealizedPnLPct float64
+	RealizedPnL      float64
 	ExchangeUnreal   float64
 	Leverage         int
 	Margin           float64
@@ -9212,10 +9213,10 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 	if len(assets) > 0 {
 		rows = append(rows, fmt.Sprintf("Assets: %s", strings.Join(assets, ", ")))
 	}
-	rows = append(rows, "| Sym | Side | Src | Manage | Protect | Qty | Entry | Mark | Last | Lev | uPnL | uPnL% | Age(m) |")
-	rows = append(rows, "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+	rows = append(rows, "| Sym | Side | Src | Manage | Protect | Qty | Entry | Mark | Last | Lev | uPnL | rPnL | uPnL% | Age(m) |")
+	rows = append(rows, "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 	for _, pos := range snap.Positions {
-		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %s | %s | %.6f | %.6f | %.6f | %.6f | %dx | %+.2f | %+.2f%% | %.1f |",
+		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %s | %s | %.6f | %.6f | %.6f | %.6f | %dx | %+.2f | %+.2f | %+.2f%% | %.1f |",
 			pos.Symbol,
 			pos.Side,
 			pos.Source,
@@ -9227,6 +9228,7 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 			pos.LastPrice,
 			maxInt(1, pos.Leverage),
 			pos.UnrealizedPnL,
+			pos.RealizedPnL,
 			pos.UnrealizedPnLPct,
 			pos.HoldMin,
 		))
@@ -9251,7 +9253,7 @@ func (m *liveExecManager) liveTradeUpdateSignature(meta map[string]symbolMeta) s
 	}
 	parts := make([]string, 0, len(snap.Positions)+1)
 	for _, pos := range snap.Positions {
-		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%.6f|%.6f|%.6f|%.6f|%dx|%.2f|%.2f",
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%.6f|%.6f|%.6f|%.6f|%dx|%.2f|%.2f|%.2f",
 			pos.Symbol,
 			pos.Side,
 			pos.Source,
@@ -9262,6 +9264,7 @@ func (m *liveExecManager) liveTradeUpdateSignature(meta map[string]symbolMeta) s
 			pos.LastPrice,
 			maxInt(1, pos.Leverage),
 			pos.UnrealizedPnL,
+			pos.RealizedPnL,
 			pos.StopPrice,
 		))
 	}
@@ -13374,6 +13377,7 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		mark   float64
 		qty    float64
 		upnl   float64
+		rpnl   float64
 		margin float64
 		lev    int
 		upct   float64
@@ -13409,6 +13413,7 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 			mark:   mark,
 			qty:    pos.Qty,
 			upnl:   upnl,
+			rpnl:   pos.Realized,
 			margin: pos.Margin,
 			lev:    maxInt(pos.Leverage, 1),
 			upct:   upct,
@@ -13435,11 +13440,11 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		b.WriteString("open: none")
 		return b.String()
 	}
-	b.WriteString("| Sym | Side | Margin | Qty | Entry | Mark | Lev | uPnL | uPnL% | Age(m) | Reason |\n")
-	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
+	b.WriteString("| Sym | Side | Margin | Qty | Entry | Mark | Lev | uPnL | rPnL | uPnL% | Age(m) | Reason |\n")
+	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "| %s | %s | $%.2f | %.4f | %s | %s | %dx | %+.2f | %+.2f%% | %d | %s |\n",
-			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.upct, r.ageMin, colorReasonTag(r.reason))
+		fmt.Fprintf(&b, "| %s | %s | $%.2f | %.4f | %s | %s | %dx | %+.2f | %+.2f | %+.2f%% | %d | %s |\n",
+			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.rpnl, r.upct, r.ageMin, colorReasonTag(r.reason))
 	}
 	fmt.Fprintf(&b, "\nTotals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f", totalUPnL, realizedToday, realizedToday+totalUPnL)
 	return strings.TrimSpace(b.String())
@@ -17930,12 +17935,18 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 			SpreadBps:        quote.SpreadBps,
 			UnrealizedPnL:    unreal,
 			UnrealizedPnLPct: unrealPct,
-			ExchangeUnreal:   rp.Unreal,
-			Leverage:         maxInt(int(rp.Leverage), 1),
-			Margin:           rp.Margin,
-			StopPrice:        stop,
-			HoldMin:          holdMin,
-			EntryReason:      entryReason,
+			RealizedPnL: func() float64 {
+				if lp != nil {
+					return lp.RealizedPnL
+				}
+				return 0
+			}(),
+			ExchangeUnreal: rp.Unreal,
+			Leverage:       maxInt(int(rp.Leverage), 1),
+			Margin:         rp.Margin,
+			StopPrice:      stop,
+			HoldMin:        holdMin,
+			EntryReason:    entryReason,
 		}
 		out.OpenPnL += unreal
 		if src == "MANUAL" {
