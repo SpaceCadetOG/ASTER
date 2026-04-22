@@ -4710,18 +4710,40 @@ func applyPnLProtectiveStop(side string, entry, currentStop, mark, upnlPct float
 	return improvedStopPrice(side, currentStop, target)
 }
 
+func earlyContinuationReady(p *livePosition) bool {
+	if p == nil {
+		return false
+	}
+	minR := envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35)
+	minHold := time.Duration(envInt("LIVE_EARLY_CONTINUATION_MIN_HOLD_MIN", 8)) * time.Minute
+	if p.AddCount > 0 || p.HitTP1 || p.HitTP2 || p.HitTP3 {
+		return true
+	}
+	if minR > 0 && p.MaxFavorableR >= minR {
+		return true
+	}
+	if minHold > 0 && !p.CreatedAt.IsZero() && time.Since(p.CreatedAt) >= minHold && p.MaxFavorableR > 0 {
+		return true
+	}
+	if p.Sponsored || confluenceRefreshActive(time.Now().UTC(), p.LastConfluenceRefresh) {
+		return true
+	}
+	return false
+}
+
 func shouldAdvanceProtection(p *livePosition) bool {
 	if p == nil {
 		return false
 	}
 	switch p.ManagePhase {
-	case managePhaseExhaustion:
-		return true
-	case managePhaseContinuation:
+	case managePhaseExhaustion, managePhaseContinuation:
 		return true
 	default:
 		if importedManagedPosition(p) {
 			return p.MaxFavorableR >= envFloat("LIVE_IMPORTED_PROTECTION_MIN_R", 0.35) || p.HitTP1 || p.HitTP2 || p.HitTP3
+		}
+		if earlyContinuationReady(p) {
+			return true
 		}
 		return p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25)
 	}
@@ -4759,7 +4781,7 @@ func updateManagePhase(p *livePosition, exhaustion bool) {
 		}
 		return
 	}
-	if p.AddCount > 0 || p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25) || p.HitTP1 || p.HitTP2 || p.HitTP3 {
+	if p.AddCount > 0 || p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25) || p.HitTP1 || p.HitTP2 || p.HitTP3 || earlyContinuationReady(p) {
 		p.ManagePhase = managePhaseContinuation
 		return
 	}
@@ -10069,6 +10091,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					WeakSponsorStreak: p.WeakSponsorStreak,
 					EntryReason:       p.EntryReason,
 					EntryStrategyID:   p.EntryStrategyID,
+					StarterEntry:      p.ManagePhase == managePhaseStarter,
+					AdvancedReady:     p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
 				})
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
@@ -10889,7 +10913,7 @@ func (m *liveExecManager) updateProtectedTrailingStop(p *livePosition, mark floa
 	)
 	trailState.TacticalStop = p.StopPrice
 	trailState.Last15mClosedCandle = p.TrailProtectedLastClose
-	trailState.AdvancedReady = p.ProtectionStage >= protectionStageArmed
+	trailState.AdvancedReady = p.ProtectionStage >= protectionStageArmed || earlyContinuationReady(p)
 	trailState.HitTP1 = p.HitTP1
 	atrMult := envFloat("LIVE_TRAIL_PROTECTED_ATR_MULT", 0)
 	if atrMult <= 0 {
@@ -11416,6 +11440,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				WeakSponsorStreak: p.WeakSponsorStreak,
 				EntryReason:       p.EntryReason,
 				EntryStrategyID:   p.EntryStrategyID,
+				StarterEntry:      p.ManagePhase == managePhaseStarter,
+				AdvancedReady:     p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
 			})
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
@@ -11491,7 +11517,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			}
 			continue
 		}
-		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed) {
+		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) &&
+			(p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed || earlyContinuationReady(p)) {
 			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (p.Sponsored || confluenceRefreshActive(now, p.LastConfluenceRefresh))) {
 				if stop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, maxFloat(p.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps, allowMoveToBreakEven(p.HitTP1, upct)); tightened {
 					p.StopReason = "MOMENTUM_FADE_TIGHTEN"
@@ -12691,6 +12718,8 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 				EntryReason:       pos.EntryReason,
 				EntryStrategyID:   pos.EntryStrategyID,
+				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
+				AdvancedReady:     pos.MaxFavorableR >= envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35) || pos.HitTP1 || pos.HitTP2 || pos.HitTP3,
 			})
 			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12895,6 +12924,8 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				WeakSponsorStreak: pos.WeakSponsorStreak,
 				EntryReason:       pos.EntryReason,
 				EntryStrategyID:   pos.EntryStrategyID,
+				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
+				AdvancedReady:     pos.MaxFavorableR >= envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35) || pos.HitTP1 || pos.HitTP2 || pos.HitTP3,
 			})
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12923,7 +12954,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				continue
 			}
 		}
-		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) && (pos.HitTP1 || pos.HitTP2 || pos.HitTP3 || pos.ProtectionStage >= protectionStageArmed) {
+		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) &&
+			(pos.HitTP1 || pos.HitTP2 || pos.HitTP3 || pos.ProtectionStage >= protectionStageArmed ||
+				pos.MaxFavorableR >= envFloat("LIVE_EARLY_CONTINUATION_MIN_R", 0.35)) {
 			if !(envBool("LIVE_MOMENTUM_FADE_REQUIRE_STRUCTURE_LOSS_AFTER_CONFIRM", true) && (pos.Sponsored || confluenceRefreshActive(now, pos.LastConfluenceRefresh))) {
 				if stop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, maxFloat(pos.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upnlPct)); tightened {
 					pos.StopReason = "MOMENTUM_FADE_TIGHTEN"
@@ -13142,8 +13175,9 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	if p.lastHarvestAt != nil && p.shouldMarkHarvest(pos, reason, net) {
 		p.lastHarvestAt[symbol] = now
 	}
+	strategyID := firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason))
+	registerReentryExit(symbol, strategyID, pos.Side, reasonU, pos.CombinedScore, pos.MaxFavorableR, net < 0, now)
 	if net < 0 {
-		registerReentryLoss(symbol, firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason)), pos.Side, pos.CombinedScore, now)
 		if ds != nil {
 			ds.SameSymbolReentryLossCount++
 		}
@@ -13154,7 +13188,9 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 			}
 		}
 	} else {
-		clearReentryLoss(symbol)
+		if !isSoftChurnExit(reasonU) {
+			clearReentryLoss(symbol)
+		}
 		if p.lossStreak != nil {
 			p.lossStreak[symbol] = 0
 		}

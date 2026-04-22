@@ -598,6 +598,40 @@ func registerReentryLoss(symbol, strategyID, side string, score float64, now tim
 	reentryGuardBySym[sym] = rec
 }
 
+func registerReentryExit(symbol, strategyID, side, reason string, score, maxFavorR float64, wasLoss bool, now time.Time) {
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if sym == "" {
+		return
+	}
+	reentryGuardMu.Lock()
+	defer reentryGuardMu.Unlock()
+	rec := reentryGuardBySym[sym]
+	rec.LastExitTime = now
+	rec.LastExitReason = strings.TrimSpace(reason)
+	rec.LastExitWasLoss = wasLoss
+	rec.LastExitMaxFavorR = maxFavorR
+	rec.LastStrategy = strings.TrimSpace(strategyID)
+	rec.LastSide = strings.TrimSpace(side)
+	rec.LastStopScore = score
+	if wasLoss {
+		if !rec.LastLossTime.IsZero() && now.Sub(rec.LastLossTime) > time.Duration(envInt("LIVE_REENTRY_LOSS_COOLDOWN_MIN", 15))*time.Minute {
+			rec.LossCount = 0
+		}
+		rec.LastLossTime = now
+		rec.LossCount++
+	}
+	reentryGuardBySym[sym] = rec
+}
+
+func isSoftChurnExit(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH_TIGHTEN", "MOMENTUM_FADE", "PROFIT_GIVEBACK":
+		return true
+	default:
+		return false
+	}
+}
+
 func clearReentryLoss(symbol string) {
 	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
 	if sym == "" {

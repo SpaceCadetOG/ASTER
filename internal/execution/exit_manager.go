@@ -201,7 +201,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.WeakFlow &&
 		in.UnrealizedPct <= profitGivebackPct &&
 		!(in.Sponsored && !in.HitTP3) {
-		if m.cfg.TightenAfterConfirm && (in.HitTP1 || in.HitTP2 || in.HitTP3) {
+		if m.cfg.TightenAfterConfirm && (in.HitTP1 || in.HitTP2 || in.HitTP3 || in.AdvancedReady || earlyContinuationProtect(in)) {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
 			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, m.cfg.ProfitLockTightenR)
@@ -216,6 +216,13 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.MFER < m.cfg.NoFollowThroughMinMFER &&
 		in.MAER >= m.cfg.NoFollowThroughMinMAER &&
 		!(in.Sponsored && in.BarsHeld <= m.cfg.SponsorshipGraceMin) {
+		if earlyContinuationProtect(in) {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.10))
+			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
+			return dec
+		}
 		dec.FullExit = true
 		dec.Reason = "NO_FOLLOW_THROUGH"
 		return dec
@@ -305,6 +312,29 @@ func firstNonEmptyExit(v ...string) string {
 func mustProtectAfterProof(maxR float64) bool {
 	return envBoolExit("LIVE_EXIT_PROTECT_AFTER_PROOF", true) &&
 		maxR >= envFloatExit("LIVE_EXIT_PROOF_R", 1.0)
+}
+
+func earlyContinuationProtect(in ProtectInput) bool {
+	minR := envFloatXM("LIVE_EARLY_CONTINUATION_MIN_R", 0.35)
+	if in.AdvancedReady || in.HitTP1 || in.HitTP2 || in.HitTP3 {
+		return true
+	}
+	if minR > 0 && in.MFER >= minR {
+		return true
+	}
+	return false
+}
+
+func envFloatXM(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func envFloatExit(key string, def float64) float64 {

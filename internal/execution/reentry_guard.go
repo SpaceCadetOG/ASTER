@@ -8,11 +8,15 @@ import (
 )
 
 type ReentryRecord struct {
-	LastLossTime  time.Time
-	LossCount     int
-	LastStrategy  string
-	LastSide      string
-	LastStopScore float64
+	LastLossTime      time.Time
+	LossCount         int
+	LastStrategy      string
+	LastSide          string
+	LastStopScore     float64
+	LastExitTime      time.Time
+	LastExitReason    string
+	LastExitWasLoss   bool
+	LastExitMaxFavorR float64
 }
 
 func ShouldBlockReentry(
@@ -45,7 +49,33 @@ func ShouldBlockReentry(
 			return true, "same_setup_cooldown"
 		}
 	}
+
+	softCooldownMin := envIntRG("LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN", 20)
+	softCooldown := time.Duration(softCooldownMin) * time.Minute
+	if isSoftChurnExit(rec.LastExitReason) &&
+		strings.EqualFold(rec.LastStrategy, strategyID) &&
+		strings.EqualFold(rec.LastSide, side) &&
+		!rec.LastExitTime.IsZero() &&
+		now.Sub(rec.LastExitTime) < softCooldown {
+		needStronger := envBoolRG("LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT", true)
+		if !needStronger {
+			return true, "same_setup_soft_exit_cooldown"
+		}
+		delta := envFloatRG("LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA", 7.5)
+		if currentScore < rec.LastStopScore+delta {
+			return true, "same_setup_soft_exit_cooldown"
+		}
+	}
 	return false, ""
+}
+
+func isSoftChurnExit(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH_TIGHTEN", "MOMENTUM_FADE", "PROFIT_GIVEBACK":
+		return true
+	default:
+		return false
+	}
 }
 
 func envIntRG(key string, def int) int {

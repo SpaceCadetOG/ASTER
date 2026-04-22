@@ -44,6 +44,32 @@ func TestEvaluateProtectNoFollowThrough(t *testing.T) {
 	}
 }
 
+func TestEvaluateProtectNoFollowThroughTightensAfterEarlyProof(t *testing.T) {
+	t.Setenv("LIVE_EARLY_CONTINUATION_MIN_R", "0.35")
+	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", "0.10")
+	m := NewManager(Config{
+		NoFollowThroughBars:    6,
+		NoFollowThroughMinMFER: 0.3,
+		NoFollowThroughMinMAER: 0.8,
+	})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:          "BUY",
+		Entry:         100,
+		Stop:          98,
+		Mark:          99.6,
+		BarsHeld:      8,
+		MFER:          0.20,
+		MAER:          1.0,
+		AdvancedReady: true,
+	})
+	if dec.FullExit {
+		t.Fatalf("expected tighten, not full exit: %+v", dec)
+	}
+	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "NO_FOLLOW_THROUGH_TIGHTEN" {
+		t.Fatalf("expected no-follow-through tighten decision, got %+v", dec)
+	}
+}
+
 func TestEvaluateProtectProfitGiveback(t *testing.T) {
 	m := NewManager(Config{ProfitLockArmR: 0.6, ProfitGivebackPct: 0.25})
 	dec := m.EvaluateProtect(ProtectInput{
