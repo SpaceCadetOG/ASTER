@@ -1520,6 +1520,7 @@ func TestHandleCommandSingleLetterRequiresSymbolWhenMultiplePending(t *testing.T
 }
 
 func TestSafetyRejectBlocksContextOnlySymbolsFromTrading(t *testing.T) {
+	t.Setenv("LIVE_CONTEXT_ONLY_ENFORCE", "1")
 	now := time.Now().UTC()
 	cfg := safetyConfig{
 		contextOnlySymbols: map[string]struct{}{

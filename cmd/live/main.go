@@ -18338,8 +18338,10 @@ func safetyReject(cfg safetyConfig, c candidate, now, lastOrderAt time.Time, las
 	if _, blocked := cfg.blockSymbols[sym]; blocked {
 		return "symbol blocked"
 	}
-	if _, contextOnly := cfg.contextOnlySymbols[sym]; contextOnly {
-		return "context_only_symbol"
+	if envBool("LIVE_CONTEXT_ONLY_ENFORCE", false) {
+		if _, contextOnly := cfg.contextOnlySymbols[sym]; contextOnly {
+			return "context_only_symbol"
+		}
 	}
 	if len(cfg.allowSymbols) > 0 {
 		if _, ok := cfg.allowSymbols[sym]; !ok {
