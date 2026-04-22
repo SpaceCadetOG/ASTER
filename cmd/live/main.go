@@ -18295,6 +18295,14 @@ func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
 			contextOnlyMap[raw] = struct{}{}
 		}
 	}
+	// Symbols listed here are always tradable even if accidentally present in context-only.
+	contextTradable := envCSV("LIVE_CONTEXT_TRADEABLE_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT")
+	for _, s := range contextTradable {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(s)))
+		if raw != "" {
+			delete(contextOnlyMap, raw)
+		}
+	}
 	return safetyConfig{
 		enableLiveTrading:      envBool("LIVE_ENABLE_LIVE_TRADING", false),
 		maxLeverage:            maxLev,
