@@ -1,6 +1,9 @@
 package execution
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestFrontRunTarget(t *testing.T) {
 	m := NewManager(Config{FrontRunPct: 0.001})
@@ -67,6 +70,38 @@ func TestEvaluateProtectNoFollowThroughTightensAfterEarlyProof(t *testing.T) {
 	}
 	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "NO_FOLLOW_THROUGH_TIGHTEN" {
 		t.Fatalf("expected no-follow-through tighten decision, got %+v", dec)
+	}
+}
+
+func TestEvaluateProtectNoFollowThroughUsesHTFCautionTighten(t *testing.T) {
+	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", "0.08")
+	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_CAUTION", "0.06")
+	m := NewManager(Config{
+		NoFollowThroughBars:    6,
+		NoFollowThroughMinMFER: 0.3,
+		NoFollowThroughMinMAER: 0.8,
+	})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:               "BUY",
+		Entry:              100,
+		Stop:               98,
+		Mark:               99.6,
+		BarsHeld:           8,
+		MFER:               0.20,
+		MAER:               1.0,
+		HTFTrendPersistent: true,
+		HTFTrendFailed:     false,
+		HTFCaution:         true,
+	})
+	if dec.FullExit {
+		t.Fatalf("expected tighten with HTF caution, not full exit: %+v", dec)
+	}
+	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "NO_FOLLOW_THROUGH_TIGHTEN" {
+		t.Fatalf("expected no-follow-through tighten decision with HTF caution, got %+v", dec)
+	}
+	expected := 99.88 // tightenToR(BUY,100,98,0.06)
+	if math.Abs(dec.TightenToPrice-expected) > 1e-9 {
+		t.Fatalf("expected caution tighten price %.8f, got %.8f", expected, dec.TightenToPrice)
 	}
 }
 

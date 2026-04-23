@@ -58,6 +58,7 @@ type ProtectInput struct {
 	HTFTrendState      string
 	HTFTrendPersistent bool
 	HTFTrendFailed     bool
+	HTFCaution         bool
 }
 
 type ProtectDecision struct {
@@ -70,6 +71,7 @@ type ProtectDecision struct {
 	HTFTrendState  string
 	HTFPersistent  bool
 	HTFFailed      bool
+	HTFCaution     bool
 }
 
 func NewManager(cfg Config) *Manager {
@@ -154,6 +156,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		HTFTrendState: in.HTFTrendState,
 		HTFPersistent: in.HTFTrendPersistent,
 		HTFFailed:     in.HTFTrendFailed,
+		HTFCaution:    in.HTFCaution,
 	}
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
@@ -215,6 +218,9 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
 			tightR := envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06)
+			if in.HTFCaution {
+				tightR = envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R_CAUTION", 0.05)
+			}
 			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
 			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
 			return dec
@@ -242,6 +248,9 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
 			tightR := envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.08)
+			if in.HTFCaution {
+				tightR = envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_CAUTION", 0.06)
+			}
 			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
 			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
 			return dec
@@ -270,7 +279,11 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		if in.HTFTrendPersistent && !in.HTFTrendFailed {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
-			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06))
+			tightR := envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06)
+			if in.HTFCaution {
+				tightR = envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R_CAUTION", 0.05)
+			}
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
 			dec.Reason = firstNonEmptyExit(dec.Reason, "MOMENTUM_FADE_TIGHTEN")
 			return dec
 		}

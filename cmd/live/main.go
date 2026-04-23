@@ -768,6 +768,7 @@ type paperTrader struct {
 	partialFillMinFrac     float64
 	stopMarketSlipBps      float64
 	featureCache           *featureRuntimeCache
+	htf1HBySymbol          map[string]HTFStructureSnapshot
 }
 
 type paperDayStats struct {
@@ -1044,6 +1045,7 @@ type liveExecManager struct {
 	legalityFailCount    map[string]int
 	symbolQuarantineTill map[string]time.Time
 	unknownExecGuards    map[string]UnknownExecutionGuard
+	htf1HBySymbol        map[string]HTFStructureSnapshot
 }
 
 type ladderConfig struct {
@@ -6683,6 +6685,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 		partialFillEnable:  partialFillEnable,
 		partialFillMinFrac: partialFillMinFrac,
 		stopMarketSlipBps:  stopMarketSlipBps,
+		htf1HBySymbol:      map[string]HTFStructureSnapshot{},
 	}
 	p.stateFile = resolveStatePath(p.stateFile)
 	if p.enabled {
@@ -6985,6 +6988,7 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		legalityFailCount:    map[string]int{},
 		symbolQuarantineTill: map[string]time.Time{},
 		unknownExecGuards:    map[string]UnknownExecutionGuard{},
+		htf1HBySymbol:        map[string]HTFStructureSnapshot{},
 		ladderCfg:            ladderCfg,
 		fundsCfg:             fundsCfg,
 		reentryCfg:           reentryCfg,
@@ -10075,7 +10079,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			rawSym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
 			currentMV := mom[rawSym]
 			currentRunnerState := evaluateRunnerExitStateWithFlow(p.Side, currentMV, flow[rawSym], flowfeed.ExternalSignal{})
-			htf := htfSnapshotFromEntry(p.Side, sameSideMomentumEntry(p.Side, currentMV))
+			htf := m.htfSnapshot(rawSym, p.Side, sameSideMomentumEntry(p.Side, currentMV))
 			updateManagePhase(p, currentRunnerState.ExhaustionConfirmed && !currentRunnerState.StructureBroken)
 			refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 			if m.exitManager != nil {
@@ -10102,6 +10106,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					HTFTrendState:      string(htf.State),
 					HTFTrendPersistent: htfPersistent(p.Side, htf),
 					HTFTrendFailed:     htfFailed(p.Side, htf),
+					HTFCaution:         htfCaution(p.Side, htf),
 				})
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
@@ -11427,7 +11432,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			continue
 		}
 		runnerState := evaluateRunnerExitStateWithFlow(p.Side, mv, flow[sym], ext[sym])
-		htf := htfSnapshotFromEntry(p.Side, sameSideMomentumEntry(p.Side, mv))
+		htf := m.htfSnapshot(sym, p.Side, sameSideMomentumEntry(p.Side, mv))
 		updateManagePhase(p, runnerState.ExhaustionConfirmed && !runnerState.StructureBroken)
 		refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 		if m.exitManager != nil {
@@ -11455,6 +11460,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(p.Side, htf),
 				HTFTrendFailed:     htfFailed(p.Side, htf),
+				HTFCaution:         htfCaution(p.Side, htf),
 			})
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
@@ -12219,15 +12225,15 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 	if dec.PartialExitPct > 0 && pos.Qty > 0 {
 		q := pos.Qty * dec.PartialExitPct
 		if q > 0 && q < pos.Qty {
-			fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=PARTIAL reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
-				raw, pos.Side, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
+			fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=PARTIAL reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+				raw, pos.Side, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 			p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), mark, q, meta[raw], depth[raw])
 			return true
 		}
 	}
 	if dec.FullExit {
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
-			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
 		return true
 	}
@@ -12236,8 +12242,8 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		if dec.MoveStopToBE && !dec.TightenStop {
 			action = "BE"
 		}
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
-			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 	}
 	return changed
 }
@@ -12781,7 +12787,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			frTP2 = p.exitManager.FrontRunTarget(pos.Side, pos.TP2, pos.OpposingFriction)
 			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
 			cur, _ := paperCurrentEntryForSide(pos.Side, raw, longCurrent, shortCurrent)
-			htf := htfSnapshotFromEntry(pos.Side, &cur)
+			htf := p.htfSnapshot(raw, pos.Side, &cur)
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:               pos.Side,
 				Entry:              pos.Entry,
@@ -12805,6 +12811,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(pos.Side, htf),
 				HTFTrendFailed:     htfFailed(pos.Side, htf),
+				HTFCaution:         htfCaution(pos.Side, htf),
 			})
 			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12936,7 +12943,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					}
 				}
 				cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
-				htf := htfSnapshotFromEntry(pos.Side, &cur)
+				htf := p.htfSnapshot(raw, pos.Side, &cur)
 				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 					Side:               pos.Side,
 					Entry:              pos.Entry,
@@ -12962,6 +12969,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					HTFTrendState:      string(htf.State),
 					HTFTrendPersistent: htfPersistent(pos.Side, htf),
 					HTFTrendFailed:     htfFailed(pos.Side, htf),
+					HTFCaution:         htfCaution(pos.Side, htf),
 				})
 				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
 					continue
@@ -13034,7 +13042,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			continue
 		}
 		if p.exitManager != nil {
-			htf := htfSnapshotFromEntry(pos.Side, sameSideMomentumEntry(pos.Side, mv))
+			htf := p.htfSnapshot(raw, pos.Side, sameSideMomentumEntry(pos.Side, mv))
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:               pos.Side,
 				Entry:              pos.Entry,
@@ -13059,6 +13067,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(pos.Side, htf),
 				HTFTrendFailed:     htfFailed(pos.Side, htf),
+				HTFCaution:         htfCaution(pos.Side, htf),
 			})
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -16026,6 +16035,23 @@ func addNeedsFreshPhase(p *livePosition, c candidate) bool {
 	return !hasFreshStructureReset(c)
 }
 
+func materiallyDifferentReentrySetup(c candidate, prev *livePosition) bool {
+	if prev == nil {
+		return false
+	}
+	curStrat := strings.TrimSpace(firstNonEmpty(c.StrategyID, c.Strat))
+	prevStrat := strings.TrimSpace(firstNonEmpty(prev.EntryStrategyID, prev.EntryReason))
+	if curStrat != "" && prevStrat != "" && !strings.EqualFold(curStrat, prevStrat) {
+		return true
+	}
+	curFam := strings.TrimSpace(c.SetupFamily)
+	prevFam := strings.TrimSpace(prev.EntryReason)
+	if curFam != "" && prevFam != "" && !strings.EqualFold(curFam, prevFam) {
+		return true
+	}
+	return false
+}
+
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
 	plan := ladderPlan{
 		MarginUSDT: envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10)),
@@ -16213,6 +16239,25 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		if closedSame.RunnerCaptureFailed && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 30*time.Minute) && !hasFreshStructureReset(c) {
 			plan.RejectReason = "reentry_runner_capture_failed"
 			return plan
+		}
+		if isSoftChurnExit(closedSame.CloseReason) {
+			htf := execMgr.htfSnapshot(raw, c.Side, &c.Entry)
+			if htfPersistent(c.Side, htf) && !htfFailed(c.Side, htf) {
+				softCooldown := time.Duration(envInt("LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN", 20)) * time.Minute
+				softCooldown = maxDuration(reentryCfg.Cooldown, softCooldown)
+				if softCooldown > 0 && now.Sub(closedSame.ClosedAt) < softCooldown {
+					plan.RejectReason = "reentry_soft_exit_htf_persistent_cooldown"
+					return plan
+				}
+				if envBool("LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT", true) &&
+					!materiallyDifferentReentrySetup(c, closedSame) {
+					delta := envFloat("LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA", 7.5)
+					if c.Entry.CurrentScore < closedSame.CombinedScore+delta {
+						plan.RejectReason = "reentry_soft_exit_needs_stronger_score"
+						return plan
+					}
+				}
+			}
 		}
 		if !qualifiesStructuredReentry(c) {
 			plan.RejectReason = "reentry_needs_pullback_hold"
@@ -17432,20 +17477,270 @@ const (
 )
 
 type HTFStructureSnapshot struct {
-	Symbol     string
-	TF         string
-	State      HTFStructureState
-	TrendScore float64
-	UpdatedAt  time.Time
+	Symbol                string
+	TF                    string
+	State                 HTFStructureState
+	LastSwingHigh         float64
+	LastSwingLow          float64
+	PriorSwingHigh        float64
+	PriorSwingLow         float64
+	StructureBreakUp      bool
+	StructureBreakDown    bool
+	BreakConfirmCountUp   int
+	BreakConfirmCountDown int
+	Delta1H               float64
+	DeltaBias             string
+	TrendScore            float64
+	LastClose             float64
+	UpdatedAt             time.Time
+}
+
+func htfRefreshInterval() time.Duration {
+	sec := envInt("LIVE_HTF_REFRESH_SEC", 300)
+	if sec <= 0 {
+		sec = 300
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func htfMaxStaleness() time.Duration {
+	sec := envInt("LIVE_HTF_MAX_STALENESS_SEC", 900)
+	if sec <= 0 {
+		sec = 900
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func htfBreakConfirmCloses() int {
+	n := envInt("LIVE_HTF_BREAK_CONFIRM_CLOSES", 2)
+	if n <= 0 {
+		n = 2
+	}
+	return n
+}
+
+func htfSnapshotStale(s HTFStructureSnapshot, now time.Time) bool {
+	if s.UpdatedAt.IsZero() {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.Sub(s.UpdatedAt) > htfMaxStaleness()
+}
+
+func htfClosed1HCandles(candles []types.Candle, now time.Time) []types.Candle {
+	if len(candles) == 0 {
+		return candles
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	last := candles[len(candles)-1]
+	if last.T.Add(time.Hour).After(now) {
+		return candles[:len(candles)-1]
+	}
+	return candles
+}
+
+func htfDetectSwings1H(candles []types.Candle, leftRight int) (highs []int, lows []int) {
+	if leftRight < 1 {
+		leftRight = 1
+	}
+	if len(candles) < leftRight*2+3 {
+		return nil, nil
+	}
+	for i := leftRight; i < len(candles)-leftRight; i++ {
+		isHigh := true
+		isLow := true
+		for j := i - leftRight; j <= i+leftRight; j++ {
+			if j == i {
+				continue
+			}
+			if candles[j].H >= candles[i].H {
+				isHigh = false
+			}
+			if candles[j].L <= candles[i].L {
+				isLow = false
+			}
+		}
+		if isHigh {
+			highs = append(highs, i)
+		}
+		if isLow {
+			lows = append(lows, i)
+		}
+	}
+	return highs, lows
+}
+
+func htfDeltaFromCandles(candles []types.Candle) float64 {
+	if len(candles) == 0 {
+		return 0
+	}
+	lookback := envInt("LIVE_HTF_DELTA_LOOKBACK", 12)
+	if lookback <= 0 {
+		lookback = 12
+	}
+	if len(candles) > lookback {
+		candles = candles[len(candles)-lookback:]
+	}
+	delta := 0.0
+	for _, c := range candles {
+		price := maxFloat(c.C, 0)
+		qvol := c.V * price
+		switch {
+		case c.C > c.O:
+			delta += qvol
+		case c.C < c.O:
+			delta -= qvol
+		}
+	}
+	return delta
+}
+
+func htfDeltaBias(delta float64) string {
+	pos := envFloat("LIVE_HTF_DELTA_POS", 250000)
+	neg := envFloat("LIVE_HTF_DELTA_NEG", -250000)
+	if pos <= 0 {
+		pos = 250000
+	}
+	if neg >= 0 {
+		neg = -250000
+	}
+	switch {
+	case delta >= pos:
+		return "bullish"
+	case delta <= neg:
+		return "bearish"
+	default:
+		return "neutral"
+	}
+}
+
+func htfConsecutiveCloseBreak(candles []types.Candle, level float64, breakDown bool) int {
+	if level <= 0 || len(candles) == 0 {
+		return 0
+	}
+	count := 0
+	for i := len(candles) - 1; i >= 0; i-- {
+		c := candles[i]
+		if breakDown {
+			if c.C < level {
+				count++
+				continue
+			}
+			break
+		}
+		if c.C > level {
+			count++
+			continue
+		}
+		break
+	}
+	return count
+}
+
+func buildHTFSnapshotFromCandles(symbol, side string, candles []types.Candle, now time.Time) HTFStructureSnapshot {
+	snap := HTFStructureSnapshot{
+		Symbol:    strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
+		TF:        "1h",
+		State:     HTFUnknown,
+		DeltaBias: "neutral",
+		UpdatedAt: now,
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+		snap.UpdatedAt = now
+	}
+	if len(candles) == 0 {
+		return snap
+	}
+	closed := htfClosed1HCandles(candles, now)
+	if len(closed) < 8 {
+		return snap
+	}
+	last := closed[len(closed)-1]
+	snap.LastClose = last.C
+	snap.Delta1H = htfDeltaFromCandles(closed)
+	snap.DeltaBias = htfDeltaBias(snap.Delta1H)
+
+	lr := envInt("LIVE_HTF_SWING_LR", 3)
+	if lr < 1 {
+		lr = 3
+	}
+	highs, lows := htfDetectSwings1H(closed, lr)
+	if len(highs) >= 2 {
+		snap.PriorSwingHigh = closed[highs[len(highs)-2]].H
+		snap.LastSwingHigh = closed[highs[len(highs)-1]].H
+	} else if len(highs) == 1 {
+		snap.LastSwingHigh = closed[highs[len(highs)-1]].H
+	}
+	if len(lows) >= 2 {
+		snap.PriorSwingLow = closed[lows[len(lows)-2]].L
+		snap.LastSwingLow = closed[lows[len(lows)-1]].L
+	} else if len(lows) == 1 {
+		snap.LastSwingLow = closed[lows[len(lows)-1]].L
+	}
+	hasHigherHigh := snap.LastSwingHigh > 0 && snap.PriorSwingHigh > 0 && snap.LastSwingHigh > snap.PriorSwingHigh
+	hasHigherLow := snap.LastSwingLow > 0 && snap.PriorSwingLow > 0 && snap.LastSwingLow > snap.PriorSwingLow
+	hasLowerHigh := snap.LastSwingHigh > 0 && snap.PriorSwingHigh > 0 && snap.LastSwingHigh < snap.PriorSwingHigh
+	hasLowerLow := snap.LastSwingLow > 0 && snap.PriorSwingLow > 0 && snap.LastSwingLow < snap.PriorSwingLow
+
+	snap.BreakConfirmCountDown = htfConsecutiveCloseBreak(closed, snap.LastSwingLow, true)
+	snap.BreakConfirmCountUp = htfConsecutiveCloseBreak(closed, snap.LastSwingHigh, false)
+	confirmNeed := htfBreakConfirmCloses()
+	snap.StructureBreakDown = snap.BreakConfirmCountDown >= confirmNeed
+	snap.StructureBreakUp = snap.BreakConfirmCountUp >= confirmNeed
+
+	normalizedSide := strings.ToUpper(strings.TrimSpace(side))
+	switch normalizedSide {
+	case "BUY", "LONG":
+		switch {
+		case snap.StructureBreakDown:
+			snap.State = HTFLongBroken
+			snap.TrendScore = -2.0
+		case hasHigherHigh && hasHigherLow:
+			snap.State = HTFLongHHHL
+			snap.TrendScore = 2.0
+		case hasLowerHigh && hasLowerLow:
+			snap.State = HTFShortLHLL
+			snap.TrendScore = -1.0
+		default:
+			snap.State = HTFLongRange
+			snap.TrendScore = 0.5
+		}
+	default:
+		switch {
+		case snap.StructureBreakUp:
+			snap.State = HTFShortBroken
+			snap.TrendScore = -2.0
+		case hasLowerHigh && hasLowerLow:
+			snap.State = HTFShortLHLL
+			snap.TrendScore = 2.0
+		case hasHigherHigh && hasHigherLow:
+			snap.State = HTFLongHHHL
+			snap.TrendScore = -1.0
+		default:
+			snap.State = HTFShortRange
+			snap.TrendScore = 0.5
+		}
+	}
+	if snap.DeltaBias == "bullish" {
+		snap.TrendScore += 0.5
+	} else if snap.DeltaBias == "bearish" {
+		snap.TrendScore -= 0.5
+	}
+	return snap
 }
 
 func htfSnapshotFromEntry(side string, e *inplay.Entry) HTFStructureSnapshot {
 	snap := HTFStructureSnapshot{
-		Symbol:     "",
-		TF:         "1h",
-		State:      HTFUnknown,
-		TrendScore: 0,
-		UpdatedAt:  time.Now().UTC(),
+		Symbol:    "",
+		TF:        "1h",
+		State:     HTFUnknown,
+		DeltaBias: "neutral",
+		UpdatedAt: time.Now().UTC(),
 	}
 	if e == nil {
 		return snap
@@ -17486,16 +17781,149 @@ func htfSnapshotFromEntry(side string, e *inplay.Entry) HTFStructureSnapshot {
 
 func htfPersistent(side string, s HTFStructureSnapshot) bool {
 	if strings.EqualFold(side, "BUY") {
-		return s.State == HTFLongHHHL || s.State == HTFLongRange
+		switch s.State {
+		case HTFLongHHHL, HTFLongRange:
+			if s.StructureBreakDown {
+				return false
+			}
+			return true
+		default:
+			return false
+		}
 	}
-	return s.State == HTFShortLHLL || s.State == HTFShortRange
+	switch s.State {
+	case HTFShortLHLL, HTFShortRange:
+		if s.StructureBreakUp {
+			return false
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func htfFailed(side string, s HTFStructureSnapshot) bool {
-	if strings.EqualFold(side, "BUY") {
-		return s.State == HTFLongBroken
+	if htfSnapshotStale(s, time.Now().UTC()) {
+		return false
 	}
-	return s.State == HTFShortBroken
+	if strings.EqualFold(side, "BUY") {
+		if s.State == HTFLongBroken || s.StructureBreakDown {
+			return true
+		}
+		if s.State != HTFLongHHHL && s.State != HTFLongRange && s.DeltaBias == "bearish" {
+			return true
+		}
+		return false
+	}
+	if s.State == HTFShortBroken || s.StructureBreakUp {
+		return true
+	}
+	if s.State != HTFShortLHLL && s.State != HTFShortRange && s.DeltaBias == "bullish" {
+		return true
+	}
+	return false
+}
+
+func htfCaution(side string, s HTFStructureSnapshot) bool {
+	if htfSnapshotStale(s, time.Now().UTC()) {
+		return false
+	}
+	if strings.EqualFold(side, "BUY") {
+		return htfPersistent(side, s) && s.DeltaBias == "bearish"
+	}
+	return htfPersistent(side, s) && s.DeltaBias == "bullish"
+}
+
+func (m *liveExecManager) htfSnapshot(symbol, side string, fallback *inplay.Entry) HTFStructureSnapshot {
+	if m == nil {
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" && fallback != nil {
+		raw = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fallback.Symbol)))
+	}
+	if raw == "" {
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	now := time.Now().UTC()
+	if m.htf1HBySymbol != nil {
+		if snap, ok := m.htf1HBySymbol[raw]; ok && !snap.UpdatedAt.IsZero() && now.Sub(snap.UpdatedAt) < htfRefreshInterval() {
+			return snap
+		}
+	}
+	limit := envInt("LIVE_HTF_CANDLE_LOOKBACK", 72)
+	if limit < 24 {
+		limit = 72
+	}
+	var (
+		bars []types.Candle
+		err  error
+	)
+	if m.featureCache != nil {
+		bars, err = m.featureCache.candleSeries(raw, types.TF1h, limit)
+	} else {
+		bars, err = aster.LoadCandles(raw, types.TF1h, limit)
+	}
+	if err != nil || len(bars) < 8 {
+		if m.htf1HBySymbol != nil {
+			if snap, ok := m.htf1HBySymbol[raw]; ok {
+				return snap
+			}
+		}
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	snap := buildHTFSnapshotFromCandles(raw, side, bars, now)
+	if m.htf1HBySymbol == nil {
+		m.htf1HBySymbol = map[string]HTFStructureSnapshot{}
+	}
+	m.htf1HBySymbol[raw] = snap
+	return snap
+}
+
+func (p *paperTrader) htfSnapshot(symbol, side string, fallback *inplay.Entry) HTFStructureSnapshot {
+	if p == nil {
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if raw == "" && fallback != nil {
+		raw = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fallback.Symbol)))
+	}
+	if raw == "" {
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	now := time.Now().UTC()
+	if p.htf1HBySymbol != nil {
+		if snap, ok := p.htf1HBySymbol[raw]; ok && !snap.UpdatedAt.IsZero() && now.Sub(snap.UpdatedAt) < htfRefreshInterval() {
+			return snap
+		}
+	}
+	limit := envInt("LIVE_HTF_CANDLE_LOOKBACK", 72)
+	if limit < 24 {
+		limit = 72
+	}
+	var (
+		bars []types.Candle
+		err  error
+	)
+	if p.featureCache != nil {
+		bars, err = p.featureCache.candleSeries(raw, types.TF1h, limit)
+	} else {
+		bars, err = aster.LoadCandles(raw, types.TF1h, limit)
+	}
+	if err != nil || len(bars) < 8 {
+		if p.htf1HBySymbol != nil {
+			if snap, ok := p.htf1HBySymbol[raw]; ok {
+				return snap
+			}
+		}
+		return htfSnapshotFromEntry(side, fallback)
+	}
+	snap := buildHTFSnapshotFromCandles(raw, side, bars, now)
+	if p.htf1HBySymbol == nil {
+		p.htf1HBySymbol = map[string]HTFStructureSnapshot{}
+	}
+	p.htf1HBySymbol[raw] = snap
+	return snap
 }
 
 func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.ExternalSignal) runnerExitState {
