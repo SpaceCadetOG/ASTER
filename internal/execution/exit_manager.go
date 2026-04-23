@@ -193,13 +193,13 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.MoveStopToBE = true
 		dec.TightenStop = true
 		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.00)
-		dec.Reason = firstNonEmptyExit(dec.Reason, "instant_be_lock")
+		dec.Reason = strongerExitReason(dec.Reason, "instant_be_lock")
 	}
 	if envBoolExit("LIVE_EXIT_WINNER_REVERSION_BLOCK", true) &&
 		in.MFER >= beLockR && in.UnrealizedPct < 0 {
 		dec.ImmediateExit = true
 		dec.ExitNowReason = "winner_reversion_block"
-		dec.Reason = firstNonEmptyExit(dec.Reason, dec.ExitNowReason)
+		dec.Reason = "winner_reversion_block"
 		return dec
 	}
 	earlyTrailR := envFloatExit("LIVE_EXIT_EARLY_TRAIL_R", 1.0)
@@ -220,7 +220,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			}
 			dec.TightenStop = true
 		}
-		dec.Reason = firstNonEmptyExit(dec.Reason, "early_profit_trail")
+		dec.Reason = strongerExitReason(dec.Reason, "early_profit_trail")
 	}
 	plan := exitPlanForStrategy(firstNonEmptyExit(in.EntryStrategyID, in.EntryReason))
 	if starterInitialManageOnly(in, m.cfg.StarterStabilizeBars) {
@@ -250,7 +250,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 				dec.TightenToPrice = minFloat(dec.TightenToPrice, wp.NewStop)
 			}
 		}
-		dec.Reason = firstNonEmptyExit(dec.Reason, wp.Reason)
+		dec.Reason = strongerExitReason(dec.Reason, wp.Reason)
 	}
 	if wp.TakePartial && wp.PartialFraction > 0 {
 		dec.PartialExitPct = wp.PartialFraction
@@ -442,6 +442,30 @@ func maxFloat(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func exitReasonPriority(reason string) int {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "":
+		return 0
+	case "INSTANT_BE_LOCK", "PROTECT_BE_FALLBACK":
+		return 10
+	case "NO_FOLLOW_THROUGH_TIGHTEN", "MOMENTUM_FADE_TIGHTEN", "PROFIT_GIVEBACK_TIGHTEN":
+		return 20
+	case "EARLY_PROFIT_TRAIL":
+		return 30
+	case "WINNER_REVERSION_BLOCK":
+		return 100
+	default:
+		return 15
+	}
+}
+
+func strongerExitReason(current, next string) string {
+	if exitReasonPriority(next) >= exitReasonPriority(current) {
+		return next
+	}
+	return current
 }
 
 func firstNonEmptyExit(v ...string) string {

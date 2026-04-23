@@ -338,3 +338,45 @@ func TestEvaluateProtect_EarlyTrailMonotonic(t *testing.T) {
 		t.Fatalf("expected at least 30%% lock from peak move, got %.8f", dec.TightenToPrice)
 	}
 }
+
+func TestEvaluateProtect_EarlyProfitTrailOverridesInstantBELockReason(t *testing.T) {
+	t.Setenv("LIVE_EXIT_BE_LOCK_R", "0.5")
+	t.Setenv("LIVE_EXIT_EARLY_TRAIL_R", "1.0")
+	t.Setenv("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", "0.30")
+	m := NewManager(Config{})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:          "BUY",
+		Entry:         100,
+		Stop:          98,
+		Mark:          104,
+		MFER:          1.2,
+		UnrealizedPct: 4.0,
+	})
+	if !dec.TightenStop {
+		t.Fatalf("expected tighten stop, got %+v", dec)
+	}
+	if dec.Reason != "early_profit_trail" {
+		t.Fatalf("expected reason early_profit_trail, got %+v", dec)
+	}
+}
+
+func TestStrongerExitReason_PrefersTrailOverBE(t *testing.T) {
+	got := strongerExitReason("instant_be_lock", "early_profit_trail")
+	if got != "early_profit_trail" {
+		t.Fatalf("expected early_profit_trail, got %q", got)
+	}
+}
+
+func TestStrongerExitReason_WinnerReversionBlockDominates(t *testing.T) {
+	got := strongerExitReason("early_profit_trail", "winner_reversion_block")
+	if got != "winner_reversion_block" {
+		t.Fatalf("expected winner_reversion_block, got %q", got)
+	}
+}
+
+func TestStrongerExitReason_DoesNotDowngradeTrailToFallback(t *testing.T) {
+	got := strongerExitReason("early_profit_trail", "PROTECT_BE_FALLBACK")
+	if got != "early_profit_trail" {
+		t.Fatalf("expected early_profit_trail, got %q", got)
+	}
+}
