@@ -158,6 +158,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		HTFFailed:     in.HTFTrendFailed,
 		HTFCaution:    in.HTFCaution,
 	}
+	softManageOnly := envBoolXM("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true)
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
 	}
@@ -236,6 +237,17 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
 			return dec
 		}
+		if softManageOnly && !in.HTFTrendFailed {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			tightR := envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06)
+			if in.HTFCaution {
+				tightR = envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R_CAUTION", 0.05)
+			}
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
+			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
+			return dec
+		}
 		dec.FullExit = true
 		dec.Reason = "PROFIT_GIVEBACK"
 		return dec
@@ -266,7 +278,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
 			return dec
 		}
-		if in.MFER <= 0 {
+		if in.MFER <= 0 && (in.HTFTrendFailed || !softManageOnly) {
 			dec.FullExit = true
 			dec.Reason = "NO_FOLLOW_THROUGH"
 			return dec
@@ -404,6 +416,21 @@ func envFloatXM(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+func envBoolXM(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func envFloatExit(key string, def float64) float64 {

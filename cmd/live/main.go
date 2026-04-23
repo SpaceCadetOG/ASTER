@@ -11548,6 +11548,13 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			}
 			continue
 		}
+		if envBool("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true) &&
+			htfPersistent(p.Side, htf) && !htfFailed(p.Side, htf) {
+			if m.tightenRunnerStop(p, "MOMENTUM_FADE_TIGHTEN_HTF") {
+				changed = true
+			}
+			continue
+		}
 		if !runnerState.StructureBroken {
 			continue
 		}
@@ -12975,6 +12982,12 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					continue
 				}
 			}
+			cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
+			htf := p.htfSnapshot(raw, pos.Side, &cur)
+			if envBool("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true) &&
+				htfPersistent(pos.Side, htf) && !htfFailed(pos.Side, htf) {
+				continue
+			}
 			p.exitPortion(now, pos, reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
@@ -13041,8 +13054,8 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		if upnlPct < minUpnlPct {
 			continue
 		}
+		htf := p.htfSnapshot(raw, pos.Side, sameSideMomentumEntry(pos.Side, mv))
 		if p.exitManager != nil {
-			htf := p.htfSnapshot(raw, pos.Side, sameSideMomentumEntry(pos.Side, mv))
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:               pos.Side,
 				Entry:              pos.Entry,
@@ -13105,6 +13118,15 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 					pos.Stop = stop
 					changed = true
 				}
+			}
+			continue
+		}
+		if envBool("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true) &&
+			htfPersistent(pos.Side, htf) && !htfFailed(pos.Side, htf) {
+			if stop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, maxFloat(pos.MaxFavorableR, envFloat("LIVE_PROFIT_LOCK_STAGE1_R", 1.0)), &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upnlPct)); tightened {
+				pos.StopReason = "MOMENTUM_FADE_TIGHTEN_HTF"
+				pos.Stop = stop
+				changed = true
 			}
 			continue
 		}

@@ -38,6 +38,7 @@ func TestEvaluateProtectLiqSpikePartial(t *testing.T) {
 }
 
 func TestEvaluateProtectNoFollowThrough(t *testing.T) {
+	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "0")
 	m := NewManager(Config{NoFollowThroughBars: 6, NoFollowThroughMinMFER: 0.3, NoFollowThroughMinMAER: 0.8})
 	dec := m.EvaluateProtect(ProtectInput{
 		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.6, BarsHeld: 8, MFER: 0.0, MAER: 1.0,
@@ -105,6 +106,32 @@ func TestEvaluateProtectNoFollowThroughUsesHTFCautionTighten(t *testing.T) {
 	}
 }
 
+func TestEvaluateProtectNoFollowThroughManageOnlyNoFullExitWhenHTFNotFailed(t *testing.T) {
+	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "1")
+	m := NewManager(Config{
+		NoFollowThroughBars:    6,
+		NoFollowThroughMinMFER: 0.3,
+		NoFollowThroughMinMAER: 0.8,
+	})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:               "BUY",
+		Entry:              100,
+		Stop:               98,
+		Mark:               99.2,
+		BarsHeld:           8,
+		MFER:               0.0,
+		MAER:               1.0,
+		HTFTrendPersistent: false,
+		HTFTrendFailed:     false,
+	})
+	if dec.FullExit {
+		t.Fatalf("expected manage-only soft signal to avoid full exit when HTF not failed: %+v", dec)
+	}
+	if !dec.MoveStopToBE {
+		t.Fatalf("expected BE management action in manage-only mode, got %+v", dec)
+	}
+}
+
 func TestEvaluateProtectProfitGiveback(t *testing.T) {
 	m := NewManager(Config{ProfitLockArmR: 0.6, ProfitGivebackPct: 0.25})
 	dec := m.EvaluateProtect(ProtectInput{
@@ -137,6 +164,29 @@ func TestEvaluateProtectProfitGivebackTightensAfterConfirm(t *testing.T) {
 	})
 	if dec.FullExit || !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "PROFIT_GIVEBACK_TIGHTEN" {
 		t.Fatalf("expected tighten-after-confirm decision, got %+v", dec)
+	}
+}
+
+func TestEvaluateProtectProfitGivebackManageOnlyPrefersTighten(t *testing.T) {
+	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "1")
+	m := NewManager(Config{ProfitLockArmR: 0.6, ProfitGivebackPct: 0.25})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side:               "BUY",
+		Entry:              100,
+		Stop:               98,
+		Mark:               100.05,
+		MFER:               0.8,
+		MAER:               0.5,
+		WeakFlow:           true,
+		UnrealizedPct:      0.10,
+		HTFTrendPersistent: false,
+		HTFTrendFailed:     false,
+	})
+	if dec.FullExit {
+		t.Fatalf("expected manage-only profit giveback to tighten, not full exit: %+v", dec)
+	}
+	if !dec.TightenStop || !dec.MoveStopToBE {
+		t.Fatalf("expected tighten+BE in manage-only profit giveback mode, got %+v", dec)
 	}
 }
 
