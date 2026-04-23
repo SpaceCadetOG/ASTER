@@ -10072,30 +10072,36 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			if updated {
 				changed = true
 			}
-			currentRunnerState := evaluateRunnerExitStateWithFlow(p.Side, mom[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flow[strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))], flowfeed.ExternalSignal{})
+			rawSym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
+			currentMV := mom[rawSym]
+			currentRunnerState := evaluateRunnerExitStateWithFlow(p.Side, currentMV, flow[rawSym], flowfeed.ExternalSignal{})
+			htf := htfSnapshotFromEntry(p.Side, sameSideMomentumEntry(p.Side, currentMV))
 			updateManagePhase(p, currentRunnerState.ExhaustionConfirmed && !currentRunnerState.StructureBroken)
 			refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 			if m.exitManager != nil {
 				mv := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-					Side:              p.Side,
-					Entry:             p.EntryPrice,
-					Stop:              p.StopPrice,
-					Mark:              mark,
-					MFER:              p.MaxFavorableR,
-					MAER:              p.MaxAdverseR,
-					BarsHeld:          int(now.Sub(p.CreatedAt) / time.Minute),
-					StallBars:         p.StallBars,
-					NearFriction:      p.VPTargetLevel > 0 && abs(mark-p.VPTargetLevel)/maxFloat(mark, 1e-9) < 0.002,
-					UnrealizedPct:     abs((mark-p.EntryPrice)/maxFloat(p.EntryPrice, 1e-9)) * 100,
-					Sponsored:         p.Sponsored,
-					HitTP1:            p.HitTP1,
-					HitTP2:            p.HitTP2,
-					HitTP3:            p.HitTP3,
-					WeakSponsorStreak: p.WeakSponsorStreak,
-					EntryReason:       p.EntryReason,
-					EntryStrategyID:   p.EntryStrategyID,
-					StarterEntry:      p.ManagePhase == managePhaseStarter,
-					AdvancedReady:     p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
+					Side:               p.Side,
+					Entry:              p.EntryPrice,
+					Stop:               p.StopPrice,
+					Mark:               mark,
+					MFER:               p.MaxFavorableR,
+					MAER:               p.MaxAdverseR,
+					BarsHeld:           int(now.Sub(p.CreatedAt) / time.Minute),
+					StallBars:          p.StallBars,
+					NearFriction:       p.VPTargetLevel > 0 && abs(mark-p.VPTargetLevel)/maxFloat(mark, 1e-9) < 0.002,
+					UnrealizedPct:      abs((mark-p.EntryPrice)/maxFloat(p.EntryPrice, 1e-9)) * 100,
+					Sponsored:          p.Sponsored,
+					HitTP1:             p.HitTP1,
+					HitTP2:             p.HitTP2,
+					HitTP3:             p.HitTP3,
+					WeakSponsorStreak:  p.WeakSponsorStreak,
+					EntryReason:        p.EntryReason,
+					EntryStrategyID:    p.EntryStrategyID,
+					StarterEntry:       p.ManagePhase == managePhaseStarter,
+					AdvancedReady:      p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
+					HTFTrendState:      string(htf.State),
+					HTFTrendPersistent: htfPersistent(p.Side, htf),
+					HTFTrendFailed:     htfFailed(p.Side, htf),
 				})
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
@@ -11421,30 +11427,34 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			continue
 		}
 		runnerState := evaluateRunnerExitStateWithFlow(p.Side, mv, flow[sym], ext[sym])
+		htf := htfSnapshotFromEntry(p.Side, sameSideMomentumEntry(p.Side, mv))
 		updateManagePhase(p, runnerState.ExhaustionConfirmed && !runnerState.StructureBroken)
 		refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 		if m.exitManager != nil {
 			dec := m.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-				Side:              p.Side,
-				Entry:             p.EntryPrice,
-				Stop:              p.StopPrice,
-				Mark:              mark,
-				MFER:              p.MaxFavorableR,
-				MAER:              p.MaxAdverseR,
-				BarsHeld:          int(now.Sub(p.CreatedAt) / time.Minute),
-				StallBars:         p.StallBars,
-				WeakFlow:          shouldExitOnMomentumFade(p.Side, mv, slopeMax),
-				LiqSpike:          ext[sym].LiqSpike,
-				UnrealizedPct:     upct,
-				Sponsored:         sponsored,
-				HitTP1:            p.HitTP1,
-				HitTP2:            p.HitTP2,
-				HitTP3:            p.HitTP3,
-				WeakSponsorStreak: p.WeakSponsorStreak,
-				EntryReason:       p.EntryReason,
-				EntryStrategyID:   p.EntryStrategyID,
-				StarterEntry:      p.ManagePhase == managePhaseStarter,
-				AdvancedReady:     p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
+				Side:               p.Side,
+				Entry:              p.EntryPrice,
+				Stop:               p.StopPrice,
+				Mark:               mark,
+				MFER:               p.MaxFavorableR,
+				MAER:               p.MaxAdverseR,
+				BarsHeld:           int(now.Sub(p.CreatedAt) / time.Minute),
+				StallBars:          p.StallBars,
+				WeakFlow:           shouldExitOnMomentumFade(p.Side, mv, slopeMax),
+				LiqSpike:           ext[sym].LiqSpike,
+				UnrealizedPct:      upct,
+				Sponsored:          sponsored,
+				HitTP1:             p.HitTP1,
+				HitTP2:             p.HitTP2,
+				HitTP3:             p.HitTP3,
+				WeakSponsorStreak:  p.WeakSponsorStreak,
+				EntryReason:        p.EntryReason,
+				EntryStrategyID:    p.EntryStrategyID,
+				StarterEntry:       p.ManagePhase == managePhaseStarter,
+				AdvancedReady:      p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
+				HTFTrendState:      string(htf.State),
+				HTFTrendPersistent: htfPersistent(p.Side, htf),
+				HTFTrendFailed:     htfFailed(p.Side, htf),
 			})
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
@@ -12209,13 +12219,25 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 	if dec.PartialExitPct > 0 && pos.Qty > 0 {
 		q := pos.Qty * dec.PartialExitPct
 		if q > 0 && q < pos.Qty {
+			fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=PARTIAL reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
+				raw, pos.Side, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
 			p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), mark, q, meta[raw], depth[raw])
 			return true
 		}
 	}
 	if dec.FullExit {
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
+			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
 		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
 		return true
+	}
+	if changed {
+		action := "TIGHTEN"
+		if dec.MoveStopToBE && !dec.TightenStop {
+			action = "BE"
+		}
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t\n",
+			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed)
 	}
 	return changed
 }
@@ -12758,26 +12780,31 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			frTP1 = p.exitManager.FrontRunTarget(pos.Side, pos.TP1, pos.OpposingFriction)
 			frTP2 = p.exitManager.FrontRunTarget(pos.Side, pos.TP2, pos.OpposingFriction)
 			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
+			cur, _ := paperCurrentEntryForSide(pos.Side, raw, longCurrent, shortCurrent)
+			htf := htfSnapshotFromEntry(pos.Side, &cur)
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-				Side:              pos.Side,
-				Entry:             pos.Entry,
-				Stop:              pos.Stop,
-				Mark:              stopCheckPx,
-				MFER:              pos.MaxFavorableR,
-				MAER:              pos.MaxAdverseR,
-				BarsHeld:          int(now.Sub(pos.OpenedAt) / time.Minute),
-				StallBars:         pos.StallBars,
-				NearFriction:      p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
-				UnrealizedPct:     upctStop,
-				Sponsored:         pos.Sponsored,
-				HitTP1:            pos.HitTP1,
-				HitTP2:            pos.HitTP2,
-				HitTP3:            pos.HitTP3,
-				WeakSponsorStreak: pos.WeakSponsorStreak,
-				EntryReason:       pos.EntryReason,
-				EntryStrategyID:   pos.EntryStrategyID,
-				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
-				AdvancedReady:     paperAdvancedReady(pos),
+				Side:               pos.Side,
+				Entry:              pos.Entry,
+				Stop:               pos.Stop,
+				Mark:               stopCheckPx,
+				MFER:               pos.MaxFavorableR,
+				MAER:               pos.MaxAdverseR,
+				BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
+				StallBars:          pos.StallBars,
+				NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
+				UnrealizedPct:      upctStop,
+				Sponsored:          pos.Sponsored,
+				HitTP1:             pos.HitTP1,
+				HitTP2:             pos.HitTP2,
+				HitTP3:             pos.HitTP3,
+				WeakSponsorStreak:  pos.WeakSponsorStreak,
+				EntryReason:        pos.EntryReason,
+				EntryStrategyID:    pos.EntryStrategyID,
+				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+				AdvancedReady:      paperAdvancedReady(pos),
+				HTFTrendState:      string(htf.State),
+				HTFTrendPersistent: htfPersistent(pos.Side, htf),
+				HTFTrendFailed:     htfFailed(pos.Side, htf),
 			})
 			if dec.MoveStopToBE && allowBE {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -12908,28 +12935,33 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 						weakFlow = paperTrendLikeState(cur.State) && cur.ScoreSlope <= slopeMax && !cur.Momentum
 					}
 				}
+				cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
+				htf := htfSnapshotFromEntry(pos.Side, &cur)
 				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-					Side:              pos.Side,
-					Entry:             pos.Entry,
-					Stop:              pos.Stop,
-					Mark:              stopCheckPx,
-					MFER:              pos.MaxFavorableR,
-					MAER:              pos.MaxAdverseR,
-					BarsHeld:          int(now.Sub(pos.OpenedAt) / time.Minute),
-					StallBars:         pos.StallBars,
-					WeakFlow:          weakFlow,
-					NearFriction:      false,
-					LiqSpike:          false,
-					UnrealizedPct:     upnlPct,
-					Sponsored:         pos.Sponsored,
-					HitTP1:            pos.HitTP1,
-					HitTP2:            pos.HitTP2,
-					HitTP3:            pos.HitTP3,
-					WeakSponsorStreak: pos.WeakSponsorStreak,
-					EntryReason:       pos.EntryReason,
-					EntryStrategyID:   pos.EntryStrategyID,
-					StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
-					AdvancedReady:     paperAdvancedReady(pos),
+					Side:               pos.Side,
+					Entry:              pos.Entry,
+					Stop:               pos.Stop,
+					Mark:               stopCheckPx,
+					MFER:               pos.MaxFavorableR,
+					MAER:               pos.MaxAdverseR,
+					BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
+					StallBars:          pos.StallBars,
+					WeakFlow:           weakFlow,
+					NearFriction:       false,
+					LiqSpike:           false,
+					UnrealizedPct:      upnlPct,
+					Sponsored:          pos.Sponsored,
+					HitTP1:             pos.HitTP1,
+					HitTP2:             pos.HitTP2,
+					HitTP3:             pos.HitTP3,
+					WeakSponsorStreak:  pos.WeakSponsorStreak,
+					EntryReason:        pos.EntryReason,
+					EntryStrategyID:    pos.EntryStrategyID,
+					StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+					AdvancedReady:      paperAdvancedReady(pos),
+					HTFTrendState:      string(htf.State),
+					HTFTrendPersistent: htfPersistent(pos.Side, htf),
+					HTFTrendFailed:     htfFailed(pos.Side, htf),
 				})
 				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
 					continue
@@ -13002,27 +13034,31 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			continue
 		}
 		if p.exitManager != nil {
+			htf := htfSnapshotFromEntry(pos.Side, sameSideMomentumEntry(pos.Side, mv))
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-				Side:              pos.Side,
-				Entry:             pos.Entry,
-				Stop:              pos.Stop,
-				Mark:              mark,
-				MFER:              pos.MaxFavorableR,
-				MAER:              pos.MaxAdverseR,
-				BarsHeld:          int(now.Sub(pos.OpenedAt) / time.Minute),
-				StallBars:         pos.StallBars,
-				WeakFlow:          shouldExitOnMomentumFade(pos.Side, mv, slopeMax),
-				LiqSpike:          ext[raw].LiqSpike,
-				UnrealizedPct:     upnlPct,
-				Sponsored:         sponsored,
-				HitTP1:            pos.HitTP1,
-				HitTP2:            pos.HitTP2,
-				HitTP3:            pos.HitTP3,
-				WeakSponsorStreak: pos.WeakSponsorStreak,
-				EntryReason:       pos.EntryReason,
-				EntryStrategyID:   pos.EntryStrategyID,
-				StarterEntry:      exitmgr.IsStarterEntryReason(pos.EntryReason),
-				AdvancedReady:     paperAdvancedReady(pos),
+				Side:               pos.Side,
+				Entry:              pos.Entry,
+				Stop:               pos.Stop,
+				Mark:               mark,
+				MFER:               pos.MaxFavorableR,
+				MAER:               pos.MaxAdverseR,
+				BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
+				StallBars:          pos.StallBars,
+				WeakFlow:           shouldExitOnMomentumFade(pos.Side, mv, slopeMax),
+				LiqSpike:           ext[raw].LiqSpike,
+				UnrealizedPct:      upnlPct,
+				Sponsored:          sponsored,
+				HitTP1:             pos.HitTP1,
+				HitTP2:             pos.HitTP2,
+				HitTP3:             pos.HitTP3,
+				WeakSponsorStreak:  pos.WeakSponsorStreak,
+				EntryReason:        pos.EntryReason,
+				EntryStrategyID:    pos.EntryStrategyID,
+				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+				AdvancedReady:      paperAdvancedReady(pos),
+				HTFTrendState:      string(htf.State),
+				HTFTrendPersistent: htfPersistent(pos.Side, htf),
+				HTFTrendFailed:     htfFailed(pos.Side, htf),
 			})
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
@@ -17381,6 +17417,85 @@ type runnerExitState struct {
 	StructureBroken     bool
 	TightenReason       string
 	FullExitReason      string
+}
+
+type HTFStructureState string
+
+const (
+	HTFUnknown     HTFStructureState = "unknown"
+	HTFLongHHHL    HTFStructureState = "long_hh_hl"
+	HTFLongRange   HTFStructureState = "long_range"
+	HTFLongBroken  HTFStructureState = "long_broken"
+	HTFShortLHLL   HTFStructureState = "short_lh_ll"
+	HTFShortRange  HTFStructureState = "short_range"
+	HTFShortBroken HTFStructureState = "short_broken"
+)
+
+type HTFStructureSnapshot struct {
+	Symbol     string
+	TF         string
+	State      HTFStructureState
+	TrendScore float64
+	UpdatedAt  time.Time
+}
+
+func htfSnapshotFromEntry(side string, e *inplay.Entry) HTFStructureSnapshot {
+	snap := HTFStructureSnapshot{
+		Symbol:     "",
+		TF:         "1h",
+		State:      HTFUnknown,
+		TrendScore: 0,
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if e == nil {
+		return snap
+	}
+	snap.Symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(e.Symbol)))
+	minStateMin := envFloat("LIVE_HTF_MIN_STATE_MIN", 30.0)
+	if strings.EqualFold(side, "BUY") {
+		switch {
+		case e.LongDemotionFlag || e.State == inplay.StateExhausted || e.State == inplay.StateDumping:
+			snap.State = HTFLongBroken
+			snap.TrendScore = -2
+		case e.TimeInStateMin >= minStateMin &&
+			(e.State == inplay.StateInPlay || e.State == inplay.StateHeating || e.State == inplay.StatePumping) &&
+			e.ScoreSlope >= -0.05:
+			snap.State = HTFLongHHHL
+			snap.TrendScore = 2
+		default:
+			snap.State = HTFLongRange
+			snap.TrendScore = 0.75
+		}
+		return snap
+	}
+	switch {
+	case e.ShortDemotionFlag || e.State == inplay.StateExhausted || e.State == inplay.StatePumping:
+		snap.State = HTFShortBroken
+		snap.TrendScore = -2
+	case e.TimeInStateMin >= minStateMin &&
+		(e.State == inplay.StateInPlay || e.State == inplay.StateHeating || e.State == inplay.StateDumping || e.State == inplay.StateCooling) &&
+		e.ScoreSlope <= 0.05:
+		snap.State = HTFShortLHLL
+		snap.TrendScore = 2
+	default:
+		snap.State = HTFShortRange
+		snap.TrendScore = 0.75
+	}
+	return snap
+}
+
+func htfPersistent(side string, s HTFStructureSnapshot) bool {
+	if strings.EqualFold(side, "BUY") {
+		return s.State == HTFLongHHHL || s.State == HTFLongRange
+	}
+	return s.State == HTFShortLHLL || s.State == HTFShortRange
+}
+
+func htfFailed(side string, s HTFStructureSnapshot) bool {
+	if strings.EqualFold(side, "BUY") {
+		return s.State == HTFLongBroken
+	}
+	return s.State == HTFShortBroken
 }
 
 func evaluateRunnerExitState(side string, mv momentumView, ext flowfeed.ExternalSignal) runnerExitState {

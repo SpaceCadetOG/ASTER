@@ -34,27 +34,30 @@ type Manager struct {
 }
 
 type ProtectInput struct {
-	Side              string
-	Entry             float64
-	Stop              float64
-	Mark              float64
-	MFER              float64
-	MAER              float64
-	BarsHeld          int
-	StallBars         int
-	WeakFlow          bool
-	NearFriction      bool
-	LiqSpike          bool
-	UnrealizedPct     float64
-	Sponsored         bool
-	HitTP1            bool
-	HitTP2            bool
-	HitTP3            bool
-	WeakSponsorStreak int
-	EntryReason       string
-	EntryStrategyID   string
-	StarterEntry      bool
-	AdvancedReady     bool
+	Side               string
+	Entry              float64
+	Stop               float64
+	Mark               float64
+	MFER               float64
+	MAER               float64
+	BarsHeld           int
+	StallBars          int
+	WeakFlow           bool
+	NearFriction       bool
+	LiqSpike           bool
+	UnrealizedPct      float64
+	Sponsored          bool
+	HitTP1             bool
+	HitTP2             bool
+	HitTP3             bool
+	WeakSponsorStreak  int
+	EntryReason        string
+	EntryStrategyID    string
+	StarterEntry       bool
+	AdvancedReady      bool
+	HTFTrendState      string
+	HTFTrendPersistent bool
+	HTFTrendFailed     bool
 }
 
 type ProtectDecision struct {
@@ -64,6 +67,9 @@ type ProtectDecision struct {
 	TightenToPrice float64
 	PartialExitPct float64
 	FullExit       bool
+	HTFTrendState  string
+	HTFPersistent  bool
+	HTFFailed      bool
 }
 
 func NewManager(cfg Config) *Manager {
@@ -144,7 +150,11 @@ func (m *Manager) FrontRunTarget(side string, target float64, frictions ...float
 }
 
 func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
-	dec := ProtectDecision{}
+	dec := ProtectDecision{
+		HTFTrendState: in.HTFTrendState,
+		HTFPersistent: in.HTFTrendPersistent,
+		HTFFailed:     in.HTFTrendFailed,
+	}
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
 	}
@@ -201,6 +211,14 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.WeakFlow &&
 		in.UnrealizedPct <= profitGivebackPct &&
 		!(in.Sponsored && !in.HitTP3) {
+		if in.HTFTrendPersistent && !in.HTFTrendFailed {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			tightR := envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06)
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
+			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
+			return dec
+		}
 		if earlyContinuationProtect(in) {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
@@ -220,6 +238,14 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		in.MFER < m.cfg.NoFollowThroughMinMFER &&
 		in.MAER >= m.cfg.NoFollowThroughMinMAER &&
 		!(in.Sponsored && in.BarsHeld <= m.cfg.SponsorshipGraceMin) {
+		if in.HTFTrendPersistent && !in.HTFTrendFailed {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			tightR := envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.08)
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
+			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
+			return dec
+		}
 		if earlyContinuationProtect(in) {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
@@ -241,6 +267,13 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		return dec
 	}
 	if in.WeakFlow && in.MFER >= m.cfg.WeakFlowArmBER {
+		if in.HTFTrendPersistent && !in.HTFTrendFailed {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06))
+			dec.Reason = firstNonEmptyExit(dec.Reason, "MOMENTUM_FADE_TIGHTEN")
+			return dec
+		}
 		if in.HitTP1 || in.UnrealizedPct >= m.cfg.MinUPnLPctForBE {
 			dec.MoveStopToBE = true
 			dec.Reason = "WEAK_FLOW_BE"
