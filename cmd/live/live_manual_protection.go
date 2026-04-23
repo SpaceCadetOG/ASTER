@@ -12,6 +12,34 @@ import (
 	"go-machine/internal/stats"
 )
 
+func normalizeProtectiveStopToTick(side string, stop float64, meta aster.SymbolMeta) float64 {
+	if stop <= 0 {
+		return 0
+	}
+	out := stop
+	if meta.TickSize > 0 {
+		steps := stop / meta.TickSize
+		if isLongSide(side) {
+			steps = math.Floor(steps + 1e-9)
+		} else {
+			steps = math.Ceil(steps - 1e-9)
+		}
+		out = steps * meta.TickSize
+	}
+	if out <= 0 {
+		return 0
+	}
+	return roundToPrecision(out, meta.PricePrecision)
+}
+
+func manualProtectionStillAttaching(p *livePosition) bool {
+	if p == nil || !manualManagedTrade(p) || !p.ProtectionPending {
+		return false
+	}
+	state := strings.TrimSpace(p.ManualManageState)
+	return state != manualManageStateCritical && state != manualManageStateForceClose
+}
+
 func (m *liveExecManager) tryImmediateManualProtection(p *livePosition) {
 	if m == nil || p == nil || !manualManagedTrade(p) || m.rest == nil {
 		return
@@ -76,6 +104,9 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 			m.mu.Unlock()
 			_ = m.save()
 			if !hasLiveProtectiveOrder(p) {
+				if manualProtectionStillAttaching(p) {
+					return p, nil
+				}
 				return p, fmt.Errorf("immediate protection attach failed")
 			}
 			return p, nil
@@ -114,6 +145,9 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 	m.mu.Unlock()
 	_ = m.save()
 	if !hasLiveProtectiveOrder(p) {
+		if manualProtectionStillAttaching(p) {
+			return p, nil
+		}
 		return p, fmt.Errorf("immediate protection attach failed")
 	}
 	if m.tg != nil {
@@ -187,21 +221,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		)
 	}
 	if m != nil && m.tg != nil {
-		notifyTelegram := true
 		now := time.Now().UTC()
-		if envBool("LIVE_ALERT_SUPPRESSION_ENABLE", true) &&
-			p.ProtectionFailCount > 1 &&
-			!p.LastManageFailAt.IsZero() &&
-			now.Sub(p.LastManageFailAt) < manualProtectionAlertCooldown() &&
-			strings.EqualFold(strings.TrimSpace(p.LastManageFailCause), cause) {
-			notifyTelegram = false
-			p.ManageFailSuppressCount++
-		}
-		if !notifyTelegram {
-			return
-		}
-		suppressed := p.ManageFailSuppressCount
-		p.ManageFailSuppressCount = 0
 		state := notify.ManageStateAttachingProtection
 		switch strings.TrimSpace(p.ManualManageState) {
 		case manualManageStateForceClose:
@@ -209,6 +229,12 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		case manualManageStateCritical:
 			state = notify.ManageStateDegraded
 		}
+		if !shouldNotifyManageStatus(p, state, cause, now) {
+			p.ManageFailSuppressCount++
+			return
+		}
+		suppressed := p.ManageFailSuppressCount
+		p.ManageFailSuppressCount = 0
 		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
@@ -270,6 +296,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	computedStop := p.StopPrice
 	protectiveEntry := manageAnchorPrice(p)
+	protectiveMark := 0.0
 	if protectiveEntry <= 0 {
 		protectiveEntry = p.EntryPrice
 	}
@@ -288,6 +315,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			}
 			return fmt.Errorf("manage-failed-safe: mark unavailable for %s %s", p.Symbol, p.Side)
 		}
+		protectiveMark = mark
 		computedStop = chooseManagedProtectiveStop(p.Side, protectiveEntry, mark, computedStop, p.ProtectedStop)
 		stopPx, _, err = m.rest.RoundPrice(p.Symbol, computedStop)
 		if err != nil {
@@ -304,23 +332,46 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			return fmt.Errorf("manage-failed-safe: invalid protective stop symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s",
 				p.Symbol, p.Side, fmtPrice(normalizedMark), fmtPrice(p.EntryPrice), fmtPrice(computedStop), fmtPrice(stopPx))
 		}
+		protectiveMark = normalizedMark
 		stopPx = normalizedStop
 	}
+	stopPx = normalizeProtectiveStopToTick(p.Side, stopPx, meta)
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
 	}
-	if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx); legalityReason != "" {
-		m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
-		if manualManagedTrade(p) {
-			recordManualProtectionFailure(p, now, legalityReason)
-			m.handleManualProtectionFailure(p, legalityReason, now)
-			return nil
+	legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx)
+	if legalityReason != "" {
+		if manualManagedTrade(p) && legalityReason == orderIllegalTickSizeReason {
+			repairMark := protectiveMark
+			if repairMark <= 0 {
+				repairMark = maxFloat(p.LastMark, protectiveEntry)
+			}
+			for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, repairMark, meta.TickSize) {
+				retryStop := normalizeProtectiveStopToTick(p.Side, candidate, meta)
+				if !protectiveStopExchangeSafe(p.Side, protectiveEntry, repairMark, retryStop, meta.TickSize) {
+					continue
+				}
+				if q2, s2, r2 := validateOrderLegality(meta, qty, retryStop); r2 == "" {
+					legalQty = q2
+					legalStop = s2
+					legalityReason = ""
+					break
+				}
+			}
 		}
-		return fmt.Errorf("%s", legalityReason)
-	} else {
-		qty = legalQty
-		stopPx = legalStop
+		if legalityReason != "" {
+			m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
+			if manualManagedTrade(p) {
+				recordManualProtectionFailure(p, now, legalityReason)
+				m.handleManualProtectionFailure(p, legalityReason, now)
+				return nil
+			}
+			return fmt.Errorf("%s", legalityReason)
+		}
 	}
+	qty = legalQty
+	stopPx = legalStop
+	stopPx = normalizeProtectiveStopToTick(p.Side, stopPx, meta)
 	p.StopPrice = stopPx
 	closeSide := "SELL"
 	if strings.EqualFold(p.Side, "SELL") {
@@ -354,10 +405,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 				}
 				lastRetryMark = mark
 				for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
-					retryStop, _, roundErr := m.rest.RoundPrice(p.Symbol, candidate)
-					if roundErr != nil {
-						continue
-					}
+					retryStop := normalizeProtectiveStopToTick(p.Side, candidate, meta)
 					if !protectiveStopExchangeSafe(p.Side, protectiveEntry, mark, retryStop, meta.TickSize) {
 						lastRetryStop = retryStop
 						continue

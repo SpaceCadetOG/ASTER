@@ -921,6 +921,9 @@ type livePosition struct {
 	ManageFailSuppressCount int              `json:"manageFailSuppressCount,omitempty"`
 	LastManageFailAt        time.Time        `json:"lastManageFailAt,omitempty"`
 	LastManageFailCause     string           `json:"lastManageFailCause,omitempty"`
+	LastManageNotifyState   string           `json:"lastManageNotifyState,omitempty"`
+	LastManageNotifyCause   string           `json:"lastManageNotifyCause,omitempty"`
+	LastManageNotifyAt      time.Time        `json:"lastManageNotifyAt,omitempty"`
 	ManualManageState       string           `json:"manualManageState,omitempty"`
 	Managed                 bool             `json:"managed,omitempty"`
 	Protected               bool             `json:"protected,omitempty"`
@@ -8324,6 +8327,9 @@ func clearProtectionPending(p *livePosition) {
 	p.ManageFailSuppressCount = 0
 	p.LastManageFailAt = time.Time{}
 	p.LastManageFailCause = ""
+	p.LastManageNotifyState = ""
+	p.LastManageNotifyCause = ""
+	p.LastManageNotifyAt = time.Time{}
 	if manualManagedTrade(p) {
 		p.ManualManageState = manualManageStateLive
 		p.Managed = true
@@ -8404,6 +8410,41 @@ func manualProtectionStatus(p *livePosition) string {
 	default:
 		return "PROTECTING"
 	}
+}
+
+func manageStatusNotifyInterval(state string) time.Duration {
+	switch strings.ToUpper(strings.TrimSpace(state)) {
+	case notify.ManageStateDegraded:
+		return degradedReminderInterval()
+	default:
+		return manualProtectionAlertCooldown()
+	}
+}
+
+func shouldNotifyManageStatus(p *livePosition, state, cause string, now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	state = strings.ToUpper(strings.TrimSpace(state))
+	cause = strings.TrimSpace(cause)
+	if p.LastManageNotifyState == "" {
+		p.LastManageNotifyState = state
+		p.LastManageNotifyCause = cause
+		p.LastManageNotifyAt = now
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.LastManageNotifyState), state) ||
+		!strings.EqualFold(strings.TrimSpace(p.LastManageNotifyCause), cause) {
+		p.LastManageNotifyState = state
+		p.LastManageNotifyCause = cause
+		p.LastManageNotifyAt = now
+		return true
+	}
+	if p.LastManageNotifyAt.IsZero() || now.Sub(p.LastManageNotifyAt) >= manageStatusNotifyInterval(state) {
+		p.LastManageNotifyAt = now
+		return true
+	}
+	return false
 }
 
 func manualManagedProtectionBroken(p *livePosition) bool {
@@ -8534,22 +8575,18 @@ func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause s
 			return
 		}
 	}
-	p.ManualManageState = manualManageStateCritical
 	p.Managed = true
 	p.Protected = false
+	if strings.TrimSpace(p.ManualManageState) == "" {
+		p.ManualManageState = manualManageStatePendingProtection
+	}
+	if strings.EqualFold(cause, "awaiting_conviction_timeout") {
+		p.ManualManageState = manualManageStateCritical
+	}
 	if !p.ProtectionPending {
 		markProtectionPending(p, now, cause)
 	} else if p.ProtectionRetryAfter.IsZero() || !p.ProtectionRetryAfter.After(now) {
 		p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(maxInt(1, p.ProtectionRetryCount)))
-	}
-	if m.tg != nil && now.Sub(p.LastManageFailAt) >= time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300))*time.Second {
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAttachingProtection, p.Symbol, p.Side,
-			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
-			fmt.Sprintf("<b>Retry:</b> %d/%d", p.ProtectionRetryCount, manualProtectionRetryBudget()),
-			"The bot could not attach legal protection yet. It is keeping the trade blocked from new entries and retrying wider legal protection before any emergency close.",
-		))
-		p.LastManageFailAt = now
 	}
 	if m.manualConfirm && m.shouldEmergencyForceCloseManagedPosition(p, cause) {
 		m.queueManualForceFlatRequest(manualManageRequestFromPosition(p), cause, now)
