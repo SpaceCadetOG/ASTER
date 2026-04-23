@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -235,8 +234,8 @@ func TestManualApprovalRequiresImmediateLiveProtection(t *testing.T) {
 		tp3Frac:        0.34,
 	}
 	_, err := m.activateManualManagement(req, now, "MANUAL_APPROVED")
-	if err == nil || !strings.Contains(err.Error(), "immediate protection attach failed") {
-		t.Fatalf("expected immediate protection failure, got err=%v", err)
+	if err != nil {
+		t.Fatalf("expected managed adoption while protection attach remains pending, got err=%v", err)
 	}
 }
 

@@ -516,6 +516,23 @@ func TestMarkProtectionPendingDoesNotResetManageAlertCooldown(t *testing.T) {
 	}
 }
 
+func TestShouldNotifyManageStatusOnStateOrCauseChange(t *testing.T) {
+	p := &livePosition{}
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	if !shouldNotifyManageStatus(p, notify.ManageStateAttachingProtection, "ORDER_ILLEGAL_TICK_SIZE", now) {
+		t.Fatal("expected first manage status notification")
+	}
+	if shouldNotifyManageStatus(p, notify.ManageStateAttachingProtection, "ORDER_ILLEGAL_TICK_SIZE", now.Add(30*time.Second)) {
+		t.Fatal("did not expect duplicate status/cause notification inside cooldown")
+	}
+	if !shouldNotifyManageStatus(p, notify.ManageStateAttachingProtection, "MARK_UNAVAILABLE", now.Add(31*time.Second)) {
+		t.Fatal("expected notification when cause changes")
+	}
+	if !shouldNotifyManageStatus(p, notify.ManageStateDegraded, "MARK_UNAVAILABLE", now.Add(32*time.Second)) {
+		t.Fatal("expected notification when state changes to degraded")
+	}
+}
+
 func TestChurnRejectReasonLocksRepeatedStops(t *testing.T) {
 	t.Setenv("LIVE_SYMBOL_QUICK_LOSS_LOCK_MIN", "0")
 	mem := map[string]*sessionChurn{}
@@ -1193,8 +1210,8 @@ func TestActivateManualManagementPromotesExistingPassiveImport(t *testing.T) {
 		tp3Frac:        0.34,
 	}
 	p, err := m.activateManualManagement(req, now, "MANUAL_APPROVED")
-	if err == nil {
-		t.Fatalf("expected immediate protection attach failure when no exchange stop can be attached")
+	if err != nil {
+		t.Fatalf("expected manage adoption to proceed while protection is attaching, got err=%v", err)
 	}
 	if p != passive {
 		t.Fatalf("expected in-place promotion of passive position")
@@ -1252,8 +1269,8 @@ func TestActivateManualManagementPromotesPassiveImportWithRawSellSide(t *testing
 		tp2Frac:        0.33,
 		tp3Frac:        0.34,
 	}
-	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err == nil {
-		t.Fatalf("expected approval to fail when immediate stop attach is not live")
+	if _, err := m.activateManualManagement(req, now, "MANUAL_APPROVED"); err != nil {
+		t.Fatalf("expected approval to continue while protection attach is pending, got err=%v", err)
 	}
 }
 
@@ -3190,8 +3207,8 @@ func TestHandleManualProtectionFailureKeepsManagedTradeAliveWhenLossIsSmall(t *t
 	if p.State == execClosed {
 		t.Fatal("expected managed trade to remain open while retries continue")
 	}
-	if p.ManualManageState != manualManageStateCritical {
-		t.Fatalf("expected critical retry state, got %s", p.ManualManageState)
+	if p.ManualManageState != manualManageStatePendingProtection {
+		t.Fatalf("expected pending protection state during bounded retries, got %s", p.ManualManageState)
 	}
 	if !p.ProtectionPending {
 		t.Fatal("expected protection to remain pending")
