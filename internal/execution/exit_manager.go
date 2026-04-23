@@ -59,6 +59,11 @@ type ProtectInput struct {
 	HTFTrendPersistent bool
 	HTFTrendFailed     bool
 	HTFCaution         bool
+	TriggerRef         string
+	ComputedStop       float64
+	SubmittedStop      float64
+	AcceptedStop       float64
+	LegalityAdjusted   bool
 }
 
 type ProtectDecision struct {
@@ -68,6 +73,13 @@ type ProtectDecision struct {
 	TightenToPrice float64
 	PartialExitPct float64
 	FullExit       bool
+	ImmediateExit  bool
+	ExitNowReason  string
+	ComputedStop   float64
+	SubmittedStop  float64
+	AcceptedStop   float64
+	TriggerRef     string
+	LegalityAdjusted bool
 	HTFTrendState  string
 	HTFPersistent  bool
 	HTFFailed      bool
@@ -153,14 +165,62 @@ func (m *Manager) FrontRunTarget(side string, target float64, frictions ...float
 
 func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	dec := ProtectDecision{
-		HTFTrendState: in.HTFTrendState,
-		HTFPersistent: in.HTFTrendPersistent,
-		HTFFailed:     in.HTFTrendFailed,
-		HTFCaution:    in.HTFCaution,
+		HTFTrendState:    in.HTFTrendState,
+		HTFPersistent:    in.HTFTrendPersistent,
+		HTFFailed:        in.HTFTrendFailed,
+		HTFCaution:       in.HTFCaution,
+		ComputedStop:     in.ComputedStop,
+		SubmittedStop:    in.SubmittedStop,
+		AcceptedStop:     in.AcceptedStop,
+		TriggerRef:       strings.ToLower(strings.TrimSpace(in.TriggerRef)),
+		LegalityAdjusted: in.LegalityAdjusted,
 	}
 	softManageOnly := envBoolXM("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true)
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
+	}
+	if in.AcceptedStop <= 0 {
+		dec.AcceptedStop = in.Stop
+	}
+	if in.SubmittedStop <= 0 {
+		dec.SubmittedStop = in.Stop
+	}
+	if in.ComputedStop <= 0 {
+		dec.ComputedStop = in.Stop
+	}
+	beLockR := envFloatExit("LIVE_EXIT_BE_LOCK_R", 0.5)
+	if in.MFER >= beLockR {
+		dec.MoveStopToBE = true
+		dec.TightenStop = true
+		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.00)
+		dec.Reason = firstNonEmptyExit(dec.Reason, "instant_be_lock")
+	}
+	if envBoolExit("LIVE_EXIT_WINNER_REVERSION_BLOCK", true) &&
+		in.MFER >= beLockR && in.UnrealizedPct < 0 {
+		dec.ImmediateExit = true
+		dec.ExitNowReason = "winner_reversion_block"
+		dec.Reason = firstNonEmptyExit(dec.Reason, dec.ExitNowReason)
+		return dec
+	}
+	earlyTrailR := envFloatExit("LIVE_EXIT_EARLY_TRAIL_R", 1.0)
+	if in.MFER >= earlyTrailR {
+		frac := envFloatExit("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)
+		if frac <= 0 || frac > 1 {
+			frac = 0.30
+		}
+		trailStop := trailLockFromPeak(in.Side, in.Entry, in.Mark, frac)
+		if strings.EqualFold(in.Side, "BUY") {
+			dec.TightenStop = true
+			dec.TightenToPrice = maxFloat(dec.TightenToPrice, trailStop)
+		} else {
+			if dec.TightenToPrice <= 0 {
+				dec.TightenToPrice = trailStop
+			} else {
+				dec.TightenToPrice = minFloat(dec.TightenToPrice, trailStop)
+			}
+			dec.TightenStop = true
+		}
+		dec.Reason = firstNonEmptyExit(dec.Reason, "early_profit_trail")
 	}
 	plan := exitPlanForStrategy(firstNonEmptyExit(in.EntryStrategyID, in.EntryReason))
 	if starterInitialManageOnly(in, m.cfg.StarterStabilizeBars) {
@@ -181,7 +241,15 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	if wp.MoveStop {
 		dec.MoveStopToBE = true
 		dec.TightenStop = true
-		dec.TightenToPrice = wp.NewStop
+		if strings.EqualFold(in.Side, "BUY") {
+			dec.TightenToPrice = maxFloat(dec.TightenToPrice, wp.NewStop)
+		} else {
+			if dec.TightenToPrice <= 0 {
+				dec.TightenToPrice = wp.NewStop
+			} else {
+				dec.TightenToPrice = minFloat(dec.TightenToPrice, wp.NewStop)
+			}
+		}
 		dec.Reason = firstNonEmptyExit(dec.Reason, wp.Reason)
 	}
 	if wp.TakePartial && wp.PartialFraction > 0 {
@@ -317,7 +385,8 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.02)
 		dec.Reason = firstNonEmptyExit(dec.Reason, "proof_r_protect")
 	}
-	if in.MFER > 0.25 && in.UnrealizedPct < 0 {
+	if in.MFER > 0.25 && in.UnrealizedPct < 0 &&
+		!dec.MoveStopToBE && !dec.TightenStop && !dec.FullExit && !dec.ImmediateExit {
 		dec.MoveStopToBE = true
 		dec.Reason = firstNonEmptyExit(dec.Reason, "PROTECT_BE_FALLBACK")
 	}
@@ -386,7 +455,23 @@ func firstNonEmptyExit(v ...string) string {
 
 func mustProtectAfterProof(maxR float64) bool {
 	return envBoolExit("LIVE_EXIT_PROTECT_AFTER_PROOF", true) &&
-		maxR >= envFloatExit("LIVE_EXIT_PROOF_R", 1.0)
+		maxR >= envFloatExit("LIVE_EXIT_PROOF_R", 0.5)
+}
+
+func trailLockFromPeak(side string, entry, mark, frac float64) float64 {
+	if frac <= 0 || frac > 1 {
+		frac = 0.30
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		if mark <= entry {
+			return entry
+		}
+		return entry + (mark-entry)*frac
+	}
+	if mark >= entry {
+		return entry
+	}
+	return entry - (entry-mark)*frac
 }
 
 func earlyContinuationProtect(in ProtectInput) bool {

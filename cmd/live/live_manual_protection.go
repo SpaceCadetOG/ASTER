@@ -295,6 +295,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		return err
 	}
 	computedStop := p.StopPrice
+	legalityAdjusted := false
 	protectiveEntry := manageAnchorPrice(p)
 	protectiveMark := 0.0
 	if protectiveEntry <= 0 {
@@ -334,8 +335,12 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 		}
 		protectiveMark = normalizedMark
 		stopPx = normalizedStop
+		legalityAdjusted = math.Abs(stopPx-computedStop) > 1e-9
 	}
 	stopPx = normalizeProtectiveStopToTick(p.Side, stopPx, meta)
+	if !legalityAdjusted {
+		legalityAdjusted = math.Abs(stopPx-computedStop) > 1e-9
+	}
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
 	}
@@ -372,6 +377,9 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	qty = legalQty
 	stopPx = legalStop
 	stopPx = normalizeProtectiveStopToTick(p.Side, stopPx, meta)
+	if !legalityAdjusted {
+		legalityAdjusted = math.Abs(stopPx-computedStop) > 1e-9
+	}
 	p.StopPrice = stopPx
 	closeSide := "SELL"
 	if strings.EqualFold(p.Side, "SELL") {
@@ -476,6 +484,17 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			nonEmpty(strings.ToUpper(strings.TrimSpace(p.EntrySource)), "BOT"),
 		)
 	}
+	if legalityAdjusted {
+		fmt.Printf("PROTECTION_ADJUSTED symbol=%s side=%s computed_stop=%s submitted_stop=%s accepted_stop=%s trigger_ref=%s legality_adjustment_applied=%t\n",
+			p.Symbol,
+			p.Side,
+			fmtPrice(computedStop),
+			fmtPrice(stopPx),
+			fmtPrice(stopPx),
+			strings.ToUpper(strings.TrimSpace(m.stopTriggerRef)),
+			true,
+		)
+	}
 	if stopChanged && m.eventLog != nil {
 		m.eventLog.Emit(stats.Event{
 			Timestamp:  time.Now().UTC(),
@@ -489,5 +508,14 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 			Reason:     nonEmpty(strings.ToUpper(strings.TrimSpace(p.StopReason)), "PROTECT"),
 		})
 	}
+	fmt.Printf("STOP_CHAIN symbol=%s side=%s computed_stop=%s submitted_stop=%s accepted_stop=%s trigger_ref=%s legality_adjustment_applied=%t\n",
+		p.Symbol,
+		p.Side,
+		fmtPrice(computedStop),
+		fmtPrice(stopPx),
+		fmtPrice(stopPx),
+		strings.ToLower(strings.TrimSpace(m.stopTriggerRef)),
+		legalityAdjusted,
+	)
 	return nil
 }

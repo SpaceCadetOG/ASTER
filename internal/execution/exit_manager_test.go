@@ -294,3 +294,47 @@ func TestEvaluateProtectStarterAdvancedAfterStabilizationOrTP1(t *testing.T) {
 		t.Fatalf("expected explicit advanced-ready flag to unlock advanced management")
 	}
 }
+
+func TestEvaluateProtect_InstantBELockAtHalfR(t *testing.T) {
+	t.Setenv("LIVE_EXIT_BE_LOCK_R", "0.5")
+	m := NewManager(Config{})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 101, MFER: 0.5, UnrealizedPct: 1.0,
+	})
+	if !dec.MoveStopToBE || !dec.TightenStop {
+		t.Fatalf("expected immediate BE lock, got %+v", dec)
+	}
+	if dec.TightenToPrice < 100 {
+		t.Fatalf("expected BE lock at/above entry, got %.8f", dec.TightenToPrice)
+	}
+}
+
+func TestEvaluateProtect_WinnerReversionBlock(t *testing.T) {
+	t.Setenv("LIVE_EXIT_WINNER_REVERSION_BLOCK", "true")
+	t.Setenv("LIVE_EXIT_BE_LOCK_R", "0.5")
+	m := NewManager(Config{})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.5, MFER: 0.7, UnrealizedPct: -0.2,
+	})
+	if !dec.ImmediateExit {
+		t.Fatalf("expected immediate exit on winner reversion, got %+v", dec)
+	}
+	if dec.ExitNowReason != "winner_reversion_block" {
+		t.Fatalf("expected winner_reversion_block reason, got %+v", dec)
+	}
+}
+
+func TestEvaluateProtect_EarlyTrailMonotonic(t *testing.T) {
+	t.Setenv("LIVE_EXIT_EARLY_TRAIL_R", "1.0")
+	t.Setenv("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", "0.30")
+	m := NewManager(Config{})
+	dec := m.EvaluateProtect(ProtectInput{
+		Side: "BUY", Entry: 100, Stop: 98, Mark: 104, MFER: 1.2, UnrealizedPct: 4.0,
+	})
+	if !dec.TightenStop {
+		t.Fatalf("expected early trail tighten, got %+v", dec)
+	}
+	if dec.TightenToPrice < 101.2 {
+		t.Fatalf("expected at least 30%% lock from peak move, got %.8f", dec.TightenToPrice)
+	}
+}

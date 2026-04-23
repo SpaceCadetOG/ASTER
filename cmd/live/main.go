@@ -4874,11 +4874,27 @@ func stopStillOriginal(stop, originalStop float64) bool {
 }
 
 func winnerProofR() float64 {
-	return envFloat("LIVE_EXIT_PROOF_R", 1.0)
+	return envFloat("LIVE_EXIT_PROOF_R", 0.5)
 }
 
 func protectAfterProofEnabled() bool {
 	return envBool("LIVE_EXIT_PROTECT_AFTER_PROOF", true)
+}
+
+func enforceWinnerBEFloor(side string, entry, stop, maxR float64) (float64, bool) {
+	if entry <= 0 || stop <= 0 || maxR < winnerProofR() {
+		return stop, false
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		if stop < entry {
+			return entry, true
+		}
+		return stop, false
+	}
+	if stop > entry {
+		return entry, true
+	}
+	return stop, false
 }
 
 func enforceTPProgression(side string, tp1, tp2, tp3 float64) (float64, float64, float64) {
@@ -10144,7 +10160,31 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					HTFTrendPersistent: htfPersistent(p.Side, htf),
 					HTFTrendFailed:     htfFailed(p.Side, htf),
 					HTFCaution:         htfCaution(p.Side, htf),
+					TriggerRef:         m.stopTriggerRef,
+					ComputedStop:       p.StopPrice,
+					SubmittedStop:      p.StopPrice,
+					AcceptedStop:       p.StopPrice,
+					LegalityAdjusted:   false,
 				})
+				if mv.Reason != "" || mv.MoveStopToBE || mv.TightenStop || mv.PartialExitPct > 0 || mv.FullExit || mv.ImmediateExit {
+					action := "HOLD"
+					switch {
+					case mv.ImmediateExit:
+						action = "IMMEDIATE_EXIT"
+					case mv.FullExit:
+						action = "FULL_EXIT"
+					case mv.PartialExitPct > 0:
+						action = "PARTIAL"
+					case mv.MoveStopToBE && mv.TightenStop:
+						action = "BE_TIGHTEN"
+					case mv.MoveStopToBE:
+						action = "BE"
+					case mv.TightenStop:
+						action = "TIGHTEN"
+					}
+					fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+						p.Symbol, p.Side, action, firstNonEmpty(mv.ExitNowReason, mv.Reason, "PROTECT"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, strings.ToLower(strings.TrimSpace(mv.TriggerRef)), mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution)
+				}
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
 					be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
@@ -10160,6 +10200,20 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 						_ = m.placeOrReplaceStop(p)
 						changed = true
 					}
+				}
+				if correctedStop, corrected := enforceWinnerBEFloor(p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR); corrected {
+					p.StopReason = "forced_be_correction"
+					p.StopPrice = correctedStop
+					_ = m.placeOrReplaceStop(p)
+					changed = true
+				}
+				if mv.ImmediateExit {
+					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block")
+					_ = m.cancelRemainingExits(p)
+					if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
+						changed = true
+					}
+					return changed, nil
 				}
 				if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
 					if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
@@ -11498,7 +11552,31 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				HTFTrendPersistent: htfPersistent(p.Side, htf),
 				HTFTrendFailed:     htfFailed(p.Side, htf),
 				HTFCaution:         htfCaution(p.Side, htf),
+				TriggerRef:         m.stopTriggerRef,
+				ComputedStop:       p.StopPrice,
+				SubmittedStop:      p.StopPrice,
+				AcceptedStop:       p.StopPrice,
+				LegalityAdjusted:   false,
 			})
+			if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
+				action := "HOLD"
+				switch {
+				case dec.ImmediateExit:
+					action = "IMMEDIATE_EXIT"
+				case dec.FullExit:
+					action = "FULL_EXIT"
+				case dec.PartialExitPct > 0:
+					action = "PARTIAL"
+				case dec.MoveStopToBE && dec.TightenStop:
+					action = "BE_TIGHTEN"
+				case dec.MoveStopToBE:
+					action = "BE"
+				case dec.TightenStop:
+					action = "TIGHTEN"
+				}
+				fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+					sym, p.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+			}
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
 				if q > 0 && q < p.RemainingQty {
@@ -11521,6 +11599,20 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 					_ = m.placeOrReplaceStop(p)
 					changed = true
 				}
+			}
+			if correctedStop, corrected := enforceWinnerBEFloor(p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR); corrected {
+				p.StopReason = "forced_be_correction"
+				p.StopPrice = correctedStop
+				_ = m.placeOrReplaceStop(p)
+				changed = true
+			}
+			if dec.ImmediateExit {
+				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+				_ = m.cancelRemainingExits(p)
+				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
+					changed = true
+				}
+				continue
 			}
 			if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
 				if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
@@ -12266,6 +12358,11 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 			changed = true
 		}
 	}
+	if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
+		pos.StopReason = "forced_be_correction"
+		pos.Stop = correctedStop
+		changed = true
+	}
 	if dec.PartialExitPct > 0 && pos.Qty > 0 {
 		q := pos.Qty * dec.PartialExitPct
 		if q > 0 && q < pos.Qty {
@@ -12275,9 +12372,16 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 			return true
 		}
 	}
+	if dec.ImmediateExit {
+		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=IMMEDIATE_EXIT reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+			raw, pos.Side, reason, dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+		return true
+	}
 	if dec.FullExit {
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
 		return true
 	}
@@ -12286,8 +12390,8 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		if dec.MoveStopToBE && !dec.TightenStop {
 			action = "BE"
 		}
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 	}
 	return changed
 }
@@ -12832,42 +12936,74 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
 			cur, _ := paperCurrentEntryForSide(pos.Side, raw, longCurrent, shortCurrent)
 			htf := p.htfSnapshot(raw, pos.Side, &cur)
-			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-				Side:               pos.Side,
-				Entry:              pos.Entry,
-				Stop:               pos.Stop,
-				Mark:               stopCheckPx,
-				MFER:               pos.MaxFavorableR,
-				MAER:               pos.MaxAdverseR,
-				BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
-				StallBars:          pos.StallBars,
-				NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
-				UnrealizedPct:      upctStop,
-				Sponsored:          pos.Sponsored,
-				HitTP1:             pos.HitTP1,
-				HitTP2:             pos.HitTP2,
-				HitTP3:             pos.HitTP3,
-				WeakSponsorStreak:  pos.WeakSponsorStreak,
-				EntryReason:        pos.EntryReason,
-				EntryStrategyID:    pos.EntryStrategyID,
-				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
-				AdvancedReady:      paperAdvancedReady(pos),
-				HTFTrendState:      string(htf.State),
-				HTFTrendPersistent: htfPersistent(pos.Side, htf),
-				HTFTrendFailed:     htfFailed(pos.Side, htf),
-				HTFCaution:         htfCaution(pos.Side, htf),
-			})
-			if dec.MoveStopToBE && allowBE {
-				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
-				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
-					pos.Stop = be
+				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+					Side:               pos.Side,
+					Entry:              pos.Entry,
+					Stop:               pos.Stop,
+					Mark:               stopCheckPx,
+					MFER:               pos.MaxFavorableR,
+					MAER:               pos.MaxAdverseR,
+					BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
+					StallBars:          pos.StallBars,
+					NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
+					UnrealizedPct:      upctStop,
+					Sponsored:          pos.Sponsored,
+					HitTP1:             pos.HitTP1,
+					HitTP2:             pos.HitTP2,
+					HitTP3:             pos.HitTP3,
+					WeakSponsorStreak:  pos.WeakSponsorStreak,
+					EntryReason:        pos.EntryReason,
+					EntryStrategyID:    pos.EntryStrategyID,
+					StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+					AdvancedReady:      paperAdvancedReady(pos),
+					HTFTrendState:      string(htf.State),
+					HTFTrendPersistent: htfPersistent(pos.Side, htf),
+					HTFTrendFailed:     htfFailed(pos.Side, htf),
+					HTFCaution:         htfCaution(pos.Side, htf),
+					TriggerRef:         p.stopTriggerRef,
+					ComputedStop:       pos.Stop,
+					SubmittedStop:      pos.Stop,
+					AcceptedStop:       pos.Stop,
+					LegalityAdjusted:   false,
+				})
+				if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
+					action := "HOLD"
+					switch {
+					case dec.ImmediateExit:
+						action = "IMMEDIATE_EXIT"
+					case dec.FullExit:
+						action = "FULL_EXIT"
+					case dec.PartialExitPct > 0:
+						action = "PARTIAL"
+					case dec.MoveStopToBE && dec.TightenStop:
+						action = "BE_TIGHTEN"
+					case dec.MoveStopToBE:
+						action = "BE"
+					case dec.TightenStop:
+						action = "TIGHTEN"
+					}
+					fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+						raw, pos.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
 				}
-			}
-			if dec.TightenStop {
-				if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
-					pos.Stop = dec.TightenToPrice
+				if dec.MoveStopToBE && allowBE {
+					be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
+					if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
+						pos.Stop = be
+					}
 				}
-			}
+				if dec.TightenStop {
+					if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
+						pos.Stop = dec.TightenToPrice
+					}
+				}
+				if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
+					pos.StopReason = "forced_be_correction"
+					pos.Stop = correctedStop
+				}
+				if dec.ImmediateExit {
+					p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
+					continue
+				}
 			if dec.FullExit {
 				p.exitPortion(now, pos, dec.Reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 				continue
@@ -13014,6 +13150,11 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					HTFTrendPersistent: htfPersistent(pos.Side, htf),
 					HTFTrendFailed:     htfFailed(pos.Side, htf),
 					HTFCaution:         htfCaution(pos.Side, htf),
+					TriggerRef:         p.stopTriggerRef,
+					ComputedStop:       pos.Stop,
+					SubmittedStop:      pos.Stop,
+					AcceptedStop:       pos.Stop,
+					LegalityAdjusted:   false,
 				})
 				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
 					continue
@@ -13118,7 +13259,31 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				HTFTrendPersistent: htfPersistent(pos.Side, htf),
 				HTFTrendFailed:     htfFailed(pos.Side, htf),
 				HTFCaution:         htfCaution(pos.Side, htf),
+				TriggerRef:         p.stopTriggerRef,
+				ComputedStop:       pos.Stop,
+				SubmittedStop:      pos.Stop,
+				AcceptedStop:       pos.Stop,
+				LegalityAdjusted:   false,
 			})
+			if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
+				action := "HOLD"
+				switch {
+				case dec.ImmediateExit:
+					action = "IMMEDIATE_EXIT"
+				case dec.FullExit:
+					action = "FULL_EXIT"
+				case dec.PartialExitPct > 0:
+					action = "PARTIAL"
+				case dec.MoveStopToBE && dec.TightenStop:
+					action = "BE_TIGHTEN"
+				case dec.MoveStopToBE:
+					action = "BE"
+				case dec.TightenStop:
+					action = "TIGHTEN"
+				}
+				fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
+					raw, pos.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+			}
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
@@ -13139,6 +13304,16 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 					pos.Stop = dec.TightenToPrice
 					changed = true
 				}
+			}
+			if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
+				pos.StopReason = "forced_be_correction"
+				pos.Stop = correctedStop
+				changed = true
+			}
+			if dec.ImmediateExit {
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, depth[raw])
+				changed = true
+				continue
 			}
 			if dec.FullExit {
 				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])

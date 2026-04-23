@@ -37,6 +37,20 @@ func EvaluateWinnerProtection(
 	if currentR <= 0 {
 		return WinnerProtectionDecision{}
 	}
+	if maxR >= envFloatWP("LIVE_EXIT_EARLY_TRAIL_R", 1.0) {
+		return WinnerProtectionDecision{
+			MoveStop: true,
+			NewStop:  trailLockFromPeakWP(side, entry, mark, envFloatWP("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)),
+			Reason:   "early_profit_trail",
+		}
+	}
+	if maxR >= envFloatWP("LIVE_EXIT_BE_LOCK_R", 0.5) {
+		return WinnerProtectionDecision{
+			MoveStop: true,
+			NewStop:  breakEvenPlus(side, entry, stop, 0.00),
+			Reason:   "instant_be_lock",
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(strategyID)) {
 	case "impulse_continuation", "entry_now_long", "entry_now_short":
 		if currentR >= envFloatWP("LIVE_EXIT_FORCE_PARTIAL_AT_R", 1.0) && !tp1Taken {
@@ -93,7 +107,7 @@ func EvaluateWinnerProtection(
 			}
 		}
 	}
-	if maxR >= envFloatWP("LIVE_EXIT_PROOF_R", 1.0) {
+	if maxR >= envFloatWP("LIVE_EXIT_PROOF_R", 0.5) {
 		return WinnerProtectionDecision{
 			MoveStop: true,
 			NewStop:  breakEvenPlus(side, entry, stop, 0.02),
@@ -101,6 +115,22 @@ func EvaluateWinnerProtection(
 		}
 	}
 	return WinnerProtectionDecision{}
+}
+
+func trailLockFromPeakWP(side string, entry, mark, frac float64) float64 {
+	if frac <= 0 || frac > 1 {
+		frac = 0.30
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		if mark <= entry {
+			return entry
+		}
+		return entry + (mark-entry)*frac
+	}
+	if mark >= entry {
+		return entry
+	}
+	return entry - (entry-mark)*frac
 }
 
 func currentRMultiple(side string, entry, stop, mark float64) float64 {

@@ -136,9 +136,9 @@ func UpdateTrail(st *TrailState, closed15m features.Candle, ema20 float64) Trail
 }
 
 func shouldMoveToBreakEven(strategyID string, initialR float64, tp1Hit bool, structureValidated bool) bool {
-	minR := 1.0
+	minR := 0.5
 	if isFastMomentumStrategy(strategyID) {
-		minR = 0.75
+		minR = 0.5
 	}
 	if tp1Hit {
 		return true
