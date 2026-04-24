@@ -171,8 +171,9 @@ func (m *Manager) FrontRunTarget(side string, target float64, frictions ...float
 
 func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	currentR := currentRMultiple(in.Side, in.Entry, in.Stop, in.Mark)
+	currentLifecycle := NormalizeWinnerLifecycle(in.WinnerLifecycle)
 	dec := ProtectDecision{
-		CurrentWinnerLifecycle: string(NormalizeWinnerLifecycle(in.WinnerLifecycle)),
+		CurrentWinnerLifecycle: string(currentLifecycle),
 		HTFTrendState:          in.HTFTrendState,
 		HTFPersistent:          in.HTFTrendPersistent,
 		HTFFailed:              in.HTFTrendFailed,
@@ -183,7 +184,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		TriggerRef:             strings.ToLower(strings.TrimSpace(in.TriggerRef)),
 		LegalityAdjusted:       in.LegalityAdjusted,
 		WinnerLifecycle: string(ResolveWinnerLifecycle(
-			NormalizeWinnerLifecycle(in.WinnerLifecycle),
+			currentLifecycle,
 			WinnerLifecycleInput{
 				MaxR:             in.MFER,
 				CurrentR:         currentR,
@@ -196,6 +197,10 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		)),
 	}
 	softManageOnly := envBoolXM("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true)
+	softExitManageOnly := softManageOnly || isStarterOrProof(currentLifecycle) || isWinnerLockedOrBetter(currentLifecycle)
+	earlySoftHoldMinutes := envIntExit("LIVE_EXIT_EARLY_SOFT_HOLD_MIN", 20)
+	earlySoftProtected := isStarterOrProof(currentLifecycle) &&
+		((earlySoftHoldMinutes > 0 && in.BarsHeld < earlySoftHoldMinutes && in.MFER > 0) || in.MFER > 0)
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
 		return dec
 	}
@@ -237,10 +242,16 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 	earlyTrailR := envFloatExit("LIVE_EXIT_EARLY_TRAIL_R", 1.0)
 	if in.MFER >= earlyTrailR {
 		frac := envFloatExit("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)
+		switch {
+		case in.MFER >= envFloatExit("LIVE_EXIT_LATE_TRAIL_LOCK_R", 3.0):
+			frac = envFloatExit("LIVE_EXIT_LATE_TRAIL_LOCK_FRAC", 0.70)
+		case in.MFER >= envFloatExit("LIVE_EXIT_PEAK_LOCK_R", 2.0):
+			frac = envFloatExit("LIVE_EXIT_PEAK_LOCK_FRAC", 0.50)
+		}
 		if frac <= 0 || frac > 1 {
 			frac = 0.30
 		}
-		trailStop := trailLockFromPeak(in.Side, in.Entry, in.Mark, frac)
+		trailStop := trailLockFromMaxR(in.Side, in.Entry, in.Stop, in.Mark, in.MFER, frac)
 		if strings.EqualFold(in.Side, "BUY") {
 			dec.TightenStop = true
 			dec.TightenToPrice = maxFloat(dec.TightenToPrice, trailStop)
@@ -337,7 +348,7 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
 			return dec
 		}
-		if softManageOnly && !in.HTFTrendFailed {
+		if softExitManageOnly && !in.HTFTrendFailed {
 			dec.MoveStopToBE = true
 			dec.TightenStop = true
 			tightR := envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06)
@@ -345,6 +356,13 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 				tightR = envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R_CAUTION", 0.05)
 			}
 			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
+			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
+			return dec
+		}
+		if isWinnerLockedOrBetter(currentLifecycle) || earlySoftProtected {
+			dec.MoveStopToBE = true
+			dec.TightenStop = true
+			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, envFloatXM("LIVE_MOMENTUM_FADE_TIGHTEN_R", 0.06))
 			dec.Reason = "PROFIT_GIVEBACK_TIGHTEN"
 			return dec
 		}
@@ -378,7 +396,16 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
 			return dec
 		}
-		if in.MFER <= 0 && (in.HTFTrendFailed || !softManageOnly) {
+		if isStarterOrProof(currentLifecycle) {
+			if in.MFER > 0 {
+				dec.MoveStopToBE = true
+				dec.Reason = firstNonEmptyExit(dec.Reason, "NO_FOLLOW_THROUGH_BE")
+			} else {
+				dec.Reason = firstNonEmptyExit(dec.Reason, "NO_FOLLOW_THROUGH_MONITOR")
+			}
+			return dec
+		}
+		if in.MFER <= 0 && (in.HTFTrendFailed || !softExitManageOnly) {
 			dec.FullExit = true
 			dec.Reason = "NO_FOLLOW_THROUGH"
 			return dec
@@ -436,6 +463,30 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		))
 	}
 	return dec
+}
+
+func trailLockFromMaxR(side string, entry, stop, mark, maxR, frac float64) float64 {
+	risk := math.Abs(entry - stop)
+	if risk <= 0 {
+		return trailLockFromPeak(side, entry, mark, frac)
+	}
+	if frac <= 0 || frac > 1 {
+		frac = 0.30
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		peak := entry + risk*maxR
+		locked := entry + (peak-entry)*frac
+		if mark > 0 && locked > mark {
+			return mark
+		}
+		return locked
+	}
+	peak := entry - risk*maxR
+	locked := entry - (entry-peak)*frac
+	if mark > 0 && locked < mark {
+		return mark
+	}
+	return locked
 }
 
 func exitPlanForStrategy(strategyID string) string {
@@ -612,4 +663,16 @@ func envBoolExit(key string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+func envIntExit(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }

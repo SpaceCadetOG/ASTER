@@ -38,9 +38,16 @@ func EvaluateWinnerProtection(
 		return WinnerProtectionDecision{}
 	}
 	if maxR >= envFloatWP("LIVE_EXIT_EARLY_TRAIL_R", 1.0) {
+		lockFrac := envFloatWP("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)
+		switch {
+		case maxR >= envFloatWP("LIVE_EXIT_LATE_TRAIL_LOCK_R", 3.0):
+			lockFrac = envFloatWP("LIVE_EXIT_LATE_TRAIL_LOCK_FRAC", 0.70)
+		case maxR >= envFloatWP("LIVE_EXIT_PEAK_LOCK_R", 2.0):
+			lockFrac = envFloatWP("LIVE_EXIT_PEAK_LOCK_FRAC", 0.50)
+		}
 		return WinnerProtectionDecision{
 			MoveStop: true,
-			NewStop:  trailLockFromPeakWP(side, entry, mark, envFloatWP("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)),
+			NewStop:  trailLockFromMaxRWP(side, entry, stop, mark, maxR, lockFrac),
 			Reason:   "early_profit_trail",
 		}
 	}
@@ -131,6 +138,30 @@ func trailLockFromPeakWP(side string, entry, mark, frac float64) float64 {
 		return entry
 	}
 	return entry - (entry-mark)*frac
+}
+
+func trailLockFromMaxRWP(side string, entry, stop, mark, maxR, frac float64) float64 {
+	risk := math.Abs(entry - stop)
+	if risk <= 0 {
+		return trailLockFromPeakWP(side, entry, mark, frac)
+	}
+	if frac <= 0 || frac > 1 {
+		frac = 0.30
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		peak := entry + risk*maxR
+		locked := entry + (peak-entry)*frac
+		if mark > 0 && locked > mark {
+			return mark
+		}
+		return locked
+	}
+	peak := entry - risk*maxR
+	locked := entry - (entry-peak)*frac
+	if mark > 0 && locked < mark {
+		return mark
+	}
+	return locked
 }
 
 func currentRMultiple(side string, entry, stop, mark float64) float64 {

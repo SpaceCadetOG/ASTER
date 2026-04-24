@@ -164,6 +164,9 @@ func (m *liveExecManager) activateManualManagement(req manualManageRequest, now 
 				fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(p)),
 			)
 		}
+		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+			lines = append(lines, guidance)
+		}
 		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateAdopted, p.Symbol, p.Side, lines...))
 	}
 	_ = m.logFill(now, p, "ENTRY", reason, p.FilledQty, p.EntryPrice, 0, 0)
@@ -474,11 +477,15 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 	wasProtectionPending := p.ProtectionPending
 	clearProtectionPending(p)
 	if wasProtectionPending && m.tg != nil && manualManagedTrade(p) {
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateProtected, p.Symbol, p.Side,
+		lines := []string{
 			fmt.Sprintf("<b>Exchange stop:</b> %s", fmtPrice(stopPx)),
 			fmt.Sprintf("<b>Order ID:</b> %d", p.StopOrderID),
 			"<b>Fresh entries remain blocked</b> until normal gates re-evaluate.",
-		))
+		}
+		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+			lines = append(lines, guidance)
+		}
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateProtected, p.Symbol, p.Side, lines...))
 	}
 	stopChanged := prevStop <= 0 || math.Abs(prevStop-stopPx) > 1e-9
 	if stopChanged && manageDebugLogging() {

@@ -675,6 +675,7 @@ type paperPosition struct {
 	LastConfluenceRefresh  time.Time
 	ConfluenceRefreshCount int
 	EntryVolumeUSD         float64
+	EntryATRPct            float64
 	OpposingFriction       float64
 	StopReason             string
 	StopDistancePct        float64
@@ -911,6 +912,7 @@ type livePosition struct {
 	EntryTags                []string         `json:"entryTags,omitempty"`
 	EntryReasons             []string         `json:"entryReasons,omitempty"`
 	EntryVolumeUSD           float64          `json:"entryVolumeUsd,omitempty"`
+	EntryATRPct              float64          `json:"entryAtrPct,omitempty"`
 	StopReason               string           `json:"stopReason,omitempty"`
 	StopDistancePct          float64          `json:"stopDistancePct,omitempty"`
 	RegimeTag                string           `json:"regimeTag,omitempty"`
@@ -4777,6 +4779,35 @@ func matureTrendForWinnerLifecycle(maxR float64, htfPersistent bool, hitTP1, hit
 		return true
 	}
 	return maxR >= envFloat("LIVE_EXIT_EARLY_TRAIL_R", 1.0) && (htfPersistent || hitTP1)
+}
+
+func lifecycleSoftExitsCanHardClose(raw string) bool {
+	switch exitmgr.NormalizeWinnerLifecycle(raw) {
+	case exitmgr.WinnerLifecycleWinnerLocked, exitmgr.WinnerLifecycleRunner, exitmgr.WinnerLifecycleLateTrail:
+		return false
+	default:
+		return true
+	}
+}
+
+func lifecycleNeedsManualTrendCaptureWarning(raw string) bool {
+	switch exitmgr.NormalizeWinnerLifecycle(raw) {
+	case exitmgr.WinnerLifecycleWinnerLocked, exitmgr.WinnerLifecycleRunner, exitmgr.WinnerLifecycleLateTrail:
+		return true
+	default:
+		return false
+	}
+}
+
+func manualTrendCaptureGuidance(raw string) string {
+	if !lifecycleNeedsManualTrendCaptureWarning(raw) {
+		return ""
+	}
+	stage := strings.ToUpper(strings.TrimSpace(raw))
+	if stage == "" {
+		stage = "WINNER_LOCKED"
+	}
+	return fmt.Sprintf("<b>Trend Capture:</b> %s protected. Avoid manual churn unless emergency or structure fails.", stage)
 }
 
 func syncLiveWinnerLifecycle(p *livePosition, htfPersistent bool) {
@@ -9951,6 +9982,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		EntryTags:             entryTags,
 		EntryReasons:          entryReasons,
 		EntryVolumeUSD:        c.VolumeUSD,
+		EntryATRPct:           c.ATRPct,
 		StopReason:            stopReason,
 		StopDistancePct:       stopDistancePct,
 		RegimeTag:             c.Sig.RegimeTag,
@@ -10441,16 +10473,19 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					}
 				}
 				if mv.FullExit {
-					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "FULL_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, mv.Reason), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
-					if !runnerState.StructureBroken {
-						if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
-							changed = true
-						}
+					if !lifecycleSoftExitsCanHardClose(p.WinnerLifecycle) {
 					} else {
-						reason := firstNonEmpty(runnerState.FullExitReason, mv.Reason)
-						_ = m.cancelRemainingExits(p)
-						if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
-							changed = true
+						logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "FULL_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, mv.Reason), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
+						if !runnerState.StructureBroken {
+							if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
+								changed = true
+							}
+						} else {
+							reason := firstNonEmpty(runnerState.FullExitReason, mv.Reason)
+							_ = m.cancelRemainingExits(p)
+							if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
+								changed = true
+							}
 						}
 					}
 				}
@@ -10649,6 +10684,7 @@ func (m *liveExecManager) initializeBracketLevels(p *livePosition) error {
 		m.minStopPct/100.0,
 		m.maxStopPct/100.0,
 	)
+	stopPct = clamp(widenStopPctForVolatility(stopPct, p.EntryATRPct, p.EntryVolumeUSD), m.minStopPct/100.0, m.maxStopPct/100.0)
 	if sideBuy {
 		p.StopPrice = anchor * (1 - stopPct)
 		p.TP1Price = anchor * (1 + stopPct*tp1R)
@@ -11465,7 +11501,7 @@ func (m *liveExecManager) calcTrailStopForPosition(p *livePosition, sideBuy bool
 	if p != nil && p.Symbol != "" {
 		atrPct := estimateATRPctWithCache(m.featureCache, p.Symbol, maxInt(m.atrLen*4, 64), m.atrLen)
 		if atrPct > 0 {
-			atrDist = ref * atrPct * trailATRMultForReason(p.EntryReason)
+			atrDist = ref * atrPct * trailATRMultForContext(p.EntryReason, atrPct, p.EntryVolumeUSD)
 		}
 	}
 	structDist := 0.0
@@ -11845,6 +11881,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				}
 			}
 			if dec.FullExit {
+				if !lifecycleSoftExitsCanHardClose(p.WinnerLifecycle) {
+					continue
+				}
 				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "FULL_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, dec.Reason), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 				if !runnerState.StructureBroken {
 					if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
@@ -11908,6 +11947,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			continue
 		}
 		if !runnerState.StructureBroken {
+			continue
+		}
+		if !lifecycleSoftExitsCanHardClose(p.WinnerLifecycle) {
 			continue
 		}
 		reason := firstNonEmpty(runnerState.FullExitReason, "MOMENTUM_FADE")
@@ -12602,6 +12644,12 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		return true
 	}
 	if dec.FullExit {
+		if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
+			if !changed {
+				logPaperProtectDecision(raw, pos, "TIGHTEN", dec, pos.Stop, pos.Stop, false)
+			}
+			return changed
+		}
 		logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
 		return true
@@ -13008,6 +13056,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		p.minStopPct/100.0,
 		p.maxStopPct/100.0,
 	)
+	if c.Sig.Stop <= 0 {
+		stopPct = clamp(widenStopPctForVolatility(stopPct, c.ATRPct, m.VolumeUSD), p.minStopPct/100.0, p.maxStopPct/100.0)
+	}
 	stopReason := ""
 	stopDistancePct := stopPct * 100.0
 	if p.hybridStopCfg.Enabled {
@@ -13081,6 +13132,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		ExecutionScore:   c.ExecutionScore,
 		CombinedScore:    c.CombinedScore,
 		EntryVolumeUSD:   c.VolumeUSD,
+		EntryATRPct:      c.ATRPct,
 		OpposingFriction: c.Sig.VPTargetLevel,
 		StopReason:       stopReason,
 		StopDistancePct:  stopDistancePct,
@@ -13235,6 +13287,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				continue
 			}
 			if dec.FullExit {
+				if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
+					continue
+				}
 				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 				p.exitPortion(now, pos, dec.Reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 				continue
@@ -13403,6 +13458,9 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				htfPersistent(pos.Side, htf) && !htfFailed(pos.Side, htf) {
 				continue
 			}
+			if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
+				continue
+			}
 			p.exitPortion(now, pos, reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 			continue
 		}
@@ -13557,6 +13615,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				continue
 			}
 			if dec.FullExit {
+				if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
+					continue
+				}
 				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])
 				changed = true
@@ -13582,6 +13643,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				pos.Stop = stop
 				changed = true
 			}
+			continue
+		}
+		if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
 			continue
 		}
 		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
@@ -14186,7 +14250,7 @@ func (p *paperTrader) calcTrailStopForPosition(pos *paperPosition, sideBuy bool,
 	if pos != nil && pos.Symbol != "" {
 		atrPct := estimateATRPctWithCache(p.featureCache, pos.Symbol, maxInt(p.atrLen*4, 64), p.atrLen)
 		if atrPct > 0 {
-			atrDist = ref * atrPct * trailATRMultForReason(pos.EntryReason)
+			atrDist = ref * atrPct * trailATRMultForContext(pos.EntryReason, atrPct, pos.EntryVolumeUSD)
 		}
 	}
 	structDist := 0.0
@@ -17203,7 +17267,35 @@ func finalSortRank(c candidate, cfg rankSortConfig, rel reliability.Store) float
 			r -= penalty
 		}
 	}
+	r += sessionScannerBoost(c, time.Now().In(time.Local))
 	return r
+}
+
+func sessionScannerBoost(c candidate, now time.Time) float64 {
+	if !envBool("LIVE_ENTRY_SESSION_BOOST_ENABLE", true) {
+		return 0
+	}
+	startHour, startMin := parseHHMM(envStr("LIVE_ENTRY_SESSION_BOOST_START", "05:00"), 5, 0)
+	endHour, endMin := parseHHMM(envStr("LIVE_ENTRY_SESSION_BOOST_END", "07:00"), 7, 0)
+	minutes := now.Hour()*60 + now.Minute()
+	startMinutes := startHour*60 + startMin
+	endMinutes := endHour*60 + endMin
+	if minutes < startMinutes || minutes > endMinutes {
+		return 0
+	}
+	maxRank := envFloat("LIVE_ENTRY_SESSION_BOOST_MAX_RANK", 5.0)
+	if maxRank > 0 && c.Entry.Rank > maxRank {
+		return 0
+	}
+	minScore := envFloat("LIVE_ENTRY_SESSION_BOOST_MIN_SCORE", 88.0)
+	if c.Entry.CurrentScore < minScore {
+		return 0
+	}
+	boost := envFloat("LIVE_ENTRY_SESSION_BOOST_POINTS", 12.0)
+	if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A") {
+		boost *= envFloat("LIVE_ENTRY_SESSION_BOOST_A_MULT", 1.15)
+	}
+	return boost
 }
 
 func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64, flow map[string]flowMetrics) candidate {
@@ -17708,6 +17800,37 @@ func trailATRMultForReason(reason string) float64 {
 	default:
 		return envFloat("LIVE_TRAIL_ATR_MULT_CONT", 2.6)
 	}
+}
+
+func trendCaptureVolatilityMultiplier(atrPct, volumeUSD float64) float64 {
+	if atrPct <= 0 {
+		return 1.0
+	}
+	if volumeUSD > envFloat("LIVE_VOLATILE_MAX_VOLUME_USD", 75_000_000.0) {
+		return 1.0
+	}
+	high := envFloat("LIVE_VOLATILE_ATR_PCT_HIGH", 0.050)
+	moderate := envFloat("LIVE_VOLATILE_ATR_PCT_MODERATE", 0.035)
+	switch {
+	case atrPct >= high:
+		return envFloat("LIVE_VOLATILE_STOP_MULT_HIGH", 1.60)
+	case atrPct >= moderate:
+		return envFloat("LIVE_VOLATILE_STOP_MULT_MODERATE", 1.25)
+	default:
+		return 1.0
+	}
+}
+
+func widenStopPctForVolatility(stopPct, atrPct, volumeUSD float64) float64 {
+	if stopPct <= 0 {
+		return stopPct
+	}
+	return stopPct * trendCaptureVolatilityMultiplier(atrPct, volumeUSD)
+}
+
+func trailATRMultForContext(reason string, atrPct, volumeUSD float64) float64 {
+	base := trailATRMultForReason(reason)
+	return base * trendCaptureVolatilityMultiplier(atrPct, volumeUSD)
 }
 
 func distForStopMode(price, atr, pctFallback, pctFloor, atrMult float64, mode string) float64 {
@@ -22069,16 +22192,24 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 					if !hasLiveProtectiveOrder(managed) {
 						c.execMgr.tryImmediateManualProtection(managed)
 						_ = c.execMgr.save()
-						return notify.BuildEventHTML("✅", "MANAGE ACTIVE",
+						lines := []string{
 							fmt.Sprintf("<b>%s %s</b> is already bot-managed", cleanSymbol(managed.Symbol), displayPositionSide(managed.Side)),
 							fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(managed)),
 							"Live protection was re-armed automatically.",
-						)
+						}
+						if guidance := manualTrendCaptureGuidance(managed.WinnerLifecycle); guidance != "" {
+							lines = append(lines, guidance)
+						}
+						return notify.BuildEventHTML("✅", "MANAGE ACTIVE", lines...)
 					}
-					return notify.BuildEventHTML("✅", "MANAGE ACTIVE",
+					lines := []string{
 						fmt.Sprintf("<b>%s %s</b> is already bot-managed", cleanSymbol(managed.Symbol), displayPositionSide(managed.Side)),
 						fmt.Sprintf("<b>Protection:</b> %s", manualProtectionStatus(managed)),
-					)
+					}
+					if guidance := manualTrendCaptureGuidance(managed.WinnerLifecycle); guidance != "" {
+						lines = append(lines, guidance)
+					}
+					return notify.BuildEventHTML("✅", "MANAGE ACTIVE", lines...)
 				}
 			}
 			return notify.BuildEventHTML("ℹ️", "MANAGE", fmt.Sprintf("No pending manual trade for %s", cleanSymbol(sym)))
@@ -22327,10 +22458,14 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
 			)
 		}
-		return notify.BuildManagementStatusCard(notify.ManageStateProtected, sym, p.Side,
+		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
-		)
+		}
+		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+			lines = append(lines, guidance)
+		}
+		return notify.BuildManagementStatusCard(notify.ManageStateProtected, sym, p.Side, lines...)
 	case strings.HasPrefix(cmd, "/pause"):
 		if c.safety.pauseFile == "" {
 			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")

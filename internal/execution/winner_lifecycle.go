@@ -21,6 +21,36 @@ type WinnerLifecycleInput struct {
 	WinnerReversion  bool
 }
 
+func winnerLifecycleRank(stage WinnerLifecycle) int {
+	switch NormalizeWinnerLifecycle(string(stage)) {
+	case WinnerLifecycleStarter:
+		return 0
+	case WinnerLifecycleProofArmed:
+		return 1
+	case WinnerLifecycleWinnerLocked:
+		return 2
+	case WinnerLifecycleRunner:
+		return 3
+	case WinnerLifecycleLateTrail:
+		return 4
+	case WinnerLifecycleFailed:
+		return 5
+	default:
+		return 0
+	}
+}
+
+func isStarterOrProof(stage WinnerLifecycle) bool {
+	stage = NormalizeWinnerLifecycle(string(stage))
+	return stage == WinnerLifecycleStarter || stage == WinnerLifecycleProofArmed
+}
+
+func isWinnerLockedOrBetter(stage WinnerLifecycle) bool {
+	stage = NormalizeWinnerLifecycle(string(stage))
+	return winnerLifecycleRank(stage) >= winnerLifecycleRank(WinnerLifecycleWinnerLocked) &&
+		stage != WinnerLifecycleFailed
+}
+
 func NormalizeWinnerLifecycle(raw string) WinnerLifecycle {
 	switch WinnerLifecycle(raw) {
 	case WinnerLifecycleStarter,
