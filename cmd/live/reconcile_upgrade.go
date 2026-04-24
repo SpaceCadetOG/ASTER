@@ -256,7 +256,7 @@ func (m *liveExecManager) closePendingWithoutFill(now time.Time, p *livePosition
 	if p == nil {
 		return false, nil
 	}
-	markLivePositionClosed(p, now, reason)
+	m.markPositionClosed(now, p, reason)
 	_ = m.logFill(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	m.sendFillReceipt(now, p, "ENTRY", reason, 0, 0, 0, 0)
 	return true, nil
@@ -341,7 +341,7 @@ func (m *liveExecManager) closeFromRemoteSnapshot(now time.Time, p *livePosition
 	_ = m.addDayRealized(now, pnl)
 	_ = m.logFill(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
 	m.sendFillReceipt(now, p, "CLOSE", reason, p.RemainingQty, fillPx, pnl, pct)
-	markLivePositionClosed(p, now, reason)
+	m.markPositionClosed(now, p, reason)
 	p.RemainingQty = 0
 	m.maybeSweepTradeProfit(now, p)
 	return true, nil
@@ -483,7 +483,7 @@ func (m *liveExecManager) applyPendingExitProgress(now time.Time, p *livePositio
 	m.sendFillReceipt(now, p, fillAction, reason, deltaQty, fillPx, pnl, pct)
 	if p.RemainingQty <= fillEpsilon(p.Qty) {
 		m.clearPendingExit(p)
-		markLivePositionClosed(p, now, reason)
+		m.markPositionClosed(now, p, reason)
 		p.RemainingQty = 0
 		m.maybeSweepTradeProfit(now, p)
 		return nil
@@ -574,7 +574,7 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 		p.StopOrderID = 0
 		reason = "STOP_HIT"
 		title = "STOP HIT"
-		markLivePositionClosed(p, now, "STOP_HIT")
+		m.markPositionClosed(now, p, "STOP_HIT")
 	}
 	if m.tg != nil {
 		m.tg.Sendf("%s", notify.BuildEventHTML("🛑", title,

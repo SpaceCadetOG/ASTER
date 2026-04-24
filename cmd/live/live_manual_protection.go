@@ -249,13 +249,20 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 	}
 }
 
-func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
+func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 	if p.RemainingQty <= 0 {
+		clearQueuedLiveProtectStopChain(p)
 		return nil
 	}
 	if manualPassivePosition(p) {
+		clearQueuedLiveProtectStopChain(p)
 		return nil
 	}
+	defer func() {
+		if err != nil {
+			clearQueuedLiveProtectStopChain(p)
+		}
+	}()
 	now := time.Now().UTC()
 	if manualManagedTrade(p) {
 		forceNow := p.ForceProtectionNow
@@ -463,6 +470,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) error {
 	}
 	p.StopOrderID = mapInt64(out["orderId"])
 	p.ProtectedStop = stopPx
+	m.logQueuedProtectStopChain(p, stopPx, stopPx, legalityAdjusted)
 	wasProtectionPending := p.ProtectionPending
 	clearProtectionPending(p)
 	if wasProtectionPending && m.tg != nil && manualManagedTrade(p) {

@@ -1415,6 +1415,9 @@ func TestReconstructManualManagedStateEnablesTrailForLateStageWinner(t *testing.
 	if p.TrailRef <= 0 || p.TrailStop <= 0 {
 		t.Fatalf("expected trail state initialized, got ref=%.6f stop=%.6f", p.TrailRef, p.TrailStop)
 	}
+	if p.WinnerLifecycle != "late_trail" {
+		t.Fatalf("expected reconstructed winner lifecycle late_trail, got %q", p.WinnerLifecycle)
+	}
 }
 
 func TestSyncImportedRemotePositionDetectsManualAddMutation(t *testing.T) {

@@ -678,13 +678,17 @@ type paperPosition struct {
 	OpposingFriction       float64
 	StopReason             string
 	StopDistancePct        float64
+	EntrySetupFamily       string
+	ExecBucket             string
 	StallBars              int
 	ProtectionStage        protectionStage
 	FirstProtectAt         time.Time
 	ProtectedStop          float64
+	WinnerLifecycle        string
 	MaxGivebackR           float64
 	CaptureRatio           float64
 	OriginalStop           float64
+	lastProtectDecisionKey string
 }
 
 type paperTrader struct {
@@ -760,6 +764,7 @@ type paperTrader struct {
 	exitManager            *exitmgr.Manager
 	riskOnMargin           bool
 	riskMarginPct          float64
+	governorRecords        []executionGovernorRecord
 	stopTriggerRef         string
 	tpTriggerRef           string
 	markLastModel          string
@@ -793,6 +798,7 @@ type paperState struct {
 	Balance          float64                   `json:"balance"`
 	Reserve          float64                   `json:"reserve"`
 	Positions        map[string]*paperPosition `json:"positions"`
+	GovernorRecords  []executionGovernorRecord `json:"governorRecords,omitempty"`
 	DayStats         map[string]*paperDayStats `json:"dayStats"`
 	LastFund         map[string]string         `json:"lastFund,omitempty"`
 	LastExitAt       map[string]time.Time      `json:"lastExitAt,omitempty"`
@@ -830,134 +836,150 @@ const (
 )
 
 type livePosition struct {
-	Symbol                  string           `json:"symbol"`
-	Side                    string           `json:"side"`
-	State                   execState        `json:"state"`
-	CreatedAt               time.Time        `json:"createdAt"`
-	UpdatedAt               time.Time        `json:"updatedAt"`
-	ClosedAt                time.Time        `json:"closedAt,omitempty"`
-	CloseReason             string           `json:"closeReason,omitempty"`
-	EntryOrderID            int64            `json:"entryOrderId"`
-	EntryPrice              float64          `json:"entryPrice"`
-	ManageAnchorPrice       float64          `json:"manageAnchorPrice,omitempty"`
-	Qty                     float64          `json:"qty"`
-	FilledQty               float64          `json:"filledQty"`
-	RemainingQty            float64          `json:"remainingQty"`
-	Margin                  float64          `json:"margin"`
-	DeployedMargin          float64          `json:"deployedMargin,omitempty"`
-	Leverage                int              `json:"leverage"`
-	AddCount                int              `json:"addCount,omitempty"`
-	StarterOnly             bool             `json:"starterOnly,omitempty"`
-	AddLockedUntilConfirm   bool             `json:"addLockedUntilConfirm,omitempty"`
-	StopPrice               float64          `json:"stopPrice"`
-	TP1Price                float64          `json:"tp1Price"`
-	TP2Price                float64          `json:"tp2Price"`
-	TP3Price                float64          `json:"tp3Price"`
-	TP1Qty                  float64          `json:"tp1Qty"`
-	TP2Qty                  float64          `json:"tp2Qty"`
-	TP3Qty                  float64          `json:"tp3Qty"`
-	TP1FilledQty            float64          `json:"tp1FilledQty,omitempty"`
-	TP2FilledQty            float64          `json:"tp2FilledQty,omitempty"`
-	TP3FilledQty            float64          `json:"tp3FilledQty,omitempty"`
-	StopFilledQty           float64          `json:"stopFilledQty,omitempty"`
-	HitTP1                  bool             `json:"hitTp1,omitempty"`
-	HitTP2                  bool             `json:"hitTp2,omitempty"`
-	HitTP3                  bool             `json:"hitTp3,omitempty"`
-	StopOrderID             int64            `json:"stopOrderId"`
-	TP1OrderID              int64            `json:"tp1OrderId"`
-	TP2OrderID              int64            `json:"tp2OrderId"`
-	TP3OrderID              int64            `json:"tp3OrderId"`
-	TrailOn                 bool             `json:"trailOn"`
-	TrailRef                float64          `json:"trailRef"`
-	TrailStop               float64          `json:"trailStop"`
-	TrailCandidateRef       float64          `json:"trailCandidateRef,omitempty"`
-	TrailCandidateStop      float64          `json:"trailCandidateStop,omitempty"`
-	TrailCandidateLevel     float64          `json:"trailCandidateLevel,omitempty"`
-	TrailCandidateAt        time.Time        `json:"trailCandidateAt,omitempty"`
-	TrailProtectedLastClose time.Time        `json:"trailProtectedLastClose,omitempty"`
-	VPSetup                 string           `json:"vpSetup,omitempty"`
-	VPLevel                 float64          `json:"vpLevel,omitempty"`
-	VPTargetLevel           float64          `json:"vpTargetLevel,omitempty"`
-	VPStopMode              string           `json:"vpStopMode,omitempty"`
-	VPTargetMode            string           `json:"vpTargetMode,omitempty"`
-	RejectReason            string           `json:"rejectReason,omitempty"`
-	CustomRiskPct           float64          `json:"customRiskPct,omitempty"`
-	CustomTP1R              float64          `json:"customTp1R,omitempty"`
-	CustomTP2R              float64          `json:"customTp2R,omitempty"`
-	EntryReason             string           `json:"entryReason,omitempty"`
-	EntryStrategyID         string           `json:"entryStrategyId,omitempty"`
-	EntrySource             string           `json:"entrySource,omitempty"`
-	EntryGrade              string           `json:"entryGrade,omitempty"`
-	EntryState              string           `json:"entryState,omitempty"`
-	EntryTrigger            string           `json:"entryTrigger,omitempty"`
-	ExitProfile             string           `json:"exitProfile,omitempty"`
-	EntryConf               float64          `json:"entryConf,omitempty"`
-	DiscoveryScore          float64          `json:"discoveryScore,omitempty"`
-	TriggerScore            float64          `json:"triggerScore,omitempty"`
-	ExecutionScore          float64          `json:"executionScore,omitempty"`
-	CombinedScore           float64          `json:"combinedScore,omitempty"`
-	Sponsored               bool             `json:"sponsored,omitempty"`
-	SponsorshipScore        float64          `json:"sponsorshipScore,omitempty"`
-	WeakSponsorStreak       int              `json:"weakSponsorStreak,omitempty"`
-	StrongSponsorStreak     int              `json:"strongSponsorStreak,omitempty"`
-	LastConfluenceRefresh   time.Time        `json:"lastConfluenceRefresh,omitempty"`
-	ConfluenceRefreshCount  int              `json:"confluenceRefreshCount,omitempty"`
-	EntryTags               []string         `json:"entryTags,omitempty"`
-	EntryReasons            []string         `json:"entryReasons,omitempty"`
-	EntryVolumeUSD          float64          `json:"entryVolumeUsd,omitempty"`
-	StopReason              string           `json:"stopReason,omitempty"`
-	StopDistancePct         float64          `json:"stopDistancePct,omitempty"`
-	RegimeTag               string           `json:"regimeTag,omitempty"`
-	MaxFavorableR           float64          `json:"maxFavorableR,omitempty"`
-	MaxAdverseR             float64          `json:"maxAdverseR,omitempty"`
-	StallBars               int              `json:"stallBars,omitempty"`
-	LastMark                float64          `json:"lastMark,omitempty"`
-	RealizedPnL             float64          `json:"realizedPnl,omitempty"`
-	ProtectionPending       bool             `json:"protectionPending,omitempty"`
-	ProtectionRetryAfter    time.Time        `json:"protectionRetryAfter,omitempty"`
-	ProtectionRetryCount    int              `json:"protectionRetryCount,omitempty"`
-	ProtectionFailCount     int              `json:"protectionFailCount,omitempty"`
-	ForceProtectionNow      bool             `json:"forceProtectionNow,omitempty"`
-	ManageFailSuppressCount int              `json:"manageFailSuppressCount,omitempty"`
-	LastManageFailAt        time.Time        `json:"lastManageFailAt,omitempty"`
-	LastManageFailCause     string           `json:"lastManageFailCause,omitempty"`
-	LastManageNotifyState   string           `json:"lastManageNotifyState,omitempty"`
-	LastManageNotifyCause   string           `json:"lastManageNotifyCause,omitempty"`
-	LastManageNotifyAt      time.Time        `json:"lastManageNotifyAt,omitempty"`
-	ManualManageState       string           `json:"manualManageState,omitempty"`
-	Managed                 bool             `json:"managed,omitempty"`
-	Protected               bool             `json:"protected,omitempty"`
-	UnknownEntryChecks      int              `json:"unknownEntryChecks,omitempty"`
-	UnknownExitChecks       int              `json:"unknownExitChecks,omitempty"`
-	PendingAddOrderID       int64            `json:"pendingAddOrderId,omitempty"`
-	PendingAddPrice         float64          `json:"pendingAddPrice,omitempty"`
-	PendingAddQty           float64          `json:"pendingAddQty,omitempty"`
-	PendingAddFilledQty     float64          `json:"pendingAddFilledQty,omitempty"`
-	PendingAddMargin        float64          `json:"pendingAddMargin,omitempty"`
-	PendingAddCreatedAt     time.Time        `json:"pendingAddCreatedAt,omitempty"`
-	PendingAddEntryReason   string           `json:"pendingAddEntryReason,omitempty"`
-	PendingExitOrderID      int64            `json:"pendingExitOrderId,omitempty"`
-	PendingExitPrice        float64          `json:"pendingExitPrice,omitempty"`
-	PendingExitQty          float64          `json:"pendingExitQty,omitempty"`
-	PendingExitFilledQty    float64          `json:"pendingExitFilledQty,omitempty"`
-	PendingExitCreatedAt    time.Time        `json:"pendingExitCreatedAt,omitempty"`
-	PendingExitReason       string           `json:"pendingExitReason,omitempty"`
-	PendingExitAction       string           `json:"pendingExitAction,omitempty"`
-	ProfitSweptUSDT         float64          `json:"profitSweptUsdt,omitempty"`
-	ReentryCount            int              `json:"reentryCount,omitempty"`
-	ExhaustionExit          bool             `json:"exhaustionExit,omitempty"`
-	ProtectionStage         protectionStage  `json:"protectionStage,omitempty"`
-	FirstProtectAt          time.Time        `json:"firstProtectAt,omitempty"`
-	ProtectedStop           float64          `json:"protectedStop,omitempty"`
-	MaxGivebackR            float64          `json:"maxGivebackR,omitempty"`
-	CaptureRatio            float64          `json:"captureRatio,omitempty"`
-	ManagePhase             tradeManagePhase `json:"managePhase,omitempty"`
-	RunnerMinQty            float64          `json:"runnerMinQty,omitempty"`
-	RunnerCaptureFailed     bool             `json:"runnerCaptureFailed,omitempty"`
+	Symbol                   string           `json:"symbol"`
+	Side                     string           `json:"side"`
+	State                    execState        `json:"state"`
+	CreatedAt                time.Time        `json:"createdAt"`
+	UpdatedAt                time.Time        `json:"updatedAt"`
+	ClosedAt                 time.Time        `json:"closedAt,omitempty"`
+	CloseReason              string           `json:"closeReason,omitempty"`
+	EntryOrderID             int64            `json:"entryOrderId"`
+	EntryPrice               float64          `json:"entryPrice"`
+	ManageAnchorPrice        float64          `json:"manageAnchorPrice,omitempty"`
+	Qty                      float64          `json:"qty"`
+	FilledQty                float64          `json:"filledQty"`
+	RemainingQty             float64          `json:"remainingQty"`
+	Margin                   float64          `json:"margin"`
+	DeployedMargin           float64          `json:"deployedMargin,omitempty"`
+	Leverage                 int              `json:"leverage"`
+	AddCount                 int              `json:"addCount,omitempty"`
+	StarterOnly              bool             `json:"starterOnly,omitempty"`
+	AddLockedUntilConfirm    bool             `json:"addLockedUntilConfirm,omitempty"`
+	StopPrice                float64          `json:"stopPrice"`
+	TP1Price                 float64          `json:"tp1Price"`
+	TP2Price                 float64          `json:"tp2Price"`
+	TP3Price                 float64          `json:"tp3Price"`
+	TP1Qty                   float64          `json:"tp1Qty"`
+	TP2Qty                   float64          `json:"tp2Qty"`
+	TP3Qty                   float64          `json:"tp3Qty"`
+	TP1FilledQty             float64          `json:"tp1FilledQty,omitempty"`
+	TP2FilledQty             float64          `json:"tp2FilledQty,omitempty"`
+	TP3FilledQty             float64          `json:"tp3FilledQty,omitempty"`
+	StopFilledQty            float64          `json:"stopFilledQty,omitempty"`
+	HitTP1                   bool             `json:"hitTp1,omitempty"`
+	HitTP2                   bool             `json:"hitTp2,omitempty"`
+	HitTP3                   bool             `json:"hitTp3,omitempty"`
+	StopOrderID              int64            `json:"stopOrderId"`
+	TP1OrderID               int64            `json:"tp1OrderId"`
+	TP2OrderID               int64            `json:"tp2OrderId"`
+	TP3OrderID               int64            `json:"tp3OrderId"`
+	TrailOn                  bool             `json:"trailOn"`
+	TrailRef                 float64          `json:"trailRef"`
+	TrailStop                float64          `json:"trailStop"`
+	TrailCandidateRef        float64          `json:"trailCandidateRef,omitempty"`
+	TrailCandidateStop       float64          `json:"trailCandidateStop,omitempty"`
+	TrailCandidateLevel      float64          `json:"trailCandidateLevel,omitempty"`
+	TrailCandidateAt         time.Time        `json:"trailCandidateAt,omitempty"`
+	TrailProtectedLastClose  time.Time        `json:"trailProtectedLastClose,omitempty"`
+	VPSetup                  string           `json:"vpSetup,omitempty"`
+	VPLevel                  float64          `json:"vpLevel,omitempty"`
+	VPTargetLevel            float64          `json:"vpTargetLevel,omitempty"`
+	VPStopMode               string           `json:"vpStopMode,omitempty"`
+	VPTargetMode             string           `json:"vpTargetMode,omitempty"`
+	RejectReason             string           `json:"rejectReason,omitempty"`
+	CustomRiskPct            float64          `json:"customRiskPct,omitempty"`
+	CustomTP1R               float64          `json:"customTp1R,omitempty"`
+	CustomTP2R               float64          `json:"customTp2R,omitempty"`
+	EntryReason              string           `json:"entryReason,omitempty"`
+	EntryStrategyID          string           `json:"entryStrategyId,omitempty"`
+	EntrySource              string           `json:"entrySource,omitempty"`
+	EntryGrade               string           `json:"entryGrade,omitempty"`
+	EntryState               string           `json:"entryState,omitempty"`
+	EntryTrigger             string           `json:"entryTrigger,omitempty"`
+	ExitProfile              string           `json:"exitProfile,omitempty"`
+	EntryConf                float64          `json:"entryConf,omitempty"`
+	DiscoveryScore           float64          `json:"discoveryScore,omitempty"`
+	TriggerScore             float64          `json:"triggerScore,omitempty"`
+	ExecutionScore           float64          `json:"executionScore,omitempty"`
+	CombinedScore            float64          `json:"combinedScore,omitempty"`
+	Sponsored                bool             `json:"sponsored,omitempty"`
+	SponsorshipScore         float64          `json:"sponsorshipScore,omitempty"`
+	WeakSponsorStreak        int              `json:"weakSponsorStreak,omitempty"`
+	StrongSponsorStreak      int              `json:"strongSponsorStreak,omitempty"`
+	LastConfluenceRefresh    time.Time        `json:"lastConfluenceRefresh,omitempty"`
+	ConfluenceRefreshCount   int              `json:"confluenceRefreshCount,omitempty"`
+	EntryTags                []string         `json:"entryTags,omitempty"`
+	EntryReasons             []string         `json:"entryReasons,omitempty"`
+	EntryVolumeUSD           float64          `json:"entryVolumeUsd,omitempty"`
+	StopReason               string           `json:"stopReason,omitempty"`
+	StopDistancePct          float64          `json:"stopDistancePct,omitempty"`
+	RegimeTag                string           `json:"regimeTag,omitempty"`
+	EntrySetupFamily         string           `json:"entrySetupFamily,omitempty"`
+	ExecBucket               string           `json:"execBucket,omitempty"`
+	MaxFavorableR            float64          `json:"maxFavorableR,omitempty"`
+	MaxAdverseR              float64          `json:"maxAdverseR,omitempty"`
+	StallBars                int              `json:"stallBars,omitempty"`
+	LastMark                 float64          `json:"lastMark,omitempty"`
+	RealizedPnL              float64          `json:"realizedPnl,omitempty"`
+	ProtectionPending        bool             `json:"protectionPending,omitempty"`
+	ProtectionRetryAfter     time.Time        `json:"protectionRetryAfter,omitempty"`
+	ProtectionRetryCount     int              `json:"protectionRetryCount,omitempty"`
+	ProtectionFailCount      int              `json:"protectionFailCount,omitempty"`
+	ForceProtectionNow       bool             `json:"forceProtectionNow,omitempty"`
+	ManageFailSuppressCount  int              `json:"manageFailSuppressCount,omitempty"`
+	LastManageFailAt         time.Time        `json:"lastManageFailAt,omitempty"`
+	LastManageFailCause      string           `json:"lastManageFailCause,omitempty"`
+	LastManageNotifyState    string           `json:"lastManageNotifyState,omitempty"`
+	LastManageNotifyCause    string           `json:"lastManageNotifyCause,omitempty"`
+	LastManageNotifyAt       time.Time        `json:"lastManageNotifyAt,omitempty"`
+	ManualManageState        string           `json:"manualManageState,omitempty"`
+	Managed                  bool             `json:"managed,omitempty"`
+	Protected                bool             `json:"protected,omitempty"`
+	UnknownEntryChecks       int              `json:"unknownEntryChecks,omitempty"`
+	UnknownExitChecks        int              `json:"unknownExitChecks,omitempty"`
+	PendingAddOrderID        int64            `json:"pendingAddOrderId,omitempty"`
+	PendingAddPrice          float64          `json:"pendingAddPrice,omitempty"`
+	PendingAddQty            float64          `json:"pendingAddQty,omitempty"`
+	PendingAddFilledQty      float64          `json:"pendingAddFilledQty,omitempty"`
+	PendingAddMargin         float64          `json:"pendingAddMargin,omitempty"`
+	PendingAddCreatedAt      time.Time        `json:"pendingAddCreatedAt,omitempty"`
+	PendingAddEntryReason    string           `json:"pendingAddEntryReason,omitempty"`
+	PendingExitOrderID       int64            `json:"pendingExitOrderId,omitempty"`
+	PendingExitPrice         float64          `json:"pendingExitPrice,omitempty"`
+	PendingExitQty           float64          `json:"pendingExitQty,omitempty"`
+	PendingExitFilledQty     float64          `json:"pendingExitFilledQty,omitempty"`
+	PendingExitCreatedAt     time.Time        `json:"pendingExitCreatedAt,omitempty"`
+	PendingExitReason        string           `json:"pendingExitReason,omitempty"`
+	PendingExitAction        string           `json:"pendingExitAction,omitempty"`
+	ProfitSweptUSDT          float64          `json:"profitSweptUsdt,omitempty"`
+	ReentryCount             int              `json:"reentryCount,omitempty"`
+	ExhaustionExit           bool             `json:"exhaustionExit,omitempty"`
+	ProtectionStage          protectionStage  `json:"protectionStage,omitempty"`
+	FirstProtectAt           time.Time        `json:"firstProtectAt,omitempty"`
+	ProtectedStop            float64          `json:"protectedStop,omitempty"`
+	WinnerLifecycle          string           `json:"winnerLifecycle,omitempty"`
+	MaxGivebackR             float64          `json:"maxGivebackR,omitempty"`
+	CaptureRatio             float64          `json:"captureRatio,omitempty"`
+	ManagePhase              tradeManagePhase `json:"managePhase,omitempty"`
+	RunnerMinQty             float64          `json:"runnerMinQty,omitempty"`
+	RunnerCaptureFailed      bool             `json:"runnerCaptureFailed,omitempty"`
+	lastProtectDecisionKey   string
+	pendingProtectAction     string
+	pendingProtectReason     string
+	pendingProtectCurrent    string
+	pendingProtectNext       string
+	pendingProtectTrigger    string
+	pendingProtectHTFState   string
+	pendingProtectMFE        float64
+	pendingProtectPersistent bool
+	pendingProtectFailed     bool
+	pendingProtectCaution    bool
+	pendingProtectComputed   float64
 }
 
 type liveExecStore struct {
-	Positions map[string]*livePosition `json:"positions"`
+	Positions       map[string]*livePosition  `json:"positions"`
+	GovernorRecords []executionGovernorRecord `json:"governorRecords,omitempty"`
 }
 
 type liveExecManager struct {
@@ -1039,6 +1061,7 @@ type liveExecManager struct {
 	entryBlockActive     bool
 	entryBlockReason     string
 	healthyAccountReads  int
+	governorRecords      []executionGovernorRecord
 	lastTransferStatus   string
 	lastRemoteImportAt   time.Time
 	lastFundsCheckAt     time.Time
@@ -3442,6 +3465,18 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, "fastlane_bypass_"+reason)
 			}
 		}
+		if !ladderPlan.IsAdd && execMgr != nil {
+			if dec := execMgr.executionGovernorDecision(now, best, effectiveMargin); dec.Reason != "" {
+				recordCandidateDecision(cmdCtx, best, dec.Reason)
+				fmt.Println(executionGovernorRejectLogLine(dec))
+				addEligibilityBlock(&eligibility, dec.Reason)
+				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+				statusStore.Set(st)
+				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, dec.Reason)
+				waitAndReport()
+				continue
+			}
+		}
 		if reason := activeWinnerRejectReason(now, best, execMgr, paper, metaBySymbol, longCurrent, shortCurrent); reason != "" {
 			recordCandidateDecision(cmdCtx, best, reason)
 			addEligibilityBlock(&eligibility, reason)
@@ -4735,6 +4770,171 @@ func earlyContinuationReady(p *livePosition) bool {
 		return true
 	}
 	return false
+}
+
+func matureTrendForWinnerLifecycle(maxR float64, htfPersistent bool, hitTP1, hitTP2, hitTP3 bool) bool {
+	if hitTP2 || hitTP3 {
+		return true
+	}
+	return maxR >= envFloat("LIVE_EXIT_EARLY_TRAIL_R", 1.0) && (htfPersistent || hitTP1)
+}
+
+func syncLiveWinnerLifecycle(p *livePosition, htfPersistent bool) {
+	if p == nil {
+		return
+	}
+	currentR := unrealizedRiskR(p.Side, p.EntryPrice, p.StopPrice, p.LastMark)
+	p.WinnerLifecycle = string(exitmgr.ResolveWinnerLifecycle(
+		exitmgr.NormalizeWinnerLifecycle(p.WinnerLifecycle),
+		exitmgr.WinnerLifecycleInput{
+			MaxR:           p.MaxFavorableR,
+			CurrentR:       currentR,
+			ProofObserved:  p.MaxFavorableR >= envFloat("LIVE_EXIT_FIRST_PROOF_R", 0.15) || p.HitTP1 || p.HitTP2 || p.HitTP3 || earlyContinuationReady(p),
+			MatureTrend:    matureTrendForWinnerLifecycle(p.MaxFavorableR, htfPersistent, p.HitTP1, p.HitTP2, p.HitTP3),
+			TrailingActive: p.TrailOn,
+		},
+	))
+}
+
+func syncPaperWinnerLifecycle(pos *paperPosition, htfPersistent bool) {
+	if pos == nil {
+		return
+	}
+	currentR := unrealizedRiskR(pos.Side, pos.Entry, pos.Stop, pos.LastMark)
+	pos.WinnerLifecycle = string(exitmgr.ResolveWinnerLifecycle(
+		exitmgr.NormalizeWinnerLifecycle(pos.WinnerLifecycle),
+		exitmgr.WinnerLifecycleInput{
+			MaxR:           pos.MaxFavorableR,
+			CurrentR:       currentR,
+			ProofObserved:  pos.MaxFavorableR >= envFloat("LIVE_EXIT_FIRST_PROOF_R", 0.15) || pos.HitTP1 || pos.HitTP2 || pos.HitTP3 || paperAdvancedReady(pos),
+			MatureTrend:    matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent, pos.HitTP1, pos.HitTP2, pos.HitTP3),
+			TrailingActive: pos.TrailOn,
+		},
+	))
+}
+
+func lifecycleTransitionReason(from, to, fallback string, trailingActive bool) string {
+	if fallback != "" {
+		return fallback
+	}
+	switch {
+	case from == "" && to == "":
+		return ""
+	case to == "proof_armed":
+		return "proof_observed"
+	case to == "winner_locked":
+		return "instant_be_lock"
+	case to == "runner":
+		return "early_profit_trail"
+	case to == "late_trail":
+		if trailingActive {
+			return "trail_activated"
+		}
+		return "mature_trend"
+	case to == "failed":
+		return "real_invalidation"
+	default:
+		return "lifecycle_advance"
+	}
+}
+
+func logWinnerLifecycleTransition(symbol, side, from, to, reason string) {
+	from = strings.TrimSpace(from)
+	to = strings.TrimSpace(to)
+	if from == to || to == "" {
+		return
+	}
+	fmt.Printf("WINNER_LIFECYCLE_TRANSITION symbol=%s side=%s from=%s to=%s reason=%s\n",
+		symbol, side, firstNonEmpty(from, "starter"), to, firstNonEmpty(reason, "lifecycle_advance"))
+}
+
+func protectDecisionLogLine(symbol, side, action, currentLifecycle, nextLifecycle, reason string, computedStop, submittedStop, acceptedStop float64, triggerRef string, legalityAdjusted bool, mfe float64, htfState string, persistent, failed, caution bool) string {
+	return fmt.Sprintf("PROTECT_DECISION symbol=%s side=%s winner_lifecycle=%s next_winner_lifecycle=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t",
+		symbol,
+		side,
+		firstNonEmpty(currentLifecycle, "starter"),
+		firstNonEmpty(nextLifecycle, firstNonEmpty(currentLifecycle, "starter")),
+		action,
+		firstNonEmpty(reason, "PROTECT"),
+		computedStop,
+		submittedStop,
+		acceptedStop,
+		strings.ToLower(strings.TrimSpace(triggerRef)),
+		legalityAdjusted,
+		mfe,
+		htfState,
+		persistent,
+		failed,
+		caution,
+	)
+}
+
+func logProtectDecisionOnce(lastKey *string, line string) {
+	if lastKey == nil {
+		fmt.Println(line)
+		return
+	}
+	if *lastKey == line {
+		return
+	}
+	*lastKey = line
+	fmt.Println(line)
+}
+
+func logPaperProtectDecision(symbol string, pos *paperPosition, action string, dec exitmgr.ProtectDecision, submittedStop, acceptedStop float64, legalityAdjusted bool) {
+	if pos == nil {
+		return
+	}
+	line := protectDecisionLogLine(symbol, pos.Side, action, dec.CurrentWinnerLifecycle, dec.WinnerLifecycle,
+		firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"),
+		dec.ComputedStop, submittedStop, acceptedStop, dec.TriggerRef, legalityAdjusted, pos.MaxFavorableR,
+		dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+	logProtectDecisionOnce(&pos.lastProtectDecisionKey, line)
+}
+
+func queueLiveProtectStopChain(p *livePosition, action string, dec exitmgr.ProtectDecision, computedStop float64) {
+	if p == nil {
+		return
+	}
+	p.pendingProtectAction = action
+	p.pendingProtectReason = firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT")
+	p.pendingProtectCurrent = dec.CurrentWinnerLifecycle
+	p.pendingProtectNext = dec.WinnerLifecycle
+	p.pendingProtectTrigger = dec.TriggerRef
+	p.pendingProtectHTFState = dec.HTFTrendState
+	p.pendingProtectMFE = p.MaxFavorableR
+	p.pendingProtectPersistent = dec.HTFPersistent
+	p.pendingProtectFailed = dec.HTFFailed
+	p.pendingProtectCaution = dec.HTFCaution
+	p.pendingProtectComputed = computedStop
+}
+
+func clearQueuedLiveProtectStopChain(p *livePosition) {
+	if p == nil {
+		return
+	}
+	p.pendingProtectAction = ""
+	p.pendingProtectReason = ""
+	p.pendingProtectCurrent = ""
+	p.pendingProtectNext = ""
+	p.pendingProtectTrigger = ""
+	p.pendingProtectHTFState = ""
+	p.pendingProtectMFE = 0
+	p.pendingProtectPersistent = false
+	p.pendingProtectFailed = false
+	p.pendingProtectCaution = false
+	p.pendingProtectComputed = 0
+}
+
+func (m *liveExecManager) logQueuedProtectStopChain(p *livePosition, submittedStop, acceptedStop float64, legalityAdjusted bool) {
+	if m == nil || p == nil || strings.TrimSpace(p.pendingProtectAction) == "" {
+		return
+	}
+	line := protectDecisionLogLine(p.Symbol, p.Side, p.pendingProtectAction, p.pendingProtectCurrent, p.pendingProtectNext,
+		p.pendingProtectReason, p.pendingProtectComputed, submittedStop, acceptedStop, p.pendingProtectTrigger, legalityAdjusted,
+		p.pendingProtectMFE, p.pendingProtectHTFState, p.pendingProtectPersistent, p.pendingProtectFailed, p.pendingProtectCaution)
+	logProtectDecisionOnce(&p.lastProtectDecisionKey, line)
+	clearQueuedLiveProtectStopChain(p)
 }
 
 func shouldAdvanceProtection(p *livePosition) bool {
@@ -6745,6 +6945,9 @@ func (p *paperTrader) load() error {
 	if st.DayStats != nil {
 		p.dayStats = st.DayStats
 	}
+	if st.GovernorRecords != nil {
+		p.governorRecords = trimExecutionGovernorRecords(st.GovernorRecords, time.Now().UTC())
+	}
 	if st.LastFund != nil {
 		p.lastFundKey = st.LastFund
 	}
@@ -6784,6 +6987,7 @@ func (p *paperTrader) save() error {
 		Balance:          p.balance,
 		Reserve:          p.reserve,
 		Positions:        p.positions,
+		GovernorRecords:  trimExecutionGovernorRecords(p.governorRecords, time.Now().UTC()),
 		DayStats:         p.dayStats,
 		LastFund:         p.lastFundKey,
 		LastExitAt:       p.lastExitAt,
@@ -7421,6 +7625,7 @@ func (m *liveExecManager) load() error {
 		st.Positions = map[string]*livePosition{}
 	}
 	m.positions = st.Positions
+	m.governorRecords = trimExecutionGovernorRecords(st.GovernorRecords, time.Now().UTC())
 	return nil
 }
 
@@ -7431,7 +7636,10 @@ func (m *liveExecManager) save() error {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
 		return err
 	}
-	st := liveExecStore{Positions: m.positions}
+	st := liveExecStore{
+		Positions:       m.positions,
+		GovernorRecords: trimExecutionGovernorRecords(m.governorRecords, time.Now().UTC()),
+	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
@@ -7993,7 +8201,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			continue
 		}
 		_ = m.cancelRemainingExits(p)
-		markLivePositionClosed(p, now, "POSITION_FLAT_RECOVERED")
+		m.markPositionClosed(now, p, "POSITION_FLAT_RECOVERED")
 		closedLocal++
 	}
 	for sym, rp := range remote {
@@ -8765,6 +8973,9 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 	if p.MaxFavorableR >= maxFloat(trailMinR, tp1R) {
 		m.maybeEnableTrail(p, 2)
 	}
+	prevLifecycle := p.WinnerLifecycle
+	syncLiveWinnerLifecycle(p, false)
+	logWinnerLifecycleTransition(p.Symbol, p.Side, prevLifecycle, p.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, p.WinnerLifecycle, "", p.TrailOn))
 	updateManagePhase(p, false)
 	refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 	if p.TrailOn {
@@ -9743,6 +9954,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		StopReason:            stopReason,
 		StopDistancePct:       stopDistancePct,
 		RegimeTag:             c.Sig.RegimeTag,
+		EntrySetupFamily:      c.SetupFamily,
+		ExecBucket:            executionGovernorBucketForCandidate(c),
 		StarterOnly:           starterOnly,
 		AddLockedUntilConfirm: starterOnly,
 		ReentryCount:          reentryCount,
@@ -9764,6 +9977,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		}
 	}
 	m.positions[rawSym] = p
+	m.recordExecutionGovernorEntry(now, c)
 	_ = m.save()
 	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v stop_reason=%s\n",
 		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(stopReason, "generic"))
@@ -10133,6 +10347,9 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 			currentMV := mom[rawSym]
 			currentRunnerState := evaluateRunnerExitStateWithFlow(p.Side, currentMV, flow[rawSym], flowfeed.ExternalSignal{})
 			htf := m.htfSnapshot(rawSym, p.Side, sameSideMomentumEntry(p.Side, currentMV))
+			prevLifecycle := p.WinnerLifecycle
+			syncLiveWinnerLifecycle(p, htfPersistent(p.Side, htf))
+			logWinnerLifecycleTransition(p.Symbol, p.Side, prevLifecycle, p.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, p.WinnerLifecycle, "", p.TrailOn))
 			updateManagePhase(p, currentRunnerState.ExhaustionConfirmed && !currentRunnerState.StructureBroken)
 			refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 			if m.exitManager != nil {
@@ -10165,31 +10382,19 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					SubmittedStop:      p.StopPrice,
 					AcceptedStop:       p.StopPrice,
 					LegalityAdjusted:   false,
+					WinnerLifecycle:    p.WinnerLifecycle,
+					TrailingActive:     p.TrailOn,
+					MatureTrend:        matureTrendForWinnerLifecycle(p.MaxFavorableR, htfPersistent(p.Side, htf), p.HitTP1, p.HitTP2, p.HitTP3),
+					RealInvalidation:   htfFailed(p.Side, htf),
 				})
-				if mv.Reason != "" || mv.MoveStopToBE || mv.TightenStop || mv.PartialExitPct > 0 || mv.FullExit || mv.ImmediateExit {
-					action := "HOLD"
-					switch {
-					case mv.ImmediateExit:
-						action = "IMMEDIATE_EXIT"
-					case mv.FullExit:
-						action = "FULL_EXIT"
-					case mv.PartialExitPct > 0:
-						action = "PARTIAL"
-					case mv.MoveStopToBE && mv.TightenStop:
-						action = "BE_TIGHTEN"
-					case mv.MoveStopToBE:
-						action = "BE"
-					case mv.TightenStop:
-						action = "TIGHTEN"
-					}
-					fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-						p.Symbol, p.Side, action, firstNonEmpty(mv.ExitNowReason, mv.Reason, "PROTECT"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, strings.ToLower(strings.TrimSpace(mv.TriggerRef)), mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution)
-				}
+				logWinnerLifecycleTransition(p.Symbol, p.Side, p.WinnerLifecycle, mv.WinnerLifecycle, lifecycleTransitionReason(p.WinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason), p.TrailOn))
+				p.WinnerLifecycle = mv.WinnerLifecycle
 				runnerState := currentRunnerState
 				if mv.MoveStopToBE && allowBE {
 					be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 					if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 						p.StopPrice = be
+						queueLiveProtectStopChain(p, "BE", mv, be)
 						_ = m.placeOrReplaceStop(p)
 						changed = true
 					}
@@ -10197,6 +10402,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				if mv.TightenStop {
 					if (strings.EqualFold(p.Side, "BUY") && mv.TightenToPrice > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && mv.TightenToPrice < p.StopPrice) {
 						p.StopPrice = mv.TightenToPrice
+						queueLiveProtectStopChain(p, "TIGHTEN", mv, mv.TightenToPrice)
 						_ = m.placeOrReplaceStop(p)
 						changed = true
 					}
@@ -10204,10 +10410,21 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				if correctedStop, corrected := enforceWinnerBEFloor(p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR); corrected {
 					p.StopReason = "forced_be_correction"
 					p.StopPrice = correctedStop
+					queueLiveProtectStopChain(p, "TIGHTEN", exitmgr.ProtectDecision{
+						CurrentWinnerLifecycle: p.WinnerLifecycle,
+						WinnerLifecycle:        p.WinnerLifecycle,
+						Reason:                 "forced_be_correction",
+						TriggerRef:             m.stopTriggerRef,
+						HTFTrendState:          string(htf.State),
+						HTFPersistent:          htfPersistent(p.Side, htf),
+						HTFFailed:              htfFailed(p.Side, htf),
+						HTFCaution:             htfCaution(p.Side, htf),
+					}, correctedStop)
 					_ = m.placeOrReplaceStop(p)
 					changed = true
 				}
 				if mv.ImmediateExit {
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
 					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block")
 					_ = m.cancelRemainingExits(p)
 					if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
@@ -10224,6 +10441,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					}
 				}
 				if mv.FullExit {
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "FULL_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, mv.Reason), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
 					if !runnerState.StructureBroken {
 						if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
 							changed = true
@@ -10372,7 +10590,7 @@ func (m *liveExecManager) reconcileExitOrders(now time.Time, p *livePosition) (b
 	}
 	if p.RemainingQty <= 1e-10 {
 		_ = m.cancelRemainingExits(p)
-		markLivePositionClosed(p, now, "TP_DONE")
+		m.markPositionClosed(now, p, "TP_DONE")
 		m.maybeSweepTradeProfit(now, p)
 		return true, nil
 	}
@@ -11524,6 +11742,9 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 		}
 		runnerState := evaluateRunnerExitStateWithFlow(p.Side, mv, flow[sym], ext[sym])
 		htf := m.htfSnapshot(sym, p.Side, sameSideMomentumEntry(p.Side, mv))
+		prevLifecycle := p.WinnerLifecycle
+		syncLiveWinnerLifecycle(p, htfPersistent(p.Side, htf))
+		logWinnerLifecycleTransition(sym, p.Side, prevLifecycle, p.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, p.WinnerLifecycle, "", p.TrailOn))
 		updateManagePhase(p, runnerState.ExhaustionConfirmed && !runnerState.StructureBroken)
 		refreshRunnerReservation(p, m.ladderCfg.StarterUSDT)
 		if m.exitManager != nil {
@@ -11557,29 +11778,17 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				SubmittedStop:      p.StopPrice,
 				AcceptedStop:       p.StopPrice,
 				LegalityAdjusted:   false,
+				WinnerLifecycle:    p.WinnerLifecycle,
+				TrailingActive:     p.TrailOn,
+				MatureTrend:        matureTrendForWinnerLifecycle(p.MaxFavorableR, htfPersistent(p.Side, htf), p.HitTP1, p.HitTP2, p.HitTP3),
+				RealInvalidation:   runnerState.StructureBroken || htfFailed(p.Side, htf),
 			})
-			if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
-				action := "HOLD"
-				switch {
-				case dec.ImmediateExit:
-					action = "IMMEDIATE_EXIT"
-				case dec.FullExit:
-					action = "FULL_EXIT"
-				case dec.PartialExitPct > 0:
-					action = "PARTIAL"
-				case dec.MoveStopToBE && dec.TightenStop:
-					action = "BE_TIGHTEN"
-				case dec.MoveStopToBE:
-					action = "BE"
-				case dec.TightenStop:
-					action = "TIGHTEN"
-				}
-				fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-					sym, p.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
-			}
+			logWinnerLifecycleTransition(sym, p.Side, p.WinnerLifecycle, dec.WinnerLifecycle, lifecycleTransitionReason(p.WinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason), p.TrailOn))
+			p.WinnerLifecycle = dec.WinnerLifecycle
 			if dec.PartialExitPct > 0 && p.RemainingQty > 0 {
 				q := p.RemainingQty * dec.PartialExitPct
 				if q > 0 && q < p.RemainingQty {
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "PARTIAL", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, dec.Reason, dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 					if err := m.submitCloseLimit(p, q, dec.Reason, "TRIM"); err == nil {
 						changed = true
 					}
@@ -11589,6 +11798,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				be := beLockPriceBuffered(p.Side, p.EntryPrice, p.StopPrice, m.beLockBps)
 				if (strings.EqualFold(p.Side, "BUY") && be > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && be < p.StopPrice) {
 					p.StopPrice = be
+					queueLiveProtectStopChain(p, "BE", dec, be)
 					_ = m.placeOrReplaceStop(p)
 				}
 			}
@@ -11596,6 +11806,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				if (strings.EqualFold(p.Side, "BUY") && dec.TightenToPrice > p.StopPrice) || (strings.EqualFold(p.Side, "SELL") && dec.TightenToPrice < p.StopPrice) {
 					p.StopReason = dec.Reason
 					p.StopPrice = dec.TightenToPrice
+					queueLiveProtectStopChain(p, "TIGHTEN", dec, dec.TightenToPrice)
 					_ = m.placeOrReplaceStop(p)
 					changed = true
 				}
@@ -11603,10 +11814,21 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 			if correctedStop, corrected := enforceWinnerBEFloor(p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR); corrected {
 				p.StopReason = "forced_be_correction"
 				p.StopPrice = correctedStop
+				queueLiveProtectStopChain(p, "TIGHTEN", exitmgr.ProtectDecision{
+					CurrentWinnerLifecycle: p.WinnerLifecycle,
+					WinnerLifecycle:        p.WinnerLifecycle,
+					Reason:                 "forced_be_correction",
+					TriggerRef:             m.stopTriggerRef,
+					HTFTrendState:          string(htf.State),
+					HTFPersistent:          htfPersistent(p.Side, htf),
+					HTFFailed:              htfFailed(p.Side, htf),
+					HTFCaution:             htfCaution(p.Side, htf),
+				}, correctedStop)
 				_ = m.placeOrReplaceStop(p)
 				changed = true
 			}
 			if dec.ImmediateExit {
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
 				_ = m.cancelRemainingExits(p)
 				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
@@ -11623,6 +11845,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				}
 			}
 			if dec.FullExit {
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "FULL_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, dec.Reason), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 				if !runnerState.StructureBroken {
 					if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
 						changed = true
@@ -12366,22 +12589,20 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 	if dec.PartialExitPct > 0 && pos.Qty > 0 {
 		q := pos.Qty * dec.PartialExitPct
 		if q > 0 && q < pos.Qty {
-			fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=PARTIAL reason=%s stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-				raw, pos.Side, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+			logPaperProtectDecision(raw, pos, "PARTIAL", dec, pos.Stop, pos.Stop, false)
 			p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "SOFT_PARTIAL"), mark, q, meta[raw], depth[raw])
 			return true
 		}
 	}
 	if dec.ImmediateExit {
 		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=IMMEDIATE_EXIT reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-			raw, pos.Side, reason, dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		dec.Reason = reason
+		logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
 		return true
 	}
 	if dec.FullExit {
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=FULL_EXIT reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-			raw, pos.Side, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 		p.exitPortion(now, pos, firstNonEmpty(dec.Reason, "DEGRADED_EXIT"), mark, pos.Qty, meta[raw], depth[raw])
 		return true
 	}
@@ -12390,8 +12611,7 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		if dec.MoveStopToBE && !dec.TightenStop {
 			action = "BE"
 		}
-		fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t stop=%.8f mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-			raw, pos.Side, action, firstNonEmpty(dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.Stop, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+		logPaperProtectDecision(raw, pos, action, dec, pos.Stop, pos.Stop, false)
 	}
 	return changed
 }
@@ -12662,6 +12882,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	} else if strings.TrimSpace(reason) != "" {
 		fmt.Printf("paper enter advisory: %s\n", strings.TrimSpace(reason))
 	}
+	if dec := p.executionGovernorDecision(now, c, margin); dec.Reason != "" {
+		fmt.Println(executionGovernorRejectLogLine(dec))
+		return nil, fmt.Errorf("%s", dec.Reason)
+	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
 			return nil, fmt.Errorf("symbol loss cooldown active")
@@ -12860,9 +13084,12 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		OpposingFriction: c.Sig.VPTargetLevel,
 		StopReason:       stopReason,
 		StopDistancePct:  stopDistancePct,
+		EntrySetupFamily: c.SetupFamily,
+		ExecBucket:       executionGovernorBucketForCandidate(c),
 		OriginalStop:     stop,
 	}
 	p.positions[raw] = pos
+	p.recordExecutionGovernorEntry(now, c)
 	_ = p.save()
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f disc=%.2f trig=%.2f exec=%.2f combo=%.2f stop_reason=%s\n",
 		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(stopReason, "generic"))
@@ -12936,75 +13163,79 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
 			cur, _ := paperCurrentEntryForSide(pos.Side, raw, longCurrent, shortCurrent)
 			htf := p.htfSnapshot(raw, pos.Side, &cur)
-				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-					Side:               pos.Side,
-					Entry:              pos.Entry,
-					Stop:               pos.Stop,
-					Mark:               stopCheckPx,
-					MFER:               pos.MaxFavorableR,
-					MAER:               pos.MaxAdverseR,
-					BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
-					StallBars:          pos.StallBars,
-					NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
-					UnrealizedPct:      upctStop,
-					Sponsored:          pos.Sponsored,
-					HitTP1:             pos.HitTP1,
-					HitTP2:             pos.HitTP2,
-					HitTP3:             pos.HitTP3,
-					WeakSponsorStreak:  pos.WeakSponsorStreak,
-					EntryReason:        pos.EntryReason,
-					EntryStrategyID:    pos.EntryStrategyID,
-					StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
-					AdvancedReady:      paperAdvancedReady(pos),
-					HTFTrendState:      string(htf.State),
-					HTFTrendPersistent: htfPersistent(pos.Side, htf),
-					HTFTrendFailed:     htfFailed(pos.Side, htf),
-					HTFCaution:         htfCaution(pos.Side, htf),
-					TriggerRef:         p.stopTriggerRef,
-					ComputedStop:       pos.Stop,
-					SubmittedStop:      pos.Stop,
-					AcceptedStop:       pos.Stop,
-					LegalityAdjusted:   false,
-				})
-				if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
-					action := "HOLD"
-					switch {
-					case dec.ImmediateExit:
-						action = "IMMEDIATE_EXIT"
-					case dec.FullExit:
-						action = "FULL_EXIT"
-					case dec.PartialExitPct > 0:
-						action = "PARTIAL"
-					case dec.MoveStopToBE && dec.TightenStop:
-						action = "BE_TIGHTEN"
-					case dec.MoveStopToBE:
-						action = "BE"
-					case dec.TightenStop:
-						action = "TIGHTEN"
-					}
-					fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-						raw, pos.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
+			prevLifecycle := pos.WinnerLifecycle
+			syncPaperWinnerLifecycle(pos, htfPersistent(pos.Side, htf))
+			logWinnerLifecycleTransition(raw, pos.Side, prevLifecycle, pos.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, pos.WinnerLifecycle, "", pos.TrailOn))
+			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
+				Side:               pos.Side,
+				Entry:              pos.Entry,
+				Stop:               pos.Stop,
+				Mark:               stopCheckPx,
+				MFER:               pos.MaxFavorableR,
+				MAER:               pos.MaxAdverseR,
+				BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
+				StallBars:          pos.StallBars,
+				NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
+				UnrealizedPct:      upctStop,
+				Sponsored:          pos.Sponsored,
+				HitTP1:             pos.HitTP1,
+				HitTP2:             pos.HitTP2,
+				HitTP3:             pos.HitTP3,
+				WeakSponsorStreak:  pos.WeakSponsorStreak,
+				EntryReason:        pos.EntryReason,
+				EntryStrategyID:    pos.EntryStrategyID,
+				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+				AdvancedReady:      paperAdvancedReady(pos),
+				HTFTrendState:      string(htf.State),
+				HTFTrendPersistent: htfPersistent(pos.Side, htf),
+				HTFTrendFailed:     htfFailed(pos.Side, htf),
+				HTFCaution:         htfCaution(pos.Side, htf),
+				TriggerRef:         p.stopTriggerRef,
+				ComputedStop:       pos.Stop,
+				SubmittedStop:      pos.Stop,
+				AcceptedStop:       pos.Stop,
+				LegalityAdjusted:   false,
+				WinnerLifecycle:    pos.WinnerLifecycle,
+				TrailingActive:     pos.TrailOn,
+				MatureTrend:        matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent(pos.Side, htf), pos.HitTP1, pos.HitTP2, pos.HitTP3),
+				RealInvalidation:   htfFailed(pos.Side, htf),
+			})
+			logWinnerLifecycleTransition(raw, pos.Side, pos.WinnerLifecycle, dec.WinnerLifecycle, lifecycleTransitionReason(pos.WinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason), pos.TrailOn))
+			pos.WinnerLifecycle = dec.WinnerLifecycle
+			if dec.MoveStopToBE && allowBE {
+				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
+				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
+					pos.Stop = be
+					logPaperProtectDecision(raw, pos, "BE", dec, pos.Stop, pos.Stop, false)
 				}
-				if dec.MoveStopToBE && allowBE {
-					be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
-					if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
-						pos.Stop = be
-					}
+			}
+			if dec.TightenStop {
+				if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
+					pos.Stop = dec.TightenToPrice
+					logPaperProtectDecision(raw, pos, "TIGHTEN", dec, pos.Stop, pos.Stop, false)
 				}
-				if dec.TightenStop {
-					if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
-						pos.Stop = dec.TightenToPrice
-					}
-				}
-				if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
-					pos.StopReason = "forced_be_correction"
-					pos.Stop = correctedStop
-				}
-				if dec.ImmediateExit {
-					p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
-					continue
-				}
+			}
+			if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
+				pos.StopReason = "forced_be_correction"
+				pos.Stop = correctedStop
+				logPaperProtectDecision(raw, pos, "TIGHTEN", exitmgr.ProtectDecision{
+					CurrentWinnerLifecycle: pos.WinnerLifecycle,
+					WinnerLifecycle:        pos.WinnerLifecycle,
+					Reason:                 "forced_be_correction",
+					TriggerRef:             p.stopTriggerRef,
+					HTFTrendState:          string(htf.State),
+					HTFPersistent:          htfPersistent(pos.Side, htf),
+					HTFFailed:              htfFailed(pos.Side, htf),
+					HTFCaution:             htfCaution(pos.Side, htf),
+				}, pos.Stop, pos.Stop, false)
+			}
+			if dec.ImmediateExit {
+				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
+				continue
+			}
 			if dec.FullExit {
+				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 				p.exitPortion(now, pos, dec.Reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
 				continue
 			}
@@ -13124,6 +13355,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				}
 				cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
 				htf := p.htfSnapshot(raw, pos.Side, &cur)
+				syncPaperWinnerLifecycle(pos, htfPersistent(pos.Side, htf))
 				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 					Side:               pos.Side,
 					Entry:              pos.Entry,
@@ -13155,7 +13387,12 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					SubmittedStop:      pos.Stop,
 					AcceptedStop:       pos.Stop,
 					LegalityAdjusted:   false,
+					WinnerLifecycle:    pos.WinnerLifecycle,
+					TrailingActive:     pos.TrailOn,
+					MatureTrend:        matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent(pos.Side, htf), pos.HitTP1, pos.HitTP2, pos.HitTP3),
+					RealInvalidation:   htfFailed(pos.Side, htf),
 				})
+				pos.WinnerLifecycle = dec.WinnerLifecycle
 				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
 					continue
 				}
@@ -13233,6 +13470,9 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			continue
 		}
 		htf := p.htfSnapshot(raw, pos.Side, sameSideMomentumEntry(pos.Side, mv))
+		prevLifecycle := pos.WinnerLifecycle
+		syncPaperWinnerLifecycle(pos, htfPersistent(pos.Side, htf))
+		logWinnerLifecycleTransition(raw, pos.Side, prevLifecycle, pos.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, pos.WinnerLifecycle, "", pos.TrailOn))
 		if p.exitManager != nil {
 			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
 				Side:               pos.Side,
@@ -13264,35 +13504,24 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				SubmittedStop:      pos.Stop,
 				AcceptedStop:       pos.Stop,
 				LegalityAdjusted:   false,
+				WinnerLifecycle:    pos.WinnerLifecycle,
+				TrailingActive:     pos.TrailOn,
+				MatureTrend:        matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent(pos.Side, htf), pos.HitTP1, pos.HitTP2, pos.HitTP3),
+				RealInvalidation:   htfFailed(pos.Side, htf),
 			})
-			if dec.Reason != "" || dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit || dec.ImmediateExit {
-				action := "HOLD"
-				switch {
-				case dec.ImmediateExit:
-					action = "IMMEDIATE_EXIT"
-				case dec.FullExit:
-					action = "FULL_EXIT"
-				case dec.PartialExitPct > 0:
-					action = "PARTIAL"
-				case dec.MoveStopToBE && dec.TightenStop:
-					action = "BE_TIGHTEN"
-				case dec.MoveStopToBE:
-					action = "BE"
-				case dec.TightenStop:
-					action = "TIGHTEN"
-				}
-				fmt.Printf("PROTECT_DECISION symbol=%s side=%s action=%s reason=%s computed_stop=%.8f submitted_stop=%.8f accepted_stop=%.8f trigger_ref=%s legality_adjustment_applied=%t mfe=%.4f htf_state=%s persistent=%t failed=%t caution=%t\n",
-					raw, pos.Side, action, firstNonEmpty(dec.ExitNowReason, dec.Reason, "PROTECT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, strings.ToLower(strings.TrimSpace(dec.TriggerRef)), dec.LegalityAdjusted, pos.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution)
-			}
+			logWinnerLifecycleTransition(raw, pos.Side, pos.WinnerLifecycle, dec.WinnerLifecycle, lifecycleTransitionReason(pos.WinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason), pos.TrailOn))
+			pos.WinnerLifecycle = dec.WinnerLifecycle
 			if dec.MoveStopToBE && allowMoveToBreakEven(pos.HitTP1, upnlPct) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 				if (strings.EqualFold(pos.Side, "BUY") && be > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && be < pos.Stop) {
 					pos.Stop = be
+					logPaperProtectDecision(raw, pos, "BE", dec, pos.Stop, pos.Stop, false)
 				}
 			}
 			if dec.PartialExitPct > 0 && pos.Qty > 0 {
 				q := pos.Qty * dec.PartialExitPct
 				if q > 0 && q < pos.Qty {
+					logPaperProtectDecision(raw, pos, "PARTIAL", dec, pos.Stop, pos.Stop, false)
 					p.exitPortion(now, pos, "SOFT_LIQ_SPIKE_PARTIAL", mark, q, m, depth[raw])
 					changed = true
 					continue
@@ -13302,20 +13531,33 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				if (strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice > pos.Stop) || (!strings.EqualFold(pos.Side, "BUY") && dec.TightenToPrice < pos.Stop) {
 					pos.StopReason = dec.Reason
 					pos.Stop = dec.TightenToPrice
+					logPaperProtectDecision(raw, pos, "TIGHTEN", dec, pos.Stop, pos.Stop, false)
 					changed = true
 				}
 			}
 			if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
 				pos.StopReason = "forced_be_correction"
 				pos.Stop = correctedStop
+				logPaperProtectDecision(raw, pos, "TIGHTEN", exitmgr.ProtectDecision{
+					CurrentWinnerLifecycle: pos.WinnerLifecycle,
+					WinnerLifecycle:        pos.WinnerLifecycle,
+					Reason:                 "forced_be_correction",
+					TriggerRef:             p.stopTriggerRef,
+					HTFTrendState:          string(htf.State),
+					HTFPersistent:          htfPersistent(pos.Side, htf),
+					HTFFailed:              htfFailed(pos.Side, htf),
+					HTFCaution:             htfCaution(pos.Side, htf),
+				}, pos.Stop, pos.Stop, false)
 				changed = true
 			}
 			if dec.ImmediateExit {
+				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, depth[raw])
 				changed = true
 				continue
 			}
 			if dec.FullExit {
+				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])
 				changed = true
 				continue
@@ -13553,6 +13795,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	}
 	strategyID := firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason))
 	registerReentryExit(symbol, strategyID, pos.Side, reasonU, pos.CombinedScore, pos.MaxFavorableR, net < 0, now)
+	p.recordExecutionGovernorExit(now, pos, reasonU, net)
 	if net < 0 {
 		if ds != nil {
 			ds.SameSymbolReentryLossCount++
@@ -19805,6 +20048,13 @@ func markLivePositionClosed(p *livePosition, now time.Time, reason string) {
 	p.UpdatedAt = now
 	p.ExhaustionExit = isExhaustionCloseReason(reason)
 	p.RunnerCaptureFailed = runnerCaptureFailed(p)
+}
+
+func (m *liveExecManager) markPositionClosed(now time.Time, p *livePosition, reason string) {
+	markLivePositionClosed(p, now, reason)
+	if m != nil {
+		m.recordExecutionGovernorExit(now, p, reason)
+	}
 }
 
 func sessionTag(ts time.Time) string {

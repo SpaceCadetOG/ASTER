@@ -64,26 +64,32 @@ type ProtectInput struct {
 	SubmittedStop      float64
 	AcceptedStop       float64
 	LegalityAdjusted   bool
+	WinnerLifecycle    string
+	TrailingActive     bool
+	MatureTrend        bool
+	RealInvalidation   bool
 }
 
 type ProtectDecision struct {
-	Reason         string
-	MoveStopToBE   bool
-	TightenStop    bool
-	TightenToPrice float64
-	PartialExitPct float64
-	FullExit       bool
-	ImmediateExit  bool
-	ExitNowReason  string
-	ComputedStop   float64
-	SubmittedStop  float64
-	AcceptedStop   float64
-	TriggerRef     string
-	LegalityAdjusted bool
-	HTFTrendState  string
-	HTFPersistent  bool
-	HTFFailed      bool
-	HTFCaution     bool
+	CurrentWinnerLifecycle string
+	Reason                 string
+	MoveStopToBE           bool
+	TightenStop            bool
+	TightenToPrice         float64
+	PartialExitPct         float64
+	FullExit               bool
+	ImmediateExit          bool
+	ExitNowReason          string
+	ComputedStop           float64
+	SubmittedStop          float64
+	AcceptedStop           float64
+	TriggerRef             string
+	LegalityAdjusted       bool
+	HTFTrendState          string
+	HTFPersistent          bool
+	HTFFailed              bool
+	HTFCaution             bool
+	WinnerLifecycle        string
 }
 
 func NewManager(cfg Config) *Manager {
@@ -164,16 +170,30 @@ func (m *Manager) FrontRunTarget(side string, target float64, frictions ...float
 }
 
 func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
+	currentR := currentRMultiple(in.Side, in.Entry, in.Stop, in.Mark)
 	dec := ProtectDecision{
-		HTFTrendState:    in.HTFTrendState,
-		HTFPersistent:    in.HTFTrendPersistent,
-		HTFFailed:        in.HTFTrendFailed,
-		HTFCaution:       in.HTFCaution,
-		ComputedStop:     in.ComputedStop,
-		SubmittedStop:    in.SubmittedStop,
-		AcceptedStop:     in.AcceptedStop,
-		TriggerRef:       strings.ToLower(strings.TrimSpace(in.TriggerRef)),
-		LegalityAdjusted: in.LegalityAdjusted,
+		CurrentWinnerLifecycle: string(NormalizeWinnerLifecycle(in.WinnerLifecycle)),
+		HTFTrendState:          in.HTFTrendState,
+		HTFPersistent:          in.HTFTrendPersistent,
+		HTFFailed:              in.HTFTrendFailed,
+		HTFCaution:             in.HTFCaution,
+		ComputedStop:           in.ComputedStop,
+		SubmittedStop:          in.SubmittedStop,
+		AcceptedStop:           in.AcceptedStop,
+		TriggerRef:             strings.ToLower(strings.TrimSpace(in.TriggerRef)),
+		LegalityAdjusted:       in.LegalityAdjusted,
+		WinnerLifecycle: string(ResolveWinnerLifecycle(
+			NormalizeWinnerLifecycle(in.WinnerLifecycle),
+			WinnerLifecycleInput{
+				MaxR:             in.MFER,
+				CurrentR:         currentR,
+				ProofObserved:    winnerProofObserved(in.MFER, currentR, in.AdvancedReady, in.HitTP1, in.HitTP2, in.HitTP3),
+				MatureTrend:      in.MatureTrend,
+				TrailingActive:   in.TrailingActive,
+				RealInvalidation: in.RealInvalidation,
+				WinnerReversion:  false,
+			},
+		)),
 	}
 	softManageOnly := envBoolXM("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true)
 	if in.Entry <= 0 || in.Stop <= 0 || in.Mark <= 0 {
@@ -200,6 +220,18 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.ImmediateExit = true
 		dec.ExitNowReason = "winner_reversion_block"
 		dec.Reason = "winner_reversion_block"
+		dec.WinnerLifecycle = string(ResolveWinnerLifecycle(
+			NormalizeWinnerLifecycle(dec.WinnerLifecycle),
+			WinnerLifecycleInput{
+				MaxR:             in.MFER,
+				CurrentR:         currentR,
+				ProofObserved:    winnerProofObserved(in.MFER, currentR, in.AdvancedReady, in.HitTP1, in.HitTP2, in.HitTP3),
+				MatureTrend:      in.MatureTrend,
+				TrailingActive:   in.TrailingActive,
+				WinnerReversion:  true,
+				RealInvalidation: in.RealInvalidation,
+			},
+		))
 		return dec
 	}
 	earlyTrailR := envFloatExit("LIVE_EXIT_EARLY_TRAIL_R", 1.0)
@@ -389,6 +421,19 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		!dec.MoveStopToBE && !dec.TightenStop && !dec.FullExit && !dec.ImmediateExit {
 		dec.MoveStopToBE = true
 		dec.Reason = firstNonEmptyExit(dec.Reason, "PROTECT_BE_FALLBACK")
+	}
+	if dec.FullExit && in.RealInvalidation {
+		dec.WinnerLifecycle = string(ResolveWinnerLifecycle(
+			NormalizeWinnerLifecycle(dec.WinnerLifecycle),
+			WinnerLifecycleInput{
+				MaxR:             in.MFER,
+				CurrentR:         currentR,
+				ProofObserved:    winnerProofObserved(in.MFER, currentR, in.AdvancedReady, in.HitTP1, in.HitTP2, in.HitTP3),
+				MatureTrend:      in.MatureTrend,
+				TrailingActive:   in.TrailingActive,
+				RealInvalidation: true,
+			},
+		))
 	}
 	return dec
 }
