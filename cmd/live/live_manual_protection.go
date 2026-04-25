@@ -270,9 +270,16 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 	if manualManagedTrade(p) {
 		forceNow := p.ForceProtectionNow
 		switch strings.TrimSpace(p.ManualManageState) {
-		case manualManageStateForceClose, manualManageStateCritical:
+		case manualManageStateForceClose:
 			if m.shouldEmergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected")) {
 				return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
+			}
+		case manualManageStateCritical:
+			if m.shouldEmergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected")) {
+				return m.emergencyForceCloseManagedPosition(p, firstNonEmpty(p.LastManageFailCause, "managed_unprotected"), now)
+			}
+			if !forceNow {
+				return nil
 			}
 			p.ManualManageState = manualManageStatePendingProtection
 		}

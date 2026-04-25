@@ -8843,9 +8843,39 @@ func (m *liveExecManager) handleManualProtectionFailure(p *livePosition, cause s
 	} else if p.ProtectionRetryAfter.IsZero() || !p.ProtectionRetryAfter.After(now) {
 		p.ProtectionRetryAfter = now.Add(manualProtectionRetryBackoff(maxInt(1, p.ProtectionRetryCount)))
 	}
+	if strings.EqualFold(strings.TrimSpace(p.ManualManageState), manualManageStateCritical) {
+		m.notifyCriticalManagedProtection(p, cause, "Protection retries are exhausted. The bot is no longer auto-rearming this stop path.")
+	}
 	if m.manualConfirm && m.shouldEmergencyForceCloseManagedPosition(p, cause) {
 		m.queueManualForceFlatRequest(manualManageRequestFromPosition(p), cause, now)
 	}
+}
+
+func (m *liveExecManager) notifyCriticalManagedProtection(p *livePosition, cause, summary string) {
+	if m == nil || m.tg == nil || p == nil {
+		return
+	}
+	now := time.Now().UTC()
+	notifyCause := "critical:" + strings.TrimSpace(cause)
+	if !shouldNotifyManageStatus(p, notify.ManageStateDegraded, notifyCause, now) {
+		return
+	}
+	lines := []string{
+		fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+		fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(strings.TrimSpace(cause), "managed_unprotected")),
+		fmt.Sprintf("<b>Protection:</b> %s | <b>Retries:</b> %d/%d", manualProtectionStatus(p), p.ProtectionRetryCount, manualProtectionRetryBudget()),
+		"<b>Critical state:</b> stop retries are frozen until operator action or force-close conditions are met.",
+	}
+	if strings.TrimSpace(summary) != "" {
+		lines = append(lines, summary)
+	}
+	if p.EntryPrice > 0 && p.LastMark > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Entry:</b> %s | <b>Mark Now:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.LastMark)))
+	}
+	if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+		lines = append(lines, guidance)
+	}
+	m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateDegraded, p.Symbol, p.Side, lines...))
 }
 
 func managedProtectionUnrealizedLossPct(p *livePosition) float64 {
@@ -8922,11 +8952,8 @@ func (m *liveExecManager) emergencyForceCloseManagedPosition(p *livePosition, ca
 	p.ProtectionPending = true
 	p.ProtectionRetryAfter = now.Add(time.Duration(envInt("LIVE_CRITICAL_PROTECTION_ALERT_SEC", 300)) * time.Second)
 	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateDegraded, p.Symbol, p.Side,
-			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Cause:</b> %s", firstNonEmpty(cause, "manual_protection_failed")),
-			"Emergency protection failed and force-close also failed. New entries are blocked until this position is handled.",
-		))
+		m.notifyCriticalManagedProtection(p, firstNonEmpty(cause, "manual_protection_failed"),
+			"Emergency protection failed and force-close also failed. New entries are blocked until this position is handled.")
 	}
 	return lastErr
 }
@@ -10863,9 +10890,9 @@ func protectiveStopValid(side string, entry, mark, stop float64) bool {
 		return false
 	}
 	if isLongSide(side) {
-		return stop < mark && stop < entry
+		return stop < mark
 	}
-	return stop > mark && stop > entry
+	return stop > mark
 }
 
 func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64) bool {

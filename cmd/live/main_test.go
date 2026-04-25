@@ -4099,14 +4099,46 @@ func TestProtectiveStopValid(t *testing.T) {
 	if !protectiveStopValid("BUY", 100, 101, 99.5) {
 		t.Fatalf("expected long protective stop to be valid")
 	}
-	if protectiveStopValid("BUY", 100, 101, 100.5) {
-		t.Fatalf("expected long protective stop above entry to be invalid")
+	if !protectiveStopValid("BUY", 100, 101, 100.5) {
+		t.Fatalf("expected long protective stop above entry but below mark to stay valid")
 	}
 	if !protectiveStopValid("SELL", 100, 99, 101) {
 		t.Fatalf("expected short protective stop to be valid")
 	}
+	if !protectiveStopValid("SELL", 100, 99, 99.5) {
+		t.Fatalf("expected short protective stop below entry but above mark to stay valid")
+	}
 	if protectiveStopValid("SELL", 100, 99, 98.5) {
 		t.Fatalf("expected short protective stop below mark to be invalid")
+	}
+}
+
+func TestPlaceOrReplaceStopKeepsCriticalManualProtectionFrozenWithoutForceClose(t *testing.T) {
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:              "SIRENUSDT",
+		Side:                "SELL",
+		State:               execOpen,
+		RemainingQty:        50,
+		EntrySource:         manualEntrySourceManaged,
+		EntryReason:         manualEntryReasonManaged,
+		Managed:             true,
+		Protected:           false,
+		ProtectionPending:   true,
+		ManualManageState:   manualManageStateCritical,
+		LastManageFailCause: "exchange_immediate_trigger_retry_failed",
+		CreatedAt:           now.Add(-30 * time.Minute),
+		UpdatedAt:           now.Add(-5 * time.Minute),
+	}
+	m := &liveExecManager{}
+	if err := m.placeOrReplaceStop(p); err != nil {
+		t.Fatalf("expected critical protection state to short-circuit without exchange call, got %v", err)
+	}
+	if p.ManualManageState != manualManageStateCritical {
+		t.Fatalf("expected critical protection state to remain frozen, got %s", p.ManualManageState)
+	}
+	if !p.ProtectionPending {
+		t.Fatal("expected protection pending to remain true while critical state is frozen")
 	}
 }
 
