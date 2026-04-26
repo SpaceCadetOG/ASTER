@@ -499,6 +499,9 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 			fmt.Sprintf("<b>Order ID:</b> %d", p.StopOrderID),
 			"<b>Fresh entries remain blocked</b> until normal gates re-evaluate.",
 		}
+		if stopPromotedAfterTP1(p) {
+			lines = append(lines, "<b>TP1_HIT -&gt; STOP_PROMOTED</b>")
+		}
 		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
 			lines = append(lines, guidance)
 		}

@@ -1420,6 +1420,70 @@ func TestReconstructManualManagedStateEnablesTrailForLateStageWinner(t *testing.
 	}
 }
 
+func TestReconstructManualManagedStatePromotesStopWhenTP1AlreadyHit(t *testing.T) {
+	t.Setenv("LIVE_BE_REQUIRE_TP1_OR_MIN_UPNL", "1")
+	t.Setenv("LIVE_BE_MIN_UPNL_PCT", "99")
+	m := &liveExecManager{
+		beLockBps:    5,
+		trailAfterTP: 3,
+	}
+	now := time.Now().UTC()
+	p := &livePosition{
+		Symbol:       "ORCAUSDT",
+		Side:         "SELL",
+		EntryReason:  manualEntryReasonManaged,
+		EntrySource:  manualEntrySourceManaged,
+		EntryPrice:   1.5000,
+		RemainingQty: 100,
+		FilledQty:    100,
+		StopPrice:    1.5400,
+		TP1Price:     1.4600,
+		TP2Price:     1.4200,
+		TP3Price:     1.3800,
+	}
+	m.reconstructManualManagedState(now, p, 1.4550)
+	if !p.HitTP1 {
+		t.Fatalf("expected TP1 to be recognized for manual managed position")
+	}
+	if p.StopPrice >= p.EntryPrice {
+		t.Fatalf("expected stop to move through break-even after TP1 hit, got stop=%.6f entry=%.6f", p.StopPrice, p.EntryPrice)
+	}
+	if p.ProtectionStage < protectionStageArmed {
+		t.Fatalf("expected protection stage to arm after TP1 hit, got %d", p.ProtectionStage)
+	}
+}
+
+func TestUpdateLiveTargetHitsTracksManualTargetsWithoutRatchetOnly(t *testing.T) {
+	m := &liveExecManager{
+		trailAfterTP: 2,
+		trailStopPct: 1.5,
+		trailPctMin:  1.0,
+	}
+	p := &livePosition{
+		Symbol:       "KATUSDT",
+		Side:         "BUY",
+		EntryPrice:   1.0000,
+		StopPrice:    0.9500,
+		TP1Price:     1.0500,
+		TP2Price:     1.1000,
+		TP3Price:     1.1500,
+		RemainingQty: 50,
+		FilledQty:    50,
+	}
+	if !m.updateLiveTargetHits(p, 1.1050) {
+		t.Fatalf("expected target hit state to change")
+	}
+	if !p.HitTP1 || !p.HitTP2 {
+		t.Fatalf("expected TP1 and TP2 to be marked, got tp1=%v tp2=%v", p.HitTP1, p.HitTP2)
+	}
+	if !p.TrailOn {
+		t.Fatalf("expected trail to enable after TP2 hit even without ratchet-only mode")
+	}
+	if p.TrailRef <= 0 || p.TrailStop <= 0 {
+		t.Fatalf("expected trail state to initialize, got ref=%.6f stop=%.6f", p.TrailRef, p.TrailStop)
+	}
+}
+
 func TestSyncImportedRemotePositionDetectsManualAddMutation(t *testing.T) {
 	now := time.Now().UTC()
 	p := &livePosition{

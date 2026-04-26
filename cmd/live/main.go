@@ -4665,6 +4665,16 @@ func targetHit(side string, mark, target float64) bool {
 	return mark <= target
 }
 
+func stopPromotedAfterTP1(p *livePosition) bool {
+	if p == nil || !p.HitTP1 || p.EntryPrice <= 0 || p.StopPrice <= 0 {
+		return false
+	}
+	if strings.EqualFold(p.Side, "BUY") {
+		return p.StopPrice >= p.EntryPrice
+	}
+	return p.StopPrice <= p.EntryPrice
+}
+
 func improvedStopPrice(side string, current, next float64) (float64, bool) {
 	if next <= 0 {
 		return current, false
@@ -9042,6 +9052,7 @@ func (m *liveExecManager) reconstructManualManagedState(now time.Time, p *livePo
 	p.ManageAnchorPrice = mark
 	p.LastMark = mark
 	updateFavorableRLive(p, mark)
+	m.updateLiveTargetHits(p, mark)
 	_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
 	allowBE := allowMoveToBreakEven(p.HitTP1, upct)
 	if newStop, tightened := applyLiveProtectionState(now, p.Side, p.EntryPrice, p.StopPrice, p.MaxFavorableR, &p.ProtectionStage, &p.FirstProtectAt, &p.ProtectedStop, m.beLockBps, allowBE); tightened {
@@ -10389,6 +10400,9 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
+			if m.updateLiveTargetHits(p, mark) {
+				changed = true
+			}
 			_, upct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
 			allowBE := allowMoveToBreakEven(p.HitTP1, upct)
 			if shouldAdvanceProtection(p) {
@@ -11095,19 +11109,62 @@ func (m *liveExecManager) maybeEnableTrail(p *livePosition, stage int) {
 	p.TrailOn = true
 }
 
-func (m *liveExecManager) handleRatchetTargets(p *livePosition, mark float64) (bool, error) {
-	if m == nil || p == nil || !m.tpRatchetOnly || mark <= 0 {
-		return false, nil
+func (m *liveExecManager) updateLiveTargetHits(p *livePosition, mark float64) bool {
+	if m == nil || p == nil || mark <= 0 {
+		return false
 	}
 	changed := false
+	sideBuy := strings.EqualFold(p.Side, "BUY")
 	if !p.HitTP1 && targetHit(p.Side, mark, p.TP1Price) {
 		p.HitTP1 = true
+		changed = true
 	}
 	if !p.HitTP2 && targetHit(p.Side, mark, p.TP2Price) {
 		p.HitTP2 = true
+		changed = true
+		m.maybeEnableTrail(p, 2)
 	}
 	if !p.HitTP3 && targetHit(p.Side, mark, p.TP3Price) {
 		p.HitTP3 = true
+		changed = true
+		m.maybeEnableTrail(p, 3)
+	}
+	if p.TrailOn {
+		if p.TrailRef <= 0 || (sideBuy && mark > p.TrailRef) || (!sideBuy && mark < p.TrailRef) {
+			p.TrailRef = mark
+			p.TrailStop = m.calcTrailStopForPosition(p, sideBuy, mark, p.HitTP3)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (m *liveExecManager) handleRatchetTargets(p *livePosition, mark float64) (bool, error) {
+	if m == nil || p == nil || mark <= 0 {
+		return false, nil
+	}
+	m.updateLiveTargetHits(p, mark)
+	if !m.tpRatchetOnly {
+		return false, nil
+	}
+	changed := false
+	if p.HitTP1 {
+		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 1); ok {
+			p.StopPrice = stop
+			changed = true
+		}
+	}
+	if p.HitTP2 {
+		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 2); ok {
+			p.StopPrice = stop
+			changed = true
+		}
+	}
+	if p.HitTP3 {
+		if stop, ok := ratchetStopTarget(p.Side, p.EntryPrice, p.StopPrice, p.TP1Price, p.TP2Price, m.beLockBps, 3); ok {
+			p.StopPrice = stop
+			changed = true
+		}
 		m.maybeEnableTrail(p, 3)
 		if p.TrailOn {
 			if p.TrailRef <= 0 || (strings.EqualFold(p.Side, "BUY") && mark > p.TrailRef) || (!strings.EqualFold(p.Side, "BUY") && mark < p.TrailRef) {
