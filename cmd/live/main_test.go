@@ -3091,10 +3091,10 @@ func TestHasLiveProtectiveOrderRequiresRealOrderAndNoPendingProtection(t *testin
 
 func TestManualStopRetryCandidatesEscalateBeyondLegacyImmediateTriggerWidths(t *testing.T) {
 	candidates := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
-	if len(candidates) != 4 {
-		t.Fatalf("expected bounded 3-step widening ladder (+base), got %d candidates: %#v", len(candidates), candidates)
+	if len(candidates) < 7 {
+		t.Fatalf("expected expanded widening ladder, got %d candidates: %#v", len(candidates), candidates)
 	}
-	if candidates[len(candidates)-1] <= 1.006 {
+	if candidates[len(candidates)-1] <= 1.010 {
 		t.Fatalf("expected final retry candidate to widen materially, got %#v", candidates)
 	}
 }
@@ -3112,6 +3112,26 @@ func TestNormalizeManualProtectiveStopWidensToExchangeSafeCandidate(t *testing.T
 	}
 	if stop <= 0.991 {
 		t.Fatalf("expected normalized stop to widen beyond original, got %v", stop)
+	}
+}
+
+func TestLogManageFailedSafePersistsCriticalTelemetry(t *testing.T) {
+	p := &livePosition{
+		Symbol:          "ORCAUSDT",
+		Side:            "SELL",
+		EntryPrice:      1.4310,
+		WinnerLifecycle: "winner_locked",
+	}
+	m := &liveExecManager{}
+	m.logManageFailedSafe(p, 1.4430, 1.4505, 1.4540, "exchange_immediate_trigger_retry_failed")
+	if math.Abs(p.LastManageProtectRef-1.4430) > 1e-9 {
+		t.Fatalf("expected protect ref to persist, got %.6f", p.LastManageProtectRef)
+	}
+	if math.Abs(p.LastManageComputedStop-1.4505) > 1e-9 {
+		t.Fatalf("expected computed stop to persist, got %.6f", p.LastManageComputedStop)
+	}
+	if math.Abs(p.LastManageNormalizedStop-1.4540) > 1e-9 {
+		t.Fatalf("expected normalized stop to persist, got %.6f", p.LastManageNormalizedStop)
 	}
 }
 

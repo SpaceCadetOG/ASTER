@@ -212,6 +212,9 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		return
 	}
 	cause = strings.TrimSpace(cause)
+	p.LastManageProtectRef = mark
+	p.LastManageComputedStop = computedStop
+	p.LastManageNormalizedStop = normalizedStop
 	if manageDebugLogging() {
 		fmt.Printf("live: manage-failed-safe symbol=%s side=%s mark=%s entry=%s computed_stop=%s normalized_stop=%s cause=%s\n",
 			p.Symbol,
@@ -238,12 +241,19 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 		}
 		suppressed := p.ManageFailSuppressCount
 		p.ManageFailSuppressCount = 0
+		refText := "unavailable"
+		if mark > 0 {
+			refText = fmtPrice(mark)
+		}
 		lines := []string{
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
-			fmt.Sprintf("<b>Mark:</b> %s | <b>Entry:</b> %s", fmtPrice(mark), fmtPrice(p.EntryPrice)),
+			fmt.Sprintf("<b>Protect Ref:</b> %s | <b>Entry:</b> %s", refText, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
 			fmt.Sprintf("<b>Cause:</b> %s", cause),
 			fmt.Sprintf("<b>Protection:</b> %s | <b>Retries:</b> %d/%d", manualProtectionStatus(p), p.ProtectionRetryCount, manualProtectionRetryBudget()),
+		}
+		if strings.TrimSpace(p.WinnerLifecycle) != "" {
+			lines = append(lines, fmt.Sprintf("<b>Winner Lifecycle:</b> %s", strings.ToUpper(strings.TrimSpace(p.WinnerLifecycle))))
 		}
 		if suppressed > 0 {
 			lines = append(lines, fmt.Sprintf("<b>Suppressed duplicates:</b> %d", suppressed))

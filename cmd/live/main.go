@@ -931,6 +931,9 @@ type livePosition struct {
 	ManageFailSuppressCount  int              `json:"manageFailSuppressCount,omitempty"`
 	LastManageFailAt         time.Time        `json:"lastManageFailAt,omitempty"`
 	LastManageFailCause      string           `json:"lastManageFailCause,omitempty"`
+	LastManageProtectRef     float64          `json:"lastManageProtectRef,omitempty"`
+	LastManageComputedStop   float64          `json:"lastManageComputedStop,omitempty"`
+	LastManageNormalizedStop float64          `json:"lastManageNormalizedStop,omitempty"`
 	LastManageNotifyState    string           `json:"lastManageNotifyState,omitempty"`
 	LastManageNotifyCause    string           `json:"lastManageNotifyCause,omitempty"`
 	LastManageNotifyAt       time.Time        `json:"lastManageNotifyAt,omitempty"`
@@ -8890,8 +8893,21 @@ func (m *liveExecManager) notifyCriticalManagedProtection(p *livePosition, cause
 	if strings.TrimSpace(summary) != "" {
 		lines = append(lines, summary)
 	}
-	if p.EntryPrice > 0 && p.LastMark > 0 {
-		lines = append(lines, fmt.Sprintf("<b>Entry:</b> %s | <b>Mark Now:</b> %s", fmtPrice(p.EntryPrice), fmtPrice(p.LastMark)))
+	if p.EntryPrice > 0 || p.LastManageProtectRef > 0 {
+		refText := "unavailable"
+		if p.LastManageProtectRef > 0 {
+			refText = fmtPrice(p.LastManageProtectRef)
+		}
+		lines = append(lines, fmt.Sprintf("<b>Protect Ref:</b> %s | <b>Entry:</b> %s", refText, fmtPrice(p.EntryPrice)))
+	}
+	if p.LastManageComputedStop > 0 || p.LastManageNormalizedStop > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(p.LastManageComputedStop), fmtPrice(p.LastManageNormalizedStop)))
+	}
+	if p.LastMark > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Last Mark:</b> %s", fmtPrice(p.LastMark)))
+	}
+	if strings.TrimSpace(p.WinnerLifecycle) != "" {
+		lines = append(lines, fmt.Sprintf("<b>Winner Lifecycle:</b> %s", strings.ToUpper(strings.TrimSpace(p.WinnerLifecycle))))
 	}
 	if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
 		lines = append(lines, guidance)
@@ -11016,6 +11032,10 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 		maxFloat(0.0025, minGapPct),
 		maxFloat(0.0025, minGapPct*1.5),
 		maxFloat(0.0025, minGapPct*2.0),
+		maxFloat(0.0035, minGapPct*3.0),
+		maxFloat(0.0050, minGapPct*5.0),
+		0.0100,
+		0.0150,
 	}
 	base := make([]float64, 0, len(basePcts)+1)
 	base = append(base, widenedProtectiveStop(side, entry, mark, tickSize))

@@ -241,8 +241,11 @@ func TestManualApprovalRequiresImmediateLiveProtection(t *testing.T) {
 
 func TestManualStopRetryCandidatesBoundedLadder(t *testing.T) {
 	cands := manualStopRetryCandidates("SELL", 1.00, 0.98, 0.0001)
-	if len(cands) != 4 {
-		t.Fatalf("expected base + 3 retries, got %d (%#v)", len(cands), cands)
+	if len(cands) < 7 {
+		t.Fatalf("expected expanded retry ladder, got %d (%#v)", len(cands), cands)
+	}
+	if cands[len(cands)-1] <= 1.010 {
+		t.Fatalf("expected last retry candidate to widen materially, got %#v", cands)
 	}
 }
 
