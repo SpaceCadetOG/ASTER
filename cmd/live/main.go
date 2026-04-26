@@ -3243,6 +3243,17 @@ func main() {
 				effectiveMargin = maxFloat(minStarter, sized)
 			}
 		}
+		effectiveMargin, sessionBand, sessionMult := sessionAdjustedMarginUSDT(now, best, ladderPlan{}, effectiveMargin)
+		_ = sessionMult
+		if reason := sessionEntryRejectReason(now, best, ladderPlan{}); reason != "" {
+			recordCandidateDecision(cmdCtx, best, reason)
+			addEligibilityBlock(&eligibility, reason)
+			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
+			statusStore.Set(st)
+			fmt.Printf("live: skip (%s reason=%s session=%s)\n", rawBest, reason, sessionBand)
+			waitAndReport()
+			continue
+		}
 		if !pureMode {
 			riskDec := risk.Approve(riskShell, risk.Input{
 				Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
@@ -3433,6 +3444,16 @@ func main() {
 		if ladderPlan.MarginUSDT > 0 {
 			effectiveMargin = ladderPlan.MarginUSDT
 		}
+		if reason := sessionEntryRejectReason(now, best, ladderPlan); reason != "" {
+			recordCandidateDecision(cmdCtx, best, reason)
+			addEligibilityBlock(&eligibility, reason)
+			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
+			statusStore.Set(st)
+			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
+			waitAndReport()
+			continue
+		}
+		effectiveMargin, ladderPlan.SessionBand, ladderPlan.SessionMult = sessionAdjustedMarginUSDT(now, best, ladderPlan, effectiveMargin)
 		eligibility.ReentryAllowed = ladderPlan.IsReentry
 		if ladderPlan.IsAdd {
 			eligibility.FullEntryAllowed = true
@@ -16485,6 +16506,8 @@ type ladderPlan struct {
 	IsReentry    bool
 	MarginUSDT   float64
 	RejectReason string
+	SessionBand  string
+	SessionMult  float64
 	Active       *livePosition
 	Previous     *livePosition
 }
@@ -16887,10 +16910,71 @@ func postWinCooldownRejectReason(now time.Time, c candidate, execMgr *liveExecMa
 	return "post_win_opposite_cooldown"
 }
 
+func liveSessionPolicyLocation() *time.Location {
+	loc, err := time.LoadLocation(envStr("LIVE_REPORT_TZ", "America/Chicago"))
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+func sessionClockMinute(now time.Time) int {
+	localNow := now.In(liveSessionPolicyLocation())
+	return localNow.Hour()*60 + localNow.Minute()
+}
+
+func sessionClockWindow(raw string, defHour, defMin int) int {
+	h, m := parseHHMM(raw, defHour, defMin)
+	return h*60 + m
+}
+
+func sessionClockInRange(cur, start, end int) bool {
+	if start <= end {
+		return cur >= start && cur <= end
+	}
+	return cur >= start || cur <= end
+}
+
+func sessionRiskBand(now time.Time) (string, float64) {
+	cur := sessionClockMinute(now)
+	fullStart := sessionClockWindow(envStr("LIVE_SESSION_FULL_RISK_START_CT", "16:00"), 16, 0)
+	fullEnd := sessionClockWindow(envStr("LIVE_SESSION_FULL_RISK_END_CT", "23:00"), 23, 0)
+	if sessionClockInRange(cur, fullStart, fullEnd) {
+		return "full", 1.0
+	}
+	cautionStart := sessionClockWindow(envStr("LIVE_SESSION_CAUTION_START_CT", "07:00"), 7, 0)
+	cautionEnd := sessionClockWindow(envStr("LIVE_SESSION_CAUTION_END_CT", "15:59"), 15, 59)
+	if sessionClockInRange(cur, cautionStart, cautionEnd) {
+		return "caution", clamp(envFloat("LIVE_SESSION_CAUTION_RISK_MULT", 0.50), 0.05, 1.0)
+	}
+	return "overnight", clamp(envFloat("LIVE_SESSION_OVERNIGHT_MAX_RISK_MULT", 0.25), 0.05, 1.0)
+}
+
+func sessionAdjustedMarginUSDT(now time.Time, c candidate, plan ladderPlan, margin float64) (float64, string, float64) {
+	if margin <= 0 {
+		band, mult := sessionRiskBand(now)
+		return margin, band, mult
+	}
+	band, mult := sessionRiskBand(now)
+	if band == "full" {
+		return margin, band, mult
+	}
+	if plan.IsAdd {
+		return margin, band, 1.0
+	}
+	return maxFloat(0.0, margin*mult), band, mult
+}
+
 func sessionEntryRejectReason(now time.Time, c candidate, plan ladderPlan) string {
-	_ = now
-	_ = c
-	_ = plan
+	if plan.IsAdd {
+		return ""
+	}
+	band, _ := sessionRiskBand(now)
+	if band == "overnight" && envBool("LIVE_SESSION_A_PLUS_ONLY_OVERNIGHT", true) {
+		if gradeValue(c.Entry.CurrentGrade) < gradeValue("A+") {
+			return "session_overnight_requires_a_plus"
+		}
+	}
 	return ""
 }
 

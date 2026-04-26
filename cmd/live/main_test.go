@@ -3723,19 +3723,22 @@ func TestResolveLadderPlanRejectsAddWhenFixedSizeNoAddEnabled(t *testing.T) {
 	}
 }
 
-func TestSessionEntryRejectReasonDoesNotGateFreshEntry(t *testing.T) {
+func TestSessionEntryRejectReasonAllowsFreshEntryInFullRiskWindow(t *testing.T) {
+	t.Setenv("LIVE_REPORT_TZ", "America/Chicago")
 	c := candidate{
 		Side:  "BUY",
 		Strat: "continuation_fast",
 		Entry: inplay.Entry{CurrentGrade: "A"},
 	}
-	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 5, 30, 0, 0, time.UTC), c, ladderPlan{})
+	reason := sessionEntryRejectReason(time.Date(2026, 3, 25, 22, 30, 0, 0, time.UTC), c, ladderPlan{})
 	if reason != "" {
 		t.Fatalf("expected no session-gating reject, got %q", reason)
 	}
 }
 
 func TestSessionEntryRejectReasonAllowsOffHoursAGradeEntry(t *testing.T) {
+	t.Setenv("LIVE_REPORT_TZ", "America/Chicago")
+	t.Setenv("LIVE_SESSION_A_PLUS_ONLY_OVERNIGHT", "0")
 	c := candidate{
 		Side:          "BUY",
 		Strat:         "continuation_fast",
@@ -3977,6 +3980,74 @@ func TestQuickCandidateSelectionRejectBlocksMaintenanceWindow(t *testing.T) {
 	got := quickCandidateSelectionReject(c, now, false, false, 0, local, maintenanceWindow{}, 0, nil, nil, safetyConfig{}, time.Time{}, nil, nil, nil, nil, nil)
 	if got != blockedMaintenanceWindowReason {
 		t.Fatalf("expected %s, got %q", blockedMaintenanceWindowReason, got)
+	}
+}
+
+func TestSessionRiskBandUsesChicagoWindows(t *testing.T) {
+	t.Setenv("LIVE_REPORT_TZ", "America/Chicago")
+	t.Setenv("LIVE_SESSION_FULL_RISK_START_CT", "16:00")
+	t.Setenv("LIVE_SESSION_FULL_RISK_END_CT", "23:00")
+	t.Setenv("LIVE_SESSION_CAUTION_START_CT", "07:00")
+	t.Setenv("LIVE_SESSION_CAUTION_END_CT", "15:59")
+	t.Setenv("LIVE_SESSION_CAUTION_RISK_MULT", "0.50")
+	t.Setenv("LIVE_SESSION_OVERNIGHT_MAX_RISK_MULT", "0.25")
+
+	cases := []struct {
+		name string
+		now  time.Time
+		band string
+		mult float64
+	}{
+		{name: "full", now: time.Date(2026, 4, 26, 22, 30, 0, 0, time.UTC), band: "full", mult: 1.0},
+		{name: "caution", now: time.Date(2026, 4, 26, 16, 30, 0, 0, time.UTC), band: "caution", mult: 0.50},
+		{name: "overnight", now: time.Date(2026, 4, 26, 8, 30, 0, 0, time.UTC), band: "overnight", mult: 0.25},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			band, mult := sessionRiskBand(tc.now)
+			if band != tc.band {
+				t.Fatalf("expected band %s, got %s", tc.band, band)
+			}
+			if math.Abs(mult-tc.mult) > 1e-9 {
+				t.Fatalf("expected multiplier %.2f, got %.2f", tc.mult, mult)
+			}
+		})
+	}
+}
+
+func TestSessionEntryRejectReasonRequiresAPlusOvernight(t *testing.T) {
+	t.Setenv("LIVE_REPORT_TZ", "America/Chicago")
+	t.Setenv("LIVE_SESSION_A_PLUS_ONLY_OVERNIGHT", "1")
+	overnight := time.Date(2026, 4, 26, 8, 30, 0, 0, time.UTC)
+	base := candidate{
+		Side:  "BUY",
+		Entry: inplay.Entry{Symbol: "ORCAUSDT", CurrentGrade: "A"},
+	}
+	if got := sessionEntryRejectReason(overnight, base, ladderPlan{}); got != "session_overnight_requires_a_plus" {
+		t.Fatalf("expected overnight A+ guard, got %q", got)
+	}
+	base.Entry.CurrentGrade = "A+"
+	if got := sessionEntryRejectReason(overnight, base, ladderPlan{}); got != "" {
+		t.Fatalf("expected A+ overnight candidate to pass, got %q", got)
+	}
+}
+
+func TestSessionAdjustedMarginReducesFreshEntriesButNotAdds(t *testing.T) {
+	t.Setenv("LIVE_REPORT_TZ", "America/Chicago")
+	t.Setenv("LIVE_SESSION_CAUTION_RISK_MULT", "0.50")
+	t.Setenv("LIVE_SESSION_OVERNIGHT_MAX_RISK_MULT", "0.25")
+	caution := time.Date(2026, 4, 26, 16, 30, 0, 0, time.UTC)
+	overnight := time.Date(2026, 4, 26, 8, 30, 0, 0, time.UTC)
+	c := candidate{Side: "BUY", Entry: inplay.Entry{Symbol: "KATUSDT"}}
+
+	if got, band, mult := sessionAdjustedMarginUSDT(caution, c, ladderPlan{}, 10); band != "caution" || math.Abs(mult-0.50) > 1e-9 || math.Abs(got-5.0) > 1e-9 {
+		t.Fatalf("expected caution adjusted margin 5.0, got margin=%.2f band=%s mult=%.2f", got, band, mult)
+	}
+	if got, band, mult := sessionAdjustedMarginUSDT(overnight, c, ladderPlan{}, 10); band != "overnight" || math.Abs(mult-0.25) > 1e-9 || math.Abs(got-2.5) > 1e-9 {
+		t.Fatalf("expected overnight adjusted margin 2.5, got margin=%.2f band=%s mult=%.2f", got, band, mult)
+	}
+	if got, _, _ := sessionAdjustedMarginUSDT(overnight, c, ladderPlan{IsAdd: true}, 10); math.Abs(got-10.0) > 1e-9 {
+		t.Fatalf("expected adds to bypass session downsize, got %.2f", got)
 	}
 }
 

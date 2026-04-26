@@ -43,6 +43,7 @@ type executionGovernorDecision struct {
 	SymbolEntries           int
 	SymbolLossesWindowMin   int
 	SymbolLosses            int
+	SymbolDailyLosses       int
 	SoftExitWindowMin       int
 	SoftExitCount           int
 	BucketEntriesWindowMin  int
@@ -74,17 +75,17 @@ func executionGovernorHistoryMax() int {
 }
 
 func executionGovernorSymbolWindow() time.Duration {
-	mins := envInt("LIVE_EXEC_CAP_SYMBOL_WINDOW_MIN", 180)
+	mins := envInt("LIVE_EXEC_CAP_SYMBOL_WINDOW_MIN", 360)
 	if mins <= 0 {
-		mins = 180
+		mins = 360
 	}
 	return time.Duration(mins) * time.Minute
 }
 
 func executionGovernorBucketWindow() time.Duration {
-	mins := envInt("LIVE_EXEC_CAP_BUCKET_WINDOW_MIN", 60)
+	mins := envInt("LIVE_EXEC_CAP_BUCKET_WINDOW_MIN", 180)
 	if mins <= 0 {
-		mins = 60
+		mins = 180
 	}
 	return time.Duration(mins) * time.Minute
 }
@@ -263,6 +264,24 @@ func executionGovernorLossCount(records []executionGovernorRecord, symbol, side 
 	return n
 }
 
+func executionGovernorDailyLossCount(records []executionGovernorRecord, symbol, side string, now time.Time) int {
+	symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	side = normalizePositionSide(side)
+	localNow := now.In(time.Local)
+	year, month, day := localNow.Date()
+	n := 0
+	for _, rec := range records {
+		if rec.Kind != "EXIT" || !rec.Loss || rec.Symbol != symbol || rec.Side != side {
+			continue
+		}
+		ry, rm, rd := rec.OccurredAt.In(time.Local).Date()
+		if ry == year && rm == month && rd == day {
+			n++
+		}
+	}
+	return n
+}
+
 func executionGovernorWinnerState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "winner_locked", "runner", "late_trail":
@@ -276,6 +295,37 @@ func executionGovernorDifferentSetup(current, previous string) bool {
 	current = strings.TrimSpace(current)
 	previous = strings.TrimSpace(previous)
 	return current != "" && previous != "" && !strings.EqualFold(current, previous)
+}
+
+func executionGovernorEliteOverride(c candidate) bool {
+	minGrade := envStr("LIVE_EXEC_CAP_ELITE_OVERRIDE_MIN_GRADE", "A+")
+	if gradeValue(c.Entry.CurrentGrade) < gradeValue(minGrade) {
+		return false
+	}
+	maxRank := envInt("LIVE_EXEC_CAP_ELITE_OVERRIDE_MAX_RANK", 1)
+	if maxRank > 0 && c.Entry.Rank > float64(maxRank) {
+		return false
+	}
+	minScore := envFloat("LIVE_EXEC_CAP_ELITE_OVERRIDE_MIN_SCORE", 97.0)
+	return c.Entry.CurrentScore >= minScore || executionGovernorCandidateScore(c) >= minScore
+}
+
+func executionGovernorCanOverrideSymbolRecycle(c candidate, rec executionGovernorRecord, bestWinner *executionGovernorPositionView) bool {
+	if bestWinner != nil {
+		return false
+	}
+	if !executionGovernorEliteOverride(c) {
+		return false
+	}
+	if !executionGovernorDifferentSetup(c.SetupFamily, rec.SetupFamily) {
+		return false
+	}
+	baseScore := executionGovernorRecordScore(rec)
+	if baseScore <= 0 {
+		baseScore = 82.0
+	}
+	delta := envFloat("LIVE_EXEC_CAP_RECYCLE_OVERRIDE_SCORE_DELTA", 15.0)
+	return executionGovernorCandidateScore(c) >= baseScore+delta
 }
 
 func executionGovernorCanOverrideRecentExit(c candidate, rec executionGovernorRecord) bool {
@@ -313,14 +363,14 @@ func executionGovernorRecentExitRejectReason(now time.Time, c candidate, rec exe
 		return ""
 	}
 	reason := strings.ToUpper(strings.TrimSpace(rec.Reason))
-	failedCooldown := time.Duration(envInt("LIVE_EXEC_CAP_FAILED_WINNER_COOLDOWN_MIN", 90)) * time.Minute
+	failedCooldown := time.Duration(envInt("LIVE_EXEC_CAP_FAILED_WINNER_COOLDOWN_MIN", 180)) * time.Minute
 	if failedCooldown > 0 &&
 		(now.Sub(rec.OccurredAt) < failedCooldown) &&
 		(strings.Contains(reason, "WINNER_REVERSION_BLOCK") || strings.EqualFold(strings.TrimSpace(rec.WinnerLifecycle), "failed")) {
 		return "exec_cap_symbol_failed_winner"
 	}
 	quickHold := envFloat("LIVE_EXEC_CAP_QUICK_STOP_MAX_HOLD_MIN", 20.0)
-	quickCooldown := time.Duration(envInt("LIVE_EXEC_CAP_QUICK_STOP_COOLDOWN_MIN", 45)) * time.Minute
+	quickCooldown := time.Duration(envInt("LIVE_EXEC_CAP_QUICK_STOP_COOLDOWN_MIN", 90)) * time.Minute
 	if quickCooldown > 0 &&
 		now.Sub(rec.OccurredAt) < quickCooldown &&
 		isStopCloseReason(reason) &&
@@ -328,7 +378,8 @@ func executionGovernorRecentExitRejectReason(now time.Time, c candidate, rec exe
 		rec.HoldMin <= quickHold {
 		return "exec_cap_symbol_quick_stop"
 	}
-	softCooldown := time.Duration(envInt("LIVE_EXEC_CAP_SYMBOL_SOFT_COOLDOWN_MIN", 30)) * time.Minute
+	softCooldownMin := envInt("LIVE_EXEC_CAP_SOFT_CHURN_COOLDOWN_MIN", envInt("LIVE_EXEC_CAP_SYMBOL_SOFT_COOLDOWN_MIN", 90))
+	softCooldown := time.Duration(softCooldownMin) * time.Minute
 	if softCooldown > 0 && now.Sub(rec.OccurredAt) < softCooldown && isSoftChurnExit(reason) {
 		return "exec_cap_symbol_soft_churn"
 	}
@@ -344,7 +395,7 @@ func executionGovernorDecisionFromState(now time.Time, c candidate, margin float
 		Bucket:                 executionGovernorBucketForCandidate(c),
 		SymbolEntriesWindowMin: int(executionGovernorSymbolWindow() / time.Minute),
 		SymbolLossesWindowMin:  int(executionGovernorSymbolWindow() / time.Minute),
-		SoftExitWindowMin:      envInt("LIVE_EXEC_CAP_SYMBOL_SOFT_COOLDOWN_MIN", 30),
+		SoftExitWindowMin:      envInt("LIVE_EXEC_CAP_SOFT_CHURN_COOLDOWN_MIN", envInt("LIVE_EXEC_CAP_SYMBOL_SOFT_COOLDOWN_MIN", 90)),
 		BucketEntriesWindowMin: int(executionGovernorBucketWindow() / time.Minute),
 	}
 	if !executionGovernorEnabled() || raw == "" || side == "" {
@@ -355,21 +406,22 @@ func executionGovernorDecisionFromState(now time.Time, c candidate, margin float
 	symbolWindow := executionGovernorSymbolWindow()
 	decision.SymbolEntries = executionGovernorEntryCount(records, raw, side, "", now.Add(-symbolWindow))
 	decision.SymbolLosses = executionGovernorLossCount(records, raw, side, now.Add(-symbolWindow))
+	decision.SymbolDailyLosses = executionGovernorDailyLossCount(records, raw, side, now)
 	if decision.SoftExitWindowMin > 0 {
 		decision.SoftExitCount = executionGovernorSoftExitCount(records, raw, side, now.Add(-time.Duration(decision.SoftExitWindowMin)*time.Minute))
 	}
 	decision.BucketEntries = executionGovernorEntryCount(records, "", side, candidateBucket, now.Add(-executionGovernorBucketWindow()))
-	if maxEntries := envInt("LIVE_EXEC_CAP_SYMBOL_MAX_ENTRIES", 3); maxEntries > 0 && decision.SymbolEntries >= maxEntries {
-		decision.Reason = "exec_cap_symbol_window"
-		return decision
-	}
+	var recentExit executionGovernorRecord
+	hasRecentExit := false
 	if rec, ok := executionGovernorRecentExit(records, raw, side); ok {
+		recentExit = rec
+		hasRecentExit = true
 		if reason := executionGovernorRecentExitRejectReason(now, c, rec); reason != "" {
 			decision.Reason = reason
 			return decision
 		}
 	}
-	if maxLosses := envInt("LIVE_EXEC_CAP_SYMBOL_MAX_LOSSES", 2); maxLosses > 0 && !hasFreshStructureReset(c) && decision.SymbolLosses >= maxLosses {
+	if maxLosses := envInt("LIVE_EXEC_CAP_SYMBOL_MAX_LOSSES", 1); maxLosses > 0 && !hasFreshStructureReset(c) && decision.SymbolLosses >= maxLosses {
 		decision.Reason = "exec_cap_symbol_loss_cluster"
 		return decision
 	}
@@ -396,11 +448,24 @@ func executionGovernorDecisionFromState(now time.Time, c candidate, margin float
 		decision.SuppressingWinnerSymbol = bestWinner.Symbol
 		decision.SuppressingWinnerState = bestWinner.WinnerLifecycle
 	}
+	if envBool("LIVE_EXEC_CAP_DAILY_LOSS_LOCK_ENABLE", true) {
+		maxDailyLosses := envInt("LIVE_EXEC_CAP_DAILY_LOSS_LOCK_MAX", 2)
+		if maxDailyLosses > 0 && decision.SymbolDailyLosses >= maxDailyLosses && !executionGovernorEliteOverride(c) {
+			decision.Reason = "exec_cap_symbol_daily_loss_lock"
+			return decision
+		}
+	}
+	if maxEntries := envInt("LIVE_EXEC_CAP_SYMBOL_MAX_ENTRIES", 2); maxEntries > 0 && decision.SymbolEntries >= maxEntries {
+		if !(hasRecentExit && executionGovernorCanOverrideSymbolRecycle(c, recentExit, bestWinner)) {
+			decision.Reason = "exec_cap_symbol_window"
+			return decision
+		}
+	}
 	if bestWinner != nil && !executionGovernorCanOverrideWinner(c, *bestWinner) {
 		decision.Reason = "exec_cap_bucket_winner_priority"
 		return decision
 	}
-	if maxActive := envInt("LIVE_EXEC_CAP_BUCKET_MAX_ACTIVE", 2); maxActive > 0 && activeBucketCount >= maxActive {
+	if maxActive := envInt("LIVE_EXEC_CAP_BUCKET_MAX_ACTIVE", 1); maxActive > 0 && activeBucketCount >= maxActive {
 		decision.Reason = "exec_cap_bucket_active"
 		return decision
 	}
@@ -408,7 +473,7 @@ func executionGovernorDecisionFromState(now time.Time, c candidate, margin float
 		decision.Reason = "exec_cap_bucket_margin"
 		return decision
 	}
-	if maxEntries := envInt("LIVE_EXEC_CAP_BUCKET_MAX_NEW_ENTRIES", 3); maxEntries > 0 && decision.BucketEntries >= maxEntries {
+	if maxEntries := envInt("LIVE_EXEC_CAP_BUCKET_MAX_NEW_ENTRIES", 2); maxEntries > 0 && decision.BucketEntries >= maxEntries {
 		decision.Reason = "exec_cap_bucket_window"
 		return decision
 	}
@@ -443,6 +508,7 @@ func executionGovernorRejectLogLine(dec executionGovernorDecision) string {
 			"reason=" + dec.Reason + " " +
 			"symbol_entries_" + strconv.Itoa(dec.SymbolEntriesWindowMin) + "m=" + strconv.Itoa(dec.SymbolEntries) + " " +
 			"symbol_losses_" + strconv.Itoa(dec.SymbolLossesWindowMin) + "m=" + strconv.Itoa(dec.SymbolLosses) + " " +
+			"symbol_losses_day=" + strconv.Itoa(dec.SymbolDailyLosses) + " " +
 			"soft_exits_" + strconv.Itoa(dec.SoftExitWindowMin) + "m=" + strconv.Itoa(dec.SoftExitCount) + " " +
 			"bucket_active=" + strconv.Itoa(dec.BucketActiveCount) + " " +
 			"bucket_entries_" + strconv.Itoa(dec.BucketEntriesWindowMin) + "m=" + strconv.Itoa(dec.BucketEntries) + " " +
