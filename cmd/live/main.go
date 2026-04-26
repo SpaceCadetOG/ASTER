@@ -7553,6 +7553,45 @@ func (m *liveExecManager) managedManualPositionBySymbol(symbol string) (*livePos
 	return nil, false
 }
 
+func (m *liveExecManager) deactivateManualManagement(symbol string, now time.Time) (*livePosition, bool) {
+	if m == nil {
+		return nil, false
+	}
+	base := canonicalSymbolBase(strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))))
+	if base == "" {
+		return nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.positions {
+		if p == nil || !m.isActive(p) || !manualManagedTrade(p) {
+			continue
+		}
+		if canonicalSymbolBase(p.Symbol) != base {
+			continue
+		}
+		p.EntryReason = manualEntryReasonPassive
+		p.EntrySource = manualEntrySourcePassive
+		p.ManualManageState = manualManageStatePassive
+		p.Managed = false
+		p.ProtectionPending = false
+		p.ProtectionRetryAfter = time.Time{}
+		p.ProtectionRetryCount = 0
+		p.ProtectionFailCount = 0
+		p.ForceProtectionNow = false
+		p.ManageFailSuppressCount = 0
+		p.LastManageFailAt = time.Time{}
+		p.LastManageFailCause = ""
+		p.LastManageNotifyState = ""
+		p.LastManageNotifyCause = ""
+		p.LastManageNotifyAt = time.Time{}
+		p.Protected = hasLiveProtectiveOrder(p)
+		p.UpdatedAt = now
+		return p, true
+	}
+	return nil, false
+}
+
 func manualManageRequestFromPosition(p *livePosition) manualManageRequest {
 	if p == nil {
 		return manualManageRequest{}
@@ -22080,7 +22119,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<code>/balance</code> <code>/acct</code> <code>/growth</code> <code>/health</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
 			"<b>Trade + Manual Management</b>",
 			"<code>/manual SYMBOL [LONG|SHORT]</code> <code>/trade SYMBOL LONG|SHORT [LEV]</code> <code>/suggest SYMBOL LONG|SHORT</code>",
-			"<code>/manage SYMBOL [y|n]</code> <code>/protect SYMBOL</code>",
+			"<code>/manage SYMBOL [y|n]</code> <code>/unmanage SYMBOL</code> <code>/protect SYMBOL</code>",
 			"<b>Runtime Controls</b>",
 			"<code>/mode</code> <code>/mode live</code> <code>/mode paper</code> <code>/pause</code> <code>/resume</code> <code>/close SYMBOL</code> <code>/closeall</code>",
 		)
@@ -22654,6 +22693,37 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			lines = append(lines, guidance)
 		}
 		return notify.BuildManagementStatusCard(notify.ManageStateProtected, sym, p.Side, lines...)
+	case strings.HasPrefix(cmd, "/unmanage "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/unmanage SYMBOL</code>")
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "UNMANAGE", "live execution manager unavailable")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/unmanage SYMBOL</code>")
+		}
+		if passive, ok := c.execMgr.passiveManualPositionBySymbol(sym); ok {
+			return notify.BuildEventHTML("ℹ️", "UNMANAGE",
+				fmt.Sprintf("<b>%s %s</b> is already manual-only", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
+			)
+		}
+		p, ok := c.execMgr.deactivateManualManagement(sym, time.Now().UTC())
+		if !ok {
+			return notify.BuildEventHTML("ℹ️", "UNMANAGE", fmt.Sprintf("No active managed manual trade for %s", cleanSymbol(sym)))
+		}
+		_ = c.execMgr.save()
+		lines := []string{
+			fmt.Sprintf("<b>%s %s</b> is now manual-only", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			"<b>Bot management:</b> disabled for this open trade",
+		}
+		if hasLiveProtectiveOrder(p) {
+			lines = append(lines, fmt.Sprintf("<b>Existing exchange stop retained:</b> %s", fmtPrice(p.StopPrice)))
+		} else {
+			lines = append(lines, "<b>Exchange stop:</b> none confirmed by bot")
+		}
+		return notify.BuildEventHTML("🟡", "UNMANAGED", lines...)
 	case strings.HasPrefix(cmd, "/pause"):
 		if c.safety.pauseFile == "" {
 			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")

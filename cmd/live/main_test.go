@@ -1137,6 +1137,79 @@ func TestHandleCommandManageExistingManagedTradeRearmsProtection(t *testing.T) {
 	}
 }
 
+func TestDeactivateManualManagementConvertsManagedTradeToPassive(t *testing.T) {
+	now := time.Now().UTC()
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"ORCAUSDT": {
+				Symbol:            "ORCAUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				RemainingQty:      40.7,
+				StopPrice:         1.4520,
+				StopOrderID:       12345,
+				Managed:           true,
+				Protected:         true,
+				ProtectionPending: true,
+				ManualManageState: manualManageStateCritical,
+			},
+		},
+	}
+	p, ok := m.deactivateManualManagement("ORCAUSDT", now)
+	if !ok {
+		t.Fatal("expected managed trade to be found")
+	}
+	if !manualPassivePosition(p) {
+		t.Fatalf("expected trade to become passive/manual-only, got source=%s reason=%s", p.EntrySource, p.EntryReason)
+	}
+	if p.Managed {
+		t.Fatal("expected managed flag to clear")
+	}
+	if p.ProtectionPending {
+		t.Fatal("expected protection pending to clear")
+	}
+	if !p.Protected {
+		t.Fatal("expected existing stop-backed protection flag to remain true")
+	}
+	if p.ManualManageState != manualManageStatePassive {
+		t.Fatalf("expected passive manage state, got %s", p.ManualManageState)
+	}
+}
+
+func TestHandleCommandUnmanageManagedTrade(t *testing.T) {
+	m := &liveExecManager{
+		positions: map[string]*livePosition{
+			"ORCAUSDT": {
+				Symbol:            "ORCAUSDT",
+				Side:              "SELL",
+				State:             execOpen,
+				EntrySource:       manualEntrySourceManaged,
+				EntryReason:       manualEntryReasonManaged,
+				RemainingQty:      40.7,
+				StopPrice:         1.4520,
+				StopOrderID:       12345,
+				Managed:           true,
+				Protected:         true,
+				ManualManageState: manualManageStateLive,
+			},
+		},
+	}
+	ctx := &telegramCommandCtx{execMgr: m}
+	resp := ctx.handleCommand("", "/unmanage ORCAUSDT")
+	if !strings.Contains(resp, "UNMANAGED") {
+		t.Fatalf("expected unmanage response, got %s", resp)
+	}
+	if !strings.Contains(resp, "manual-only") {
+		t.Fatalf("expected manual-only guidance, got %s", resp)
+	}
+	p, ok := m.passiveManualPositionBySymbol("ORCAUSDT")
+	if !ok || p == nil {
+		t.Fatal("expected ORCA to become a passive manual position")
+	}
+}
+
 func TestActivatePassiveManualImportKeepsPendingRequestAndCreatesPassiveLocal(t *testing.T) {
 	now := time.Now().UTC()
 	req := manualManageRequest{
