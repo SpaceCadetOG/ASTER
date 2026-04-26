@@ -3305,6 +3305,45 @@ func TestHandleManualProtectionFailureKeepsManagedTradeAliveWhenLossIsSmall(t *t
 	}
 }
 
+func TestKeepExistingManagedProtectionRetainsLiveStopOnTightenFailure(t *testing.T) {
+	m := &liveExecManager{}
+	p := &livePosition{
+		Symbol:            "ORCAUSDT",
+		Side:              "SELL",
+		State:             execOpen,
+		EntrySource:       manualEntrySourceManaged,
+		EntryReason:       manualEntryReasonManaged,
+		EntryPrice:        1.4310,
+		StopPrice:         1.4520,
+		ProtectedStop:     1.4520,
+		StopOrderID:       12345,
+		RemainingQty:      40.7,
+		Managed:           true,
+		Protected:         true,
+		ProtectionPending: true,
+		ManualManageState: manualManageStatePendingProtection,
+		WinnerLifecycle:   "late_trail",
+	}
+	if !m.keepExistingManagedProtection(p, 1.4520, 12345, "exchange_immediate_trigger_retry_failed_existing_stop_retained") {
+		t.Fatal("expected existing managed protection to be retained")
+	}
+	if p.StopPrice != 1.4520 || p.ProtectedStop != 1.4520 {
+		t.Fatalf("expected preserved stop to remain live, got stop=%.6f protected=%.6f", p.StopPrice, p.ProtectedStop)
+	}
+	if p.StopOrderID != 12345 {
+		t.Fatalf("expected preserved order id, got %d", p.StopOrderID)
+	}
+	if p.ProtectionPending {
+		t.Fatal("expected protection pending to clear when prior live stop is retained")
+	}
+	if !p.Protected {
+		t.Fatal("expected trade to remain protected when prior live stop is retained")
+	}
+	if p.ManualManageState != manualManageStateLive {
+		t.Fatalf("expected manual manage state to return to live, got %s", p.ManualManageState)
+	}
+}
+
 func TestInitializeBracketLevelsAllowsZeroTP1Fraction(t *testing.T) {
 	t.Setenv("LIVE_TP1_FRAC", "0.00")
 	m := &liveExecManager{

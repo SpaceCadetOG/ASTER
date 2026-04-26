@@ -262,6 +262,35 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 	}
 }
 
+func (m *liveExecManager) keepExistingManagedProtection(p *livePosition, preservedStop float64, preservedOrderID int64, cause string) bool {
+	if m == nil || p == nil || !manualManagedTrade(p) || preservedStop <= 0 || preservedOrderID <= 0 {
+		return false
+	}
+	p.StopPrice = preservedStop
+	p.ProtectedStop = preservedStop
+	p.StopOrderID = preservedOrderID
+	clearProtectionPending(p)
+	if strings.TrimSpace(cause) != "" {
+		p.LastManageFailCause = strings.TrimSpace(cause)
+	}
+	if manageDebugLogging() {
+		fmt.Printf("live: retained existing managed stop symbol=%s side=%s stop=%s order_id=%d cause=%s\n",
+			p.Symbol, p.Side, fmtPrice(preservedStop), preservedOrderID, strings.TrimSpace(cause))
+	}
+	if m.tg != nil {
+		lines := []string{
+			fmt.Sprintf("<b>Exchange stop retained:</b> %s", fmtPrice(preservedStop)),
+			fmt.Sprintf("<b>Order ID:</b> %d", preservedOrderID),
+			"<b>Stop tighten rejected; prior live stop remains active.</b>",
+		}
+		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+			lines = append(lines, guidance)
+		}
+		m.tg.Sendf("%s", notify.BuildManagementStatusCard(notify.ManageStateProtected, p.Symbol, p.Side, lines...))
+	}
+	return true
+}
+
 func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 	if p.RemainingQty <= 0 {
 		clearQueuedLiveProtectStopChain(p)
@@ -475,6 +504,9 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 				}
 			}
 			if !retryPlaced {
+				if m.keepExistingManagedProtection(p, prevStop, oldStopOrderID, "exchange_immediate_trigger_retry_failed_existing_stop_retained") {
+					return nil
+				}
 				recordManualProtectionFailure(p, now, "exchange_immediate_trigger_retry_failed")
 				m.logManageFailedSafe(p, lastRetryMark, computedStop, lastRetryStop, "exchange_immediate_trigger_retry_failed")
 				m.handleManualProtectionFailure(p, "exchange_immediate_trigger_retry_failed", now)
