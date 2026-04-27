@@ -11007,6 +11007,35 @@ func protectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64
 	return stop >= mark+minGapAbs
 }
 
+func replacementProtectiveStopExchangeSafe(side string, entry, mark, stop, tickSize float64, winnerLifecycle string) bool {
+	if !protectiveStopExchangeSafe(side, entry, mark, stop, tickSize) {
+		return false
+	}
+	ref := mark
+	if ref <= 0 {
+		ref = entry
+	}
+	if ref <= 0 {
+		return false
+	}
+	minGapPct := envFloat("LIVE_STOP_LEGALIZE_REPLACE_MIN_GAP_PCT",
+		envFloat("LIVE_STOP_LEGALIZE_MIN_GAP_PCT", envFloat("LIVE_MANUAL_PROTECTION_MIN_GAP_PCT", 0.0035))*1.75)
+	switch strings.ToLower(strings.TrimSpace(winnerLifecycle)) {
+	case "late_trail":
+		minGapPct = maxFloat(minGapPct, envFloat("LIVE_STOP_LEGALIZE_REPLACE_LATE_TRAIL_MIN_GAP_PCT", 0.0075))
+	case "runner", "winner_locked":
+		minGapPct = maxFloat(minGapPct, envFloat("LIVE_STOP_LEGALIZE_REPLACE_WINNER_MIN_GAP_PCT", 0.0060))
+	}
+	minGapAbs := ref * minGapPct
+	if tickSize > 0 {
+		minGapAbs = maxFloat(minGapAbs, tickSize*12)
+	}
+	if isLongSide(side) {
+		return stop <= mark-minGapAbs
+	}
+	return stop >= mark+minGapAbs
+}
+
 func widenedProtectiveStop(side string, entry, mark, tickSize float64) float64 {
 	ref := maxFloat(entry, mark)
 	if isLongSide(side) {
@@ -11089,6 +11118,7 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 		maxFloat(0.0050, minGapPct*5.0),
 		0.0100,
 		0.0150,
+		0.0200,
 	}
 	base := make([]float64, 0, len(basePcts)+1)
 	base = append(base, widenedProtectiveStop(side, entry, mark, tickSize))

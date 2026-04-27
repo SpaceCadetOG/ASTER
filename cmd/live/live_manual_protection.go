@@ -249,6 +249,7 @@ func (m *liveExecManager) logManageFailedSafe(p *livePosition, mark, computedSto
 			fmt.Sprintf("<b>%s %s</b>", p.Symbol, displayPositionSide(p.Side)),
 			fmt.Sprintf("<b>Protect Ref:</b> %s | <b>Entry:</b> %s", refText, fmtPrice(p.EntryPrice)),
 			fmt.Sprintf("<b>Computed Stop:</b> %s | <b>Normalized:</b> %s", fmtPrice(computedStop), fmtPrice(normalizedStop)),
+			fmt.Sprintf("<b>Trigger Ref:</b> %s", strings.ToUpper(strings.TrimSpace(m.stopTriggerRef))),
 			fmt.Sprintf("<b>Cause:</b> %s", cause),
 			fmt.Sprintf("<b>Protection:</b> %s | <b>Retries:</b> %d/%d", manualProtectionStatus(p), p.ProtectionRetryCount, manualProtectionRetryBudget()),
 		}
@@ -281,6 +282,7 @@ func (m *liveExecManager) keepExistingManagedProtection(p *livePosition, preserv
 		lines := []string{
 			fmt.Sprintf("<b>Exchange stop retained:</b> %s", fmtPrice(preservedStop)),
 			fmt.Sprintf("<b>Order ID:</b> %d", preservedOrderID),
+			fmt.Sprintf("<b>Trigger Ref:</b> %s", strings.ToUpper(strings.TrimSpace(m.stopTriggerRef))),
 			"<b>Stop tighten rejected; prior live stop remains active.</b>",
 		}
 		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
@@ -400,6 +402,16 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 	if qty <= 0 || stopPx <= 0 {
 		return fmt.Errorf("invalid stop qty/price")
 	}
+	if manualManagedTrade(p) && oldStopOrderID > 0 && prevStop > 0 &&
+		((isLongSide(p.Side) && stopPx < prevStop) || (!isLongSide(p.Side) && stopPx > prevStop)) {
+		stopPx = prevStop
+	}
+	if manualManagedTrade(p) && oldStopOrderID > 0 && prevStop > 0 &&
+		!replacementProtectiveStopExchangeSafe(p.Side, protectiveEntry, protectiveMark, stopPx, meta.TickSize, p.WinnerLifecycle) {
+		if m.keepExistingManagedProtection(p, prevStop, oldStopOrderID, "replacement_stop_too_close_retained") {
+			return nil
+		}
+	}
 	legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx)
 	if legalityReason != "" {
 		if manualManagedTrade(p) && legalityReason == orderIllegalTickSizeReason {
@@ -470,7 +482,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 				lastRetryMark = mark
 				for _, candidate := range manualStopRetryCandidates(p.Side, protectiveEntry, mark, meta.TickSize) {
 					retryStop := normalizeProtectiveStopToTick(p.Side, candidate, meta)
-					if !protectiveStopExchangeSafe(p.Side, protectiveEntry, mark, retryStop, meta.TickSize) {
+					if !replacementProtectiveStopExchangeSafe(p.Side, protectiveEntry, mark, retryStop, meta.TickSize, p.WinnerLifecycle) {
 						lastRetryStop = retryStop
 						continue
 					}

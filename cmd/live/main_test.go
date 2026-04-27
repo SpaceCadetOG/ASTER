@@ -3214,6 +3214,18 @@ func TestProtectiveStopExchangeSafeRequiresBuffer(t *testing.T) {
 	}
 }
 
+func TestReplacementProtectiveStopExchangeSafeIsStricterForLateTrail(t *testing.T) {
+	if !protectiveStopExchangeSafe("SELL", 1.4310, 1.4010, 1.4100, 0.0001) {
+		t.Fatal("expected baseline protective stop to be exchange-safe")
+	}
+	if replacementProtectiveStopExchangeSafe("SELL", 1.4310, 1.4010, 1.4100, 0.0001, "late_trail") {
+		t.Fatal("expected late-trail replacement stop to require wider buffer")
+	}
+	if !replacementProtectiveStopExchangeSafe("SELL", 1.4310, 1.4010, 1.4520, 0.0001, "late_trail") {
+		t.Fatal("expected wider retained short stop to remain replacement-safe")
+	}
+}
+
 func TestHasLiveProtectiveOrderRequiresRealOrderAndNoPendingProtection(t *testing.T) {
 	if hasLiveProtectiveOrder(&livePosition{}) {
 		t.Fatal("expected no live protection without stop order")
@@ -3231,7 +3243,13 @@ func TestManualStopRetryCandidatesEscalateBeyondLegacyImmediateTriggerWidths(t *
 	if len(candidates) < 7 {
 		t.Fatalf("expected expanded widening ladder, got %d candidates: %#v", len(candidates), candidates)
 	}
-	if candidates[len(candidates)-1] <= 1.010 {
+	maxCandidate := 0.0
+	for _, candidate := range candidates {
+		if candidate > maxCandidate {
+			maxCandidate = candidate
+		}
+	}
+	if maxCandidate <= 1.019 {
 		t.Fatalf("expected final retry candidate to widen materially, got %#v", candidates)
 	}
 }
