@@ -109,7 +109,7 @@ func (m *liveExecManager) reconcileAfterUnknown(symbol, intentID string) string 
 	}
 	raw := strings.ToUpper(strings.TrimSpace(symbol))
 	orderFound := false
-	if orders, err := m.rest.OpenOrders(raw); err == nil {
+	if orders, err := cachedOpenOrders(m.rest, raw); err == nil {
 		orderFound = len(orders) > 0
 	} else {
 		m.emitNotify(notify.Event{
@@ -124,7 +124,7 @@ func (m *liveExecManager) reconcileAfterUnknown(symbol, intentID string) string 
 		})
 	}
 	posFound := false
-	if rows, err := m.rest.PositionRisk(raw); err == nil {
+	if rows, err := cachedPositionRisk(m.rest, raw); err == nil {
 		view := remotePositionForSide(rows, "")
 		posFound = view.QtyAbs > 0
 	} else {
@@ -226,7 +226,7 @@ func (m *liveExecManager) syncPendingEntryFromRemote(p *livePosition) (float64, 
 	if m == nil || m.rest == nil || p == nil {
 		return 0, 0, false
 	}
-	rows, err := m.rest.PositionRisk(p.Symbol)
+	rows, err := cachedPositionRisk(m.rest, p.Symbol)
 	if err != nil {
 		return 0, 0, false
 	}

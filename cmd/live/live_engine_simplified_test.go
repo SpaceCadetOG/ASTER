@@ -111,10 +111,41 @@ func TestDecideSimpleEntryNowConfluenceAutoEntryAllows(t *testing.T) {
 func TestChoosePrimaryLiveSignalWeakSlopeFails(t *testing.T) {
 	withHealthyAccountProvider(t)
 	c := baseSimpleLongCandidate()
+	c.Entry.Rank = 25
+	c.FinalRank = 20
+	c.CombinedScore = 0.20
 	c.Entry.ScoreSlope = 0.05
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
 	if got.Strat != "none" || got.RejectReason != "no_simple_entry" {
 		t.Fatalf("expected no_simple_entry for weak slope, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	}
+}
+
+func TestDecideSimpleEntryNowStrongActionableOverrideBypassesStaleLeaderHeuristic(t *testing.T) {
+	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = time.Now().UTC()
+	c.Entry.Rank = 22
+	c.FinalRank = 18
+	c.CombinedScore = 0.30
+	c.Entry.CurrentScore = 98
+	c.Entry.ScoreSlope = 0.38
+	c.VolumeRatio = 1.15
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy", AsOf: time.Now().UTC()})
+	if !dec.Allowed || dec.Reason != "entry_now_long" {
+		t.Fatalf("expected strong actionable override to allow entry, got %+v", dec)
+	}
+}
+
+func TestDecideSimpleEntryNowPrefersWeakSlopeOverNotTopLeader(t *testing.T) {
+	c := baseSimpleLongCandidate()
+	c.Entry.LastSeen = time.Now().UTC()
+	c.Entry.Rank = 30
+	c.FinalRank = 10
+	c.CombinedScore = 0.10
+	c.Entry.ScoreSlope = 0.03
+	dec := decideSimpleEntryNow(c, accountHealthSummary{State: "healthy", AsOf: time.Now().UTC()})
+	if dec.Allowed || dec.Reason != "weak_slope" {
+		t.Fatalf("expected weak_slope to win over stale leader reject, got %+v", dec)
 	}
 }
 
@@ -253,6 +284,33 @@ func TestDecideSimplePaperEntryNowStrongLeaderPasses(t *testing.T) {
 	dec := decideSimplePaperEntryNow(baseSimplePaperLongCandidate(), accountHealthSummary{State: "healthy"})
 	if !dec.Allowed || dec.Side != "LONG" || dec.Reason != "entry_now_long" {
 		t.Fatalf("expected allowed paper long entry, got %+v", dec)
+	}
+}
+
+func TestShouldSuppressSimpleDecisionLogSuppressesUnchangedRepeat(t *testing.T) {
+	t.Setenv("LIVE_SIMPLE_DECISION_SUPPRESS_TTL_SEC", "45")
+	simpleDecisionLogMu.Lock()
+	simpleDecisionLogMem = map[string]simpleDecisionLogState{}
+	simpleDecisionLogMu.Unlock()
+	c := baseSimpleLongCandidate()
+	if shouldSuppressSimpleDecisionLog(c, false, "weak_slope") {
+		t.Fatal("expected first simple decision log to pass through")
+	}
+	if !shouldSuppressSimpleDecisionLog(c, false, "weak_slope") {
+		t.Fatal("expected unchanged repeat simple decision log to suppress")
+	}
+}
+
+func TestShouldSuppressSimpleDecisionLogAllowsMaterialChange(t *testing.T) {
+	t.Setenv("LIVE_SIMPLE_DECISION_SUPPRESS_TTL_SEC", "45")
+	simpleDecisionLogMu.Lock()
+	simpleDecisionLogMem = map[string]simpleDecisionLogState{}
+	simpleDecisionLogMu.Unlock()
+	c := baseSimpleLongCandidate()
+	_ = shouldSuppressSimpleDecisionLog(c, false, "weak_slope")
+	c.Entry.ScoreSlope = 0.20
+	if shouldSuppressSimpleDecisionLog(c, false, "weak_slope") {
+		t.Fatal("expected materially changed simple decision log to emit")
 	}
 }
 

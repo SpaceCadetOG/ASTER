@@ -154,12 +154,8 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 			return out, nil
 		}
 	}
-	if err := signedUserDataBackoffCheck(now); err != nil {
-		return out, err
-	}
 	missing := map[string]struct{}{}
-	acct, acctErr := rest.GetAccountSummary()
-	signedUserDataBackoffObserve(now, acctErr)
+	acct, acctErr := cachedAccountSummary(rest)
 	if acctErr != nil {
 		missing["perp_account_summary"] = struct{}{}
 	}
@@ -190,8 +186,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	var bals []aster.Balance
 	var balErr error
 	if !havePerpWallet || !havePerpAvail || !havePerpUnreal {
-		bals, balErr = rest.GetBalance()
-		signedUserDataBackoffObserve(now, balErr)
+		bals, balErr = cachedBalances(rest)
 		if balErr != nil {
 			missing["perp_balance"] = struct{}{}
 		}
@@ -221,8 +216,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 	var rows []map[string]any
 	var posErr error
 	if !haveOpenPositions || !havePerpUnreal || !haveMarginUsed {
-		rows, posErr = rest.PositionRisk("")
-		signedUserDataBackoffObserve(now, posErr)
+		rows, posErr = cachedPositionRisk(rest, "")
 		if posErr != nil {
 			missing["position_risk"] = struct{}{}
 		}
@@ -258,8 +252,7 @@ func fetchNormalizedAccountSummary(rest *aster.RESTAuth, transferManager Transfe
 		}
 	}
 
-	orders, ordersErr := rest.OpenOrders("")
-	signedUserDataBackoffObserve(now, ordersErr)
+	orders, ordersErr := cachedOpenOrders(rest, "")
 	if ordersErr != nil {
 		missing["open_orders"] = struct{}{}
 	}

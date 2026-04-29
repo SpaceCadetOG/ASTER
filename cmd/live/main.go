@@ -94,6 +94,14 @@ type candidate struct {
 	ResetRebreak           bool
 	ExtensionATR           float64
 	StructureReason        string
+	LiquidityRisk          bool
+	LiquidityRiskReason    string
+	LiquidityPoolLevel     float64
+	LiquidityPoolCount     int
+	LiquidityPoolSide      string
+	LiquiditySweepSeen     bool
+	LiquiditySweepStrength float64
+	LiquiditySweepBarsAgo  int
 	PatternBias            float64
 	PatternReasons         []string
 	WallMode               string
@@ -245,12 +253,19 @@ type acceptanceQueueConfig struct {
 }
 
 type recentRejectMemory struct {
-	Symbol      string
-	Reject      string
-	ExpiresAt   time.Time
-	Discovery   float64
-	Combined    float64
-	LastAttempt time.Time
+	Symbol       string
+	Side         string
+	Reject       string
+	ExpiresAt    time.Time
+	Discovery    float64
+	Combined     float64
+	Score        float64
+	Slope        float64
+	State        string
+	SpreadBps    float64
+	ExtensionATR float64
+	FinalRank    float64
+	LastAttempt  time.Time
 }
 
 type positionView struct {
@@ -2483,6 +2498,19 @@ func main() {
 			if c.StructureReason != "" {
 				c.QualityReasons = append(c.QualityReasons, "structure:"+c.StructureReason)
 			}
+			if c.LiquidityRisk {
+				c.QualityReasons = append(c.QualityReasons,
+					"liquidity_risk:"+c.LiquidityRiskReason,
+					fmt.Sprintf("liquidity_level=%.8f", c.LiquidityPoolLevel),
+					fmt.Sprintf("liquidity_touches=%d", c.LiquidityPoolCount),
+				)
+				if c.LiquiditySweepSeen {
+					c.QualityReasons = append(c.QualityReasons,
+						fmt.Sprintf("liquidity_sweep_strength=%.3f", c.LiquiditySweepStrength),
+						fmt.Sprintf("liquidity_sweep_bars_ago=%d", c.LiquiditySweepBarsAgo),
+					)
+				}
+			}
 			if c.SetupFamily != "" {
 				c.QualityReasons = append(c.QualityReasons, "setup:"+c.SetupFamily)
 			}
@@ -2629,12 +2657,37 @@ func main() {
 				}
 			}
 			c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
+			if liquidityReason := liquidityRiskRejectReason(c); liquidityReason != "" {
+				if suppressOrRememberReject(recentRejects, now, c, liquidityReason, acceptanceCfg) {
+					continue
+				}
+				recordCandidateDecision(cmdCtx, c, liquidityReason)
+				f := false
+				eventLog.Emit(stats.Event{
+					Timestamp:   now,
+					Type:        "GATE_DECISION",
+					Symbol:      rawCandidate,
+					Side:        c.Side,
+					Strategy:    c.Strat,
+					Score:       c.Entry.CurrentScore,
+					Slope:       c.Entry.ScoreSlope,
+					Discovery:   c.DiscoveryScore,
+					Trigger:     c.TriggerScore,
+					Execution:   c.ExecutionScore,
+					Combined:    c.CombinedScore,
+					GateAllow:   &f,
+					GateReasons: []string{liquidityReason},
+				})
+				continue
+			}
 			if paperSimpleMode {
 				pdec := decideSimplePaperEntryNow(c, currentAccountHealth())
 				logSimplePaperDecision(c, pdec)
 				if !pdec.Allowed {
+					if suppressOrRememberReject(recentRejects, now, c, pdec.Reason, acceptanceCfg) {
+						continue
+					}
 					recordCandidateDecision(cmdCtx, c, pdec.Reason)
-					rememberRecentReject(recentRejects, now, c, pdec.Reason, acceptanceCfg)
 					f := false
 					eventLog.Emit(stats.Event{
 						Timestamp:   now,
@@ -8253,11 +8306,7 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 	if m == nil || m.rest == nil {
 		return 0, 0, nil
 	}
-	if err := signedUserDataBackoffCheck(time.Now().UTC()); err != nil {
-		return 0, 0, err
-	}
-	rows, err := m.rest.PositionRisk("")
-	signedUserDataBackoffObserve(time.Now().UTC(), err)
+	rows, err := cachedPositionRisk(m.rest, "")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -9164,11 +9213,7 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 		return 0, nil
 	}
 	importAutoManage := envBool("LIVE_IMPORT_AUTO_MANAGE_ENABLE", false)
-	if err := signedUserDataBackoffCheck(now); err != nil {
-		return 0, err
-	}
-	rows, err := m.rest.PositionRisk("")
-	signedUserDataBackoffObserve(now, err)
+	rows, err := cachedPositionRisk(m.rest, "")
 	if err != nil {
 		return 0, err
 	}
@@ -9291,12 +9336,8 @@ func (m *liveExecManager) validateManualManageRequest(req manualManageRequest, n
 	if m == nil || m.rest == nil {
 		return nil
 	}
-	if err := signedUserDataBackoffCheck(now); err != nil {
-		return err
-	}
 	sym := strings.ToUpper(strings.TrimSpace(req.Symbol))
-	rows, err := m.rest.PositionRisk(sym)
-	signedUserDataBackoffObserve(now, err)
+	rows, err := cachedPositionRisk(m.rest, sym)
 	if err != nil {
 		return err
 	}
@@ -9955,7 +9996,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	}
 	if m.marginType != "" {
 		alreadySet := false
-		if rows, err := m.rest.PositionRisk(rawSym); err == nil {
+		if rows, err := cachedPositionRisk(m.rest, rawSym); err == nil {
 			alreadySet = marginTypeAlreadySet(rows, rawSym, m.marginType)
 		}
 		if !alreadySet {
@@ -10274,7 +10315,7 @@ func (m *liveExecManager) reconcilePendingAdd(now time.Time, p *livePosition) (b
 	}
 	order, err := m.rest.GetOrder(p.Symbol, p.PendingAddOrderID)
 	if err != nil {
-		if rows, syncErr := m.rest.PositionRisk(p.Symbol); syncErr == nil {
+		if rows, syncErr := cachedPositionRisk(m.rest, p.Symbol); syncErr == nil {
 			changed, _, applyErr := m.syncOpenFromRemote(now, p, rows)
 			if applyErr == nil && changed {
 				return true, nil
@@ -10331,7 +10372,7 @@ func (m *liveExecManager) reconcilePendingExit(now time.Time, p *livePosition) (
 	}
 	order, err := m.rest.GetOrder(p.Symbol, p.PendingExitOrderID)
 	if err != nil {
-		if rows, syncErr := m.rest.PositionRisk(p.Symbol); syncErr == nil {
+		if rows, syncErr := cachedPositionRisk(m.rest, p.Symbol); syncErr == nil {
 			changed, closed, applyErr := m.syncOpenFromRemote(now, p, rows)
 			if applyErr == nil && (changed || closed) {
 				return true, nil
@@ -10393,7 +10434,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 		return true, nil
 	}
 	var remoteRows []map[string]any
-	if rows, err := m.rest.PositionRisk(p.Symbol); err == nil {
+	if rows, err := cachedPositionRisk(m.rest, p.Symbol); err == nil {
 		remoteRows = rows
 		synced, closed, err := m.syncOpenFromRemote(now, p, rows)
 		if err != nil {
@@ -10618,7 +10659,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 	}
 	// If exchange position is flat, close local state and cancel leftovers.
 	if len(remoteRows) == 0 {
-		rows, err := m.rest.PositionRisk(p.Symbol)
+		rows, err := cachedPositionRisk(m.rest, p.Symbol)
 		if err == nil {
 			remoteRows = rows
 		}
@@ -15253,6 +15294,66 @@ func candidateKey(c candidate) string {
 	return strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)) + "|" + strings.ToUpper(strings.TrimSpace(c.Side))
 }
 
+func recentRejectKey(c candidate) string {
+	return strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))) + "|" + strings.ToUpper(strings.TrimSpace(c.Side))
+}
+
+func suppressibleRepeatReject(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "weak_slope", "spread_too_wide", "extended", "not_top_leader":
+		return true
+	default:
+		return false
+	}
+}
+
+func materiallyChangedAfterReject(prev recentRejectMemory, c candidate) bool {
+	if strings.TrimSpace(prev.State) != strings.TrimSpace(string(c.Entry.State)) {
+		return true
+	}
+	if math.Abs(prev.Score-c.Entry.CurrentScore) >= envFloat("LIVE_REPEAT_REJECT_SCORE_DELTA", 2.5) {
+		return true
+	}
+	if math.Abs(prev.Slope-c.Entry.ScoreSlope) >= envFloat("LIVE_REPEAT_REJECT_SLOPE_DELTA", 0.05) {
+		return true
+	}
+	if math.Abs(prev.SpreadBps-c.SpreadBps) >= envFloat("LIVE_REPEAT_REJECT_SPREAD_DELTA_BPS", 2.0) {
+		return true
+	}
+	if math.Abs(prev.ExtensionATR-c.ExtensionATR) >= envFloat("LIVE_REPEAT_REJECT_EXTENSION_DELTA", 0.20) {
+		return true
+	}
+	if math.Abs(prev.FinalRank-c.FinalRank) >= envFloat("LIVE_REPEAT_REJECT_FINAL_RANK_DELTA", 5.0) {
+		return true
+	}
+	return false
+}
+
+func shouldSuppressDuplicateReject(mem map[string]recentRejectMemory, now time.Time, c candidate, reason string, cfg acceptanceQueueConfig) bool {
+	if cfg.RecentRejectTTL <= 0 || !suppressibleRepeatReject(reason) {
+		return false
+	}
+	key := recentRejectKey(c)
+	rec, ok := mem[key]
+	if !ok {
+		return false
+	}
+	if now.After(rec.ExpiresAt) {
+		delete(mem, key)
+		return false
+	}
+	if strings.TrimSpace(rec.Reject) != strings.TrimSpace(reason) {
+		return false
+	}
+	if materiallyChangedAfterReject(rec, c) {
+		return false
+	}
+	rec.LastAttempt = now
+	rec.ExpiresAt = now.Add(cfg.RecentRejectTTL)
+	mem[key] = rec
+	return true
+}
+
 func sideEntryMap(entries []inplay.Entry) map[string]inplay.Entry {
 	out := make(map[string]inplay.Entry, len(entries))
 	for _, e := range entries {
@@ -15283,13 +15384,20 @@ func rememberRecentReject(mem map[string]recentRejectMemory, now time.Time, c ca
 	if c.DiscoveryScore < 0.60 && c.CombinedScore < 0.55 {
 		return
 	}
-	mem[raw] = recentRejectMemory{
-		Symbol:      raw,
-		Reject:      reason,
-		ExpiresAt:   now.Add(cfg.RecentRejectTTL),
-		Discovery:   c.DiscoveryScore,
-		Combined:    c.CombinedScore,
-		LastAttempt: now,
+	mem[recentRejectKey(c)] = recentRejectMemory{
+		Symbol:       raw,
+		Side:         strings.ToUpper(strings.TrimSpace(c.Side)),
+		Reject:       reason,
+		ExpiresAt:    now.Add(cfg.RecentRejectTTL),
+		Discovery:    c.DiscoveryScore,
+		Combined:     c.CombinedScore,
+		Score:        c.Entry.CurrentScore,
+		Slope:        c.Entry.ScoreSlope,
+		State:        string(c.Entry.State),
+		SpreadBps:    c.SpreadBps,
+		ExtensionATR: c.ExtensionATR,
+		FinalRank:    c.FinalRank,
+		LastAttempt:  now,
 	}
 }
 
@@ -15307,6 +15415,14 @@ func activeRecentRejectSymbols(now time.Time, mem map[string]recentRejectMemory)
 	}
 	sort.Strings(out)
 	return out
+}
+
+func suppressOrRememberReject(mem map[string]recentRejectMemory, now time.Time, c candidate, reason string, cfg acceptanceQueueConfig) bool {
+	if shouldSuppressDuplicateReject(mem, now, c, reason, cfg) {
+		return true
+	}
+	rememberRecentReject(mem, now, c, reason, cfg)
+	return false
 }
 
 func trimRecentTimes(now time.Time, in []time.Time, window time.Duration) []time.Time {
@@ -15382,6 +15498,9 @@ func continuationLaneRejectReason(c candidate) string {
 	}
 	if starterLaneEligible(c) {
 		return ""
+	}
+	if reason := liquidityRiskRejectReason(c); reason != "" {
+		return reason
 	}
 	if candidateExhaustionActive(c) {
 		return "continuation_exhaustion_active"
@@ -16596,6 +16715,9 @@ func qualifiesStructuredReentry(c candidate) bool {
 	if !continuationStateTrending(c.Entry.State) || candidateExhaustionActive(c) || !candidatePriceConfirmsDirection(c) {
 		return false
 	}
+	if liquidityRiskRejectReason(c) != "" {
+		return false
+	}
 	if hasFreshStructureReset(c) || continuationStructureConfirmed(c) {
 		return true
 	}
@@ -17379,6 +17501,149 @@ func hasFreshStructureReset(c candidate) bool {
 	return c.ReclaimHold || c.RetestHold || c.ResetRebreak
 }
 
+func nearbyLiquidityRiskPool(c candidate, pools []features.LiquidityPool, lastClose float64) (features.LiquidityPool, bool) {
+	if lastClose <= 0 || len(pools) == 0 {
+		return features.LiquidityPool{}, false
+	}
+	nearBps := envFloat("LIVE_LIQUIDITY_RISK_NEARBY_BPS", 35.0)
+	minTouches := envInt("LIVE_LIQUIDITY_RISK_MIN_TOUCHES", 2)
+	bestDist := math.MaxFloat64
+	var best features.LiquidityPool
+	found := false
+	for _, p := range pools {
+		if p.Level <= 0 || p.Count < minTouches {
+			continue
+		}
+		if strings.EqualFold(c.Side, "BUY") {
+			if p.Side != features.SideLong || p.Level >= lastClose {
+				continue
+			}
+			dist := ((lastClose - p.Level) / lastClose) * 10000.0
+			if dist <= nearBps && dist < bestDist {
+				bestDist = dist
+				best = p
+				found = true
+			}
+			continue
+		}
+		if p.Side != features.SideShort || p.Level <= lastClose {
+			continue
+		}
+		dist := ((p.Level - lastClose) / lastClose) * 10000.0
+		if dist <= nearBps && dist < bestDist {
+			bestDist = dist
+			best = p
+			found = true
+		}
+	}
+	return best, found
+}
+
+func detectRecentLiquiditySweep(bars []features.Candle, p features.LiquidityPool) (bool, float64, int) {
+	if len(bars) == 0 || p.Level <= 0 {
+		return false, 0, 0
+	}
+	lookback := maxInt(1, envInt("LIVE_LIQUIDITY_SWEEP_LOOKBACK_BARS", 4))
+	start := maxInt(0, len(bars)-lookback)
+	bestStrength := 0.0
+	bestBarsAgo := 0
+	found := false
+	for i := len(bars) - 1; i >= start; i-- {
+		b := bars[i]
+		if p.Side == features.SideLong {
+			if b.L < p.Level && b.C > p.Level {
+				wickPct := ((p.Level - b.L) / p.Level) * 100.0
+				if !found || wickPct > bestStrength {
+					bestStrength = wickPct + 0.5
+					bestBarsAgo = len(bars) - 1 - i
+					found = true
+				}
+			}
+			continue
+		}
+		if b.H > p.Level && b.C < p.Level {
+			wickPct := ((b.H - p.Level) / p.Level) * 100.0
+			if !found || wickPct > bestStrength {
+				bestStrength = wickPct + 0.5
+				bestBarsAgo = len(bars) - 1 - i
+				found = true
+			}
+		}
+	}
+	return found, bestStrength, bestBarsAgo
+}
+
+func applyLiquidityRiskSignals(cand *candidate, snap features.Snapshot, bars []features.Candle) {
+	if cand == nil || !envBool("LIVE_LIQUIDITY_RISK_ENABLE", true) {
+		return
+	}
+	pool, ok := nearbyLiquidityRiskPool(*cand, snap.Pools, cand.LastClose)
+	if !ok {
+		return
+	}
+	cand.LiquidityRisk = true
+	cand.LiquidityPoolLevel = pool.Level
+	cand.LiquidityPoolCount = pool.Count
+	cand.LiquidityPoolSide = string(pool.Side)
+	if strings.EqualFold(cand.Side, "BUY") {
+		cand.LiquidityRiskReason = "weak_low_below_entry"
+	} else {
+		cand.LiquidityRiskReason = "weak_high_above_entry"
+	}
+	sweepSeen, sweepStrength, barsAgo := detectRecentLiquiditySweep(bars, pool)
+	if !sweepSeen && snap.Sweep != nil && snap.Sweep.Side == pool.Side && math.Abs(relativePct(snap.Sweep.Level, pool.Level)) <= envFloat("LIVE_LIQUIDITY_SAME_LEVEL_TOL_PCT", 0.20) {
+		sweepSeen = true
+		sweepStrength = snap.Sweep.Strength
+		barsAgo = 0
+	}
+	cand.LiquiditySweepSeen = sweepSeen
+	cand.LiquiditySweepStrength = sweepStrength
+	cand.LiquiditySweepBarsAgo = barsAgo
+}
+
+func liquiditySweepAcceptanceConfirmed(c candidate) bool {
+	if !c.LiquidityRisk {
+		return true
+	}
+	structureOK := hasFreshStructureReset(c) || c.ReclaimHold || c.RetestHold || c.ClosedBreakHold
+	if !structureOK {
+		return false
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.LastClose > c.LiquidityPoolLevel
+	}
+	return c.LastClose < c.LiquidityPoolLevel
+}
+
+func liquiditySweepOFIConfirmed(c candidate) bool {
+	ofiEnabled := envBool("LIVE_ENABLE_OFI", true)
+	ofiMinSamples := maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8))
+	if !ofiEnabled || c.OFISamples < ofiMinSamples {
+		return true
+	}
+	minOFIZ := envFloat("LIVE_LIQUIDITY_SWEEP_MIN_OFI_Z", 0.15)
+	if strings.EqualFold(c.Side, "BUY") {
+		return c.OFIZ >= minOFIZ
+	}
+	return c.OFIZ <= -minOFIZ
+}
+
+func liquidityRiskRejectReason(c candidate) string {
+	if !envBool("LIVE_LIQUIDITY_RISK_ENABLE", true) || !c.LiquidityRisk {
+		return ""
+	}
+	if !c.LiquiditySweepSeen {
+		return "liquidity_risk_wait_sweep"
+	}
+	if !liquiditySweepAcceptanceConfirmed(c) {
+		return "liquidity_risk_wait_reclaim_hold"
+	}
+	if !liquiditySweepOFIConfirmed(c) {
+		return "liquidity_risk_wait_ofi_confirm"
+	}
+	return ""
+}
+
 func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 	switch c.SetupFamily {
 	case "reset_impulse_breakout":
@@ -17581,6 +17846,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	cand.ATR = snapView.ATR
 	cand.ATRPct = snapView.ATRPct
 	deriveContinuationStructureSignals(&cand, fc)
+	applyLiquidityRiskSignals(&cand, snap, fc)
 	applyPatternModifiers(&cand, fc)
 	if fm, ok := flow[raw]; ok {
 		cand.OFIRaw = fm.OFIRaw
@@ -19083,12 +19349,7 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, a
 		return accountSnapshotFromUserData(snap, assets), nil
 	}
 	snap := accountSnapshot{}
-	now := time.Now().UTC()
-	if err := signedUserDataBackoffCheck(now); err != nil {
-		return snap, err
-	}
-	bals, err := rest.GetBalance()
-	signedUserDataBackoffObserve(now, err)
+	bals, err := cachedBalances(rest)
 	if err != nil {
 		return snap, err
 	}
@@ -19099,8 +19360,7 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, a
 			break
 		}
 	}
-	rows, err := rest.PositionRisk("")
-	signedUserDataBackoffObserve(now, err)
+	rows, err := cachedPositionRisk(rest, "")
 	if err != nil {
 		return snap, err
 	}
@@ -19523,7 +19783,7 @@ func filterBalances(rows []aster.Balance, assets []string) []aster.Balance {
 }
 
 func availableUSDT(rest *aster.RESTAuth) (float64, error) {
-	bals, err := rest.GetBalance()
+	bals, err := cachedBalances(rest)
 	if err != nil {
 		return 0, err
 	}
@@ -19536,7 +19796,7 @@ func availableUSDT(rest *aster.RESTAuth) (float64, error) {
 }
 
 func countOpenPositions(rest *aster.RESTAuth) (int, error) {
-	rows, err := rest.PositionRisk("")
+	rows, err := cachedPositionRisk(rest, "")
 	if err != nil {
 		return 0, err
 	}

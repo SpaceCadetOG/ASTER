@@ -44,7 +44,20 @@ var (
 	reentryGuardMu      sync.Mutex
 	reentryGuardBySym   = map[string]exitmgr.ReentryRecord{}
 	reentryGuardEnabled = true
+	simpleDecisionLogMu  sync.Mutex
+	simpleDecisionLogMem = map[string]simpleDecisionLogState{}
 )
+
+type simpleDecisionLogState struct {
+	Reason       string
+	Allowed      bool
+	Score        float64
+	Slope        float64
+	State        string
+	SpreadBps    float64
+	ExtensionATR float64
+	ExpiresAt    time.Time
+}
 
 func setLiveEntryAccountHealthProvider(fn func() accountHealthSummary) {
 	if fn == nil {
@@ -510,9 +523,6 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
-	if !simpleEntryLeaderEligible(c) {
-		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
-	}
 	confluenceHardGate := envBool("LIVE_SIMPLE_CONFLUENCE_HARD_GATE", false)
 	if confluenceScorePct, ok := candidateConfluenceScorePct(c); ok {
 		if confluenceHardGate && confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
@@ -546,6 +556,9 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 	}
 	if block, reason := reentryGuardReject(c, side, now); block {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+	}
+	if !simpleEntryLeaderEligible(c) {
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "not_top_leader", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
 	reason := "entry_now_" + strings.ToLower(side)
 	if staleData {
@@ -734,7 +747,43 @@ func simpleEntryLeaderEligible(c candidate) bool {
 	if c.FinalRank >= minFinalRank {
 		return true
 	}
-	return c.CombinedScore >= minCombined
+	if c.CombinedScore >= minCombined {
+		return true
+	}
+	return simpleEntryActionableOverride(c)
+}
+
+func simpleEntryActionableOverride(c candidate) bool {
+	side := simpleEntrySide(c.Side)
+	if side == "" {
+		return false
+	}
+	if !simpleStateAllowed(c.Entry.State, side) {
+		return false
+	}
+	if c.Entry.CurrentScore < envFloat("LIVE_SIMPLE_ENTRY_ACTIONABLE_SCORE", 92.0) {
+		return false
+	}
+	if c.Entry.ScoreSlope < envFloat("LIVE_SIMPLE_ENTRY_ACTIONABLE_SLOPE", 0.12) {
+		return false
+	}
+	if c.ExtensionATR >= envFloat("LIVE_TRUE_EXTENSION_ATR", 2.25) {
+		return false
+	}
+	if candidateSpikeCandle(c) || c.Entry.ExhaustionRisk >= envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5) {
+		return false
+	}
+	if c.SpreadBps > envFloat("LIVE_MAX_SPREAD_BPS", envFloat("LIVE_OB_MAX_SPREAD_BPS", 10)) {
+		return false
+	}
+	if directionalConflictRejectReason(c) != "" {
+		return false
+	}
+	if !candidatePriceConfirmsDirection(c) {
+		return false
+	}
+	minVolRatio := envFloat("LIVE_SIMPLE_ENTRY_ACTIONABLE_MIN_VOL_RATIO", 0.90)
+	return c.VolumeRatio >= minVolRatio || c.Entry.Momentum || continuationStructureConfirmed(c) || hasFreshStructureReset(c)
 }
 
 func simpleStateAllowed(st inplay.State, side string) bool {
@@ -766,8 +815,52 @@ func simpleMinSlope(side string) float64 {
 	return envFloat("LIVE_SIMPLE_LONG_MIN_SLOPE", 0.20)
 }
 
+func shouldSuppressSimpleDecisionLog(c candidate, allowed bool, reason string) bool {
+	if !suppressibleRepeatReject(reason) {
+		return false
+	}
+	ttl := time.Duration(envInt("LIVE_SIMPLE_DECISION_SUPPRESS_TTL_SEC", 45)) * time.Second
+	if ttl <= 0 {
+		return false
+	}
+	key := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))) + "|" + strings.ToUpper(strings.TrimSpace(c.Side)) + "|" + firstNonEmpty(strings.TrimSpace(reason), "none")
+	now := time.Now().UTC()
+	simpleDecisionLogMu.Lock()
+	defer simpleDecisionLogMu.Unlock()
+	prev, ok := simpleDecisionLogMem[key]
+	if ok {
+		if now.After(prev.ExpiresAt) {
+			delete(simpleDecisionLogMem, key)
+		} else if prev.Allowed == allowed &&
+			prev.Reason == strings.TrimSpace(reason) &&
+			prev.State == strings.TrimSpace(string(c.Entry.State)) &&
+			abs(prev.Score-c.Entry.CurrentScore) < envFloat("LIVE_REPEAT_REJECT_SCORE_DELTA", 2.5) &&
+			abs(prev.Slope-c.Entry.ScoreSlope) < envFloat("LIVE_REPEAT_REJECT_SLOPE_DELTA", 0.05) &&
+			abs(prev.SpreadBps-c.SpreadBps) < envFloat("LIVE_REPEAT_REJECT_SPREAD_DELTA_BPS", 2.0) &&
+			abs(prev.ExtensionATR-c.ExtensionATR) < envFloat("LIVE_REPEAT_REJECT_EXTENSION_DELTA", 0.20) {
+			prev.ExpiresAt = now.Add(ttl)
+			simpleDecisionLogMem[key] = prev
+			return true
+		}
+	}
+	simpleDecisionLogMem[key] = simpleDecisionLogState{
+		Reason:       strings.TrimSpace(reason),
+		Allowed:      allowed,
+		Score:        c.Entry.CurrentScore,
+		Slope:        c.Entry.ScoreSlope,
+		State:        strings.TrimSpace(string(c.Entry.State)),
+		SpreadBps:    c.SpreadBps,
+		ExtensionATR: c.ExtensionATR,
+		ExpiresAt:    now.Add(ttl),
+	}
+	return false
+}
+
 func logSimpleDecision(c candidate, allowed bool, reason string) {
 	if !shouldLogSimpleDecision(c) {
+		return
+	}
+	if shouldSuppressSimpleDecisionLog(c, allowed, reason) {
 		return
 	}
 	side := simpleEntrySide(c.Side)
@@ -967,6 +1060,9 @@ func paperSimpleShortAllowed(c candidate, moveMin float64) bool {
 
 func logSimplePaperDecision(c candidate, dec SimplePaperDecision) {
 	if !shouldLogSimpleDecision(c) {
+		return
+	}
+	if shouldSuppressSimpleDecisionLog(c, dec.Allowed, dec.Reason) {
 		return
 	}
 	log.Printf("SIMPLE_DECISION sym=%s side=%s score=%.2f slope=%.3f state=%s extended=%d exhausted=%d allowed=%d reason=%s",

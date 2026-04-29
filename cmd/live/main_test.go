@@ -4140,6 +4140,91 @@ func TestContinuationLaneRejectReasonBlocksExhaustionAndFadingImpulse(t *testing
 	}
 }
 
+func TestLiquidityRiskRejectReasonBlocksPresweepLong(t *testing.T) {
+	t.Setenv("LIVE_LIQUIDITY_RISK_ENABLE", "1")
+	c := candidate{
+		Side:                "BUY",
+		LiquidityRisk:       true,
+		LiquidityRiskReason: "weak_low_below_entry",
+		LiquidityPoolLevel:  0.98,
+		LastClose:           1.00,
+		Entry: inplay.Entry{
+			State: inplay.StateInPlay,
+		},
+	}
+	if got := liquidityRiskRejectReason(c); got != "liquidity_risk_wait_sweep" {
+		t.Fatalf("expected wait_sweep rejection, got %q", got)
+	}
+}
+
+func TestLiquidityRiskRejectReasonAllowsPostSweepReclaimHold(t *testing.T) {
+	t.Setenv("LIVE_LIQUIDITY_RISK_ENABLE", "1")
+	t.Setenv("LIVE_ENABLE_OFI", "1")
+	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
+	t.Setenv("LIVE_LIQUIDITY_SWEEP_MIN_OFI_Z", "0.15")
+	c := candidate{
+		Side:                 "BUY",
+		LiquidityRisk:        true,
+		LiquidityRiskReason:  "weak_low_below_entry",
+		LiquidityPoolLevel:   0.98,
+		LiquiditySweepSeen:   true,
+		LiquiditySweepBarsAgo: 1,
+		LastClose:            1.01,
+		ReclaimHold:          true,
+		OFISamples:           12,
+		OFIZ:                 0.42,
+		Entry: inplay.Entry{
+			State: inplay.StateInPlay,
+		},
+	}
+	if got := liquidityRiskRejectReason(c); got != "" {
+		t.Fatalf("expected post-sweep reclaim hold to pass, got %q", got)
+	}
+}
+
+func TestLiquidityRiskRejectReasonRequiresOFIConfirmAfterSweep(t *testing.T) {
+	t.Setenv("LIVE_LIQUIDITY_RISK_ENABLE", "1")
+	t.Setenv("LIVE_ENABLE_OFI", "1")
+	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
+	t.Setenv("LIVE_LIQUIDITY_SWEEP_MIN_OFI_Z", "0.15")
+	c := candidate{
+		Side:                "SELL",
+		LiquidityRisk:       true,
+		LiquidityRiskReason: "weak_high_above_entry",
+		LiquidityPoolLevel:  1.02,
+		LiquiditySweepSeen:  true,
+		LastClose:           1.00,
+		ReclaimHold:         true,
+		OFISamples:          10,
+		OFIZ:                -0.05,
+		Entry: inplay.Entry{
+			State: inplay.StateInPlay,
+		},
+	}
+	if got := liquidityRiskRejectReason(c); got != "liquidity_risk_wait_ofi_confirm" {
+		t.Fatalf("expected OFI confirm rejection, got %q", got)
+	}
+}
+
+func TestQualifiesStructuredReentryBlockedByLiquidityRisk(t *testing.T) {
+	t.Setenv("LIVE_LIQUIDITY_RISK_ENABLE", "1")
+	c := candidate{
+		Side:                "BUY",
+		LiquidityRisk:       true,
+		LiquidityRiskReason: "weak_low_below_entry",
+		LiquidityPoolLevel:  0.98,
+		Entry: inplay.Entry{
+			State: inplay.StateInPlay,
+		},
+		LastClose:   1.00,
+		SessionVWAP: 1.00,
+		EMA9:        1.00,
+	}
+	if qualifiesStructuredReentry(c) {
+		t.Fatal("expected structured reentry to fail while liquidity risk still needs sweep")
+	}
+}
+
 func TestStarterLaneQualityRequiresPersistenceOrReset(t *testing.T) {
 	t.Setenv("LIVE_STARTER_PERSIST_MIN_SEEN", "2")
 	t.Setenv("LIVE_STARTER_PERSIST_MIN_TOPN", "1")
@@ -4262,6 +4347,62 @@ func TestSessionAdjustedMarginReducesFreshEntriesButNotAdds(t *testing.T) {
 	}
 	if got, _, _ := sessionAdjustedMarginUSDT(overnight, c, ladderPlan{IsAdd: true}, 10); math.Abs(got-10.0) > 1e-9 {
 		t.Fatalf("expected adds to bypass session downsize, got %.2f", got)
+	}
+}
+
+func TestShouldSuppressDuplicateRejectSuppressesUnchangedRepeat(t *testing.T) {
+	t.Setenv("LIVE_REPEAT_REJECT_SCORE_DELTA", "2.5")
+	t.Setenv("LIVE_REPEAT_REJECT_SLOPE_DELTA", "0.05")
+	t.Setenv("LIVE_REPEAT_REJECT_SPREAD_DELTA_BPS", "2.0")
+	t.Setenv("LIVE_REPEAT_REJECT_EXTENSION_DELTA", "0.20")
+	now := time.Now().UTC()
+	cfg := acceptanceQueueConfig{RecentRejectTTL: 30 * time.Second}
+	mem := map[string]recentRejectMemory{}
+	c := candidate{
+		Side:         "BUY",
+		SpreadBps:    12.0,
+		ExtensionATR: 0.8,
+		FinalRank:    90,
+		DiscoveryScore: 0.72,
+		CombinedScore:  0.74,
+		Entry: inplay.Entry{
+			Symbol:       "SKYAIUSDT",
+			State:        inplay.StateHeating,
+			CurrentScore: 92,
+			ScoreSlope:   0.08,
+		},
+	}
+	if shouldSuppressDuplicateReject(mem, now, c, "weak_slope", cfg) {
+		t.Fatal("expected first reject to be recorded, not suppressed")
+	}
+	rememberRecentReject(mem, now, c, "weak_slope", cfg)
+	if !shouldSuppressDuplicateReject(mem, now.Add(5*time.Second), c, "weak_slope", cfg) {
+		t.Fatal("expected unchanged repeat reject to be suppressed")
+	}
+}
+
+func TestShouldSuppressDuplicateRejectAllowsMaterialStateChange(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := acceptanceQueueConfig{RecentRejectTTL: 30 * time.Second}
+	mem := map[string]recentRejectMemory{}
+	c := candidate{
+		Side:         "BUY",
+		SpreadBps:    12.0,
+		ExtensionATR: 0.8,
+		FinalRank:    90,
+		DiscoveryScore: 0.72,
+		CombinedScore:  0.74,
+		Entry: inplay.Entry{
+			Symbol:       "SKYAIUSDT",
+			State:        inplay.StateHeating,
+			CurrentScore: 92,
+			ScoreSlope:   0.08,
+		},
+	}
+	rememberRecentReject(mem, now, c, "weak_slope", cfg)
+	c.Entry.ScoreSlope = 0.20
+	if shouldSuppressDuplicateReject(mem, now.Add(5*time.Second), c, "weak_slope", cfg) {
+		t.Fatal("expected materially changed candidate to bypass suppression")
 	}
 }
 
