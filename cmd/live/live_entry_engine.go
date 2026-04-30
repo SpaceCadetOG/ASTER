@@ -46,6 +46,8 @@ var (
 	reentryGuardEnabled = true
 	simpleDecisionLogMu  sync.Mutex
 	simpleDecisionLogMem = map[string]simpleDecisionLogState{}
+	waveSlopeMu          sync.Mutex
+	waveSlopeStateBySym  = map[string]waveSlopeState{}
 )
 
 type simpleDecisionLogState struct {
@@ -57,6 +59,12 @@ type simpleDecisionLogState struct {
 	SpreadBps    float64
 	ExtensionATR float64
 	ExpiresAt    time.Time
+}
+
+type waveSlopeState struct {
+	LastSlope   float64
+	RisingStreak int
+	LastSeen    time.Time
 }
 
 func setLiveEntryAccountHealthProvider(fn func() accountHealthSummary) {
@@ -523,6 +531,9 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 	if reason, blocked := entriesBlockedByAccountHealth(acct); blocked {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
 	}
+	if reason := simpleOperationalBlockReason(c); reason != "" {
+		return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+	}
 	confluenceHardGate := envBool("LIVE_SIMPLE_CONFLUENCE_HARD_GATE", false)
 	if confluenceScorePct, ok := candidateConfluenceScorePct(c); ok {
 		if confluenceHardGate && confluenceScorePct < envFloat("LIVE_CONFLUENCE_MIN_SCORE", 70.0) {
@@ -535,6 +546,11 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 	}
 	if !simpleStateAllowed(c.Entry.State, side) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "state_not_allowed", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+	}
+	if envBool("LIVE_WAVE_ENTRY_RULES_ENABLE", false) {
+		if reason := waveEntryReadinessRejectReason(c, side); reason != "" {
+			return SimpleEntryDecision{Allowed: false, Side: side, Reason: reason, MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
+		}
 	}
 	if c.Entry.CurrentScore < simpleMinScore(side) {
 		return SimpleEntryDecision{Allowed: false, Side: side, Reason: "low_score", MarketSnapshotTs: marketTs, AccountSnapshotTs: accountTs}
@@ -570,6 +586,124 @@ func decideSimpleEntryNowLegacyAt(c candidate, acct accountHealthSummary, now ti
 		Reason:            reason,
 		MarketSnapshotTs:  marketTs,
 		AccountSnapshotTs: accountTs,
+	}
+}
+
+func waveEntryReadinessRejectReason(c candidate, side string) string {
+	trigger := strings.ToUpper(strings.TrimSpace(c.TriggerState))
+	state := c.Entry.State
+	structureOK := c.ReclaimHold || c.ClosedBreakHold || c.RetestHold
+	impulseTrigger := waveImpulseTrigger(trigger)
+	reclaimTrigger := waveReclaimTrigger(trigger)
+	if envBool("LIVE_WAVE_REQUIRE_SLOPE_STREAK", false) && !waveSlopeStreakReady(c) {
+		return "slope_streak_not_ready"
+	}
+
+	dayUTCThresh := waveDayUTCThreshold(c, side)
+	if side == "LONG" {
+		if c.DayUTC24h < dayUTCThresh {
+			return "dayutc_below_wave_threshold"
+		}
+		if state == inplay.StateBalanced && !(c.ReclaimHold && reclaimTrigger) {
+			return "wait_reclaim_from_balance"
+		}
+		if trigger == "OF_EXHAUSTION" && !c.ReclaimHold {
+			return "wait_pullback_reclaim"
+		}
+		if state == inplay.StateHeating && !structureOK && !impulseTrigger {
+			return "setup_wait_structure"
+		}
+		if state == inplay.StateInPlay && !structureOK && !impulseTrigger && !reclaimTrigger {
+			return "inplay_needs_structure_or_trigger"
+		}
+		return ""
+	}
+
+	// SHORT wave rules mirror long rules with downside dayUTC.
+	if c.DayUTC24h > -dayUTCThresh {
+		return "dayutc_above_short_wave_threshold"
+	}
+	if state == inplay.StateBalanced && !(c.ReclaimHold && reclaimTrigger) {
+		return "wait_reclaim_from_balance"
+	}
+	if trigger == "OF_EXHAUSTION" && !c.ReclaimHold {
+		return "wait_pullback_reclaim"
+	}
+	if state == inplay.StateHeating && !structureOK && !impulseTrigger {
+		return "setup_wait_structure"
+	}
+	if state == inplay.StateInPlay && !structureOK && !impulseTrigger && !reclaimTrigger {
+		return "inplay_needs_structure_or_trigger"
+	}
+	return ""
+}
+
+func waveSlopeStreakReady(c candidate) bool {
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	if sym == "" {
+		return false
+	}
+	minSlope := envFloat("LIVE_WAVE_MIN_POSITIVE_SLOPE", 0.05)
+	req := envInt("LIVE_WAVE_MIN_RISING_STREAK", 2)
+	if req < 1 {
+		req = 1
+	}
+	now := time.Now().UTC()
+	waveSlopeMu.Lock()
+	defer waveSlopeMu.Unlock()
+	st := waveSlopeStateBySym[sym]
+	cur := c.Entry.ScoreSlope
+	if cur > minSlope && cur >= st.LastSlope {
+		st.RisingStreak++
+	} else if cur > minSlope {
+		st.RisingStreak = 1
+	} else {
+		st.RisingStreak = 0
+	}
+	st.LastSlope = cur
+	st.LastSeen = now
+	waveSlopeStateBySym[sym] = st
+	return st.RisingStreak >= req
+}
+
+func waveImpulseTrigger(trigger string) bool {
+	switch trigger {
+	case "OF_IMPULSE_CONT", "OF_DELTA_FLIP", "OF_ABSORB":
+		return true
+	default:
+		return false
+	}
+}
+
+func waveReclaimTrigger(trigger string) bool {
+	switch trigger {
+	case "OF_RECLAIM", "OF_DELTA_FLIP", "OF_IMPULSE_CONT":
+		return true
+	default:
+		return false
+	}
+}
+
+func waveDayUTCThreshold(c candidate, side string) float64 {
+	if isWaveMajorSymbol(c.Entry.Symbol) {
+		if side == "SHORT" {
+			return envFloat("LIVE_WAVE_SHORT_DAYUTC_MAJOR", 10.0)
+		}
+		return envFloat("LIVE_WAVE_LONG_DAYUTC_MAJOR", 10.0)
+	}
+	if side == "SHORT" {
+		return envFloat("LIVE_WAVE_SHORT_DAYUTC_MICRO", 15.0)
+	}
+	return envFloat("LIVE_WAVE_LONG_DAYUTC_MICRO", 15.0)
+}
+
+func isWaveMajorSymbol(sym string) bool {
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(sym)))
+	switch raw {
+	case "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -816,6 +950,9 @@ func simpleMinSlope(side string) float64 {
 }
 
 func shouldSuppressSimpleDecisionLog(c candidate, allowed bool, reason string) bool {
+	if envBool("LIVE_SIMPLE_DECISION_LOG_ALL", false) || envBool("LIVE_SIMPLE_DECISION_DISABLE_SUPPRESS", false) {
+		return false
+	}
 	if !suppressibleRepeatReject(reason) {
 		return false
 	}
@@ -884,9 +1021,13 @@ func logSimpleDecision(c candidate, allowed bool, reason string) {
 		boolInt(acctOK),
 		boolInt(allowed),
 		firstNonEmpty(strings.TrimSpace(reason), "no_simple_entry"))
+	logDetailedDecision("live", c, side, allowed, reason)
 }
 
 func shouldLogSimpleDecision(c candidate) bool {
+	if envBool("LIVE_SIMPLE_DECISION_LOG_ALL", false) {
+		return true
+	}
 	if c.Entry.Rank > 0 && c.Entry.Rank <= envFloat("LIVE_SIMPLE_DECISION_LOG_MAX_RANK", 6.0) {
 		return true
 	}
@@ -1013,6 +1154,9 @@ func simpleOperationalBlockReason(c candidate) string {
 		"insufficient_balance",
 		"insufficient_usable_balance",
 		"available_balance_hard_failure",
+		"exec_cap_symbol_loss_cluster",
+		"exec_cap_bucket_window",
+		"exec_cap",
 	}
 	reject := strings.ToLower(strings.TrimSpace(c.RejectReason))
 	if reject == "" {
@@ -1024,6 +1168,48 @@ func simpleOperationalBlockReason(c candidate) string {
 		}
 	}
 	return ""
+}
+
+func isExecutionBlocked(c candidate) bool {
+	reject := strings.ToLower(strings.TrimSpace(c.RejectReason))
+	if reject == "" {
+		return false
+	}
+	return strings.Contains(reject, "exec_cap") || strings.Contains(reject, "symbol_loss_cluster")
+}
+
+func shouldEmitEarlyOpportunity(c candidate, allowed bool) bool {
+	if !envBool("LIVE_EARLY_OPPORTUNITY_ALERT_ENABLE", false) {
+		return false
+	}
+	grade := strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade))
+	if grade != "A" && grade != "A+" {
+		return false
+	}
+	if c.Entry.State != inplay.StateHeating && c.Entry.State != inplay.StateInPlay {
+		return false
+	}
+	if c.Entry.ScoreSlope <= 0 {
+		return false
+	}
+	side := simpleEntrySide(c.Side)
+	if side == "" {
+		return false
+	}
+	dayThr := waveDayUTCThreshold(c, side)
+	if side == "LONG" && c.DayUTC24h < dayThr {
+		return false
+	}
+	if side == "SHORT" && c.DayUTC24h > -dayThr {
+		return false
+	}
+	if !(c.ReclaimHold || c.ClosedBreakHold) {
+		return false
+	}
+	if isExecutionBlocked(c) {
+		return false
+	}
+	return allowed
 }
 
 func paperSimpleVolumeOK(c candidate) bool {
@@ -1075,6 +1261,53 @@ func logSimplePaperDecision(c candidate, dec SimplePaperDecision) {
 		boolInt(candidateSpikeCandle(c) || (c.Entry.ExhaustionRisk >= envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5))),
 		boolInt(dec.Allowed),
 		firstNonEmpty(strings.TrimSpace(dec.Reason), "paper_no_simple_entry"))
+	logDetailedDecision("paper", c, firstNonEmpty(strings.ToUpper(strings.TrimSpace(dec.Side)), simpleEntrySide(c.Side)), dec.Allowed, dec.Reason)
+}
+
+func logDetailedDecision(mode string, c candidate, side string, allowed bool, reason string) {
+	if !envBool("LIVE_SIMPLE_DECISION_LOG_VERBOSE", true) {
+		return
+	}
+	log.Printf("DECISION_TRACE mode=%s symbol=%s side=%s grade=%s rank=%.2f final_rank=%.2f score=%.2f slope=%.3f state=%s trigger_state=%s strat=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f spread_bps=%.2f vol_ratio=%.2f ext_atr=%.2f break_hold=%t reclaim_hold=%t retest_hold=%t allowed=%d reason=%s",
+		strings.ToLower(strings.TrimSpace(mode)),
+		strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+		firstNonEmpty(strings.ToUpper(strings.TrimSpace(side)), strings.ToUpper(strings.TrimSpace(c.Side))),
+		strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade)),
+		c.Entry.Rank,
+		c.FinalRank,
+		c.Entry.CurrentScore,
+		c.Entry.ScoreSlope,
+		strings.ToLower(strings.TrimSpace(string(c.Entry.State))),
+		strings.TrimSpace(c.TriggerState),
+		strings.TrimSpace(c.Strat),
+		c.DiscoveryScore,
+		c.TriggerScore,
+		c.ExecutionScore,
+		c.CombinedScore,
+		c.DayUTC24h,
+		c.SpreadBps,
+		c.VolumeRatio,
+		c.ExtensionATR,
+		c.ClosedBreakHold,
+		c.ReclaimHold,
+		c.RetestHold,
+		boolInt(allowed),
+		firstNonEmpty(strings.TrimSpace(reason), "no_reason"))
+	if shouldEmitEarlyOpportunity(c, allowed) {
+		log.Printf("EARLY_OPPORTUNITY symbol=%s side=%s grade=%s state=%s slope=%.3f dayUTC=%+.2f trigger_state=%s structure=%s reclaim_hold=%t break_hold=%t score=%.2f combo=%.2f",
+			strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+			firstNonEmpty(strings.ToUpper(strings.TrimSpace(side)), strings.ToUpper(strings.TrimSpace(c.Side))),
+			strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade)),
+			strings.ToLower(strings.TrimSpace(string(c.Entry.State))),
+			c.Entry.ScoreSlope,
+			c.DayUTC24h,
+			strings.TrimSpace(c.TriggerState),
+			strings.TrimSpace(c.StructureReason),
+			c.ReclaimHold,
+			c.ClosedBreakHold,
+			c.Entry.CurrentScore,
+			c.CombinedScore)
+	}
 }
 
 func hardBlockEntry(c candidate) (string, bool) {
