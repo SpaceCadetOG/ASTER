@@ -134,6 +134,8 @@ type candidate struct {
 	PriorDayLeaderBoost    float64
 	PriorDayLeaderMode     string
 	PriorDayLeaderReasons  []string
+	EntryPosture           string
+	EntryPostureReason     string
 }
 
 type entryQualityConfig struct {
@@ -3060,8 +3062,19 @@ func main() {
 		if ladderCfg.StarterUSDT > 0 {
 			effectiveMargin = ladderCfg.StarterUSDT
 		}
+		if postureForcesStarter(best) {
+			starterUSDT := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMarginMin, 10.0)))
+			if starterUSDT <= 0 {
+				starterUSDT = maxFloat(tradeMarginMin, 10.0)
+			}
+			effectiveMargin = starterUSDT
+		}
+		if postureForcesAttack(best) {
+			attackFrac := clamp(envFloat("LIVE_POSTURE_ATTACK_MARGIN_FRAC", 1.0), 0.25, 2.0)
+			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*attackFrac)
+		}
 		eligibility.StarterAllowed = starterLaneEligible(best)
-		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat)
+		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) || postureForcesAttack(best)
 		bestMeta := metaBySymbol[rawBest]
 		if emitTerminal {
 			fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
@@ -9953,6 +9966,12 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	stopReason := ""
 	stopDistancePct := 0.0
 	starterOnly := isStarterOnlyStrategyName(c.Strat)
+	if postureForcesAttack(c) {
+		starterOnly = false
+	}
+	if postureForcesStarter(c) {
+		starterOnly = true
+	}
 	if m.hybridStopCfg.Enabled {
 		stopRes := exitmgr.ComputeHybridStop(m.hybridStopCfg, hybridStopInputForCandidate(c, price, c.Sig.TP1))
 		if stopRes.Rejected {
@@ -10166,8 +10185,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	m.positions[rawSym] = p
 	m.recordExecutionGovernorEntry(now, c)
 	_ = m.save()
-	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v stop_reason=%s\n",
-		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v posture=%s posture_reason=%s stop_reason=%s\n",
+		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(strings.TrimSpace(c.EntryPosture), "-"), firstNonEmpty(strings.TrimSpace(c.EntryPostureReason), "-"), firstNonEmpty(stopReason, "generic"))
 	if m.tg != nil {
 		title := "ENTRY SUBMITTED"
 		if plan.IsReentry {
@@ -13378,8 +13397,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	p.positions[raw] = pos
 	p.recordExecutionGovernorEntry(now, c)
 	_ = p.save()
-	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f disc=%.2f trig=%.2f exec=%.2f combo=%.2f stop_reason=%s\n",
-		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f disc=%.2f trig=%.2f exec=%.2f combo=%.2f posture=%s posture_reason=%s stop_reason=%s\n",
+		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(strings.TrimSpace(c.EntryPosture), "-"), firstNonEmpty(strings.TrimSpace(c.EntryPostureReason), "-"), firstNonEmpty(stopReason, "generic"))
 	return pos, nil
 }
 
@@ -15469,6 +15488,14 @@ func isStarterOnlyStrategyName(strat string) bool {
 	default:
 		return false
 	}
+}
+
+func postureForcesStarter(c candidate) bool {
+	return strings.EqualFold(strings.TrimSpace(c.EntryPosture), "STARTER_NOW")
+}
+
+func postureForcesAttack(c candidate) bool {
+	return strings.EqualFold(strings.TrimSpace(c.EntryPosture), "ATTACK_NOW")
 }
 
 func starterLaneEligible(c candidate) bool {
