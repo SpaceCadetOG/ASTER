@@ -36,6 +36,18 @@ type UnifiedEntryDecision struct {
 	Context strategies.StrategyContext
 }
 
+type EntryPosture string
+
+const (
+	PostureAttackNow      EntryPosture = "ATTACK_NOW"
+	PostureStarterNow     EntryPosture = "STARTER_NOW"
+	PostureWaitPullback   EntryPosture = "WAIT_FOR_PULLBACK"
+	PostureWaitReclaim    EntryPosture = "WAIT_FOR_RECLAIM"
+	PostureBlockExhausted EntryPosture = "BLOCK_EXHAUSTED"
+	PostureBlockWeakFlow  EntryPosture = "BLOCK_WEAK_FLOW"
+	PostureBlockRisk      EntryPosture = "BLOCK_RISK"
+)
+
 var liveEntryAccountHealthProvider = func() accountHealthSummary {
 	return accountHealthSummary{State: "healthy"}
 }
@@ -441,7 +453,9 @@ func decideUnifiedEntryAt(c candidate, acct accountHealthSummary, now time.Time)
 	simple := decideSimpleEntryNowLegacyAt(c, acct, now)
 	ctx := strategyContextFromCandidate(c, now)
 	entry := DecideEntry(ctx, strategies.NewDefaultRouter(nil), nil)
-	if !simple.Allowed {
+	openAllStrategies := envBool("LIVE_OPEN_ALL_STRATEGIES", false)
+	requireSimpleGate := envBool("LIVE_REQUIRE_SIMPLE_GATE", !openAllStrategies)
+	if !simple.Allowed && requireSimpleGate {
 		entry.Allowed = false
 		if simple.Reason != "" {
 			entry.RejectReason = simple.Reason
@@ -469,8 +483,35 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 	}
 
 	dec := decideUnifiedEntryAt(c, currentAccountHealth(), now)
-	if dec.Entry.Allowed && dec.Simple.Allowed {
+	openAllStrategies := envBool("LIVE_OPEN_ALL_STRATEGIES", false)
+	requireSimpleGate := envBool("LIVE_REQUIRE_SIMPLE_GATE", !openAllStrategies)
+	if dec.Entry.Allowed && (dec.Simple.Allowed || !requireSimpleGate) {
+		posture, postureReason := chooseEntryPosture(c, dec, currentAccountHealth())
+		c.EntryPosture = string(posture)
+		c.EntryPostureReason = postureReason
+		logEntryPosture(c, dec, posture, postureReason)
+		if envBool("LIVE_POSTURE_GOV_ENABLE", false) {
+			switch posture {
+			case PostureWaitPullback, PostureWaitReclaim:
+				c.Strat = "none"
+				c.Conf = 0
+				c.RejectReason = firstNonEmpty(postureReason, "posture_wait")
+				logSimpleDecision(c, false, c.RejectReason)
+				logEntryReject(dec.Entry, dec.Context)
+				return c
+			case PostureBlockExhausted, PostureBlockWeakFlow, PostureBlockRisk:
+				c.Strat = "none"
+				c.Conf = 0
+				c.RejectReason = firstNonEmpty(postureReason, "posture_block")
+				logSimpleDecision(c, false, c.RejectReason)
+				logEntryReject(dec.Entry, dec.Context)
+				return c
+			}
+		}
 		signal := "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Simple.Side))
+		if openAllStrategies {
+			signal = strategySignalName(dec)
+		}
 		c.Strat = signal
 		if dec.Entry.Intent != nil {
 			c.StrategyID = string(dec.Entry.Intent.Strategy)
@@ -483,14 +524,19 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 			Side:         toFeatureSide(c.Side),
 			Confidence:   c.Conf,
 			RejectReason: "",
-			Reasons:      []string{dec.Simple.Reason},
-			Tags:         []string{"entry_now", "starter_only"},
+			Reasons:      []string{firstNonEmpty(dec.Simple.Reason, signal)},
+			Tags:         []string{"router_entry"},
 		}
 		if strings.TrimSpace(c.StrategyID) != "" {
 			c.Sig.SignalSource = append(c.Sig.SignalSource, c.StrategyID)
 		}
 		c.Sig = applySignalRiskGeometry(c, signal)
 		c.RejectReason = ""
+		if posture == PostureStarterNow {
+			c.Sig.Tags = append(c.Sig.Tags, "posture:starter_now")
+		} else if posture == PostureAttackNow {
+			c.Sig.Tags = append(c.Sig.Tags, "posture:attack_now")
+		}
 		logSimpleDecision(c, true, dec.Simple.Reason)
 		logEntryAllow(dec.Entry, dec.Context)
 		return c
@@ -502,6 +548,117 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 	logSimpleDecision(c, false, firstNonEmpty(strings.TrimSpace(dec.Simple.Reason), strings.TrimSpace(dec.Entry.RejectReason), "no_simple_entry"))
 	logEntryReject(dec.Entry, dec.Context)
 	return c
+}
+
+func chooseEntryPosture(c candidate, dec UnifiedEntryDecision, acct accountHealthSummary) (EntryPosture, string) {
+	if !dec.Simple.Allowed || !dec.Entry.Allowed {
+		return PostureBlockRisk, "simple_or_entry_not_allowed"
+	}
+	if reason := simpleOperationalBlockReason(c); reason != "" {
+		return PostureBlockRisk, reason
+	}
+	if candidateSpikeCandle(c) || c.Entry.ExhaustionRisk >= envFloat("LIVE_TRUE_EXHAUSTION_RISK", 5.5) {
+		if c.ReclaimHold || c.RetestHold {
+			return PostureWaitReclaim, "exhausted_wait_reclaim"
+		}
+		return PostureBlockExhausted, "exhausted"
+	}
+	if c.SpreadBps > envFloat("LIVE_MAX_SPREAD_BPS", envFloat("LIVE_OB_MAX_SPREAD_BPS", 10)) {
+		return PostureBlockRisk, "spread_too_wide"
+	}
+	flowWeak := c.TriggerScore < envFloat("LIVE_POSTURE_MIN_TRIGGER_SCORE", 0.50) && c.ExecutionScore < envFloat("LIVE_POSTURE_MIN_EXEC_SCORE", 0.18)
+	if flowWeak {
+		return PostureBlockWeakFlow, "weak_flow"
+	}
+	if isEliteLeaderPosture(c) {
+		if c.ReclaimHold || c.ClosedBreakHold || c.RetestHold || waveImpulseTrigger(strings.ToUpper(strings.TrimSpace(c.TriggerState))) {
+			if c.TriggerScore >= envFloat("LIVE_POSTURE_ATTACK_TRIGGER_SCORE", 0.62) && c.CombinedScore >= envFloat("LIVE_POSTURE_ATTACK_COMBO_SCORE", 0.62) {
+				return PostureAttackNow, "elite_leader_attack"
+			}
+			return PostureStarterNow, "elite_leader_starter"
+		}
+		return PostureWaitReclaim, "elite_wait_reclaim"
+	}
+	if isBGradePosture(c) {
+		if c.ReclaimHold || c.ClosedBreakHold || c.RetestHold {
+			return PostureStarterNow, "b_grade_structure_starter"
+		}
+		return PostureWaitPullback, "b_grade_wait_pullback"
+	}
+	if c.ReclaimHold || c.ClosedBreakHold {
+		return PostureStarterNow, "structure_starter"
+	}
+	return PostureWaitReclaim, "default_wait_reclaim"
+}
+
+func strategySignalName(dec UnifiedEntryDecision) string {
+	side := strings.ToLower(strings.TrimSpace(dec.Simple.Side))
+	if dec.Entry.Intent == nil {
+		if side == "" {
+			side = "long"
+		}
+		return "entry_now_" + side
+	}
+	if side == "" {
+		if dec.Entry.Intent.Side == strategies.SideShort {
+			side = "short"
+		} else {
+			side = "long"
+		}
+	}
+	switch dec.Entry.Intent.Strategy {
+	case strategies.StrategyImpulseContinuation:
+		return "continuation_fast"
+	case strategies.StrategyAnchoredVWAPPullback:
+		if side == "short" {
+			return "pullback_short"
+		}
+		return "pullback_long"
+	case strategies.StrategyVPRetest:
+		return "vp_retest"
+	default:
+		return "entry_now_" + side
+	}
+}
+
+func isEliteLeaderPosture(c candidate) bool {
+	grade := strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade))
+	if grade != "A+" && grade != "A" {
+		return false
+	}
+	topRank := c.Entry.Rank > 0 && c.Entry.Rank <= envFloat("LIVE_POSTURE_ELITE_MAX_RANK", 3.0)
+	strongSlope := c.Entry.ScoreSlope >= envFloat("LIVE_POSTURE_ELITE_MIN_SLOPE", 0.18)
+	strongDay := c.DayUTC24h >= waveDayUTCThreshold(c, "LONG")
+	return topRank && strongSlope && strongDay
+}
+
+func isBGradePosture(c candidate) bool {
+	grade := strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade))
+	return grade == "B" || grade == "B+"
+}
+
+func logEntryPosture(c candidate, dec UnifiedEntryDecision, posture EntryPosture, reason string) {
+	if !envBool("LIVE_POSTURE_LOG_ENABLE", true) {
+		return
+	}
+	log.Printf("ENTRY_POSTURE symbol=%s side=%s grade=%s rank=%.2f final_rank=%.2f score=%.2f slope=%.3f state=%s dayUTC=%+.2f trigger=%s strat=%s posture=%s reason=%s spread_bps=%.2f recent_exit=%s cooldown=%t",
+		strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+		firstNonEmpty(strings.ToUpper(strings.TrimSpace(dec.Simple.Side)), strings.ToUpper(strings.TrimSpace(c.Side))),
+		strings.ToUpper(strings.TrimSpace(c.Entry.CurrentGrade)),
+		c.Entry.Rank,
+		c.FinalRank,
+		c.Entry.CurrentScore,
+		c.Entry.ScoreSlope,
+		strings.ToLower(strings.TrimSpace(string(c.Entry.State))),
+		c.DayUTC24h,
+		strings.ToUpper(strings.TrimSpace(c.TriggerState)),
+		strings.TrimSpace(c.Strat),
+		string(posture),
+		firstNonEmpty(strings.TrimSpace(reason), "none"),
+		c.SpreadBps,
+		strings.ToUpper(strings.TrimSpace(c.RejectReason)),
+		strings.Contains(strings.ToLower(strings.TrimSpace(c.RejectReason)), "cooldown"),
+	)
 }
 
 func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDecision {
