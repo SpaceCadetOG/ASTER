@@ -568,6 +568,9 @@ func chooseEntryPosture(c candidate, dec UnifiedEntryDecision, acct accountHealt
 	}
 	flowWeak := c.TriggerScore < envFloat("LIVE_POSTURE_MIN_TRIGGER_SCORE", 0.50) && c.ExecutionScore < envFloat("LIVE_POSTURE_MIN_EXEC_SCORE", 0.18)
 	if flowWeak {
+		if simpleEntryNowAllowed(dec) {
+			return PostureStarterNow, "weak_flow_starter_override_simple_allow"
+		}
 		return PostureBlockWeakFlow, "weak_flow"
 	}
 	if isEliteLeaderPosture(c) {
@@ -589,6 +592,14 @@ func chooseEntryPosture(c candidate, dec UnifiedEntryDecision, acct accountHealt
 		return PostureStarterNow, "structure_starter"
 	}
 	return PostureWaitReclaim, "default_wait_reclaim"
+}
+
+func simpleEntryNowAllowed(dec UnifiedEntryDecision) bool {
+	if !dec.Simple.Allowed {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(dec.Simple.Reason))
+	return strings.HasPrefix(reason, "entry_now_")
 }
 
 func strategySignalName(dec UnifiedEntryDecision) string {
@@ -640,6 +651,19 @@ func isBGradePosture(c candidate) bool {
 func logEntryPosture(c candidate, dec UnifiedEntryDecision, posture EntryPosture, reason string) {
 	if !envBool("LIVE_POSTURE_LOG_ENABLE", true) {
 		return
+	}
+	if dec.Simple.Allowed && (posture == PostureBlockExhausted || posture == PostureBlockWeakFlow || posture == PostureBlockRisk || posture == PostureWaitPullback || posture == PostureWaitReclaim) {
+		log.Printf("POSTURE_CONFLICT symbol=%s side=%s simple_allowed=1 simple_reason=%s posture=%s posture_reason=%s trigger=%.2f exec=%.2f combo=%.2f spread_bps=%.2f",
+			strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
+			firstNonEmpty(strings.ToUpper(strings.TrimSpace(dec.Simple.Side)), strings.ToUpper(strings.TrimSpace(c.Side))),
+			firstNonEmpty(strings.TrimSpace(dec.Simple.Reason), "none"),
+			string(posture),
+			firstNonEmpty(strings.TrimSpace(reason), "none"),
+			c.TriggerScore,
+			c.ExecutionScore,
+			c.CombinedScore,
+			c.SpreadBps,
+		)
 	}
 	log.Printf("ENTRY_POSTURE symbol=%s side=%s grade=%s rank=%.2f final_rank=%.2f score=%.2f slope=%.3f state=%s dayUTC=%+.2f trigger=%s strat=%s posture=%s reason=%s spread_bps=%.2f recent_exit=%s cooldown=%t",
 		strings.ToUpper(strings.TrimSpace(c.Entry.Symbol)),
