@@ -511,6 +511,12 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 		signal := "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Simple.Side))
 		if openAllStrategies {
 			signal = strategySignalName(dec)
+		} else {
+			// Even when "open all" is off, prefer concrete strategy intents over
+			// generic entry_now labels so retired entry_now does not suppress valid setups.
+			if intentSignal := strategySignalName(dec); !strings.HasPrefix(strings.ToLower(strings.TrimSpace(intentSignal)), "entry_now_") {
+				signal = intentSignal
+			}
 		}
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(signal)), "entry_now_") {
 			c.Strat = "none"

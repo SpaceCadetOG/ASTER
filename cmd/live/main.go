@@ -15497,7 +15497,7 @@ func strategyFamily(c candidate) string {
 
 func isStarterOnlyStrategyName(strat string) bool {
 	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "entry_now_long", "entry_now_short":
+	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
 		return true
 	default:
 		return false
@@ -17707,7 +17707,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "entry_now_long", "entry_now_short", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
