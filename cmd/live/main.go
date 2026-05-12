@@ -2708,7 +2708,11 @@ func main() {
 					})
 					continue
 				}
-				c.Strat = "entry_now_" + strings.ToLower(strings.TrimSpace(pdec.Side))
+				if strings.EqualFold(strings.TrimSpace(pdec.Side), "short") {
+					c.Strat = "impulsive_short_starter"
+				} else {
+					c.Strat = "impulsive_long_starter"
+				}
 				c.Conf = clamp(maxFloat(c.Conf, 0.55), 0, 0.92)
 				c.RejectReason = ""
 				c.QualityReasons = append(c.QualityReasons, "paper_simple:"+pdec.Reason)
@@ -13199,7 +13203,11 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			return nil, fmt.Errorf("paper simple entry rejected: %s", firstNonEmpty(dec.Reason, "no_simple_entry"))
 		}
 		if dec.Side != "" {
-			c.Strat = "entry_now_" + strings.ToLower(strings.TrimSpace(dec.Side))
+			if strings.EqualFold(strings.TrimSpace(dec.Side), "short") {
+				c.Strat = "impulsive_short_starter"
+			} else {
+				c.Strat = "impulsive_long_starter"
+			}
 		}
 	}
 	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")

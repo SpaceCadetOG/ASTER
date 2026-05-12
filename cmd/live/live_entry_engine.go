@@ -512,6 +512,14 @@ func choosePrimaryLiveSignal(c candidate, now time.Time) candidate {
 		if openAllStrategies {
 			signal = strategySignalName(dec)
 		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(signal)), "entry_now_") {
+			c.Strat = "none"
+			c.Conf = 0
+			c.RejectReason = "entry_now_retired"
+			logSimpleDecision(c, false, c.RejectReason)
+			logEntryReject(dec.Entry, dec.Context)
+			return c
+		}
 		c.Strat = signal
 		if dec.Entry.Intent != nil {
 			c.StrategyID = string(dec.Entry.Intent.Strategy)

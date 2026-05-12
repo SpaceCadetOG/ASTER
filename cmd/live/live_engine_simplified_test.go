@@ -83,8 +83,8 @@ func TestChoosePrimaryLiveSignalHeatingStateCanEnter(t *testing.T) {
 	c := baseSimpleLongCandidate()
 	c.Entry.State = inplay.StateHeating
 	got := choosePrimaryLiveSignal(c, time.Now().UTC())
-	if got.Strat != "entry_now_long" {
-		t.Fatalf("expected entry_now_long for heating leader, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "none" || got.RejectReason != "entry_now_retired" {
+		t.Fatalf("expected entry_now_retired for heating leader, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 
@@ -189,8 +189,8 @@ func TestChoosePrimaryLiveSignalDegradedAccountHealthFails(t *testing.T) {
 		})
 	})
 	got := choosePrimaryLiveSignal(baseSimpleLongCandidate(), time.Now().UTC())
-	if got.Strat == "none" {
-		t.Fatalf("expected degraded health to be non-blocking, got strat=%q reject=%q", got.Strat, got.RejectReason)
+	if got.RejectReason != "entry_now_retired" {
+		t.Fatalf("expected entry_now_retired for degraded health scenario, got strat=%q reject=%q", got.Strat, got.RejectReason)
 	}
 }
 

@@ -1898,11 +1898,11 @@ func TestPullbackContinuationGetsConfidenceWithStructure(t *testing.T) {
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "entry_now_long" {
-		t.Fatalf("expected entry_now_long, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "none" || got.RejectReason != "entry_now_retired" {
+		t.Fatalf("expected entry_now_retired, got %q reject=%q", got.Strat, got.RejectReason)
 	}
-	if got.Conf <= 0 {
-		t.Fatalf("expected positive confidence, got %.3f", got.Conf)
+	if got.Conf != 0 {
+		t.Fatalf("expected zero confidence when entry_now is retired, got %.3f", got.Conf)
 	}
 }
 
@@ -2020,11 +2020,11 @@ func TestApplySimpleContinuationFallbackEliteSoftRejectUsesStarter(t *testing.T)
 		},
 	}
 	got := applySimpleContinuationFallbackAt(c, time.Date(2026, 3, 25, 14, 0, 0, 0, time.UTC))
-	if got.Strat != "entry_now_long" {
-		t.Fatalf("expected entry_now_long, got %q reject=%q", got.Strat, got.RejectReason)
+	if got.Strat != "none" || got.RejectReason != "entry_now_retired" {
+		t.Fatalf("expected entry_now_retired, got %q reject=%q", got.Strat, got.RejectReason)
 	}
-	if got.Conf <= 0 {
-		t.Fatalf("expected starter confidence, got %.3f", got.Conf)
+	if got.Conf != 0 {
+		t.Fatalf("expected zero confidence when entry_now is retired, got %.3f", got.Conf)
 	}
 }
 
