@@ -569,7 +569,20 @@ func chooseEntryPosture(c candidate, dec UnifiedEntryDecision, acct accountHealt
 	flowWeak := c.TriggerScore < envFloat("LIVE_POSTURE_MIN_TRIGGER_SCORE", 0.50) && c.ExecutionScore < envFloat("LIVE_POSTURE_MIN_EXEC_SCORE", 0.18)
 	if flowWeak {
 		if simpleEntryNowAllowed(dec) {
-			return PostureStarterNow, "weak_flow_starter_override_simple_allow"
+			// Retire weak-flow starter overrides to prevent churn entries.
+			if envBool("LIVE_WEAK_FLOW_OVERRIDE_ENABLE", false) {
+				weakFlowOverrideMinTrigger := envFloat("LIVE_WEAK_FLOW_OVERRIDE_MIN_TRIGGER_SCORE", 0.72)
+				weakFlowOverrideMinCombo := envFloat("LIVE_WEAK_FLOW_OVERRIDE_MIN_COMBO_SCORE", 0.66)
+				weakFlowOverrideMinExec := envFloat("LIVE_WEAK_FLOW_OVERRIDE_MIN_EXEC_SCORE", 0.20)
+				strongStructure := c.ReclaimHold || c.ClosedBreakHold || c.RetestHold
+				if strongStructure &&
+					c.TriggerScore >= weakFlowOverrideMinTrigger &&
+					c.CombinedScore >= weakFlowOverrideMinCombo &&
+					c.ExecutionScore >= weakFlowOverrideMinExec {
+					return PostureStarterNow, "weak_flow_starter_override_simple_allow"
+				}
+			}
+			return PostureWaitReclaim, "weak_flow_wait_reclaim"
 		}
 		return PostureBlockWeakFlow, "weak_flow"
 	}
@@ -690,6 +703,16 @@ func decideSimpleEntryNow(c candidate, acct accountHealthSummary) SimpleEntryDec
 }
 
 func decideSimpleEntryNowAt(c candidate, acct accountHealthSummary, now time.Time) SimpleEntryDecision {
+	if envBool("LIVE_SYNC_WITH_PAPER", false) {
+		paperDec := decideSimplePaperEntryNowWithSync(c, acct, false)
+		return SimpleEntryDecision{
+			Allowed:           paperDec.Allowed,
+			Side:              paperDec.Side,
+			Reason:            firstNonEmpty(strings.TrimSpace(paperDec.Reason), "paper_no_simple_entry"),
+			MarketSnapshotTs:  now,
+			AccountSnapshotTs: now,
+		}
+	}
 	dec := decideUnifiedEntryAt(c, acct, now)
 	out := dec.Simple
 	if strings.TrimSpace(out.Reason) == "" {
@@ -1223,11 +1246,15 @@ func boolInt(v bool) int {
 }
 
 func decideSimplePaperEntryNow(c candidate, acct accountHealthSummary) SimplePaperDecision {
+	return decideSimplePaperEntryNowWithSync(c, acct, envBool("LIVE_PAPER_SYNC_WITH_LIVE", true))
+}
+
+func decideSimplePaperEntryNowWithSync(c candidate, acct accountHealthSummary, syncWithLive bool) SimplePaperDecision {
 	side := simpleEntrySide(c.Side)
 	if side == "" {
 		return SimplePaperDecision{Allowed: false, Reason: "side_unknown"}
 	}
-	if envBool("LIVE_PAPER_SYNC_WITH_LIVE", true) {
+	if syncWithLive {
 		liveDec := decideSimpleEntryNow(c, acct)
 		return SimplePaperDecision{
 			Allowed:           liveDec.Allowed,

@@ -13326,6 +13326,12 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			stopDistancePct = stopRes.StopDistancePct
 		}
 	}
+	if envBool("LIVE_REJECT_FRAGILE_STOPS", true) {
+		stopReasonL := strings.ToLower(strings.TrimSpace(stopReason))
+		if strings.Contains(stopReasonL, "rr_low") || strings.Contains(stopReasonL, "max_width") {
+			return nil, fmt.Errorf("fragile stop rejected: %s", firstNonEmpty(stopReason, "unknown"))
+		}
+	}
 	tp1Pct := stopPct * tp1R
 	tp2Pct := stopPct * tp2R
 	tp3Pct := stopPct * tp3R

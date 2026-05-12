@@ -67,7 +67,8 @@ func ComputeConfluence(tr TrendResult, ef EffortResult, ob OBContext, side strin
 		} else if ob.Imbalance < -0.1 {
 			notes = append(notes, "ob: ask pressure")
 		}
-		if ob.TopAskWall.Rank <= 3 && ob.TopAskWall.Size > ob.TopBidWall.Size*1.5 {
+		if ob.TopAskWall != nil && ob.TopBidWall != nil &&
+			ob.TopAskWall.Rank <= 3 && ob.TopAskWall.Size > ob.TopBidWall.Size*1.5 {
 			notes = append(notes, "ob: large ask wall near")
 		}
 	} else { // short
@@ -76,7 +77,8 @@ func ComputeConfluence(tr TrendResult, ef EffortResult, ob OBContext, side strin
 		} else if ob.Imbalance > 0.1 {
 			notes = append(notes, "ob: bid absorption risk")
 		}
-		if ob.TopBidWall.Rank <= 3 && ob.TopBidWall.Size > ob.TopAskWall.Size*1.5 {
+		if ob.TopBidWall != nil && ob.TopAskWall != nil &&
+			ob.TopBidWall.Rank <= 3 && ob.TopBidWall.Size > ob.TopAskWall.Size*1.5 {
 			notes = append(notes, "ob: large bid wall near")
 		}
 	}
@@ -86,7 +88,7 @@ func ComputeConfluence(tr TrendResult, ef EffortResult, ob OBContext, side strin
 		if ob.Imbalance > 0.20 {
 			score += 3
 		}
-		if ob.TopBidWall.Rank <= 2 {
+		if ob.TopBidWall != nil && ob.TopBidWall.Rank <= 2 {
 			score += 2
 		}
 	}
@@ -94,7 +96,7 @@ func ComputeConfluence(tr TrendResult, ef EffortResult, ob OBContext, side strin
 		if ob.Imbalance < -0.20 {
 			score += 3
 		}
-		if ob.TopAskWall.Rank <= 2 {
+		if ob.TopAskWall != nil && ob.TopAskWall.Rank <= 2 {
 			score += 2
 		}
 	}
