@@ -2374,7 +2374,7 @@ func main() {
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
 						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", tgPre(notifyAccum.RenderHourlyReport(localMaintNow, snap)))
+						tg.Sendf("%s", notifyAccum.RenderHourlyReport(localMaintNow, snap))
 						lastPulseSentAt = now
 						lastHourlyKey = hk
 					}
@@ -2395,7 +2395,7 @@ func main() {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != lastOvernightReportDay {
 						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", tgPre(notifyAccum.RenderOvernightReport(localMaintNow, snap)))
+						tg.Sendf("%s", notifyAccum.RenderOvernightReport(localMaintNow, snap))
 						lastOvernightReportDay = dayKey
 					}
 				}
@@ -2405,7 +2405,7 @@ func main() {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != last1900ReportDay {
 						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", tgPre(notifyAccum.RenderDailyReport(localMaintNow, snap)))
+						tg.Sendf("%s", notifyAccum.RenderDailyReport(localMaintNow, snap))
 						last1900ReportDay = dayKey
 					}
 				}
