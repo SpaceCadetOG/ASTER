@@ -2642,10 +2642,8 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		// Runtime mode switch:
-		// - true  => scanner/manual only (no auto entries)
-		// - false => full entry engine path (paper/live mirror behavior)
-		manualOnlyScannerMode := envBool("LIVE_MANUAL_ONLY_SCANNER", false)
+		// Hard lock: scanner/manual only. Auto-entry is disabled for both paper and live.
+		manualOnlyScannerMode := true
 		if manualOnlyScannerMode {
 			st := liveStatus{
 				Generated:     now,
