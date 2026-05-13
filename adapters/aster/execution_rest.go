@@ -443,7 +443,10 @@ func (r *RESTAuth) ChangeMarginType(symbol, marginType string) (map[string]any, 
 	q := url.Values{}
 	q.Set("symbol", sym)
 	q.Set("marginType", mt)
-	paths := []string{"/fapi/v1/marginType"}
+	paths := []string{"/fapi/v3/marginType", "/fapi/v1/marginType"}
+	if r.isAgentMode() {
+		paths = []string{"/fapi/v3/marginType"}
+	}
 	b, err := r.doSignedPOSTAny(paths, q)
 	if err != nil {
 		return nil, err

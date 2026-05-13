@@ -54,7 +54,8 @@ func (r *RESTAuth) GetBalance() ([]Balance, error) {
 }
 
 func (r *RESTAuth) GetAccountSummary() (AccountSummary, error) {
-	paths := []string{"/fapi/v3/account", "/fapi/v4/account"}
+	// Prefer v3 and keep v2 fallback for legacy/HMAC compatibility.
+	paths := []string{"/fapi/v3/account", "/fapi/v2/account"}
 	if r.isAgentMode() {
 		paths = []string{"/fapi/v3/account"}
 	}
