@@ -2642,9 +2642,10 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		// Ground-zero runtime: scanner + manual execution only.
-		// We intentionally bypass automated setup gates, routers, postures, and auto-entry.
-		manualOnlyScannerMode := true
+		// Runtime mode switch:
+		// - true  => scanner/manual only (no auto entries)
+		// - false => full entry engine path (paper/live mirror behavior)
+		manualOnlyScannerMode := envBool("LIVE_MANUAL_ONLY_SCANNER", false)
 		if manualOnlyScannerMode {
 			st := liveStatus{
 				Generated:     now,
