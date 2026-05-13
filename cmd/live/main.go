@@ -1095,9 +1095,6 @@ type liveExecManager struct {
 	symbolQuarantineTill map[string]time.Time
 	unknownExecGuards    map[string]UnknownExecutionGuard
 	htf1HBySymbol        map[string]HTFStructureSnapshot
-	wsMetaBySymbol       map[string]symbolMeta
-	wsMetaUpdatedAt      time.Time
-	wsQuoteMaxAge        time.Duration
 }
 
 type ladderConfig struct {
@@ -2098,9 +2095,6 @@ func main() {
 		shortInPlay := append([]inplay.Entry(nil), watchSnap.ShortInPlay...)
 		metaBySymbol := copySymbolMetaMap(watchSnap.MetaBySym)
 		cmdCtx.setMeta(metaBySymbol)
-		if execMgr != nil {
-			execMgr.updateWSMetaSnapshot(now, metaBySymbol)
-		}
 			longCurrent := sideEntryMap(longInPlay)
 			shortCurrent := sideEntryMap(shortInPlay)
 			flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
@@ -5982,8 +5976,6 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		symbolQuarantineTill: map[string]time.Time{},
 		unknownExecGuards:    map[string]UnknownExecutionGuard{},
 		htf1HBySymbol:        map[string]HTFStructureSnapshot{},
-		wsMetaBySymbol:       map[string]symbolMeta{},
-		wsQuoteMaxAge:        time.Duration(envInt("LIVE_WS_QUOTE_MAX_AGE_MS", 1500)) * time.Millisecond,
 		ladderCfg:            ladderCfg,
 		fundsCfg:             fundsCfg,
 		reentryCfg:           reentryCfg,
@@ -6021,9 +6013,6 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 	}
 	if m.recoverATRMult <= 0 {
 		m.recoverATRMult = 1.5
-	}
-	if m.wsQuoteMaxAge <= 0 {
-		m.wsQuoteMaxAge = 1500 * time.Millisecond
 	}
 	_ = m.load()
 	for _, p := range m.positions {
@@ -8572,7 +8561,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			return fmt.Errorf("pending add already exists for %s", rawSym)
 		}
 	}
-	bid, ask, err := m.bestBidAsk(rawSym)
+	bid, ask, err := m.rest.BookTicker(rawSym)
 	if err != nil {
 		return err
 	}
@@ -9849,7 +9838,7 @@ func manualStopRetryCandidates(side string, entry, mark, tickSize float64) []flo
 }
 
 func (m *liveExecManager) currentMark(symbol string) (float64, error) {
-	bid, ask, err := m.bestBidAsk(symbol)
+	bid, ask, err := m.rest.BookTicker(symbol)
 	if err != nil {
 		return 0, err
 	}
@@ -9861,7 +9850,7 @@ func (m *liveExecManager) currentMark(symbol string) (float64, error) {
 }
 
 func (m *liveExecManager) currentProtectiveReference(symbol, side string) (float64, error) {
-	bid, ask, err := m.bestBidAsk(symbol)
+	bid, ask, err := m.rest.BookTicker(symbol)
 	if err != nil {
 		return 0, err
 	}
@@ -9870,49 +9859,6 @@ func (m *liveExecManager) currentProtectiveReference(symbol, side string) (float
 		return 0, fmt.Errorf("invalid protective reference")
 	}
 	return ref, nil
-}
-
-func (m *liveExecManager) updateWSMetaSnapshot(now time.Time, meta map[string]symbolMeta) {
-	if m == nil {
-		return
-	}
-	cp := make(map[string]symbolMeta, len(meta))
-	for raw, sm := range meta {
-		cp[strings.ToUpper(strings.TrimSpace(raw))] = sm
-	}
-	m.mu.Lock()
-	m.wsMetaBySymbol = cp
-	m.wsMetaUpdatedAt = now
-	m.mu.Unlock()
-}
-
-func (m *liveExecManager) wsBidAsk(symbol string) (float64, float64, bool) {
-	if m == nil {
-		return 0, 0, false
-	}
-	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
-	if raw == "" {
-		return 0, 0, false
-	}
-	m.mu.RLock()
-	maxAge := m.wsQuoteMaxAge
-	updatedAt := m.wsMetaUpdatedAt
-	sm, ok := m.wsMetaBySymbol[raw]
-	m.mu.RUnlock()
-	if !ok || sm.Bid <= 0 || sm.Ask <= 0 {
-		return 0, 0, false
-	}
-	if maxAge > 0 && !updatedAt.IsZero() && time.Since(updatedAt) > maxAge {
-		return 0, 0, false
-	}
-	return sm.Bid, sm.Ask, true
-}
-
-func (m *liveExecManager) bestBidAsk(symbol string) (float64, float64, error) {
-	if bid, ask, ok := m.wsBidAsk(symbol); ok {
-		return bid, ask, nil
-	}
-	return m.rest.BookTicker(symbol)
 }
 
 func (m *liveExecManager) maybeEnableTrail(p *livePosition, stage int) {
@@ -11052,7 +10998,7 @@ func exitLimitCrossBps() float64 {
 }
 
 func (m *liveExecManager) exitLimitPrice(symbol, side string) (float64, error) {
-	bid, ask, err := m.bestBidAsk(symbol)
+	bid, ask, err := m.rest.BookTicker(symbol)
 	if err != nil {
 		return 0, err
 	}
