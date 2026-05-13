@@ -2,7 +2,6 @@ package notify
 
 import (
 	"fmt"
-	"math"
 	"strings"
 )
 
@@ -217,20 +216,17 @@ func renderScanSection(items []ScanItem) string {
 		if it.Price > 0 {
 			price = formatScanPrice(it.Price)
 		}
-		dayUTCv, dayUTCok := sanitizeScanPct(it.DayUTC)
 		dayUTC := "n/a"
-		if dayUTCok {
-			dayUTC = fmt.Sprintf("%+.1f%%", dayUTCv)
+		if it.DayUTC != 0 {
+			dayUTC = fmt.Sprintf("%+.1f%%", it.DayUTC)
 		}
-		utc4hv, utc4hok := sanitizeScanPct(it.UTC4h)
 		utc4h := "n/a"
-		if utc4hok {
-			utc4h = fmt.Sprintf("%+.1f%%", utc4hv)
+		if it.UTC4h != 0 {
+			utc4h = fmt.Sprintf("%+.1f%%", it.UTC4h)
 		}
-		utc1hv, utc1hok := sanitizeScanPct(it.UTC1h)
 		utc1h := "n/a"
-		if utc1hok {
-			utc1h = fmt.Sprintf("%+.1f%%", utc1hv)
+		if it.UTC1h != 0 {
+			utc1h = fmt.Sprintf("%+.1f%%", it.UTC1h)
 		}
 		vol := "n/a"
 		if it.VolumeUSD > 0 {
@@ -253,19 +249,6 @@ func renderScanSection(items []ScanItem) string {
 		))
 	}
 	return strings.Join(parts, "\n")
-}
-
-func sanitizeScanPct(v float64) (float64, bool) {
-	if v == 0 {
-		return 0, false
-	}
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return 0, false
-	}
-	if math.Abs(v) > 400 {
-		return 0, false
-	}
-	return v, true
 }
 
 func renderScanSectionCompact(label string, items []ScanItem, topN int) string {
