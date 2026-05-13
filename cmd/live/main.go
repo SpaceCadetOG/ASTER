@@ -21291,15 +21291,12 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		return notify.BuildEventHTML("📘", "COMMANDS",
-			"<b>Market + Status</b>",
-			"<code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
-			"<b>Account + Positions</b>",
-			"<code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
-			"<b>Hotkeys</b>",
-			"<code>/l SYMBOL [LEV] [MARGIN_USDT]</code> <code>/s SYMBOL [LEV] [MARGIN_USDT]</code> <code>/l3 SYMBOL [MARGIN_USDT]</code> <code>/l5 SYMBOL [MARGIN_USDT]</code> <code>/l10 SYMBOL [MARGIN_USDT]</code> <code>/l20 SYMBOL [MARGIN_USDT]</code>",
-			"<code>/s3 SYMBOL [MARGIN_USDT]</code> <code>/s5 SYMBOL [MARGIN_USDT]</code> <code>/s10 SYMBOL [MARGIN_USDT]</code> <code>/s20 SYMBOL [MARGIN_USDT]</code> <code>/m SYMBOL</code> <code>/c SYMBOL</code> <code>/p SYMBOL</code>",
-			"<b>Runtime Controls</b>",
-			"<code>/mode</code> <code>/mode live</code> <code>/mode paper</code> <code>/pause</code> <code>/resume</code> <code>/close SYMBOL</code> <code>/closeall</code>",
+			"<b>Fast</b> <code>/execute SYMBOL LONG|SHORT [LEV] [MARGIN]</code>",
+			"<b>Hotkeys</b> <code>/l</code> <code>/s</code> <code>/l3</code> <code>/l5</code> <code>/l10</code> <code>/l20</code> <code>/s3</code> <code>/s5</code> <code>/s10</code> <code>/s20</code>",
+			"<b>Scanner</b> <code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
+			"<b>Account</b> <code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
+			"<b>Manage</b> <code>/m SYMBOL</code> <code>/p SYMBOL</code> <code>/c SYMBOL</code> <code>/closeall</code>",
+			"<b>More</b> <code>/hotkeys</code>",
 		)
 	case strings.HasPrefix(cmd, "/hotkeys"):
 		return notify.BuildEventHTML("⌨️", "HOTKEYS",
@@ -21371,6 +21368,15 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return c.handleCommand("", fmt.Sprintf("/trade %s %s", sym, side))
 		}
 		return c.handleCommand("", fmt.Sprintf("/trade %s %s %s", sym, side, lev))
+	case strings.HasPrefix(cmd, "/execute "):
+		// /execute is a clean alias to /trade in manual-only runtime.
+		// Usage: /execute SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]
+		parts := strings.Fields(rawMsg)
+		if len(parts) < 3 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/execute SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>")
+		}
+		args := strings.Join(parts[1:], " ")
+		return c.handleCommand("", "/trade "+args)
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
 		liveSummary := "live snapshot unavailable"
