@@ -1977,13 +1977,41 @@ func main() {
 	if wsScannerEnable {
 		scannerWSPool = newScannerWSQuotePool(runtimeCtx)
 	}
+	scannerRateLimitBackoffBase := time.Duration(envInt("LIVE_SCANNER_RATE_BACKOFF_BASE_SEC", 10)) * time.Second
+	scannerRateLimitBackoffMax := time.Duration(envInt("LIVE_SCANNER_RATE_BACKOFF_MAX_SEC", 120)) * time.Second
+	if scannerRateLimitBackoffBase <= 0 {
+		scannerRateLimitBackoffBase = 10 * time.Second
+	}
+	if scannerRateLimitBackoffMax < scannerRateLimitBackoffBase {
+		scannerRateLimitBackoffMax = scannerRateLimitBackoffBase
+	}
+	scannerRateBackoffUntil := time.Time{}
+	scannerRateHitStreak := 0
 	runtimeLoop.startScannerWorker(runtimeCtx, scanEvery, func(now time.Time) (liveScannerSnapshot, bool) {
+		if !scannerRateBackoffUntil.IsZero() && now.Before(scannerRateBackoffUntil) {
+			return liveScannerSnapshot{}, false
+		}
 		var mkts []market.Market
 		if wsScannerEnable {
 			mkts = client.FetchAllMarketsLite()
 		} else {
 			mkts = client.FetchAllMarkets()
 		}
+		if len(mkts) == 0 {
+			if err := client.LastFetchError(); scannerRateLimitError(err) {
+				scannerRateHitStreak++
+				backoff := scannerRateLimitBackoffBase * time.Duration(1<<minInt(scannerRateHitStreak-1, 4))
+				if backoff > scannerRateLimitBackoffMax {
+					backoff = scannerRateLimitBackoffMax
+				}
+				scannerRateBackoffUntil = now.Add(backoff)
+				fmt.Printf("live: scanner rate-limit backoff active for %s (streak=%d, until=%s)\n",
+					backoff, scannerRateHitStreak, scannerRateBackoffUntil.Format(time.RFC3339))
+			}
+			return liveScannerSnapshot{}, false
+		}
+		scannerRateHitStreak = 0
+		scannerRateBackoffUntil = time.Time{}
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
 		longRows = filterBlockedScored(longRows, safety.blockSymbols)
@@ -19172,6 +19200,19 @@ func isSignedUserDataRateLimitErr(err error) bool {
 	}
 	raw := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(raw, "http 429") || strings.Contains(raw, "rate limit")
+}
+
+func scannerRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(raw, "status 429") ||
+		strings.Contains(raw, "status 418") ||
+		strings.Contains(raw, "http 429") ||
+		strings.Contains(raw, "http 418") ||
+		strings.Contains(raw, "rate limit") ||
+		strings.Contains(raw, "waf limit")
 }
 
 func waitForNextCycle(cycleStart time.Time, scanEvery, reconEvery time.Duration, execMgr *liveExecManager) {

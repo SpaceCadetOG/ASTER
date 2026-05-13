@@ -3,6 +3,7 @@ package aster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,8 +24,29 @@ type Client struct {
 	HTTP    *http.Client
 	RL      *ratelimit.Limiter // 10 req/s, burst 20
 
-	openMu    sync.RWMutex
-	openCache map[string]map[string]float64
+	openMu       sync.RWMutex
+	openCache    map[string]map[string]float64
+	lastFetchErr atomicError
+}
+
+type atomicError struct {
+	mu  sync.RWMutex
+	err error
+}
+
+func (a *atomicError) Set(err error) {
+	a.mu.Lock()
+	a.err = err
+	a.mu.Unlock()
+}
+
+func (a *atomicError) Get() error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.err == nil {
+		return nil
+	}
+	return errors.New(a.err.Error())
 }
 
 func New(base string) *Client {
@@ -296,8 +318,12 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 
 	rows, err := c.fetchAll24h()
 	if err != nil || len(rows) == 0 {
+		if err != nil {
+			c.lastFetchErr.Set(err)
+		}
 		return nil
 	}
+	c.lastFetchErr.Set(nil)
 
 	mkts := make([]market.Market, 0, len(rows))
 	for _, ts := range rows {
@@ -360,8 +386,12 @@ func (c *Client) FetchAllMarketsLite(quoteAssets ...string) []market.Market {
 	}
 	rows, err := c.fetchAll24h()
 	if err != nil || len(rows) == 0 {
+		if err != nil {
+			c.lastFetchErr.Set(err)
+		}
 		return nil
 	}
+	c.lastFetchErr.Set(nil)
 	mkts := make([]market.Market, 0, len(rows))
 	for _, ts := range rows {
 		if !MatchesQuoteAsset(ts.Symbol, quoteAssets) {
@@ -374,6 +404,13 @@ func (c *Client) FetchAllMarketsLite(quoteAssets ...string) []market.Market {
 		mkts = append(mkts, m)
 	}
 	return mkts
+}
+
+func (c *Client) LastFetchError() error {
+	if c == nil {
+		return nil
+	}
+	return c.lastFetchErr.Get()
 }
 
 // ---- Candle loader (mark-price klines) ----
