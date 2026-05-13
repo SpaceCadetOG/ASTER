@@ -21063,25 +21063,20 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		return notify.BuildEventHTML("📘", "COMMANDS",
-			"<b>Fast</b> <code>/execute SYMBOL LONG|SHORT [LEV] [MARGIN]</code>",
-			"<b>Hotkeys</b> <code>/l</code> <code>/s</code> <code>/l3</code> <code>/l5</code> <code>/l10</code> <code>/l20</code> <code>/s3</code> <code>/s5</code> <code>/s10</code> <code>/s20</code>",
 			"<b>Scanner</b> <code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
 			"<b>Account</b> <code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
-			"<b>Manage</b> <code>/m SYMBOL</code> <code>/p SYMBOL</code> <code>/c SYMBOL</code> <code>/closeall</code>",
+			"<b>Trading:</b> disabled (ground-zero mode)",
 			"<b>More</b> <code>/hotkeys</code>",
 		)
 	case strings.HasPrefix(cmd, "/hotkeys"):
 		return notify.BuildEventHTML("⌨️", "HOTKEYS",
-			"<b>Entry Request (priority arm)</b>",
-			"<code>/l SYMBOL [LEV] [MARGIN_USDT]</code> = <code>/trade SYMBOL LONG [LEV] [MARGIN_USDT]</code>",
-			"<code>/s SYMBOL [LEV] [MARGIN_USDT]</code> = <code>/trade SYMBOL SHORT [LEV] [MARGIN_USDT]</code>",
-			"<b>Fixed-Leverage Variants</b>",
-			"<code>/l3 SYMBOL [MARGIN_USDT]</code> <code>/l5 SYMBOL [MARGIN_USDT]</code> <code>/l10 SYMBOL [MARGIN_USDT]</code> <code>/l20 SYMBOL [MARGIN_USDT]</code>",
-			"<code>/s3 SYMBOL [MARGIN_USDT]</code> <code>/s5 SYMBOL [MARGIN_USDT]</code> <code>/s10 SYMBOL [MARGIN_USDT]</code> <code>/s20 SYMBOL [MARGIN_USDT]</code>",
-			"<b>Manual + Risk</b>",
-			"<code>/m SYMBOL</code> = <code>/manual SYMBOL</code>",
-			"<code>/p SYMBOL</code> = <code>/protect SYMBOL</code>",
-			"<code>/c SYMBOL</code> = <code>/close SYMBOL</code>",
+			"Trading hotkeys are disabled in ground-zero mode.",
+			"Use scanner/status commands only.",
+		)
+	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "), strings.HasPrefix(cmd, "/execute "), strings.HasPrefix(cmd, "/trade "), strings.HasPrefix(cmd, "/protect "), strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "), strings.HasPrefix(cmd, "/closeall"), cmd == "/mode live" || cmd == "/live" || cmd == "/mode paper" || cmd == "/paper":
+		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
+			"Ground-zero mode is active.",
+			"All order/trade commands are disabled.",
 		)
 	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "):
 		if len(fields) < 2 {
