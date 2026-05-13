@@ -2626,7 +2626,7 @@ func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liv
 				}
 			}
 			snap.UnrealizedNow += upnl
-			snap.OpenPositionLines = append(snap.OpenPositionLines, fmt.Sprintf("%s %s | strat=%s | uPnL=%+.2f", raw, pos.Side, firstNonEmpty(pos.EntryReason, "n/a"), upnl))
+			snap.OpenPositionLines = append(snap.OpenPositionLines, fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", raw, pos.Side, firstNonEmpty(pos.EntryReason, "n/a"), upnl))
 		}
 	}
 	if m != nil {
@@ -2638,7 +2638,7 @@ func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liv
 			snap.OpenPositionLines = snap.OpenPositionLines[:0]
 			for _, pos := range live.Positions {
 				snap.OpenPositionLines = append(snap.OpenPositionLines,
-					fmt.Sprintf("%s %s | strat=%s | uPnL=%+.2f", pos.Symbol, pos.Side, firstNonEmpty(pos.EntryReason, "unknown"), pos.UnrealizedPnL))
+					fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", pos.Symbol, pos.Side, firstNonEmpty(pos.EntryReason, "unknown"), pos.UnrealizedPnL))
 			}
 		}
 	}
@@ -8818,8 +8818,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	m.positions[rawSym] = p
 	m.recordExecutionGovernorEntry(now, c)
 	_ = m.save()
-	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d disc=%.2f trig=%.2f exec=%.2f combo=%.2f starter_only=%v posture=%s posture_reason=%s stop_reason=%s\n",
-		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, starterOnly, firstNonEmpty(strings.TrimSpace(c.EntryPosture), "-"), firstNonEmpty(strings.TrimSpace(c.EntryPostureReason), "-"), firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d reason=%s stop_reason=%s\n",
+		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, firstNonEmpty(strings.TrimSpace(p.EntryReason), "manual"), firstNonEmpty(stopReason, "generic"))
 	if m.tg != nil {
 		title := "ENTRY SUBMITTED"
 		if plan.IsReentry {
@@ -12025,8 +12025,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	p.positions[raw] = pos
 	_ = p.save()
-	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f disc=%.2f trig=%.2f exec=%.2f combo=%.2f posture=%s posture_reason=%s stop_reason=%s\n",
-		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(strings.TrimSpace(c.EntryPosture), "-"), firstNonEmpty(strings.TrimSpace(c.EntryPostureReason), "-"), firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f reason=%s stop_reason=%s\n",
+		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, firstNonEmpty(strings.TrimSpace(c.Strat), "manual"), firstNonEmpty(stopReason, "generic"))
 	return pos, nil
 }
 

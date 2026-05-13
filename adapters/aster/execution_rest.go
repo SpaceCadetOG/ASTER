@@ -1,6 +1,7 @@
 package aster
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -227,6 +228,39 @@ func (r *RESTAuth) PlaceOrder(vals url.Values) (map[string]any, error) {
 		return nil, err
 	}
 	var out map[string]any
+	if err := decodeJSONNumbers(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *RESTAuth) PlaceBatchOrders(orders []url.Values) ([]map[string]any, error) {
+	payload := make([]map[string]string, 0, len(orders))
+	for _, ov := range orders {
+		item := map[string]string{}
+		for k, vv := range ov {
+			if len(vv) == 0 {
+				continue
+			}
+			item[k] = vv[0]
+		}
+		payload = append(payload, item)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("batchOrders", string(raw))
+	paths := []string{"/fapi/v3/batchOrders", "/fapi/v1/batchOrders"}
+	if r.isAgentMode() {
+		paths = []string{"/fapi/v3/batchOrders"}
+	}
+	b, err := r.doSignedPOSTAny(paths, q)
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
 	if err := decodeJSONNumbers(b, &out); err != nil {
 		return nil, err
 	}
