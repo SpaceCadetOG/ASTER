@@ -1310,6 +1310,18 @@ func main() {
 	riskShell.MaxRecentSlippageBps = envFloat("LIVE_MAX_RECENT_SLIPPAGE_BPS", 15)
 	riskHoldHours := envFloat("LIVE_EXPECTED_HOLD_HOURS", 8.0)
 	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 3.0)
+	_ = reentryCfg
+	_ = leverageMode
+	_ = leverageFixed
+	_ = leverageMin
+	_ = eventLockoutMin
+	_ = maxCorrelatedExposure
+	_ = corrGroups
+	_ = obFilterEnable
+	_ = obLevels
+	_ = riskShell
+	_ = riskHoldHours
+	_ = riskFallbackStopPct
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
@@ -1422,6 +1434,7 @@ func main() {
 		ReadyBoost:         envFloat("LIVE_TRIGGER_READY_BOOST", 0.12),
 		InvalidPenalty:     envFloat("LIVE_TRIGGER_INVALID_PENALTY", 0.18),
 	})
+	_ = triggerCfg
 	if lifecycleCfg.ArmScans < 1 {
 		lifecycleCfg.ArmScans = 1
 	}
@@ -1561,6 +1574,7 @@ func main() {
 	watchCfg := loadWatchConfig()
 	watcher := newWatchRuntime(watchCfg, client)
 	wallSignals := map[string]wallSignal{}
+	_ = wallSignals
 	liveWatchEvery = 0
 	liveWatchTick = nil
 	livePriorityEvery = 0
@@ -1574,6 +1588,7 @@ func main() {
 	}
 	var cmdCtx *telegramCommandCtx
 	tgVerbose := envBool("LIVE_TG_VERBOSE", false)
+	_ = tgVerbose
 	digestEvery := time.Duration(envInt("LIVE_TG_DIGEST_MIN", 60)) * time.Minute
 	if digestEvery < time.Minute {
 		digestEvery = 60 * time.Minute
@@ -1648,6 +1663,9 @@ func main() {
 	preEODEntryBlockMin := 0
 	postSLCooldown := time.Duration(envInt("POST_SL_COOLDOWN_MIN", 30)) * time.Minute
 	allowDeadSessionTrading := true
+	_ = maintWarmup
+	_ = preEODEntryBlockMin
+	_ = allowDeadSessionTrading
 	inertiaEnable := envBool("LIVE_INERTIA_BREAKER_ENABLE", false)
 	inertiaScoreMin := envFloat("LIVE_INERTIA_SCORE_MIN", 80)
 	inertiaSlowMin := envFloat("LIVE_INERTIA_SLOW_SLOPE_MIN", 0.5)
@@ -1790,6 +1808,10 @@ func main() {
 	shadowEquityFile := envStr("LIVE_PAPER_EQUITY_FILE", "out/paper_equity.csv")
 	shadowWarnAt := time.Time{}
 	lastTopKey := ""
+	_ = requireShadowDays
+	_ = shadowEquityFile
+	_ = shadowWarnAt
+	_ = lastTopKey
 	lastOrderAt := time.Time{}
 	lastOrderBySymbol := map[string]time.Time{}
 	lastOrderBySymbolSide := map[string]time.Time{}
@@ -1802,6 +1824,15 @@ func main() {
 	sessionChurns := map[string]*sessionChurn{}
 	handledClosedLive := map[string]time.Time{}
 	recentEntryAttempts := []time.Time{}
+	_ = lastOrderAt
+	_ = lastOrderBySymbol
+	_ = lastOrderBySymbolSide
+	_ = orderCountByDay
+	_ = orderCountByHour
+	_ = symbolStopoutLockUntil
+	_ = triggerMem
+	_ = recentRejects
+	_ = recentEntryAttempts
 	missed := newMissedTracker()
 	if cmdCtx != nil {
 		cmdCtx.missed = missed
@@ -1821,7 +1852,13 @@ func main() {
 	gateCfg := loadEntryGateConfig()
 	symbolCooldownSameSide := throttle.NewCooldown(time.Duration(envInt("LIVE_THROTTLE_SYMBOL_SAME_SIDE_COOLDOWN_SECONDS", envInt("LIVE_THROTTLE_SYMBOL_COOLDOWN_SECONDS", 300))) * time.Second)
 	symbolCooldownFlipSide := throttle.NewCooldown(time.Duration(envInt("LIVE_THROTTLE_SYMBOL_FLIP_SIDE_COOLDOWN_SECONDS", 120)) * time.Second)
+	_ = reserveGate
+	_ = discoveryCfg
+	_ = gateCfg
+	_ = symbolCooldownSameSide
+	_ = symbolCooldownFlipSide
 	intentDedupe := throttle.NewDedupe(time.Duration(envInt("LIVE_THROTTLE_DEDUPE_WINDOW_SECONDS", 120)) * time.Second)
+	_ = intentDedupe
 	eventLog := stats.NewEventLogger(
 		envStr("LIVE_EVENTS_LOG", "logs/events.jsonl"),
 		envBool("LIVE_EVENTS_ENABLE", true),
@@ -2057,24 +2094,14 @@ func main() {
 		shortInPlay := append([]inplay.Entry(nil), watchSnap.ShortInPlay...)
 		metaBySymbol := copySymbolMetaMap(watchSnap.MetaBySym)
 		cmdCtx.setMeta(metaBySymbol)
-		longCurrent := sideEntryMap(longInPlay)
-		shortCurrent := sideEntryMap(shortInPlay)
-		flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
-		wallSignals = copyWallSignalsMap(watchSnap.WallSignalsBySy)
-		momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
-		paperDepth := map[string]aster.OrderBook{}
-		if paper.enabled {
-			paperDepth = fetchOrderBooks(client, paper.OpenSymbols(), envInt("LIVE_PAPER_OB_LEVELS", 20))
-			mergeTopOfBookIntoMeta(metaBySymbol, paperDepth)
-			paper.ApplyFunding(now, metaBySymbol, longCurrent, shortCurrent)
-		}
-		if execMgr != nil {
-			execMgr.ApplyFundingExit(now, metaBySymbol)
-		}
-		if paper.enabled {
-			paper.CheckExit(now, metaBySymbol, paperDepth, longCurrent, shortCurrent, momBySymbol, flowMetricsBySymbol)
-		}
-		inCriticalProtection := execMgr != nil && execMgr.hasCriticalProtectionState()
+			longCurrent := sideEntryMap(longInPlay)
+			shortCurrent := sideEntryMap(shortInPlay)
+			flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
+			wallSignals = copyWallSignalsMap(watchSnap.WallSignalsBySy)
+			momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
+			paperDepth := map[string]aster.OrderBook{}
+			// Manual-only mode: no autonomous trade management/exits.
+			inCriticalProtection := execMgr != nil && execMgr.hasCriticalProtectionState()
 		if !inMaint {
 			if paper.enabled && tg != nil && tg.Enabled() {
 				if now.After(nextTradeUpdateAt) {
@@ -2417,6 +2444,7 @@ func main() {
 			acct.AvailableUSDT,
 			paper,
 		)
+		_ = effectiveMargin
 		paperIgnoresMaintenance := paper != nil && paper.enabled && envBool("LIVE_PAPER_IGNORE_MAINTENANCE", true)
 		if inMaint && !paperIgnoresMaintenance {
 			reason := blockedWindowReason(maintWindow)
@@ -2462,1461 +2490,60 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		filtered := make([]candidate, 0, len(cands))
-		paperSimpleMode := paper != nil && paper.enabled
-		for idx, c := range cands {
-			rawCandidate := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
-			if ws, ok := wallSignals[rawCandidate]; ok {
-				c = applyWallSignal(c, ws)
+		// Ground-zero runtime: scanner + manual execution only.
+		// We intentionally bypass automated setup gates, routers, postures, and auto-entry.
+		manualOnlyScannerMode := true
+		if manualOnlyScannerMode {
+			st := liveStatus{
+				Generated:     now,
+				DryRun:        dryRun,
+				LiveEnabled:   safety.enableLiveTrading,
+				LongInPlay:    len(longInPlay),
+				ShortInPlay:   len(shortInPlay),
+				AvailableUSDT: acct.AvailableUSDT,
+				Exec:          liveExecSnapshot{},
+				Live:          liveAccountSnapshot{},
 			}
-			if meta, ok := metaBySymbol[rawCandidate]; ok {
-				c.VolumeUSD = meta.VolumeUSD
-				c.FundingRate = meta.FundingRate
-				c.DayUTC24h = meta.DayUTC24h
-				c.UTC4hPct = meta.UTC4hPct
-				c.UTC1hPct = meta.UTC1hPct
+			st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
+			if execMgr != nil {
+				st.Exec = execMgr.Snapshot(10)
+				st.Live = execMgr.LiveAccountSnapshot(10)
 			}
-			triggerReasons := []string(nil)
-			c.TriggerState, c.TriggerStateN, triggerReasons = deriveTriggerState(c)
-			c = applyTriggerLifecycle(c, now, triggerMem, triggerCfg)
-			c.SetupFamily = classifySetupFamily(c, now)
-			if strings.TrimSpace(c.Strat) != "" && !strings.EqualFold(strings.TrimSpace(c.Strat), "none") && c.SetupFamily == "" {
-				c.Strat = "none"
-				c.Conf = 0
-				c.RejectReason = "setup_family_none"
+			if paper.enabled {
+				st.PaperSummary = paper.Summary(metaBySymbol)
 			}
-			c.ExitProfile = chooseExitProfile(c)
-			operatorSuggested := false
-			if cmdCtx != nil {
-				if s, ok := cmdCtx.getSuggestion(c.Entry.Symbol); ok && strings.EqualFold(s.Side, c.Side) {
-					operatorSuggested = true
-				}
-			}
-			_ = operatorSuggested
-			c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, c.QualityReasons = computeEntryScoreBreakdown(c, entryQualityCfg)
-			c.StructureFresh = requiresFreshPullback(c)
-			c.QualityReasons = append(c.QualityReasons, triggerReasons...)
-			c.QualityReasons = append(c.QualityReasons, c.WallReasons...)
-			if c.StructureReason != "" {
-				c.QualityReasons = append(c.QualityReasons, "structure:"+c.StructureReason)
-			}
-			if c.LiquidityRisk {
-				c.QualityReasons = append(c.QualityReasons,
-					"liquidity_risk:"+c.LiquidityRiskReason,
-					fmt.Sprintf("liquidity_level=%.8f", c.LiquidityPoolLevel),
-					fmt.Sprintf("liquidity_touches=%d", c.LiquidityPoolCount),
-				)
-				if c.LiquiditySweepSeen {
-					c.QualityReasons = append(c.QualityReasons,
-						fmt.Sprintf("liquidity_sweep_strength=%.3f", c.LiquiditySweepStrength),
-						fmt.Sprintf("liquidity_sweep_bars_ago=%d", c.LiquiditySweepBarsAgo),
-					)
-				}
-			}
-			if c.SetupFamily != "" {
-				c.QualityReasons = append(c.QualityReasons, "setup:"+c.SetupFamily)
-			}
-			if c.WallMode != "" {
-				c.QualityReasons = append(c.QualityReasons, "wall_mode:"+c.WallMode)
-			}
-			c.QualityReasons = append(c.QualityReasons, c.PatternReasons...)
-			if c.TriggerStage != "" {
-				c.QualityReasons = append(c.QualityReasons, "trigger_stage:"+strings.ToLower(c.TriggerStage))
-			}
-			c.TradeQuality = c.CombinedScore
-			if missed != nil {
-				missed.ObserveCandidate(now, c, idx < maxInt(1, acceptanceCfg.TopN))
-				c = missed.PromoteCandidate(now, c, execMgr, eventLog)
-			}
-			eventLog.Emit(stats.Event{
-				Timestamp:    now,
-				Type:         "SIGNAL",
-				Symbol:       rawCandidate,
-				Side:         c.Side,
-				TF:           "1m",
-				Strategy:     c.Strat,
-				TriggerState: c.TriggerState,
-				ExitProfile:  c.ExitProfile,
-				Score:        c.Entry.CurrentScore,
-				Slope:        c.Entry.ScoreSlope,
-				Discovery:    c.DiscoveryScore,
-				Trigger:      c.TriggerScore,
-				Execution:    c.ExecutionScore,
-				Combined:     c.CombinedScore,
-				Reason:       fmt.Sprintf("candidate_stage=%s trigger_stage=%s trigger_scans=%d", c.LifecycleStage, c.TriggerStage, c.TriggerScans),
-			})
-			if c.RejectReason == "STATE_INERTIA_KILL" || c.RejectReason == "VWAP_EMA_LONG_INVALIDATION" {
-				recordCandidateDecision(cmdCtx, c, c.RejectReason)
-				rememberRecentReject(recentRejects, now, c, c.RejectReason, acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{c.RejectReason},
-				})
-				continue
-			}
-			if !paperSimpleMode {
-				if guardReason := continuationGuardReason(c, entryQualityCfg); guardReason != "" {
-					recordCandidateDecision(cmdCtx, c, guardReason)
-					rememberRecentReject(recentRejects, now, c, guardReason, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{guardReason},
-					})
-					continue
-				}
-			}
-			if !paperSimpleMode {
-				if directionReason := directionalConflictRejectReason(c); directionReason != "" {
-					recordCandidateDecision(cmdCtx, c, directionReason)
-					rememberRecentReject(recentRejects, now, c, directionReason, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{directionReason},
-					})
-					continue
-				}
-			}
-			if !paperSimpleMode {
-				if dominanceReason := sideDominanceRejectReason(c, cands); dominanceReason != "" {
-					recordCandidateDecision(cmdCtx, c, dominanceReason)
-					rememberRecentReject(recentRejects, now, c, dominanceReason, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{dominanceReason},
-					})
-					continue
-				}
-			}
-			if !paperSimpleMode {
-				if churnReason := churnRejectReason(sessionChurns, now, c); churnReason != "" {
-					recordCandidateDecision(cmdCtx, c, churnReason)
-					rememberRecentReject(recentRejects, now, c, churnReason, acceptanceCfg)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{churnReason},
-					})
-					continue
-				}
-			}
-			c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
-			if liquidityReason := liquidityRiskRejectReason(c); liquidityReason != "" {
-				if suppressOrRememberReject(recentRejects, now, c, liquidityReason, acceptanceCfg) {
-					continue
-				}
-				recordCandidateDecision(cmdCtx, c, liquidityReason)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{liquidityReason},
-				})
-				continue
-			}
-			if paperSimpleMode {
-				pdec := decideSimplePaperEntryNow(c, currentAccountHealth())
-				logSimplePaperDecision(c, pdec)
-				if !pdec.Allowed {
-					if suppressOrRememberReject(recentRejects, now, c, pdec.Reason, acceptanceCfg) {
-						continue
+			if len(cands) > 0 {
+				sort.SliceStable(cands, func(i, j int) bool {
+					if cands[i].Entry.CurrentScore == cands[j].Entry.CurrentScore {
+						if cands[i].Entry.ScoreSlope == cands[j].Entry.ScoreSlope {
+							return cands[i].Entry.Rank < cands[j].Entry.Rank
+						}
+						return cands[i].Entry.ScoreSlope > cands[j].Entry.ScoreSlope
 					}
-					recordCandidateDecision(cmdCtx, c, pdec.Reason)
-					f := false
-					eventLog.Emit(stats.Event{
-						Timestamp:   now,
-						Type:        "GATE_DECISION",
-						Symbol:      rawCandidate,
-						Side:        c.Side,
-						Strategy:    c.Strat,
-						Score:       c.Entry.CurrentScore,
-						Slope:       c.Entry.ScoreSlope,
-						Discovery:   c.DiscoveryScore,
-						Trigger:     c.TriggerScore,
-						Execution:   c.ExecutionScore,
-						Combined:    c.CombinedScore,
-						GateAllow:   &f,
-						GateReasons: []string{pdec.Reason},
-					})
-					continue
-				}
-				if strings.EqualFold(strings.TrimSpace(pdec.Side), "short") {
-					c.Strat = "impulsive_short_starter"
-				} else {
-					c.Strat = "impulsive_long_starter"
-				}
-				c.Conf = clamp(maxFloat(c.Conf, 0.55), 0, 0.92)
-				c.RejectReason = ""
-				c.QualityReasons = append(c.QualityReasons, "paper_simple:"+pdec.Reason)
-				if pdec.PullbackPreferred {
-					c.QualityReasons = append(c.QualityReasons, "paper_simple:pullback_preferred")
-				}
-				recordCandidateDecision(cmdCtx, c, "")
-				filtered = append(filtered, c)
-				continue
-			}
-			if dominanceReason := sideDominanceRejectReason(c, cands); dominanceReason != "" {
-				recordCandidateDecision(cmdCtx, c, dominanceReason)
-				rememberRecentReject(recentRejects, now, c, dominanceReason, acceptanceCfg)
-				f := false
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      rawCandidate,
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					Discovery:   c.DiscoveryScore,
-					Trigger:     c.TriggerScore,
-					Execution:   c.ExecutionScore,
-					Combined:    c.CombinedScore,
-					GateAllow:   &f,
-					GateReasons: []string{dominanceReason},
+					return cands[i].Entry.CurrentScore > cands[j].Entry.CurrentScore
 				})
-				continue
-			}
-			minQuality := minQualityForStrategy(c, entryQualityCfg)
-			minConf := minEntryConfForStrategy(c, entryQualityCfg)
-			if c.TradeQuality < minQuality {
-				c.QualityReasons = append(c.QualityReasons, fmt.Sprintf("meta_quality:%.2f<%.2f", c.TradeQuality, minQuality))
-			}
-			if c.Conf < minConf {
-				c.QualityReasons = append(c.QualityReasons, confidenceRejectReason(c, minConf))
-			}
-			if !pureMode {
-				gateInput := buildGateInputWithCache(featureCache, c, gateCfg)
-				dec := gate.Evaluate(gateInput, gateCfg)
-				eventLog.Emit(stats.Event{
-					Timestamp:   now,
-					Type:        "GATE_DECISION",
-					Symbol:      strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)),
-					Side:        c.Side,
-					Strategy:    c.Strat,
-					Score:       c.Entry.CurrentScore,
-					Slope:       c.Entry.ScoreSlope,
-					VolumeRatio: gateInput.VolumeRatio,
-					GateAllow:   &dec.Allow,
-					GateReasons: dec.Reasons,
-				})
-				if !dec.Allow {
-					recordCandidateDecision(cmdCtx, c, firstNonEmpty(strings.Join(dec.Reasons, ","), "gate_reject"))
-					rememberRecentReject(recentRejects, now, c, firstNonEmpty(strings.Join(dec.Reasons, ","), "gate_reject"), acceptanceCfg)
-					continue
+				best := cands[0]
+				st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+				st.TopSide = best.Side
+				st.TopGrade = best.Entry.CurrentGrade
+				st.TopScore = best.Entry.CurrentScore
+				st.TopSlope = best.Entry.ScoreSlope
+				st.TopDecision = "manual_only"
+				st.TopDecisionWhy = "scanner_only_manual_execution"
+				if emitTerminal {
+					fmt.Printf("live: scanner-only top %s side=%s grade=%s score=%.2f slope=%.3f state=%s\n",
+						best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.State)
 				}
-			}
-			recordCandidateDecision(cmdCtx, c, "")
-			filtered = append(filtered, c)
-		}
-		cands = filtered
-		if cmdCtx != nil && len(cands) > 1 {
-			sort.SliceStable(cands, func(i, j int) bool {
-				si, oki := cmdCtx.getSuggestion(cands[i].Entry.Symbol)
-				sj, okj := cmdCtx.getSuggestion(cands[j].Entry.Symbol)
-				matchI := oki && strings.EqualFold(si.Side, cands[i].Side)
-				matchJ := okj && strings.EqualFold(sj.Side, cands[j].Side)
-				if matchI != matchJ {
-					return matchI
-				}
-				return false
-			})
-		}
-		recentEntryAttempts = trimRecentTimes(now, recentEntryAttempts, acceptanceCfg.EntryWindow)
-		if len(cands) > 1 {
-			topN := minInt(acceptanceCfg.TopN, len(cands))
-			queue := append([]candidate(nil), cands[:topN]...)
-			sort.SliceStable(queue, func(i, j int) bool {
-				ri := candidateSelectionRank(queue[i])
-				rj := candidateSelectionRank(queue[j])
-				if ri == rj {
-					if queue[i].CombinedScore == queue[j].CombinedScore {
-						return queue[i].Entry.Rank > queue[j].Entry.Rank
-					}
-					return queue[i].CombinedScore > queue[j].CombinedScore
-				}
-				return ri > rj
-			})
-			copy(cands[:topN], queue)
-		}
-		st := liveStatus{
-			Generated:     now,
-			DryRun:        dryRun,
-			LiveEnabled:   safety.enableLiveTrading,
-			LongInPlay:    len(longInPlay),
-			ShortInPlay:   len(shortInPlay),
-			AvailableUSDT: acct.AvailableUSDT,
-			Exec:          liveExecSnapshot{},
-			Live:          liveAccountSnapshot{},
-		}
-		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
-		if execMgr != nil {
-			st.Exec = execMgr.Snapshot(10)
-			st.Live = execMgr.LiveAccountSnapshot(10)
-		}
-		if paper.enabled {
-			st.PaperSummary = paper.Summary(metaBySymbol)
-		}
-		if payoutMgr != nil && payoutMgr.enabled {
-			ps := payoutMgr.state
-			st.PayoutCycleID = ps.CycleID
-			if !ps.CycleEnd.IsZero() {
-				st.PayoutNextAt = ps.CycleEnd.In(payoutMgr.loc).Format(time.RFC3339)
-			}
-			st.PayoutLastAmt = ps.LastPayoutAmt
-			st.PayoutLastPnL = ps.LastCycleProfit
-			st.PayoutLastType = ps.LastAction
-		}
-		if len(cands) == 0 {
-			statusStore.Set(st)
-			topReject := ""
-			if cmdCtx != nil {
-				for _, sym := range append(symbolNamesFromEntries(longInPlay), symbolNamesFromEntries(shortInPlay)...) {
-					if dec, ok := cmdCtx.getDecision(sym); ok && dec.RejectReason != "" {
-						topReject = dec.RejectReason
-						break
-					}
-				}
-			}
-			if emitTerminal && verboseRejectLogging() {
-				if topReject != "" {
-					fmt.Printf("signal: none (%s)\n", topReject)
-				} else {
-					fmt.Println("signal: none")
-				}
-			}
-			waitAndReport()
-			continue
-		}
-		if acceptanceCfg.MaxNewPositionsWindow > 0 && len(recentEntryAttempts) >= acceptanceCfg.MaxNewPositionsWindow {
-			st.TopRejectReason = "entry_window_limit"
-			statusStore.Set(st)
-			if emitTerminal && verboseRejectLogging() {
-				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
-			}
-			waitAndReport()
-			continue
-		}
-		best := candidate{}
-		selected := false
-		selectedSpreadBps := 0.0
-		selectedBookImb := 0.0
-		selectedDepth := map[string]aster.OrderBook{}
-		var selectionRejects []string
-		selectionN := minInt(maxInt(1, acceptanceCfg.TopN), len(cands))
-		queueCandidates := append([]candidate(nil), cands[:selectionN]...)
-		filteredQueue, earlyRejects := prefilterCandidatesBeforeExpensiveWork(queueCandidates, execMgr)
-		for _, c := range queueCandidates {
-			raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
-			if reason, ok := earlyRejects[raw]; ok {
-				recordCandidateDecision(cmdCtx, c, reason)
-				selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", raw, reason))
-				if missed != nil {
-					missed.Observe(now, c, reason)
-				}
-			}
-		}
-		queueCandidates = filteredQueue
-		if len(queueCandidates) == 0 {
-			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
-			statusStore.Set(st)
-			if emitTerminal && verboseRejectLogging() {
-				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
-			}
-			waitAndReport()
-			continue
-		}
-		attemptBudget := maxInt(1, acceptanceCfg.MaxAttemptsPerCycle)
-		depthSyms := make([]string, 0, selectionN)
-		for i := 0; i < len(queueCandidates); i++ {
-			raw := strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol))
-			if raw != "" {
-				depthSyms = append(depthSyms, raw)
-			}
-		}
-		prefetchedDepth := map[string]aster.OrderBook{}
-		if len(depthSyms) > 0 {
-			depthLevels := maxInt(obLevels, envInt("LIVE_PAPER_OB_LEVELS", 20))
-			prefetchedDepth = fetchOrderBooks(client, depthSyms, depthLevels)
-			if watcher != nil && watcher.walls != nil {
-				watcher.walls.update(now, prefetchedDepth, flowMetricsBySymbol, metaBySymbol, depthLevels)
-				wallSignals = watcher.WallSignals()
-				for i := range cands {
-					raw := strings.ToUpper(aster.RawSymbol(cands[i].Entry.Symbol))
-					if ws, ok := wallSignals[raw]; ok {
-						cands[i] = applyWallSignal(cands[i], ws)
-					}
-				}
-			}
-		}
-		if paperSimpleMode {
-			for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
-				best = queueCandidates[i]
-				raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-				if ob, ok := prefetchedDepth[raw]; ok {
-					selectedDepth[raw] = ob
-				}
-				selected = true
-				break
-			}
-		} else {
-			queueCtx := queueDeepPreflightCtx{
-				Now:                   now,
-				LocalMaintNow:         localMaintNow,
-				PureMode:              pureMode,
-				OBFilterEnable:        obFilterEnable,
-				EntryDepth:            prefetchedDepth,
-				OBLevels:              obLevels,
-				OBImbMin:              obImbMin,
-				OBMaxSpreadBps:        obMaxSpreadBps,
-				RiskShell:             riskShell,
-				RiskFallbackStopPct:   riskFallbackStopPct,
-				RiskHoldHours:         riskHoldHours,
-				LeverageMode:          leverageMode,
-				LeverageFixed:         leverageFixed,
-				LeverageMin:           leverageMin,
-				MaxLeverage:           safety.maxLeverage,
-				EffectiveReserve:      effectiveReserve,
-				EffectiveMargin:       effectiveMargin,
-				AvailableUSDT:         acct.AvailableUSDT,
-				MetaBySymbol:          metaBySymbol,
-				InMaint:               inMaint,
-				MaintWarmup:           maintWarmup,
-				MaintState:            &maintState,
-				Safety:                safety,
-				Acct:                  acct,
-				Paper:                 paper,
-				ReserveGate:           reserveGate,
-				EventLockoutMin:       eventLockoutMin,
-				CorrGroups:            corrGroups,
-				MaxCorrelatedExposure: maxCorrelatedExposure,
-				RequireShadowDays:     requireShadowDays,
-				ShadowEquityFile:      shadowEquityFile,
-				MaxOpenPos:            maxOpenPos,
-				MaxOpenPerSide:        maxOpenPerSide,
-				ExecMgr:               execMgr,
-			}
-			for i := 0; i < len(queueCandidates) && i < attemptBudget; i++ {
-				reason := quickCandidateSelectionReject(
-					queueCandidates[i],
-					now,
-					pureMode,
-					allowDeadSessionTrading,
-					preEODEntryBlockMin,
-					localMaintNow,
-					maintEOD,
-					postSLCooldown,
-					paper,
-					execMgr,
-					safety,
-					lastOrderAt,
-					lastOrderBySymbol,
-					lastOrderBySymbolSide,
-					orderCountByDay,
-					orderCountByHour,
-					symbolStopoutLockUntil,
-				)
-				if reason != "" {
-					recordCandidateDecision(cmdCtx, queueCandidates[i], reason)
-					selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), reason))
-					if missed != nil {
-						missed.Observe(now, queueCandidates[i], reason)
-					}
-					continue
-				}
-				deepRes := deepQueuePreflight(queueCandidates[i], queueCtx)
-				if deepRes.RejectReason != "" {
-					recordCandidateDecision(cmdCtx, queueCandidates[i], deepRes.RejectReason)
-					selectionRejects = append(selectionRejects, fmt.Sprintf("%s:%s", strings.ToUpper(aster.RawSymbol(queueCandidates[i].Entry.Symbol)), deepRes.RejectReason))
-					if missed != nil {
-						missed.Observe(now, queueCandidates[i], deepRes.RejectReason)
-					}
-					continue
-				}
-				best = queueCandidates[i]
-				selectedSpreadBps = deepRes.SpreadBps
-				selectedBookImb = deepRes.BookImb
-				raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-				if ob, ok := prefetchedDepth[raw]; ok {
-					selectedDepth[raw] = ob
-				}
-				selected = true
-				break
-			}
-		}
-		if !selected {
-			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
-			statusStore.Set(st)
-			if emitTerminal && verboseRejectLogging() {
-				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
-			}
-			waitAndReport()
-			continue
-		}
-		if missed != nil {
-			for i := 0; i < len(queueCandidates); i++ {
-				if strings.EqualFold(aster.RawSymbol(queueCandidates[i].Entry.Symbol), aster.RawSymbol(best.Entry.Symbol)) && strings.EqualFold(queueCandidates[i].Side, best.Side) {
-					continue
-				}
-				missed.Observe(now, queueCandidates[i], "architecture_miss:not_selected")
-			}
-		}
-		st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-		st.TopSide = best.Side
-		st.TopGrade = best.Entry.CurrentGrade
-		st.TopScore = best.Entry.CurrentScore
-		st.TopSlope = best.Entry.ScoreSlope
-		st.TopTriggerState = best.TriggerState
-		st.TopExitProfile = best.ExitProfile
-		st.TopDiscovery = best.DiscoveryScore
-		st.TopTrigger = best.TriggerScore
-		st.TopExecution = best.ExecutionScore
-		st.TopCombined = best.CombinedScore
-		st.TopVPSetup = best.Sig.VPSetup
-		st.TopVPLevel = best.Sig.VPLevel
-		st.TopVPTarget = best.Sig.VPTargetLevel
-		st.TopVPStopMode = best.Sig.StopMode
-		st.TopVPTargetMode = best.Sig.TargetMode
-		st.TopRejectReason = best.RejectReason
-		st.TopRegimeTag = best.Sig.RegimeTag
-		statusStore.Set(st)
-		eligibility := newEligibilitySummary(best)
-		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
-		if cmdCtx != nil {
-			if s, ok := cmdCtx.getSuggestion(best.Entry.Symbol); ok && strings.EqualFold(s.Side, best.Side) && s.PreferredLev > 0 {
-				effectiveLev = clampInt(s.PreferredLev, 1, safety.maxLeverage)
-			}
-		}
-		if strings.EqualFold(best.Strat, "exhaustion_flip_short") || strings.EqualFold(best.Strat, "exhaustion_flip_long") {
-			starterFrac := clamp(envFloat("LIVE_EXHAUSTION_STARTER_MARGIN_FRAC", 0.50), 0.10, 1.00)
-			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*starterFrac)
-		}
-		if strings.EqualFold(best.Strat, "momentum_ignite_long") || strings.EqualFold(best.Strat, "momentum_ignite_short") {
-			starterFrac := clamp(envFloat("LIVE_IGNITE_STARTER_MARGIN_FRAC", 0.65), 0.10, 1.00)
-			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*starterFrac)
-		}
-		rawBest := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-		if ladderCfg.StarterUSDT > 0 {
-			effectiveMargin = ladderCfg.StarterUSDT
-		}
-		if postureForcesStarter(best) {
-			starterUSDT := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", maxFloat(tradeMarginMin, 10.0)))
-			if starterUSDT <= 0 {
-				starterUSDT = maxFloat(tradeMarginMin, 10.0)
-			}
-			effectiveMargin = starterUSDT
-		}
-		if postureForcesAttack(best) {
-			attackFrac := clamp(envFloat("LIVE_POSTURE_ATTACK_MARGIN_FRAC", 1.0), 0.25, 2.0)
-			effectiveMargin = maxFloat(tradeMarginMin, effectiveMargin*attackFrac)
-		}
-		eligibility.StarterAllowed = starterLaneEligible(best)
-		eligibility.FullEntryAllowed = !isStarterOnlyStrategyName(best.Strat) || postureForcesAttack(best)
-		bestMeta := metaBySymbol[rawBest]
-		if emitTerminal {
-			fmt.Printf("live: top candidate %s side=%s grade=%s score=%.2f slope=%.3f rank=%.2f final_rank=%.2f strat=%s conf=%.2f trigger_state=%s exit_profile=%s disc=%.2f trig=%.2f exec=%.2f combo=%.2f dayUTC=%+.2f open=%s mark=%s vol=%s ofi=%.2f ofi_z=%.2f spread_bps=%.2f atr_pct=%.2f wall_mode=%s wall_status=%s wall_conf=%.2f wall_bias=%.2f wall_spoof=%.2f wall_dist=%.1f wall_ratio=%.2f long_demoted=%v short_demoted=%v reversal_watch=%v intraday_reversal_score=%.2f bull_reversal_score=%.2f drawdown_from_peak_pct=%.2f drawup_from_trough_pct=%.2f failed_reclaim_count=%d failed_bounce_count=%d failed_breakdown_count=%d failed_break_low_count=%d entry_style=%s meta_state=%s structure=%s break_hold=%v reclaim_hold=%v retest_hold=%v ext_atr=%.2f\n",
-				best.Entry.Symbol,
-				best.Side,
-				best.Entry.CurrentGrade,
-				best.Entry.CurrentScore,
-				best.Entry.ScoreSlope,
-				best.Entry.Rank,
-				best.FinalRank,
-				best.Strat,
-				best.Conf,
-				best.TriggerState,
-				best.ExitProfile,
-				best.DiscoveryScore,
-				best.TriggerScore,
-				best.ExecutionScore,
-				best.CombinedScore,
-				bestMeta.DayUTC24h,
-				fmtPrice(bestMeta.OpenPrice),
-				fmtPrice(bestMeta.LastPrice),
-				marketHumanUSD(bestMeta.VolumeUSD),
-				best.OFIRaw,
-				best.OFIZ,
-				best.SpreadBps,
-				best.ATRPct*100.0,
-				best.WallMode,
-				best.WallStatus,
-				best.WallConfidence,
-				best.WallBiasScore,
-				best.WallSpoofRisk,
-				best.WallDistanceBps,
-				best.WallSizeRatio,
-				best.Entry.LongDemotionFlag,
-				best.Entry.ShortDemotionFlag,
-				best.Entry.ReversalWatchFlag,
-				best.Entry.IntradayReversalScore,
-				best.Entry.BullReversalScore,
-				best.Entry.DrawdownFromPeakPct,
-				best.Entry.DrawupFromTroughPct,
-				best.Entry.FailedReclaimCount,
-				best.Entry.FailedBounceCount,
-				best.Entry.FailedBreakdownCount,
-				best.Entry.FailedBreakLowCount,
-				best.Entry.EntryStyle,
-				best.Entry.MetaState,
-				best.StructureReason,
-				best.ClosedBreakHold,
-				best.ReclaimHold,
-				best.RetestHold,
-				best.ExtensionATR,
-			)
-		}
-		topKey := fmt.Sprintf("%s|%s|%s", best.Entry.Symbol, best.Side, best.Entry.CurrentGrade)
-		if tgVerbose && topKey != lastTopKey {
-			emitNotifyEvent(notifyDispatcher, notify.Event{
-				Key:      "TOP_CANDIDATE",
-				Title:    "TOP CANDIDATE",
-				Class:    notify.ClassDiagnostic,
-				Severity: notify.SeverityDebug,
-				Route:    notify.RouteDebug,
-				Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-				Message:  "new top candidate",
-				Metadata: map[string]string{
-					"side":  best.Side,
-					"grade": best.Entry.CurrentGrade,
-					"score": fmt.Sprintf("%.2f", best.Entry.CurrentScore),
-					"slope": fmt.Sprintf("%+.3f", best.Entry.ScoreSlope),
-					"rank":  fmt.Sprintf("%.2f", best.Entry.Rank),
-					"setup": best.Strat,
-					"conf":  fmt.Sprintf("%.2f", best.Conf),
-				},
-			})
-			lastTopKey = topKey
-		}
-		best.VolumeUSD = metaBySymbol[rawBest].VolumeUSD
-		if sig, ok := externalFlow[rawBest]; ok {
-			if sig.LiqSpike {
-				if (strings.EqualFold(best.Side, "BUY") && sig.FlowDelta < 0) || (strings.EqualFold(best.Side, "SELL") && sig.FlowDelta > 0) {
-					recordCandidateDecision(cmdCtx, best, "external_liq_flow_against")
-					addEligibilityBlock(&eligibility, "external_liq_flow_against")
-					finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-					statusStore.Set(st)
-					eventLog.Emit(stats.Event{
-						Timestamp: now,
-						Type:      "GATE_DECISION",
-						Symbol:    rawBest,
-						Side:      best.Side,
-						Strategy:  best.Strat,
-						Score:     best.Entry.CurrentScore,
-						Slope:     best.Entry.ScoreSlope,
-						GateAllow: boolPtr(false),
-						GateReasons: []string{
-							"external_liq_flow_against",
-						},
-					})
-					waitAndReport()
-					continue
-				}
-			}
-		}
-		if postSLCooldown > 0 && hasRecentStopLoss(rawBest, best.Side, now, postSLCooldown, paper, execMgr) {
-			recordCandidateDecision(cmdCtx, best, "POST_SL_COOLDOWN_WARN")
-		}
-		_ = allowDeadSessionTrading
-		if !pureMode && !symbolCooldownSameSide.Allow(rawBest+"|"+strings.ToUpper(strings.TrimSpace(best.Side)), now) {
-			if !shouldBypassWithFastLane(best, "symbol_cooldown_same_side") {
-				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
-				addEligibilityBlock(&eligibility, "symbol_cooldown_same_side")
-				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
-				eventLog.Emit(stats.Event{
-					Timestamp: now,
-					Type:      "GATE_DECISION",
-					Symbol:    rawBest,
-					Side:      best.Side,
-					Strategy:  best.Strat,
-					Score:     best.Entry.CurrentScore,
-					Slope:     best.Entry.ScoreSlope,
-					GateAllow: boolPtr(false),
-					GateReasons: []string{
-						"throttle_symbol_same_side_cooldown",
-					},
-				})
-				waitAndReport()
-				continue
-			}
-			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_symbol_cooldown_same_side")
-		}
-		if !pureMode && !symbolCooldownFlipSide.Allow(rawBest, now) {
-			if !shouldBypassWithFastLane(best, "symbol_cooldown_flip_side") {
-				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_flip_side")
-				addEligibilityBlock(&eligibility, "symbol_cooldown_flip_side")
-				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
-				eventLog.Emit(stats.Event{
-					Timestamp: now,
-					Type:      "GATE_DECISION",
-					Symbol:    rawBest,
-					Side:      best.Side,
-					Strategy:  best.Strat,
-					Score:     best.Entry.CurrentScore,
-					Slope:     best.Entry.ScoreSlope,
-					GateAllow: boolPtr(false),
-					GateReasons: []string{
-						"throttle_symbol_flip_side_cooldown",
-					},
-				})
-				waitAndReport()
-				continue
-			}
-			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_symbol_cooldown_flip_side")
-		}
-		if !pureMode && !intentDedupe.Allow(rawBest, best.Side, now) {
-			recordCandidateDecision(cmdCtx, best, "intent_dedupe")
-			addEligibilityBlock(&eligibility, "intent_dedupe")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			eventLog.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "GATE_DECISION",
-				Symbol:    rawBest,
-				Side:      best.Side,
-				Strategy:  best.Strat,
-				Score:     best.Entry.CurrentScore,
-				Slope:     best.Entry.ScoreSlope,
-				GateAllow: boolPtr(false),
-				GateReasons: []string{
-					"throttle_dedupe",
-				},
-			})
-			waitAndReport()
-			continue
-		}
-		entryDepth := selectedDepth
-		if len(entryDepth) == 0 {
-			entryDepth = map[string]aster.OrderBook{}
-		}
-		if obFilterEnable && len(entryDepth) == 0 {
-			entryDepth = fetchOrderBooks(client, []string{rawBest}, obLevels)
-			ob := entryDepth[rawBest]
-			okOB, obReason, obSpreadBps, obImb := orderbookEntryDecision(ob, best.Side, obLevels, obImbMin, obMaxSpreadBps)
-			if !okOB {
-				recordCandidateDecision(cmdCtx, best, obReason)
-				addEligibilityBlock(&eligibility, obReason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
-				eventLog.Emit(stats.Event{
-					Timestamp: now,
-					Type:      "GATE_DECISION",
-					Symbol:    rawBest,
-					Side:      best.Side,
-					Strategy:  best.Strat,
-					Score:     best.Entry.CurrentScore,
-					Slope:     best.Entry.ScoreSlope,
-					GateAllow: boolPtr(false),
-					GateReasons: []string{
-						obReason,
-						fmt.Sprintf("spread_bps=%.2f", obSpreadBps),
-						fmt.Sprintf("imb=%.3f", obImb),
-					},
-				})
-				fmt.Printf("live: skip (%s reason=%s spread_bps=%.2f imb=%.3f)\n", rawBest, obReason, obSpreadBps, obImb)
-				waitAndReport()
-				continue
-			}
-		}
-		spreadBps, bookImb := selectedSpreadBps, selectedBookImb
-		if spreadBps == 0 && bookImb == 0 {
-			spreadBps, bookImb = orderbookRiskMetrics(rawBest, best.Side, entryDepth, metaBySymbol, obLevels)
-		}
-		entryPx := best.Sig.Entry
-		if entryPx <= 0 {
-			entryPx = metaBySymbol[rawBest].LastPrice
-		}
-		stopPx := best.Sig.Stop
-		if stopPx <= 0 && entryPx > 0 {
-			d := riskFallbackStopPct / 100.0
-			if strings.EqualFold(best.Side, "BUY") {
-				stopPx = entryPx * (1 - d)
 			} else {
-				stopPx = entryPx * (1 + d)
-			}
-		}
-		if envBool("LIVE_RISK_SIZING_ENABLE", true) {
-			eq := accountEquity(acct)
-			if eq <= 0 {
-				eq = acct.AvailableUSDT
-			}
-			if sized := riskSizedMarginUSDT(entryPx, stopPx, maxInt(1, effectiveLev), eq); sized > 0 {
-				minStarter := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10.0))
-				if minStarter <= 0 {
-					minStarter = 10.0
-				}
-				effectiveMargin = maxFloat(minStarter, sized)
-			}
-		}
-		effectiveMargin, sessionBand, sessionMult := sessionAdjustedMarginUSDT(now, best, ladderPlan{}, effectiveMargin)
-		_ = sessionMult
-		if reason := sessionEntryRejectReason(now, best, ladderPlan{}); reason != "" {
-			recordCandidateDecision(cmdCtx, best, reason)
-			addEligibilityBlock(&eligibility, reason)
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (%s reason=%s session=%s)\n", rawBest, reason, sessionBand)
-			waitAndReport()
-			continue
-		}
-		if !pureMode {
-			riskDec := risk.Approve(riskShell, risk.Input{
-				Side:              strings.ToUpper(strings.TrimSpace(best.Side)),
-				Entry:             entryPx,
-				Stop:              stopPx,
-				Leverage:          float64(maxInt(1, effectiveLev)),
-				NotionalUSD:       effectiveMargin * float64(maxInt(1, effectiveLev)),
-				FundingRate:       metaBySymbol[rawBest].FundingRate,
-				HoldHours:         riskHoldHours,
-				SpreadBps:         spreadBps,
-				BookImbalance:     bookImb,
-				RecentSlippageBps: 0,
-				VenueHealthy:      metaBySymbol[rawBest].LastPrice > 0,
-			})
-			if !riskDec.Approved {
-				recordCandidateDecision(cmdCtx, best, riskDec.RejectReason)
-				addEligibilityBlock(&eligibility, riskDec.RejectReason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
-				waitAndReport()
-				continue
-			}
-		}
-
-		_ = inMaint
-		_ = maintWarmup
-		_ = maintState
-		if paper != nil && paper.enabled {
-			eventLog.Emit(stats.Event{
-				Timestamp:   now,
-				Type:        "INTENT",
-				Simulated:   true,
-				Symbol:      rawBest,
-				Side:        best.Side,
-				TF:          "1m",
-				Strategy:    best.Strat,
-				Score:       best.Entry.CurrentScore,
-				Slope:       best.Entry.ScoreSlope,
-				VolumeRatio: 0,
-				EntryPx:     best.Sig.Entry,
-				Reason:      "dry_run_intent",
-			})
-			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
-			if len(entryDepth) == 0 {
-				entryDepth = fetchOrderBooks(client, []string{rawBest}, envInt("LIVE_PAPER_OB_LEVELS", 20))
-			}
-			mergeTopOfBookIntoMeta(metaBySymbol, entryDepth)
-			pp, err := paper.MaybeEnter(now, best, entryBps, effectiveMargin, effectiveLev, metaBySymbol, entryDepth, currentEntryMap(longInPlay, shortInPlay))
-			if err != nil {
-				fmt.Println("paper enter skip:", err)
-			} else if pp != nil {
-				if missed != nil {
-					missed.MarkTraded(now, best)
-				}
-				markSessionEntry(sessionChurns, now, best)
-				recentEntryAttempts = append(recentEntryAttempts, now)
-				eventLog.Emit(stats.Event{
-					Timestamp:    now,
-					Type:         "POSITION_OPEN",
-					Simulated:    true,
-					Symbol:       pp.Symbol,
-					Side:         pp.Side,
-					TF:           "1m",
-					Strategy:     best.Strat,
-					TriggerState: best.TriggerState,
-					ExitProfile:  best.ExitProfile,
-					Score:        best.Entry.CurrentScore,
-					Slope:        best.Entry.ScoreSlope,
-					Discovery:    best.DiscoveryScore,
-					Trigger:      best.TriggerScore,
-					Execution:    best.ExecutionScore,
-					Combined:     best.CombinedScore,
-					StopDistPct:  pp.StopDistancePct,
-					EntryPx:      pp.Entry,
-					Reason:       "paper_enter",
-				})
-				tg.Sendf("🟦 <b>PAPER ENTER | %s %s</b>\n• <b>Margin:</b> $%.2f | <b>Lev:</b> %dx | <b>Grade:</b> %s | <b>Conf:</b> %.2f\n• <b>Setup:</b> <code>%s</code>\n• <b>Entry:</b> %s | <b>SL:</b> %s\n• <b>TP1:</b> %s | <b>TP2:</b> %s | <b>TP3:</b> %s",
-					pp.Symbol, pp.Side, pp.Margin, pp.Leverage, best.Entry.CurrentGrade, best.Conf, best.Strat,
-					fmtPrice(pp.Entry), fmtPrice(pp.Stop), fmtPrice(pp.TP1), fmtPrice(pp.TP2), fmtPrice(pp.TP3))
-			}
-			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🧪", "DRY RUN INTENT",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
-					fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
-				))
-			}
-			waitAndReport()
-			continue
-		}
-		if rest == nil || dryRun {
-			eventLog.Emit(stats.Event{
-				Timestamp:   now,
-				Type:        "INTENT",
-				Simulated:   true,
-				Symbol:      rawBest,
-				Side:        best.Side,
-				TF:          "1m",
-				Strategy:    best.Strat,
-				Score:       best.Entry.CurrentScore,
-				Slope:       best.Entry.ScoreSlope,
-				VolumeRatio: 0,
-				EntryPx:     best.Sig.Entry,
-				Reason:      "dry_run_intent",
-			})
-			printTradeIntent(best, entryBps, effectiveMargin, effectiveLev)
-			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🧪", "DRY RUN INTENT",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Margin:</b> $%.2f", effectiveMargin),
-					fmt.Sprintf("<b>Grade:</b> %s | <b>Score:</b> %.2f", best.Entry.CurrentGrade, best.Entry.CurrentScore),
-				))
-			}
-			waitAndReport()
-			continue
-		}
-		nowLocal := time.Now()
-		if !pureMode && safety.stopoutCount > 0 && safety.stopoutWindow > 0 && safety.stopoutLock > 0 && execMgr != nil {
-			raw := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-			cnt := execMgr.StopoutCountSince(raw, nowLocal.Add(-safety.stopoutWindow))
-			if cnt >= safety.stopoutCount {
-				if until, ok := symbolStopoutLockUntil[raw]; !ok || nowLocal.After(until) {
-					symbolStopoutLockUntil[raw] = nowLocal.Add(safety.stopoutLock)
+				st.TopDecision = "manual_only"
+				st.TopDecisionWhy = "scanner_only_no_candidates"
+				if emitTerminal {
+					fmt.Println("live: scanner-only no candidates")
 				}
 			}
-		}
-		if !pureMode {
-			if reason := safetyReject(safety, best, nowLocal, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
-				recordCandidateDecision(cmdCtx, best, reason)
-				addEligibilityBlock(&eligibility, reason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
-				fmt.Println("live: safety skip:", reason)
-				if tgVerbose {
-					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
-						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-						fmt.Sprintf("<b>Reason:</b> %s", reason),
-					))
-				}
-				waitAndReport()
-				continue
-			}
-		}
-		if !pureMode && inEventLockout(time.Now(), eventLockoutMin) {
-			recordCandidateDecision(cmdCtx, best, "event_lockout")
-			addEligibilityBlock(&eligibility, "event_lockout")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			fmt.Println("live: skip reason=event_lockout")
-			waitAndReport()
-			continue
-		}
-		if !pureMode && isCorrelatedExposureTooHigh(best, acct, corrGroups, maxCorrelatedExposure) {
-			recordCandidateDecision(cmdCtx, best, "correlated_exposure_gate")
-			addEligibilityBlock(&eligibility, "correlated_exposure_gate")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
-			fmt.Println("live: skip reason=correlated_exposure_gate")
-			waitAndReport()
-			continue
-		}
-		if !pureMode && requireShadowDays > 0 && !shadowReady(requireShadowDays, shadowEquityFile, now) {
-			recordCandidateDecision(cmdCtx, best, "shadow_gate_active")
-			addEligibilityBlock(&eligibility, "shadow_gate_active")
-			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			if shadowWarnAt.IsZero() || now.Sub(shadowWarnAt) > 30*time.Minute {
-				msg := fmt.Sprintf("shadow gate active: need %d day(s) paper history before live", requireShadowDays)
-				fmt.Println("live:", msg)
-				emitNotifyEvent(notifyDispatcher, notify.Event{
-					Key:      "SHADOW_GATE_ACTIVE",
-					Title:    "SHADOW GATE ACTIVE",
-					Class:    notify.ClassDigest,
-					Severity: notify.SeverityInfo,
-					Route:    notify.RouteDigest,
-					Symbol:   rawBest,
-					Message:  "shadow gate requirement active",
-					Metadata: map[string]string{
-						"detail": msg,
-					},
-				})
-				shadowWarnAt = now
-			}
-			waitAndReport()
-			continue
-		}
-		ladderPlan := resolveLadderPlan(now, best, execMgr, metaBySymbol)
-		if ladderPlan.MarginUSDT > 0 {
-			effectiveMargin = ladderPlan.MarginUSDT
-		}
-		if reason := sessionEntryRejectReason(now, best, ladderPlan); reason != "" {
-			recordCandidateDecision(cmdCtx, best, reason)
-			addEligibilityBlock(&eligibility, reason)
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
-			waitAndReport()
-			continue
-		}
-		effectiveMargin, ladderPlan.SessionBand, ladderPlan.SessionMult = sessionAdjustedMarginUSDT(now, best, ladderPlan, effectiveMargin)
-		eligibility.ReentryAllowed = ladderPlan.IsReentry
-		if ladderPlan.IsAdd {
-			eligibility.FullEntryAllowed = true
-			eligibility.StarterAllowed = false
-		} else if ladderPlan.IsReentry {
-			eligibility.FullEntryAllowed = false
-			eligibility.StarterAllowed = false
-		}
-		if ladderPlan.RejectReason != "" {
-			if !shouldBypassWithFastLane(best, ladderPlan.RejectReason) {
-				recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
-				addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
-				waitAndReport()
-				continue
-			}
-			recordCandidateDecision(cmdCtx, best, "fastlane_bypass_"+ladderPlan.RejectReason)
-		}
-		if !ladderPlan.IsAdd {
-			if reason := postWinCooldownRejectReason(now, best, execMgr); reason != "" {
-				if !shouldBypassWithFastLane(best, reason) {
-					recordCandidateDecision(cmdCtx, best, reason)
-					addEligibilityBlock(&eligibility, reason)
-					finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-					statusStore.Set(st)
-					fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
-					waitAndReport()
-					continue
-				}
-				recordCandidateDecision(cmdCtx, best, "fastlane_bypass_"+reason)
-			}
-		}
-		if !ladderPlan.IsAdd && execMgr != nil {
-			if dec := execMgr.executionGovernorDecision(now, best, effectiveMargin); dec.Reason != "" {
-				recordCandidateDecision(cmdCtx, best, dec.Reason)
-				fmt.Println(executionGovernorRejectLogLine(dec))
-				addEligibilityBlock(&eligibility, dec.Reason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, dec.Reason)
-				waitAndReport()
-				continue
-			}
-		}
-		if reason := activeWinnerRejectReason(now, best, execMgr, paper, metaBySymbol, longCurrent, shortCurrent); reason != "" {
-			recordCandidateDecision(cmdCtx, best, reason)
-			addEligibilityBlock(&eligibility, reason)
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			eventAllow := false
-			eventLog.Emit(stats.Event{
-				Timestamp:   now,
-				Type:        "GATE_DECISION",
-				Symbol:      rawBest,
-				Side:        best.Side,
-				Strategy:    best.Strat,
-				Score:       best.Entry.CurrentScore,
-				Slope:       best.Entry.ScoreSlope,
-				Discovery:   best.DiscoveryScore,
-				Trigger:     best.TriggerScore,
-				Execution:   best.ExecutionScore,
-				Combined:    best.CombinedScore,
-				GateAllow:   &eventAllow,
-				GateReasons: []string{reason},
-			})
-			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
-			waitAndReport()
-			continue
-		}
-
-		avail := acct.AvailableUSDT
-		if avail <= 0 {
-			var err error
-			avail, err = availableUSDT(rest)
-			if err != nil {
-				addEligibilityBlock(&eligibility, "account_balance_fetch")
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Println("live: balance error:", err)
-				waitAndReport()
-				continue
-			}
-		}
-		if execMgr != nil {
-			if degradedReason := execMgr.degradedEntryReason(now, best.Entry.Symbol); degradedReason != "" {
-				recordCandidateDecision(cmdCtx, best, degradedReason)
-				addEligibilityBlock(&eligibility, degradedReason)
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: degraded gate block symbol=%s reason=%s\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), degradedReason)
-				waitAndReport()
-				continue
-			}
-			if refreshed, toppedUp := execMgr.EnsureEntryFunds(maxFloat(safety.minAvailUSDT, effectiveMargin), avail); toppedUp {
-				avail = refreshed
-			}
-		}
-		if avail < safety.minAvailUSDT {
-			recordCandidateDecision(cmdCtx, best, "min_available_usdt")
-			addEligibilityBlock(&eligibility, "min_available_usdt")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
-			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Available:</b> %.4f < <b>Min:</b> %.4f", avail, safety.minAvailUSDT),
-				))
-			}
-			waitAndReport()
-			continue
-		}
-		effectiveReserve = computeReserveUSDT(reserveMode, reserveUSDT, reservePct, avail, paper)
-		if ladderPlan.MarginUSDT > 0 {
-			effectiveMargin = ladderPlan.MarginUSDT
-		}
-		usable := avail - effectiveReserve
-		baseBal := sizingBaseBalance(avail, paper)
-		if reserveGate != nil {
-			reserveGate.ensureTarget(baseBal, effectiveReserve)
-		}
-		if usable < effectiveMargin {
-			recordCandidateDecision(cmdCtx, best, "insufficient_usable")
-			addEligibilityBlock(&eligibility, "insufficient_usable")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
-			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Usable:</b> %.4f | <b>Required Margin:</b> %.4f", usable, effectiveMargin),
-				))
-			}
-			waitAndReport()
-			continue
-		}
-		if !pureMode && reserveGate != nil && reserveGate.block(baseBal) {
-			recordCandidateDecision(cmdCtx, best, "reserve_lock_active")
-			addEligibilityBlock(&eligibility, "reserve_lock_active")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
-			if tgVerbose {
-				emitNotifyEvent(notifyDispatcher, notify.Event{
-					Key:      "RESERVE_LOCK_ACTIVE",
-					Title:    "RESERVE LOCK ACTIVE",
-					Class:    notify.ClassDigest,
-					Severity: notify.SeverityInfo,
-					Route:    notify.RouteDigest,
-					Symbol:   rawBest,
-					Message:  "reserve lock active",
-					Metadata: map[string]string{
-						"base": fmt.Sprintf("%.2f", baseBal),
-					},
-				})
-			}
-			waitAndReport()
-			continue
-		}
-
-		openCount := len(acct.Positions)
-		if !showAccount || len(acct.Positions) == 0 {
-			var err error
-			openCount, err = countOpenPositions(rest)
-			if err != nil {
-				addEligibilityBlock(&eligibility, "position_check_error")
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Println("live: position check error:", err)
-				waitAndReport()
-				continue
-			}
-		}
-		if !ladderPlan.IsAdd && openCount >= maxOpenPos {
-			recordCandidateDecision(cmdCtx, best, "max_open_positions")
-			addEligibilityBlock(&eligibility, "max_open_positions")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
-			if tgVerbose {
-				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
-					fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-					fmt.Sprintf("<b>Open:</b> %d | <b>Max:</b> %d", openCount, maxOpenPos),
-				))
-			}
-			waitAndReport()
-			continue
-		}
-		if !ladderPlan.IsAdd && maxOpenPerSide > 0 {
-			openSideCount := countOpenPositionsBySide(acct, best.Side)
-			if execMgr != nil && openSideCount == 0 {
-				openSideCount = execMgr.ActiveCountBySide(best.Side)
-			}
-			if openSideCount >= maxOpenPerSide {
-				recordCandidateDecision(cmdCtx, best, "max_open_positions_side")
-				addEligibilityBlock(&eligibility, "max_open_positions_side")
-				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
-				fmt.Printf("live: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
-				if tgVerbose {
-					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: SIDE FULL",
-						fmt.Sprintf("<b>%s %s</b>", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side),
-						fmt.Sprintf("<b>Side Open:</b> %d | <b>Max Per Side:</b> %d", openSideCount, maxOpenPerSide),
-					))
-				}
-				waitAndReport()
-				continue
-			}
-		}
-		if !ladderPlan.IsAdd && execMgr != nil && execMgr.ActiveCount() >= maxOpenPos {
-			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
-			addEligibilityBlock(&eligibility, "max_tracked_entries")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Printf("live: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
-			waitAndReport()
-			continue
-		}
-
-		if execMgr == nil {
-			recordCandidateDecision(cmdCtx, best, "exec_manager_unavailable")
-			addEligibilityBlock(&eligibility, "exec_manager_unavailable")
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
-			fmt.Println("live: execution manager unavailable")
-			waitAndReport()
-			continue
-		}
-		if contReject := continuationLaneRejectReason(best); contReject != "" {
-			recordCandidateDecision(cmdCtx, best, contReject)
-			addEligibilityBlock(&eligibility, contReject)
-		}
-		chooseFinalDecision(&eligibility, ladderPlan)
-		if eligibility.FinalDecision != "full_entry" && eligibility.FinalDecision != "starter_entry" && eligibility.FinalDecision != "reentry_entry" {
-			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
 			statusStore.Set(st)
 			waitAndReport()
 			continue
-		}
-		finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-		statusStore.Set(st)
-		intentReason := "live_intent"
-		submitType := "ORDER_SUBMIT"
-		if ladderPlan.IsAdd {
-			intentReason = "live_add_intent"
-			submitType = "ORDER_ADD_SUBMIT"
-		} else if ladderPlan.IsReentry {
-			intentReason = "live_reentry_intent"
-			submitType = "ORDER_REENTRY_SUBMIT"
-		}
-		eventLog.Emit(stats.Event{
-			Timestamp:    now,
-			Type:         "INTENT",
-			Symbol:       strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-			Side:         best.Side,
-			TF:           "1m",
-			Strategy:     best.Strat,
-			TriggerState: best.TriggerState,
-			ExitProfile:  best.ExitProfile,
-			Score:        best.Entry.CurrentScore,
-			Slope:        best.Entry.ScoreSlope,
-			Discovery:    best.DiscoveryScore,
-			Trigger:      best.TriggerScore,
-			Execution:    best.ExecutionScore,
-			Combined:     best.CombinedScore,
-			EntryPx:      best.Sig.Entry,
-			Reason:       intentReason,
-		})
-		eventLog.Emit(stats.Event{
-			Timestamp:    now,
-			Type:         submitType,
-			Symbol:       strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-			Side:         best.Side,
-			TF:           "1m",
-			Strategy:     best.Strat,
-			TriggerState: best.TriggerState,
-			ExitProfile:  best.ExitProfile,
-			Score:        best.Entry.CurrentScore,
-			Slope:        best.Entry.ScoreSlope,
-			Discovery:    best.DiscoveryScore,
-			Trigger:      best.TriggerScore,
-			Execution:    best.ExecutionScore,
-			Combined:     best.CombinedScore,
-			EntryPx:      best.Sig.Entry,
-		})
-		var placeErr error
-		usedLev := effectiveLev
-		levSequence := leverageRetrySequence(effectiveLev, leverageMin)
-		for idx, levTry := range levSequence {
-			usedLev = levTry
-			placeErr = execMgr.PlaceEntry(best, entryBps, effectiveMargin, levTry, ladderPlan)
-			if placeErr == nil {
-				break
-			}
-			if !isSymbolNotionalLimitError(placeErr) {
-				break
-			}
-			if idx == len(levSequence)-1 {
-				break
-			}
-			fmt.Printf("live: notional limit for %s at %dx, retrying lower leverage\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), levTry)
-		}
-		if placeErr != nil {
-			recordCandidateDecision(cmdCtx, best, "order_error")
-			fmt.Println("live: place error:", placeErr)
-			eventLog.Emit(stats.Event{
-				Timestamp:    now,
-				Type:         "ORDER_REJECT",
-				Symbol:       strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-				Side:         best.Side,
-				TF:           "1m",
-				Strategy:     best.Strat,
-				TriggerState: best.TriggerState,
-				ExitProfile:  best.ExitProfile,
-				Score:        best.Entry.CurrentScore,
-				Slope:        best.Entry.ScoreSlope,
-				Discovery:    best.DiscoveryScore,
-				Trigger:      best.TriggerScore,
-				Execution:    best.ExecutionScore,
-				Combined:     best.CombinedScore,
-				EntryPx:      best.Sig.Entry,
-				Reason:       placeErr.Error(),
-			})
-			if tgVerbose {
-				emitNotifyEvent(notifyDispatcher, notify.Event{
-					Key:      "ORDER_ERROR",
-					Title:    "ORDER ERROR",
-					Class:    notify.ClassCritical,
-					Severity: notify.SeverityWarning,
-					Route:    notify.RouteCritical,
-					Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-					Message:  "order placement failed",
-					Metadata: map[string]string{
-						"side":  best.Side,
-						"error": strings.TrimSpace(placeErr.Error()),
-					},
-				})
-			}
-		} else {
-			if missed != nil {
-				missed.MarkTraded(now, best)
-			}
-			markSessionEntry(sessionChurns, now, best)
-			recentEntryAttempts = append(recentEntryAttempts, now)
-			recordCandidateDecision(cmdCtx, best, "")
-			if usedLev != effectiveLev {
-				fmt.Printf("live: leverage fallback applied %s %s %dx->%dx\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), best.Side, effectiveLev, usedLev)
-			}
-			eventLog.Emit(stats.Event{
-				Timestamp:    now,
-				Type:         "ORDER_FILL",
-				Symbol:       strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-				Side:         best.Side,
-				TF:           "1m",
-				Strategy:     best.Strat,
-				TriggerState: best.TriggerState,
-				ExitProfile:  best.ExitProfile,
-				Score:        best.Entry.CurrentScore,
-				Slope:        best.Entry.ScoreSlope,
-				Discovery:    best.DiscoveryScore,
-				Trigger:      best.TriggerScore,
-				Execution:    best.ExecutionScore,
-				Combined:     best.CombinedScore,
-				EntryPx:      best.Sig.Entry,
-				Reason:       "entry_accepted",
-			})
-			lastOrderAt = time.Now()
-			rawOrderSym := strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-			lastOrderBySymbol[rawOrderSym] = lastOrderAt
-			lastOrderBySymbolSide[rawOrderSym+"|"+strings.ToUpper(strings.TrimSpace(best.Side))] = lastOrderAt
-			dayKey := time.Now().UTC().Format("2006-01-02")
-			hourKey := time.Now().UTC().Format("2006-01-02T15")
-			orderCountByDay[dayKey]++
-			orderCountByHour[hourKey]++
-			emitNotifyEvent(notifyDispatcher, notify.Event{
-				Key:      "ORDER_PLACED",
-				Title:    "ORDER PLACED",
-				Class:    notify.ClassLifecycle,
-				Severity: notify.SeverityNotice,
-				Route:    notify.RouteNormal,
-				Symbol:   strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)),
-				Message:  "order accepted",
-				Metadata: map[string]string{
-					"side":   best.Side,
-					"margin": fmt.Sprintf("%.2f", effectiveMargin),
-					"grade":  best.Entry.CurrentGrade,
-				},
-			})
 		}
 
 		waitAndReport()
@@ -13188,27 +11815,13 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	} else if strings.TrimSpace(reason) != "" {
 		fmt.Printf("paper enter advisory: %s\n", strings.TrimSpace(reason))
 	}
-	if dec := p.executionGovernorDecision(now, c, margin); dec.Reason != "" {
-		fmt.Println(executionGovernorRejectLogLine(dec))
-		return nil, fmt.Errorf("%s", dec.Reason)
-	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
 			return nil, fmt.Errorf("symbol loss cooldown active")
 		}
 	}
-	if p.enabled {
-		dec := decideSimplePaperEntryNow(c, currentAccountHealth())
-		if !dec.Allowed {
-			return nil, fmt.Errorf("paper simple entry rejected: %s", firstNonEmpty(dec.Reason, "no_simple_entry"))
-		}
-		if dec.Side != "" {
-			if strings.EqualFold(strings.TrimSpace(dec.Side), "short") {
-				c.Strat = "impulsive_short_starter"
-			} else {
-				c.Strat = "impulsive_long_starter"
-			}
-		}
+	if strings.TrimSpace(c.Strat) == "" {
+		c.Strat = "manual"
 	}
 	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
 	m := meta[raw]
@@ -13405,11 +12018,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		StopReason:       stopReason,
 		StopDistancePct:  stopDistancePct,
 		EntrySetupFamily: c.SetupFamily,
-		ExecBucket:       executionGovernorBucketForCandidate(c),
+		ExecBucket:       "",
 		OriginalStop:     stop,
 	}
 	p.positions[raw] = pos
-	p.recordExecutionGovernorEntry(now, c)
 	_ = p.save()
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f disc=%.2f trig=%.2f exec=%.2f combo=%.2f posture=%s posture_reason=%s stop_reason=%s\n",
 		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, c.DiscoveryScore, c.TriggerScore, c.ExecutionScore, c.CombinedScore, firstNonEmpty(strings.TrimSpace(c.EntryPosture), "-"), firstNonEmpty(strings.TrimSpace(c.EntryPostureReason), "-"), firstNonEmpty(stopReason, "generic"))
@@ -18184,7 +16796,7 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 
 func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
 	cand.SessionLabel = string(sessionPhaseUTC(now.UTC()))
-	return choosePrimaryLiveSignal(cand, now)
+	return cand
 }
 
 func toFeatureSide(side string) features.Side {
