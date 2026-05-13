@@ -526,6 +526,7 @@ type operatorSuggestion struct {
 	Side         string
 	Source       string
 	PreferredLev int
+	PreferredMargin float64
 	CreatedAt    time.Time
 	ExpiresAt    time.Time
 }
@@ -20732,7 +20733,7 @@ func (c *telegramCommandCtx) getDecision(symbol string) (operatorDecision, bool)
 	return d, ok
 }
 
-func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferredLev int) operatorSuggestion {
+func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferredLev int, preferredMargin float64) operatorSuggestion {
 	ttl := c.suggestTTL
 	if strings.Contains(strings.ToLower(strings.TrimSpace(source)), "trade") {
 		ttl = time.Duration(envInt("LIVE_PRIORITY_WATCH_TTL_MIN", int(c.suggestTTL/time.Minute))) * time.Minute
@@ -20741,12 +20742,13 @@ func (c *telegramCommandCtx) addSuggestion(symbol, side, source string, preferre
 		}
 	}
 	s := operatorSuggestion{
-		Symbol:       strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
-		Side:         strings.ToUpper(strings.TrimSpace(side)),
-		Source:       source,
-		PreferredLev: preferredLev,
-		CreatedAt:    time.Now().UTC(),
-		ExpiresAt:    time.Now().UTC().Add(ttl),
+		Symbol:          strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol))),
+		Side:            strings.ToUpper(strings.TrimSpace(side)),
+		Source:          source,
+		PreferredLev:    preferredLev,
+		PreferredMargin: preferredMargin,
+		CreatedAt:       time.Now().UTC(),
+		ExpiresAt:       time.Now().UTC().Add(ttl),
 	}
 	c.suggestMu.Lock()
 	if c.suggestions == nil {
@@ -21295,10 +21297,10 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<b>Account + Positions</b>",
 			"<code>/balance</code> <code>/acct</code> <code>/growth</code> <code>/health</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
 			"<b>Trade + Manual Management</b>",
-			"<code>/manual SYMBOL [LONG|SHORT]</code> <code>/trade SYMBOL LONG|SHORT [LEV]</code> <code>/suggest SYMBOL LONG|SHORT</code>",
+			"<code>/manual SYMBOL [LONG|SHORT]</code> <code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code> <code>/suggest SYMBOL LONG|SHORT</code>",
 			"<code>/manage SYMBOL [y|n]</code> <code>/unmanage SYMBOL</code> <code>/protect SYMBOL</code>",
 			"<b>Hotkeys</b>",
-			"<code>/l SYMBOL [LEV]</code> <code>/s SYMBOL [LEV]</code> <code>/l3 SYMBOL</code> <code>/l5 SYMBOL</code> <code>/l10 SYMBOL</code> <code>/l20 SYMBOL</code>",
+			"<code>/l SYMBOL [LEV] [MARGIN_USDT]</code> <code>/s SYMBOL [LEV] [MARGIN_USDT]</code> <code>/l3 SYMBOL [MARGIN_USDT]</code> <code>/l5 SYMBOL [MARGIN_USDT]</code> <code>/l10 SYMBOL [MARGIN_USDT]</code> <code>/l20 SYMBOL [MARGIN_USDT]</code>",
 			"<code>/s3 SYMBOL</code> <code>/s5 SYMBOL</code> <code>/s10 SYMBOL</code> <code>/s20 SYMBOL</code> <code>/m SYMBOL</code> <code>/c SYMBOL</code> <code>/p SYMBOL</code>",
 			"<b>Runtime Controls</b>",
 			"<code>/mode</code> <code>/mode live</code> <code>/mode paper</code> <code>/pause</code> <code>/resume</code> <code>/close SYMBOL</code> <code>/closeall</code>",
@@ -21306,11 +21308,11 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	case strings.HasPrefix(cmd, "/hotkeys"):
 		return notify.BuildEventHTML("⌨️", "HOTKEYS",
 			"<b>Entry Request (priority arm)</b>",
-			"<code>/l SYMBOL [LEV]</code> = <code>/trade SYMBOL LONG [LEV]</code>",
-			"<code>/s SYMBOL [LEV]</code> = <code>/trade SYMBOL SHORT [LEV]</code>",
+			"<code>/l SYMBOL [LEV] [MARGIN_USDT]</code> = <code>/trade SYMBOL LONG [LEV] [MARGIN_USDT]</code>",
+			"<code>/s SYMBOL [LEV] [MARGIN_USDT]</code> = <code>/trade SYMBOL SHORT [LEV] [MARGIN_USDT]</code>",
 			"<b>Fixed-Leverage Variants</b>",
-			"<code>/l3 SYMBOL</code> <code>/l5 SYMBOL</code> <code>/l10 SYMBOL</code> <code>/l20 SYMBOL</code>",
-			"<code>/s3 SYMBOL</code> <code>/s5 SYMBOL</code> <code>/s10 SYMBOL</code> <code>/s20 SYMBOL</code>",
+			"<code>/l3 SYMBOL [MARGIN_USDT]</code> <code>/l5 SYMBOL [MARGIN_USDT]</code> <code>/l10 SYMBOL [MARGIN_USDT]</code> <code>/l20 SYMBOL [MARGIN_USDT]</code>",
+			"<code>/s3 SYMBOL [MARGIN_USDT]</code> <code>/s5 SYMBOL [MARGIN_USDT]</code> <code>/s10 SYMBOL [MARGIN_USDT]</code> <code>/s20 SYMBOL [MARGIN_USDT]</code>",
 			"<b>Manual + Risk</b>",
 			"<code>/m SYMBOL</code> = <code>/manual SYMBOL</code>",
 			"<code>/p SYMBOL</code> = <code>/protect SYMBOL</code>",
@@ -21338,6 +21340,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			side = "SHORT"
 		}
 		lev := ""
+		margin := ""
 		switch alias {
 		case "/l3", "/s3":
 			lev = "3x"
@@ -21348,11 +21351,27 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		case "/l20", "/s20":
 			lev = "20x"
 		}
-		// /l SYMBOL [LEV] and /s SYMBOL [LEV]
+		// /l SYMBOL [LEV] [MARGIN] and /s SYMBOL [LEV] [MARGIN]
 		if lev == "" && len(fields) >= 3 {
-			lev = fields[2]
+			arg := strings.TrimSpace(fields[2])
+			if _, ok := allowedOperatorLeverage(arg); ok {
+				lev = arg
+			} else if marginVal, err := strconv.ParseFloat(arg, 64); err == nil && marginVal > 0 {
+				margin = arg
+			} else {
+				lev = arg
+			}
+		}
+		if len(fields) >= 4 {
+			margin = strings.TrimSpace(fields[3])
+		}
+		if lev != "" && margin != "" {
+			return c.handleCommand("", fmt.Sprintf("/trade %s %s %s %s", sym, side, lev, margin))
 		}
 		if lev == "" {
+			if margin != "" {
+				return c.handleCommand("", fmt.Sprintf("/trade %s %s %s", sym, side, margin))
+			}
 			return c.handleCommand("", fmt.Sprintf("/trade %s %s", sym, side))
 		}
 		return c.handleCommand("", fmt.Sprintf("/trade %s %s %s", sym, side, lev))
@@ -21828,7 +21847,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if sym == "" || !ok {
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
 		}
-		s := c.addSuggestion(sym, side, "telegram", 0)
+		s := c.addSuggestion(sym, side, "telegram", 0, 0)
 		lines := []string{
 			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
 			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
@@ -21841,30 +21860,47 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
 	case strings.HasPrefix(cmd, "/trade "):
 		if len(fields) < 3 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>")
 		}
 		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
 		side, ok := parseUserPositionSide(fields[2])
 		if sym == "" || !ok {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>")
 		}
 		preferredLev := 0
+		preferredMargin := 0.0
 		if len(fields) >= 4 {
 			lev, ok := allowedOperatorLeverage(fields[3])
 			if !ok {
-				return notify.BuildEventHTML("❓", "LEV USAGE",
-					"<code>/trade SYMBOL LONG|SHORT [LEV]</code>",
-					"Allowed leverage values: <code>20x</code>, <code>10x</code>, <code>5x</code>, <code>3x</code>",
+				if marginVal, err := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64); err == nil && marginVal > 0 {
+					preferredMargin = marginVal
+				} else {
+					return notify.BuildEventHTML("❓", "TRADE USAGE",
+						"<code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>",
+						"LEV allowed: <code>20x</code>, <code>10x</code>, <code>5x</code>, <code>3x</code>",
+						"Examples: <code>/trade BTCUSDT LONG 10x</code> | <code>/trade BTCUSDT LONG 25</code> | <code>/trade BTCUSDT LONG 10x 25</code>",
+					)
+				}
+			} else {
+				preferredLev = lev
+			}
+		}
+		if len(fields) >= 5 {
+			marginVal, err := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
+			if err != nil || marginVal <= 0 {
+				return notify.BuildEventHTML("❓", "MARGIN USAGE",
+					"<code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>",
+					"Margin must be a positive number, e.g. <code>25</code>.",
 				)
 			}
-			preferredLev = lev
+			preferredMargin = marginVal
 		}
 		if c.execMgr != nil && c.execMgr.HasActiveSymbol(sym) {
 			return notify.BuildEventHTML("ℹ️", "TRADE REQUEST SKIPPED",
 				fmt.Sprintf("%s already has an active managed position", cleanSymbol(sym)),
 			)
 		}
-		s := c.addSuggestion(sym, side, "telegram_trade", preferredLev)
+		s := c.addSuggestion(sym, side, "telegram_trade", preferredLev, preferredMargin)
 		modeDryRun, modeLiveEnabled, _ := true, false, false
 		if c.mode != nil {
 			modeDryRun, modeLiveEnabled, _ = c.mode.snapshot()
@@ -21883,6 +21919,11 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		}
 		if s.PreferredLev > 0 {
 			lines = append(lines, fmt.Sprintf("<b>Requested leverage:</b> %dx", s.PreferredLev))
+		}
+		if s.PreferredMargin > 0 {
+			lines = append(lines, fmt.Sprintf("<b>Requested margin:</b> %.2f USDT", s.PreferredMargin))
+		} else {
+			lines = append(lines, "<b>Requested margin:</b> default (10 USDT)")
 		}
 		if d, ok := c.getDecision(sym); ok {
 			lines = append(lines, fmt.Sprintf("<b>Latest:</b> side=%s reason=%s grade=%s score=%.2f slope=%+.3f",
