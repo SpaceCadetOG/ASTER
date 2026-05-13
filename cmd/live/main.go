@@ -2714,7 +2714,7 @@ func sendInPlayDigest(tg *notify.Telegram, longInPlay, shortInPlay []inplay.Entr
 	}
 	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, minInt(3, maxInt(1, limit)))
 	tg.Sendf("%s", notify.BuildEventHTML("📡", "LIVE DIGEST",
-		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("15:04")),
+		fmt.Sprintf("<b>Mode:</b> %s | <b>UTC:</b> %s", mode, now.Format("2006-01-02 15:04:05 UTC")),
 		fmt.Sprintf("<b>Session:</b> %s", sessionTag(now)),
 		notify.BuildScannerSnapshotHTML(longTop, shortTop, bias),
 	))
@@ -4355,6 +4355,7 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 			if r.DayUTC24h != nil {
 				dayUTC = *r.DayUTC24h
 			}
+			dayUTC = sanitizeDayUTCPct(dayUTC, r.OpenPrice, r.LastPrice, r.Change24h)
 			utc4h := 0.0
 			if r.UTC4hPct != nil {
 				utc4h = *r.UTC4hPct
@@ -4378,6 +4379,30 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 	put(longRows)
 	put(shortRows)
 	return out
+}
+
+func sanitizeDayUTCPct(dayUTC, openPx, lastPx, change24h float64) float64 {
+	// Guard rail for upstream feed anomalies that occasionally emit absurd UTC-day moves.
+	if !isFinite(dayUTC) {
+		dayUTC = 0
+	}
+	if abs(dayUTC) <= 400 {
+		return dayUTC
+	}
+	if isFinite(openPx) && isFinite(lastPx) && openPx > 0 && lastPx > 0 {
+		recalc := ((lastPx / openPx) - 1.0) * 100.0
+		if isFinite(recalc) && abs(recalc) <= 400 {
+			return recalc
+		}
+	}
+	if isFinite(change24h) && abs(change24h) <= 400 {
+		return change24h
+	}
+	return 0
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 func overlayWSQuotes(rows []market.Scored, pool *scannerWSQuotePool) {
@@ -21294,8 +21319,8 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<b>Fast</b> <code>/execute SYMBOL LONG|SHORT [LEV] [MARGIN]</code>",
 			"<b>Hotkeys</b> <code>/l</code> <code>/s</code> <code>/l3</code> <code>/l5</code> <code>/l10</code> <code>/l20</code> <code>/s3</code> <code>/s5</code> <code>/s10</code> <code>/s20</code>",
 			"<b>Scanner</b> <code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
-			"<b>Account</b> <code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
-			"<b>Manage</b> <code>/m SYMBOL</code> <code>/p SYMBOL</code> <code>/c SYMBOL</code> <code>/closeall</code>",
+			"<b>Account</b> <code>/balance</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
+			"<b>Manage</b> <code>/p SYMBOL</code> <code>/c SYMBOL</code> <code>/closeall</code>",
 			"<b>More</b> <code>/hotkeys</code>",
 		)
 	case strings.HasPrefix(cmd, "/hotkeys"):
@@ -21306,12 +21331,11 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<b>Fixed-Leverage Variants</b>",
 			"<code>/l3 SYMBOL [MARGIN_USDT]</code> <code>/l5 SYMBOL [MARGIN_USDT]</code> <code>/l10 SYMBOL [MARGIN_USDT]</code> <code>/l20 SYMBOL [MARGIN_USDT]</code>",
 			"<code>/s3 SYMBOL [MARGIN_USDT]</code> <code>/s5 SYMBOL [MARGIN_USDT]</code> <code>/s10 SYMBOL [MARGIN_USDT]</code> <code>/s20 SYMBOL [MARGIN_USDT]</code>",
-			"<b>Manual + Risk</b>",
-			"<code>/m SYMBOL</code> = <code>/manual SYMBOL</code>",
+			"<b>Risk</b>",
 			"<code>/p SYMBOL</code> = <code>/protect SYMBOL</code>",
 			"<code>/c SYMBOL</code> = <code>/close SYMBOL</code>",
 		)
-	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "):
+	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "):
 		if len(fields) < 2 {
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/hotkeys</code>")
 		}
@@ -21321,8 +21345,6 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/hotkeys</code>")
 		}
 		switch alias {
-		case "/m":
-			return c.handleCommand("", "/manual "+sym)
 		case "/p":
 			return c.handleCommand("", "/protect "+sym)
 		case "/c":
@@ -21467,7 +21489,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		return notify.BuildEventHTML("💼", "BALANCE",
 			fmt.Sprintf("<b>Available USDT:</b> %.4f", s.AvailableUSDT),
 		)
-	case strings.HasPrefix(cmd, "/acct"), strings.HasPrefix(cmd, "/growth"), strings.HasPrefix(cmd, "/summary"):
+	case strings.HasPrefix(cmd, "/acct"), strings.HasPrefix(cmd, "/summary"):
 		if c.execMgr == nil {
 			return notify.BuildEventHTML("💼", "ACCOUNT SUMMARY", "Execution manager unavailable")
 		}
@@ -21485,19 +21507,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				includeMissed = append(includeMissed, rows...)
 			}
 		}
-		return buildAccountHTML(report, strings.HasPrefix(cmd, "/growth"), includeMissed)
-	case strings.HasPrefix(cmd, "/health"):
-		report := accountReport{}
-		if c.execMgr != nil {
-			report = c.execMgr.ensureAccountReportFresh(time.Now().UTC(), 2*time.Minute)
-			snap := c.execMgr.LiveAccountSnapshot(6)
-			return notify.BuildEventHTML("🩺", "HEALTH",
-				fmt.Sprintf("<b>Account:</b> %s | <b>Detail:</b> %s", firstNonEmpty(report.Health, "failed"), firstNonEmpty(report.HealthDetail, "none")),
-				fmt.Sprintf("<b>Live snapshot:</b> %s | <b>Detail:</b> %s", firstNonEmpty(snap.Health, "healthy"), firstNonEmpty(snap.HealthDetail, "none")),
-				fmt.Sprintf("<b>Open:</b> %d | <b>Manual:</b> %d | <b>Bot:</b> %d", snap.OpenCount, snap.ManualCount, snap.BotCount),
-			)
-		}
-		return notify.BuildEventHTML("🩺", "HEALTH", "Execution manager unavailable")
+		return buildAccountHTML(report, false, includeMissed)
 	case strings.HasPrefix(cmd, "/positions"), cmd == "/pos":
 		if c.paper != nil && c.paper.enabled {
 			meta := c.getMeta()
@@ -21814,52 +21824,11 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			)
 		}
 		return notify.BuildEventHTML("🔎", "WHY", fmt.Sprintf("%s is not in the current market snapshot", cleanSymbol(sym)))
-	case strings.HasPrefix(cmd, "/manual "), strings.HasPrefix(cmd, "/entry "):
-		if len(fields) < 2 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
-		}
-		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
-		side := ""
-		if len(fields) >= 3 {
-			if parsed, ok := parseUserPositionSide(fields[2]); ok {
-				side = parsed
-			}
-		}
-		if sym == "" {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
-		}
-		if d, ok := c.getDecision(sym); ok {
-			if side == "" {
-				side = d.Side
-			}
-			return manualAssistResponse(sym, firstNonEmpty(side, d.Side), d, c.getMeta()[sym])
-		}
-		meta := c.getMeta()[sym]
-		return notify.BuildEventHTML("🧭", "MANUAL ENTRY",
-			fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
-			fmt.Sprintf("<b>Last:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(meta.LastPrice), meta.Move24h, meta.VolumeUSD/1_000_000.0),
-			"Decision state not cached yet. Wait for the next scan or use /why SYMBOL.",
+	case strings.HasPrefix(cmd, "/manual "), strings.HasPrefix(cmd, "/entry "), strings.HasPrefix(cmd, "/suggest "), strings.HasPrefix(cmd, "/growth"), strings.HasPrefix(cmd, "/health"):
+		return notify.BuildEventHTML("ℹ️", "COMMAND RETIRED",
+			"That command was removed in manual-only mode.",
+			"Use <code>/execute</code>, hotkeys, scanner/status, and position commands from <code>/help</code>.",
 		)
-	case strings.HasPrefix(cmd, "/suggest "):
-		if len(fields) < 3 {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
-		}
-		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
-		side, ok := parseUserPositionSide(fields[2])
-		if sym == "" || !ok {
-			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
-		}
-		s := c.addSuggestion(sym, side, "telegram", 0, 0)
-		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
-			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
-			"Candidate aging/freshness will be relaxed for this symbol only",
-			"Risk, liquidity, session, and sizing gates still apply",
-		}
-		if d, ok := c.getDecision(sym); ok {
-			lines = append(lines, fmt.Sprintf("<b>Latest:</b> %s | g=%s s=%.2f slope=%+.3f", firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
-		}
-		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
 	case strings.HasPrefix(cmd, "/trade "):
 		if len(fields) < 3 {
 			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV] [MARGIN_USDT]</code>")
