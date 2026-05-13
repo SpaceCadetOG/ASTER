@@ -2732,6 +2732,9 @@ func buildLiveDigest(label string, now time.Time, m *liveExecManager, missed *mi
 			lines = append(lines, "<b>Blocked/Missed:</b> "+strings.Join(rows, " | "))
 		}
 	}
+	if rows := manualLivePositionLines(m, 3); len(rows) > 0 {
+		lines = append(lines, "<b>Manual Live Positions:</b> "+strings.Join(rows, " | "))
+	}
 	longTop, shortTop, bias := topScanSnapshot(longInPlay, shortInPlay, meta, 3)
 	lines = append(lines, notify.BuildScannerSnapshotHTML(longTop, shortTop, bias))
 	return notify.BuildEventHTML("📡", strings.ToUpper(strings.TrimSpace(label)), lines...)
@@ -2746,6 +2749,31 @@ func scannerItemsForCommand(s liveStatus, which string) ([]notify.ScanItem, []no
 	default:
 		return s.ScannerLongs, s.ScannerShorts, s.ScannerBias
 	}
+}
+
+func manualLivePositionLines(m *liveExecManager, limit int) []string {
+	if m == nil {
+		return nil
+	}
+	snap := m.LiveAccountSnapshot(16)
+	if snap.ManualCount <= 0 || len(snap.Positions) == 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	lines := make([]string, 0, limit)
+	for _, p := range snap.Positions {
+		if strings.EqualFold(strings.TrimSpace(p.Source), "BOT") {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s %s qty=%.6f entry=%s upnl=%+.2f",
+			cleanSymbol(p.Symbol), displayPositionSide(p.Side), p.Qty, fmtPrice(p.EntryPrice), p.UnrealizedPnL))
+		if len(lines) >= limit {
+			break
+		}
+	}
+	return lines
 }
 
 func hasLiveProtectiveOrder(p *livePosition) bool {
@@ -21116,10 +21144,14 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		} else if which == "shorts" {
 			title = "SHORT SCANS"
 		}
-		return notify.BuildEventHTML("📡", title,
+		lines := []string{
 			fmt.Sprintf("<b>Session:</b> %s | <b>Updated:</b> %s", sessionTag(s.Generated), s.Generated.In(time.Local).Format("15:04:05 MST")),
 			notify.BuildScannerSnapshotHTML(longs, shorts, bias),
-		)
+		}
+		if rows := manualLivePositionLines(c.execMgr, 3); len(rows) > 0 {
+			lines = append(lines, "<b>Manual Live Positions:</b> "+strings.Join(rows, " | "))
+		}
+		return notify.BuildEventHTML("📡", title, lines...)
 	case strings.HasPrefix(cmd, "/balance"):
 		if c.execMgr != nil {
 			ls := c.execMgr.LiveAccountSnapshot(5)
