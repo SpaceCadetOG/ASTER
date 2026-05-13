@@ -21906,28 +21906,23 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			modeLabel = "LIVE"
 		}
 		lines := []string{
-			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
-			fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
-			fmt.Sprintf("<b>Priority TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
-			"Priority watch is armed for this symbol and side with elevated watcher cadence.",
-			"Next evaluation will process it ahead of normal candidate competition while still respecting hard safety gates.",
-			"This does not bypass liquidity, stop, funding, or session protection.",
+			fmt.Sprintf("<b>%s %s</b> | <b>%s</b>", cleanSymbol(sym), displayPositionSide(side), modeLabel),
+			fmt.Sprintf("<b>TTL:</b> %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
 		}
 		if s.PreferredLev > 0 {
-			lines = append(lines, fmt.Sprintf("<b>Requested leverage:</b> %dx", s.PreferredLev))
+			lines = append(lines, fmt.Sprintf("<b>Lev:</b> %dx", s.PreferredLev))
 		}
 		if s.PreferredMargin > 0 {
-			lines = append(lines, fmt.Sprintf("<b>Requested margin:</b> %.2f USDT", s.PreferredMargin))
+			lines = append(lines, fmt.Sprintf("<b>Margin:</b> %.2f USDT", s.PreferredMargin))
 		} else {
-			lines = append(lines, "<b>Requested margin:</b> default (10 USDT)")
+			lines = append(lines, "<b>Margin:</b> default (10 USDT)")
 		}
 		if d, ok := c.getDecision(sym); ok {
-			lines = append(lines, fmt.Sprintf("<b>Latest:</b> side=%s reason=%s grade=%s score=%.2f slope=%+.3f",
-				displayPositionSide(d.Side), firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
+			lines = append(lines, fmt.Sprintf("<b>State:</b> %s | <b>Grade:</b> %s | <b>Score:</b> %.1f",
+				firstNonEmpty(strings.ToUpper(strings.TrimSpace(d.State)), "UNKNOWN"), d.Grade, d.Score))
 		}
 		if meta, ok := c.getMeta()[sym]; ok {
-			lines = append(lines, fmt.Sprintf("<b>Snapshot:</b> dayUTC=%.2f%% | utc4h=%.2f%% | utc1h=%.2f%% | 24h=%.2f%% | vol=%.2fM | last=%s",
-				meta.DayUTC24h, meta.UTC4hPct, meta.UTC1hPct, meta.Move24h, meta.VolumeUSD/1_000_000.0, fmtPrice(meta.LastPrice)))
+			lines = append(lines, fmt.Sprintf("<b>Last:</b> %s | <b>24h:</b> %.2f%%", fmtPrice(meta.LastPrice), meta.Move24h))
 		}
 		return notify.BuildEventHTML("🎯", "TRADE REQUEST ARMED", lines...)
 	case strings.HasPrefix(cmd, "/protect "):
