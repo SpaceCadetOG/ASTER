@@ -377,42 +377,6 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 	return mkts
 }
 
-// FetchAllMarketsLite fetches only the 24h ticker snapshot and skips per-symbol
-// enrichment calls. It is intended for WS-first scanner mode where live quotes
-// are sourced from websocket streams.
-func (c *Client) FetchAllMarketsLite(quoteAssets ...string) []market.Market {
-	if len(quoteAssets) == 0 {
-		quoteAssets = []string{"USDT", "USD"}
-	}
-	rows, err := c.fetchAll24h()
-	if err != nil || len(rows) == 0 {
-		if err != nil {
-			c.lastFetchErr.Set(err)
-		}
-		return nil
-	}
-	c.lastFetchErr.Set(nil)
-	mkts := make([]market.Market, 0, len(rows))
-	for _, ts := range rows {
-		if !MatchesQuoteAsset(ts.Symbol, quoteAssets) {
-			continue
-		}
-		m := toMarket(c.Name(), ts, nil)
-		// In lite mode, approximate UTC day move with 24h change until WS/replay overlay refines it.
-		v := m.Change24h
-		m.DayUTC24h = &v
-		mkts = append(mkts, m)
-	}
-	return mkts
-}
-
-func (c *Client) LastFetchError() error {
-	if c == nil {
-		return nil
-	}
-	return c.lastFetchErr.Get()
-}
-
 // ---- Candle loader (mark-price klines) ----
 
 // LoadCandles is a convenience wrapper that uses a default client (base URL = Aster).
