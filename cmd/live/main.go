@@ -21297,9 +21297,65 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			"<b>Trade + Manual Management</b>",
 			"<code>/manual SYMBOL [LONG|SHORT]</code> <code>/trade SYMBOL LONG|SHORT [LEV]</code> <code>/suggest SYMBOL LONG|SHORT</code>",
 			"<code>/manage SYMBOL [y|n]</code> <code>/unmanage SYMBOL</code> <code>/protect SYMBOL</code>",
+			"<b>Hotkeys</b>",
+			"<code>/l SYMBOL [LEV]</code> <code>/s SYMBOL [LEV]</code> <code>/l3 SYMBOL</code> <code>/l5 SYMBOL</code> <code>/l10 SYMBOL</code> <code>/l20 SYMBOL</code>",
+			"<code>/s3 SYMBOL</code> <code>/s5 SYMBOL</code> <code>/s10 SYMBOL</code> <code>/s20 SYMBOL</code> <code>/m SYMBOL</code> <code>/c SYMBOL</code> <code>/p SYMBOL</code>",
 			"<b>Runtime Controls</b>",
 			"<code>/mode</code> <code>/mode live</code> <code>/mode paper</code> <code>/pause</code> <code>/resume</code> <code>/close SYMBOL</code> <code>/closeall</code>",
 		)
+	case strings.HasPrefix(cmd, "/hotkeys"):
+		return notify.BuildEventHTML("⌨️", "HOTKEYS",
+			"<b>Entry Request (priority arm)</b>",
+			"<code>/l SYMBOL [LEV]</code> = <code>/trade SYMBOL LONG [LEV]</code>",
+			"<code>/s SYMBOL [LEV]</code> = <code>/trade SYMBOL SHORT [LEV]</code>",
+			"<b>Fixed-Leverage Variants</b>",
+			"<code>/l3 SYMBOL</code> <code>/l5 SYMBOL</code> <code>/l10 SYMBOL</code> <code>/l20 SYMBOL</code>",
+			"<code>/s3 SYMBOL</code> <code>/s5 SYMBOL</code> <code>/s10 SYMBOL</code> <code>/s20 SYMBOL</code>",
+			"<b>Manual + Risk</b>",
+			"<code>/m SYMBOL</code> = <code>/manual SYMBOL</code>",
+			"<code>/p SYMBOL</code> = <code>/protect SYMBOL</code>",
+			"<code>/c SYMBOL</code> = <code>/close SYMBOL</code>",
+		)
+	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/hotkeys</code>")
+		}
+		alias := strings.ToLower(strings.TrimSpace(fields[0]))
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/hotkeys</code>")
+		}
+		switch alias {
+		case "/m":
+			return c.handleCommand("", "/manual "+sym)
+		case "/p":
+			return c.handleCommand("", "/protect "+sym)
+		case "/c":
+			return c.handleCommand("", "/close "+sym)
+		}
+		side := "LONG"
+		if strings.HasPrefix(alias, "/s") {
+			side = "SHORT"
+		}
+		lev := ""
+		switch alias {
+		case "/l3", "/s3":
+			lev = "3x"
+		case "/l5", "/s5":
+			lev = "5x"
+		case "/l10", "/s10":
+			lev = "10x"
+		case "/l20", "/s20":
+			lev = "20x"
+		}
+		// /l SYMBOL [LEV] and /s SYMBOL [LEV]
+		if lev == "" && len(fields) >= 3 {
+			lev = fields[2]
+		}
+		if lev == "" {
+			return c.handleCommand("", fmt.Sprintf("/trade %s %s", sym, side))
+		}
+		return c.handleCommand("", fmt.Sprintf("/trade %s %s %s", sym, side, lev))
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
 		liveSummary := "live snapshot unavailable"
