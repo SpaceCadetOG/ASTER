@@ -1784,7 +1784,7 @@ func main() {
 	for _, line := range startupWarningLines(ladderCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
-	fmt.Printf("  min_grade=%s | reentry_size=%.2f\n", strings.ToUpper(minGrade), reentryCfg.SizeUSDT)
+	fmt.Printf("  min_grade=%s | mode=manual_scanner\n", strings.ToUpper(minGrade))
 	if execMgr != nil {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
@@ -2530,6 +2530,7 @@ func main() {
 				st.TopSlope = best.Entry.ScoreSlope
 				st.TopDecision = "manual_only"
 				st.TopDecisionWhy = "scanner_only_manual_execution"
+				st.TopRejectReason = ""
 				if emitTerminal {
 					fmt.Printf("live: scanner-only top %s side=%s grade=%s score=%.2f slope=%.3f state=%s\n",
 						best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.State)
@@ -2537,6 +2538,7 @@ func main() {
 			} else {
 				st.TopDecision = "manual_only"
 				st.TopDecisionWhy = "scanner_only_no_candidates"
+				st.TopRejectReason = ""
 				if emitTerminal {
 					fmt.Println("live: scanner-only no candidates")
 				}
@@ -20781,20 +20783,11 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 }
 
 func logEligibilitySummary(summary EntryEligibilitySummary) {
-	fmt.Printf("ELIGIBILITY_SUMMARY symbol=%s side=%s strat=%s grade=%s rank=%.2f persistence=%.2f adj_conf=%.2f penalties=%q hard=%q soft=%q capacity=%q state=%q starter_allowed=%v full_entry_allowed=%v reentry_allowed=%v final_decision=%s final_reason=%s\n",
-		summary.Symbol, summary.Side, summary.Strat, summary.Grade, summary.Rank, summary.PersistenceScore,
-		summary.AdjustedConfidence, strings.Join(summary.ConfidencePenaltyReasons, ","),
-		strings.Join(summary.HardBlocks, ","), strings.Join(summary.SoftBlocks, ","), strings.Join(summary.CapacityBlocks, ","), strings.Join(summary.StateBlocks, ","),
-		summary.StarterAllowed, summary.FullEntryAllowed, summary.ReentryAllowed, summary.FinalDecision, summary.FinalReason)
+	_ = summary
 }
 
 func logFinalDecision(summary EntryEligibilitySummary) {
-	rejectClass := ""
-	if summary.FinalDecision == "reject" || summary.FinalDecision == "watch_only" {
-		rejectClass = string(classifyRejectReason(summary.FinalReason))
-	}
-	fmt.Printf("FINAL_DECISION symbol=%s action=%s reason=%s reject_class=%s\n",
-		summary.Symbol, summary.FinalDecision, summary.FinalReason, rejectClass)
+	_ = summary
 }
 
 func applyDecisionToStatus(st *liveStatus, summary EntryEligibilitySummary) {
