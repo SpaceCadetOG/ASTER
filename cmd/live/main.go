@@ -643,6 +643,85 @@ type watchRuntime struct {
 	lastPriorityAt time.Time
 }
 
+type scannerWSQuotePool struct {
+	ctx     context.Context
+	mu      sync.RWMutex
+	streams map[string]*scannerWSQuoteStream
+}
+
+type scannerWSQuoteStream struct {
+	state  *aster.MarketState
+	cancel context.CancelFunc
+}
+
+func newScannerWSQuotePool(ctx context.Context) *scannerWSQuotePool {
+	return &scannerWSQuotePool{
+		ctx:     ctx,
+		streams: map[string]*scannerWSQuoteStream{},
+	}
+}
+
+func (p *scannerWSQuotePool) Sync(rawSymbols []string) {
+	if p == nil || p.ctx == nil {
+		return
+	}
+	want := map[string]struct{}{}
+	for _, sym := range rawSymbols {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(sym)))
+		if raw == "" {
+			continue
+		}
+		want[raw] = struct{}{}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for raw, st := range p.streams {
+		if _, ok := want[raw]; ok {
+			continue
+		}
+		if st != nil && st.cancel != nil {
+			st.cancel()
+		}
+		delete(p.streams, raw)
+	}
+
+	for raw := range want {
+		if _, ok := p.streams[raw]; ok {
+			continue
+		}
+		state := aster.NewMarketState(raw, 32)
+		sctx, cancel := context.WithCancel(p.ctx)
+		client := aster.NewStreamClient(raw, 20, "100ms", state)
+		p.streams[raw] = &scannerWSQuoteStream{state: state, cancel: cancel}
+		go func() {
+			_ = client.Run(sctx)
+		}()
+	}
+}
+
+func (p *scannerWSQuotePool) Quote(rawSymbol string) (bid, ask, mid float64, ok bool) {
+	if p == nil {
+		return 0, 0, 0, false
+	}
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(rawSymbol)))
+	if raw == "" {
+		return 0, 0, 0, false
+	}
+	p.mu.RLock()
+	st := p.streams[raw]
+	p.mu.RUnlock()
+	if st == nil || st.state == nil {
+		return 0, 0, 0, false
+	}
+	bid, ask, mid, _, _, _ = st.state.SnapshotTop(1)
+	if bid <= 0 || ask <= 0 || mid <= 0 {
+		return 0, 0, 0, false
+	}
+	return bid, ask, mid, true
+}
+
 var (
 	liveWatchEvery     time.Duration
 	liveWatchTick      func(time.Time) bool
@@ -1886,12 +1965,50 @@ func main() {
 	runtimeLoop := newLiveRuntimeLoop()
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
+	wsScannerEnable := envBool("LIVE_SCANNER_WS_ENABLE", true)
+	wsScannerTopN := envInt("LIVE_SCANNER_WS_TOPN", 24)
+	if wsScannerTopN < 4 {
+		wsScannerTopN = 4
+	}
+	if wsScannerTopN > 80 {
+		wsScannerTopN = 80
+	}
+	var scannerWSPool *scannerWSQuotePool
+	if wsScannerEnable {
+		scannerWSPool = newScannerWSQuotePool(runtimeCtx)
+	}
 	runtimeLoop.startScannerWorker(runtimeCtx, scanEvery, func(now time.Time) (liveScannerSnapshot, bool) {
-		mkts := client.FetchAllMarkets()
+		var mkts []market.Market
+		if wsScannerEnable {
+			mkts = client.FetchAllMarketsLite()
+		} else {
+			mkts = client.FetchAllMarkets()
+		}
 		longRows := market.ScoreAndFilter(mkts)
 		shortRows := market.ScoreAndFilterShort(mkts)
 		longRows = filterBlockedScored(longRows, safety.blockSymbols)
 		shortRows = filterBlockedScored(shortRows, safety.blockSymbols)
+		if wsScannerEnable && scannerWSPool != nil {
+			watchRows := make([]market.Scored, 0, len(longRows)+len(shortRows))
+			watchRows = append(watchRows, market.TopN(longRows, wsScannerTopN)...)
+			watchRows = append(watchRows, market.TopN(shortRows, wsScannerTopN)...)
+			wsSymbols := make([]string, 0, len(watchRows))
+			seen := map[string]struct{}{}
+			for _, row := range watchRows {
+				raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(row.Symbol)))
+				if raw == "" {
+					continue
+				}
+				if _, ok := seen[raw]; ok {
+					continue
+				}
+				seen[raw] = struct{}{}
+				wsSymbols = append(wsSymbols, raw)
+			}
+			scannerWSPool.Sync(wsSymbols)
+			overlayWSQuotes(longRows, scannerWSPool)
+			overlayWSQuotes(shortRows, scannerWSPool)
+		}
 		if discoveryCfg.Enabled {
 			baseLongRows := append([]market.Scored(nil), longRows...)
 			baseShortRows := append([]market.Scored(nil), shortRows...)
@@ -4233,6 +4350,35 @@ func buildSymbolMeta(longRows, shortRows []market.Scored) map[string]symbolMeta 
 	put(longRows)
 	put(shortRows)
 	return out
+}
+
+func overlayWSQuotes(rows []market.Scored, pool *scannerWSQuotePool) {
+	if pool == nil || len(rows) == 0 {
+		return
+	}
+	for i := range rows {
+		raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(rows[i].Symbol)))
+		bid, ask, mid, ok := pool.Quote(raw)
+		if !ok {
+			continue
+		}
+		rows[i].LastPrice = mid
+		// Keep change fields aligned with WS-first mark where base open references exist.
+		if rows[i].OpenPrice > 0 {
+			v := (mid/rows[i].OpenPrice - 1.0) * 100.0
+			rows[i].DayUTC24h = &v
+		}
+		if rows[i].Open4hUTC > 0 {
+			v := (mid/rows[i].Open4hUTC - 1.0) * 100.0
+			rows[i].UTC4hPct = &v
+		}
+		if rows[i].Open1hUTC > 0 {
+			v := (mid/rows[i].Open1hUTC - 1.0) * 100.0
+			rows[i].UTC1hPct = &v
+		}
+		_ = bid
+		_ = ask
+	}
 }
 
 func loadDiscoveryConfig() discovery.Config {
