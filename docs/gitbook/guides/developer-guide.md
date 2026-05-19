@@ -9,7 +9,7 @@ Today the production shape is:
 - fixed-size entries
 - no pyramiding by default
 - Telegram-operated
-- Pi-deployed through tmux/systemd
+- host-deployed with manual runtime control during the GCP transition
 
 The bot is designed to:
 - rank markets with `cmd/long` and `cmd/short`
@@ -130,9 +130,9 @@ Expected behavior:
 - if perp available is above `$200`, sweep the difference to spot
 - if perp available is below `$150`, top up back toward `$200`
 
-## Pi deployment model
+## Host deployment model
 
-### Normal deploy
+### Build helper
 
 Use:
 
@@ -140,15 +140,10 @@ Use:
 scripts/deploy_pi.sh
 ```
 
-This is also what the GitHub Actions Pi deploy workflow uses.
+This refreshes host binaries and env examples only. It no longer installs or
+restarts tmux/systemd orchestration.
 
-### Runtime layout
-
-The Pi normally uses:
-- `aster-modules-tmux`
-- `aster-autoupdate.timer`
-
-The foreground operator script is:
+### Foreground operator script
 
 ```bash
 scripts/run_live_logged.sh
@@ -156,7 +151,7 @@ scripts/run_live_logged.sh
 
 ### Logs
 
-Use a dedicated Pi log directory outside the repo. Recommended:
+Use a dedicated host log directory outside the repo. Recommended:
 
 ```bash
 ASTER_LOG_DIR=/home/traderbot/aster-logs
@@ -166,7 +161,7 @@ That keeps runtime logs separate from the checked-out repo.
 
 ### State
 
-Use a stable state directory on the Pi:
+Use a stable state directory on a dedicated host:
 
 ```bash
 LIVE_STATE_DIR=/opt/aster/state

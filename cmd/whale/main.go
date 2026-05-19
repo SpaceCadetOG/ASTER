@@ -14,6 +14,7 @@ import (
 
 	"go-machine/internal/colorx"
 	"go-machine/internal/flow"
+	"go-machine/internal/scanneruniverse"
 	"go-machine/internal/ws"
 )
 
@@ -38,13 +39,126 @@ type whaleStatus struct {
 	Events     int64     `json:"events"`
 }
 
+type whaleAssetState struct {
+	LastUSD     float64
+	LastSide    string
+	LastTradeAt time.Time
+}
+
+type whaleAssetSnapshot struct {
+	Symbol       string     `json:"symbol"`
+	Subscribed   bool       `json:"subscribed"`
+	Connected    bool       `json:"connected"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	MinUSD       float64    `json:"min_usd"`
+	WindowSec    int        `json:"window_sec"`
+	Count        int        `json:"count"`
+	TotalUSD     float64    `json:"total_usd"`
+	BuyUSD       float64    `json:"buy_usd"`
+	SellUSD      float64    `json:"sell_usd"`
+	DeltaUSD     float64    `json:"delta_usd"`
+	LargeCount   int        `json:"large_count"`
+	BuyPct       float64    `json:"buy_pct"`
+	SellPct      float64    `json:"sell_pct"`
+	Burst        bool       `json:"burst"`
+	DominantSide string     `json:"dominant_side"`
+	LastUSD      float64    `json:"last_usd,omitempty"`
+	LastSide     string     `json:"last_side,omitempty"`
+	LastTradeAt  *time.Time `json:"last_trade_at,omitempty"`
+}
+
+type whaleRuntime struct {
+	mu      sync.RWMutex
+	windows map[string]*flow.Window
+	assets  map[string]whaleAssetState
+}
+
+func newWhaleRuntime() *whaleRuntime {
+	return &whaleRuntime{
+		windows: make(map[string]*flow.Window),
+		assets:  make(map[string]whaleAssetState),
+	}
+}
+
 func (s *whaleStatus) snapshot() whaleStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return *s
 }
 
-func startStatusServer(addr string, st *whaleStatus) {
+func (r *whaleRuntime) setWindow(symbol string, w *flow.Window) {
+	r.mu.Lock()
+	r.windows[symbol] = w
+	r.mu.Unlock()
+}
+
+func (r *whaleRuntime) getWindow(symbol string) *flow.Window {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.windows[symbol]
+}
+
+func (r *whaleRuntime) record(symbol string, usd float64, side string, ts time.Time) {
+	r.mu.Lock()
+	r.assets[symbol] = whaleAssetState{
+		LastUSD:     usd,
+		LastSide:    side,
+		LastTradeAt: ts,
+	}
+	r.mu.Unlock()
+}
+
+func (r *whaleRuntime) snapshot(symbol string, st *whaleStatus, burstCount int, imbalancePct float64) whaleAssetSnapshot {
+	stats := flow.Stats{}
+	asset := whaleAssetState{}
+	if w := r.getWindow(symbol); w != nil {
+		stats = w.Snapshot()
+	}
+	r.mu.RLock()
+	asset = r.assets[symbol]
+	r.mu.RUnlock()
+	dominant := "NEUTRAL"
+	if stats.BuyPct >= imbalancePct {
+		dominant = "BUY"
+	} else if stats.SellPct >= imbalancePct {
+		dominant = "SELL"
+	}
+	snap := st.snapshot()
+	out := whaleAssetSnapshot{
+		Symbol:       symbol,
+		Subscribed:   r.getWindow(symbol) != nil,
+		Connected:    snap.Connected,
+		UpdatedAt:    snap.UpdatedAt,
+		MinUSD:       snap.MinUSD,
+		WindowSec:    snap.WindowSec,
+		Count:        stats.Count,
+		TotalUSD:     stats.TotalUSD,
+		BuyUSD:       stats.BuyUSD,
+		SellUSD:      stats.SellUSD,
+		DeltaUSD:     stats.DeltaUSD,
+		LargeCount:   stats.LargeCount,
+		BuyPct:       stats.BuyPct,
+		SellPct:      stats.SellPct,
+		Burst:        stats.Count >= burstCount,
+		DominantSide: dominant,
+		LastUSD:      asset.LastUSD,
+		LastSide:     asset.LastSide,
+	}
+	if !asset.LastTradeAt.IsZero() {
+		out.LastTradeAt = &asset.LastTradeAt
+	}
+	return out
+}
+
+func normalizeAssetSymbol(raw string) string {
+	s := strings.ToUpper(strings.TrimSpace(raw))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "USD")
+	return s
+}
+
+func startStatusServer(addr string, st *whaleStatus, rt *whaleRuntime, burstCount int, imbalancePct float64) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
@@ -58,6 +172,15 @@ func startStatusServer(addr string, st *whaleStatus) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st.snapshot())
 	})
+	mux.HandleFunc("/api/asset", func(w http.ResponseWriter, r *http.Request) {
+		symbol := normalizeAssetSymbol(r.URL.Query().Get("symbol"))
+		if symbol == "" {
+			http.Error(w, "missing symbol", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rt.snapshot(symbol, st, burstCount, imbalancePct))
+	})
 	go func() {
 		fmt.Println("whale status server:", addr)
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -67,18 +190,20 @@ func startStatusServer(addr string, st *whaleStatus) {
 }
 
 func main() {
-	syms := parseSymbols("WHALE_SYMBOLS", defaultTapeSymbols())
-	minUSD := envFloat("WHALE_MIN_USD", 10000)
-	tier1 := envFloat("WHALE_TIER1_USD", 10000)
-	tier2 := envFloat("WHALE_TIER2_USD", 25000)
-	tier3 := envFloat("WHALE_TIER3_USD", 50000)
-	tier4 := envFloat("WHALE_TIER4_USD", 100000)
+	syms := scanneruniverse.ResolveCSVOrScanner("WHALE_SYMBOLS", defaultTapeSymbols(), []string{
+		envStr("WHALE_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
+	})
+	minUSD := envFloat("WHALE_MIN_USD", 100)
+	tier1 := envFloat("WHALE_TIER1_USD", 100)
+	tier2 := envFloat("WHALE_TIER2_USD", 500)
+	tier3 := envFloat("WHALE_TIER3_USD", 1000)
+	tier4 := envFloat("WHALE_TIER4_USD", 5000)
 	windowSec := envInt("WHALE_WINDOW_SEC", 30)
 	burstCount := envInt("WHALE_BURST_COUNT", 5)
 	imbalancePct := envFloat("WHALE_IMBALANCE_PCT", 65)
 
 	windowDur := time.Duration(windowSec) * time.Second
-	windows := make(map[string]*flow.Window, len(syms))
+	rt := newWhaleRuntime()
 	st := &whaleStatus{
 		StartedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -86,7 +211,7 @@ func main() {
 		WindowSec: windowSec,
 	}
 	for _, s := range syms {
-		windows[strings.ToUpper(s)] = flow.NewWindow(windowDur, tier1)
+		rt.setWindow(normalizeAssetSymbol(s), flow.NewWindow(windowDur, tier1))
 	}
 
 	streams := make([]string, 0, len(syms))
@@ -96,7 +221,7 @@ func main() {
 	wsURL := "wss://fstream.asterdex.com/stream?streams=" + strings.Join(streams, "/")
 	fmt.Printf("whale detector started (min=$%.0f, window=%ds)\n", minUSD, windowSec)
 	fmt.Println(wsURL)
-	startStatusServer(envStr("WHALE_HTTP_ADDR", ":8092"), st)
+	startStatusServer(envStr("WHALE_HTTP_ADDR", ":8092"), st, rt, burstCount, imbalancePct)
 
 	lastSummary := time.Now()
 	for {
@@ -149,10 +274,10 @@ func main() {
 
 			symbol := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(t.S)), "USDT")
 			key := symbol
-			w, ok := windows[key]
-			if !ok {
+			w := rt.getWindow(key)
+			if w == nil {
 				w = flow.NewWindow(windowDur, tier1)
-				windows[key] = w
+				rt.setWindow(key, w)
 			}
 
 			isBuy := !t.M
@@ -160,11 +285,13 @@ func main() {
 			if isBuy {
 				plainSide = "BUY"
 			}
+			eventTS := time.UnixMilli(t.T)
 			w.Add(flow.Event{
-				Ts:    time.UnixMilli(t.T),
+				Ts:    eventTS,
 				USD:   usd,
 				IsBuy: isBuy,
 			})
+			rt.record(symbol, usd, plainSide, eventTS)
 			st.mu.Lock()
 			st.UpdatedAt = time.Now().UTC()
 			st.Events++
@@ -215,7 +342,7 @@ func main() {
 				dominant = " dominant:SELL"
 			}
 
-			sec := time.UnixMilli(t.T).Format("15:04:05")
+			sec := eventTS.Format("15:04:05")
 			usdText := colorByWhaleTier(usd, tier1, tier2, tier3, tier4, compactUSD(usd))
 			fmt.Printf("%s %s %-4s %-5s %s %s | window:%d buy%%:%d burst:%s%s\n",
 				sec,
@@ -231,7 +358,7 @@ func main() {
 			)
 
 			if time.Since(lastSummary) >= 10*time.Second {
-				printWhaleSummary(windows)
+				printWhaleSummary(rt)
 				lastSummary = time.Now()
 			}
 		}
@@ -240,14 +367,20 @@ func main() {
 	}
 }
 
-func printWhaleSummary(windows map[string]*flow.Window) {
+func printWhaleSummary(rt *whaleRuntime) {
 	type row struct {
 		Sym      string
 		TotalUSD float64
 		DeltaUSD float64
 	}
-	rows := make([]row, 0, len(windows))
-	for sym, w := range windows {
+	rt.mu.RLock()
+	pairs := make(map[string]*flow.Window, len(rt.windows))
+	for sym, w := range rt.windows {
+		pairs[sym] = w
+	}
+	rt.mu.RUnlock()
+	rows := make([]row, 0, len(pairs))
+	for sym, w := range pairs {
 		s := w.Snapshot()
 		if s.TotalUSD <= 0 {
 			continue
@@ -276,25 +409,6 @@ func defaultTapeSymbols() []string {
 		"atomusdt", "nearusdt", "etcusdt", "suiusdt", "hypeusdt", "pepeusdt",
 		"shibusdt", "wldusdt", "usdcusdt", "fttusdt", "aptusdt", "ltusdt", "asterusdt",
 	}
-}
-
-func parseSymbols(envName string, def []string) []string {
-	raw := strings.TrimSpace(os.Getenv(envName))
-	if raw == "" {
-		return def
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		s := strings.ToLower(strings.TrimSpace(p))
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		return def
-	}
-	return out
 }
 
 func envFloat(k string, def float64) float64 {

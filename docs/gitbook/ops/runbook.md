@@ -21,11 +21,11 @@ go run ./cmd/long
 go run ./cmd/short
 ```
 
-## Pi foreground operator run
+## Foreground operator run
 
 ```bash
-cd /home/traderbot/actions-runner/_work/ASTER/ASTER/scripts
-bash run_live_logged.sh
+cd /Users/victorogbebor/2026/go-machine
+bash scripts/run_live_logged.sh
 ```
 
 This loads `/opt/aster/env/live.env` unless `ASTER_ENV_FILE` is overridden.
@@ -51,7 +51,7 @@ Common persisted files under `out/`:
 - `payout_state.json`
 - `payouts.csv`
 
-On the Pi, set:
+On a dedicated host, set:
 - `LIVE_STATE_DIR=/opt/aster/state`
 
 ## Logs
@@ -59,7 +59,7 @@ On the Pi, set:
 Local default:
 - `logs/`
 
-Pi recommended:
+Host recommended:
 - `/home/traderbot/aster-logs`
 
 Set with:
@@ -80,18 +80,14 @@ Operational baseline is defined by env (Chicago time):
 - pre-EOD exit window (`LIVE_PRE_EOD_EXIT_*`)
 - payout SLA window (`LIVE_PAYOUT_*`)
 
-## Pi deployment
+## Host deployment note
 
-Use existing docs and scripts:
-- [`docs/pi_ops.md`](../pi_ops.md)
-- `scripts/deploy_pi.sh`
-- `scripts/auto_update_aster.sh`
-- `systemd/aster-*.service`
+The old Pi tmux/systemd orchestration layer was removed from this repo.
 
-Current production pattern:
-- `aster-modules-tmux` is the main wrapper service
-- `aster-autoupdate.timer` can pull and restart on new commits
-- `scripts/deploy_pi.sh` is the repo’s deploy entrypoint
+Current repo guidance is limited to:
+- direct `go run ./cmd/...` usage
+- `scripts/run_live_logged.sh` for a logged foreground `cmd/live` session
+- `scripts/deploy_pi.sh` as a host binary/env-example refresh helper
 
 ## Funds maintenance
 

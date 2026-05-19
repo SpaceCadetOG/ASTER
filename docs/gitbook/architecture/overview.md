@@ -107,7 +107,7 @@ Behavior:
 
 - Timezone baseline: `America/Chicago` for operations and reporting.
 - Paper and live share the same decision path; only execution transport differs.
-- State is persisted under `out/` locally or `LIVE_STATE_DIR` on the Pi.
-- The Pi stack is normally run through `aster-modules-tmux`, not one-off
-  foreground binaries.
+- State is persisted under `out/` locally or `LIVE_STATE_DIR` on a dedicated host.
+- The repo no longer ships a prescribed tmux/systemd orchestration layer; run
+  commands directly or through your own host/container supervisor.
 - Logging is environment-driven via `ASTER_LOG_DIR`.

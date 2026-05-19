@@ -14,17 +14,14 @@ jobs:
         with:
           go-version: "1.21.x"
 
-      - name: Deploy to Pi
+      - name: Build host artifacts
         run: |
           bash scripts/deploy_pi.sh
 
-      - name: Restart services
+      - name: Orchestration removed
         run: |
-          sudo systemctl restart aster-modules-tmux || true
-          sudo systemctl restart aster-autoupdate.timer || true
+          echo "Legacy Pi tmux/systemd orchestration was removed from the repo."
 
       - name: Status
         run: |
-          systemctl --no-pager --full status aster-modules-tmux || true
-          systemctl --no-pager --full status aster-autoupdate.timer || true
-          tmux ls || true
+          echo "No repo-managed runtime supervisor remains in this workflow."

@@ -1,0 +1,48 @@
+Wave Window Analysis (Logs + Telegram)
+Generated: 2026-05-01 (America/Chicago)
+Data:
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR26-29/REVIEW/live-2026-04-26.log
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR26-29/REVIEW/live-2026-04-27.log
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR26-29/REVIEW/live-2026-04-28.log
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR26-29/REVIEW/live-2026-04-29.log
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR29-30/REVIEW/live-2026-04-29.log
+- /Users/victorogbebor/Documents/TraderBotLogs/2026APR29-30/REVIEW/live-2026-04-30.log
+- /Users/victorogbebor/Downloads/Telegram Desktop/ChatExport_2026-05-01/messages.html
+
+Legend
+- onset: first SIMPLE_DECISION in contiguous pre-entry scanner run (<=10m gaps), within 6h before entry
+- lag_m: minutes from onset to entry
+- wave: composite quality score (entry timing + hold window + result quality)
+
+Top Trade Windows (Ranked)
+1) PUNDIAIUSDT BUY A+ onset=2026-04-30 07:53:50 entry=2026-04-30 07:59:44 lag_m=5.9 state@entry=in-play slope@entry=0.218 hold=20.1 pnl%=1.02 exit=SL wave=89.0
+2) SWARMSUSDT BUY A+ onset=2026-04-28 06:36:32 entry=2026-04-28 06:43:32 lag_m=7.0 state@entry=heating slope@entry=0.357 hold=21.4 pnl%=0.94 exit=SL wave=88.9
+3) SKYAIUSDT BUY A onset=2026-04-29 11:35:00 entry=2026-04-29 11:42:36 lag_m=7.6 state@entry=heating slope@entry=0.223 hold=4.9 pnl%=2.62 exit=SL wave=85.2
+4) BSBUSDT BUY A+ onset=2026-04-30 17:59:50 entry=2026-04-30 18:02:24 lag_m=2.6 state@entry=heating slope@entry=0.57 hold=8.2 pnl%=-0.19 exit=WINNER_REVERSION_BLOCK wave=84.6
+5) BSBUSDT BUY A+ onset=2026-04-30 12:59:00 entry=2026-04-30 13:20:37 lag_m=21.6 state@entry=heating slope@entry=2.235 hold=20.0 pnl%=1.23 exit=SL wave=84.5
+6) SKYAIUSDT BUY A onset=2026-04-29 11:35:00 entry=2026-04-29 11:47:41 lag_m=12.7 state@entry=heating slope@entry=0.272 hold=9.4 pnl%=3.62 exit=SL wave=82.2
+7) ZBTUSDT SELL A+ onset=2026-04-27 03:21:06 entry=2026-04-27 03:37:47 lag_m=16.7 state@entry=in-play slope@entry=0.67 hold=20.0 pnl%=0.76 exit=MOMENTUM_FADE wave=81.5
+8) SKYAIUSDT BUY A+ onset=2026-04-29 01:39:09 entry=2026-04-29 04:00:36 lag_m=141.4 state@entry=in-play slope@entry=0.37 hold=24.8 pnl%=3.39 exit=SL wave=80.8
+9) SKYAIUSDT BUY A+ onset=2026-04-29 18:46:28 entry=2026-04-29 19:01:13 lag_m=14.8 state@entry=in-play slope@entry=0.54 hold=21.7 pnl%=-0.16 exit=WINNER_REVERSION_BLOCK wave=79.7
+10) SKYAIUSDT BUY A+ onset=2026-04-29 23:48:30 entry=2026-04-30 00:29:03 lag_m=40.5 state@entry=in-play slope@entry=0.95 hold=9.7 pnl%=1.23 exit=SL wave=79.5
+
+Symbol Summary
+- PUNDIAIUSDT: trades=2 wins=2 avg_wave=82.4 avg_lag_m=7.6
+- ZBTUSDT: trades=4 wins=1 avg_wave=76.1 avg_lag_m=14.7
+- SWARMSUSDT: trades=4 wins=2 avg_wave=72.9 avg_lag_m=82.4
+- BSBUSDT: trades=5 wins=3 avg_wave=72.9 avg_lag_m=11.3
+- SKYAIUSDT: trades=14 wins=7 avg_wave=71.9 avg_lag_m=53.8
+- PRLUSDT: trades=2 wins=0 avg_wave=71.2 avg_lag_m=9.4
+- ETHUSDT: trades=1 wins=0 avg_wave=69.8 avg_lag_m=110.9
+- ASTEROIDUSDT: trades=5 wins=0 avg_wave=67.0 avg_lag_m=0.0
+- WLFIUSDT: trades=1 wins=0 avg_wave=62.3 avg_lag_m=33.6
+- MEGAUSDT: trades=1 wins=0 avg_wave=62.2 avg_lag_m=1.7
+- DAMUSDT: trades=2 wins=0 avg_wave=61.9 avg_lag_m=264.7
+- ASTERUSDT: trades=1 wins=0 avg_wave=53.6 avg_lag_m=0.0
+- BIOUSDT: trades=1 wins=0 avg_wave=50.5 avg_lag_m=8.5
+- ORCAUSDT: trades=2 wins=0 avg_wave=46.5 avg_lag_m=45.7
+
+High-Impact Observations
+- Best catch windows were usually lag <= 22m and hold ~5m to 25m.
+- A+ did not guarantee wins; weak outcomes clustered when lag expanded and/or state stayed in-play without fresh impulse.
+- Repeated protection degradation (ORCA SHORT UNPROTECTED retries) and mark=0 artifacts likely polluted some state transitions and risk perception.

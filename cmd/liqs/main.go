@@ -39,13 +39,137 @@ type liqsStatus struct {
 	Events     int64     `json:"events"`
 }
 
+type liqsAssetState struct {
+	LastUSD     float64
+	LastSide    string
+	LastTradeAt time.Time
+	LastPrice   float64
+	LastQty     float64
+	Recent      []liqEvt
+}
+
+type liqsAssetSnapshot struct {
+	Symbol       string     `json:"symbol"`
+	Subscribed   bool       `json:"subscribed"`
+	Connected    bool       `json:"connected"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	MinUSD       float64    `json:"min_usd"`
+	WindowSec    int        `json:"window_sec"`
+	Count        int        `json:"count"`
+	TotalUSD     float64    `json:"total_usd"`
+	BuyUSD       float64    `json:"buy_usd"`
+	SellUSD      float64    `json:"sell_usd"`
+	DeltaUSD     float64    `json:"delta_usd"`
+	BuyPct       float64    `json:"buy_pct"`
+	SellPct      float64    `json:"sell_pct"`
+	LastUSD      float64    `json:"last_usd,omitempty"`
+	LastSide     string     `json:"last_side,omitempty"`
+	LastTradeAt  *time.Time `json:"last_trade_at,omitempty"`
+	LastPrice    float64    `json:"last_price,omitempty"`
+	LastQty      float64    `json:"last_qty,omitempty"`
+	Recent       []liqEvt   `json:"recent,omitempty"`
+	DominantSide string     `json:"dominant_side"`
+}
+
+type liqsRuntime struct {
+	mu      sync.RWMutex
+	windows map[string]*flow.Window
+	assets  map[string]liqsAssetState
+}
+
+func newLiqsRuntime() *liqsRuntime {
+	return &liqsRuntime{
+		windows: make(map[string]*flow.Window),
+		assets:  make(map[string]liqsAssetState),
+	}
+}
+
 func (s *liqsStatus) snapshot() liqsStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return *s
 }
 
-func startStatusServer(addr string, st *liqsStatus) {
+func (r *liqsRuntime) setWindow(symbol string, w *flow.Window) {
+	r.mu.Lock()
+	r.windows[symbol] = w
+	r.mu.Unlock()
+}
+
+func (r *liqsRuntime) getWindow(symbol string) *flow.Window {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.windows[symbol]
+}
+
+func (r *liqsRuntime) record(symbol string, evt liqEvt) {
+	r.mu.Lock()
+	asset := r.assets[symbol]
+	asset.LastUSD = evt.USD
+	asset.LastSide = evt.Side
+	asset.LastTradeAt = evt.Ts
+	asset.LastPrice = evt.Price
+	asset.LastQty = evt.Qty
+	asset.Recent = append(asset.Recent, evt)
+	if len(asset.Recent) > 20 {
+		asset.Recent = append([]liqEvt(nil), asset.Recent[len(asset.Recent)-20:]...)
+	}
+	r.assets[symbol] = asset
+	r.mu.Unlock()
+}
+
+func (r *liqsRuntime) snapshot(symbol string, st *liqsStatus) liqsAssetSnapshot {
+	stats := flow.Stats{}
+	asset := liqsAssetState{}
+	if w := r.getWindow(symbol); w != nil {
+		stats = w.Snapshot()
+	}
+	r.mu.RLock()
+	asset = r.assets[symbol]
+	r.mu.RUnlock()
+	dominant := "NEUTRAL"
+	if stats.BuyUSD > stats.SellUSD {
+		dominant = "BUY"
+	} else if stats.SellUSD > stats.BuyUSD {
+		dominant = "SELL"
+	}
+	snap := st.snapshot()
+	out := liqsAssetSnapshot{
+		Symbol:       symbol,
+		Subscribed:   true,
+		Connected:    snap.Connected,
+		UpdatedAt:    snap.UpdatedAt,
+		MinUSD:       snap.MinUSD,
+		WindowSec:    snap.WindowSec,
+		Count:        stats.Count,
+		TotalUSD:     stats.TotalUSD,
+		BuyUSD:       stats.BuyUSD,
+		SellUSD:      stats.SellUSD,
+		DeltaUSD:     stats.DeltaUSD,
+		BuyPct:       stats.BuyPct,
+		SellPct:      stats.SellPct,
+		LastUSD:      asset.LastUSD,
+		LastSide:     asset.LastSide,
+		LastPrice:    asset.LastPrice,
+		LastQty:      asset.LastQty,
+		Recent:       asset.Recent,
+		DominantSide: dominant,
+	}
+	if !asset.LastTradeAt.IsZero() {
+		out.LastTradeAt = &asset.LastTradeAt
+	}
+	return out
+}
+
+func normalizeAssetSymbol(raw string) string {
+	s := strings.ToUpper(strings.TrimSpace(raw))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "USD")
+	return s
+}
+
+func startStatusServer(addr string, st *liqsStatus, rt *liqsRuntime) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
@@ -58,6 +182,15 @@ func startStatusServer(addr string, st *liqsStatus) {
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st.snapshot())
+	})
+	mux.HandleFunc("/api/asset", func(w http.ResponseWriter, r *http.Request) {
+		symbol := normalizeAssetSymbol(r.URL.Query().Get("symbol"))
+		if symbol == "" {
+			http.Error(w, "missing symbol", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rt.snapshot(symbol, st))
 	})
 	go func() {
 		fmt.Println("liqs status server:", addr)
@@ -77,7 +210,7 @@ func main() {
 	tier3 := envFloat("LIQ_TIER3_USD", 500000)
 
 	windowDur := time.Duration(windowSec) * time.Second
-	windows := map[string]*flow.Window{}
+	rt := newLiqsRuntime()
 	st := &liqsStatus{
 		StartedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -87,7 +220,7 @@ func main() {
 	allowed := map[string]struct{}{}
 	for _, s := range syms {
 		key := strings.ToUpper(strings.TrimSuffix(s, "usdt"))
-		windows[key] = flow.NewWindow(windowDur, minUSD)
+		rt.setWindow(key, flow.NewWindow(windowDur, minUSD))
 		allowed[key] = struct{}{}
 	}
 
@@ -99,7 +232,7 @@ func main() {
 	urls := liquidationURLs(syms)
 	urlIdx := 0
 	lastSummary := time.Now()
-	startStatusServer(envStr("LIQS_HTTP_ADDR", ":8093"), st)
+	startStatusServer(envStr("LIQS_HTTP_ADDR", ":8093"), st, rt)
 
 	for {
 		wsURL := urls[urlIdx%len(urls)]
@@ -147,12 +280,13 @@ func main() {
 					}
 				}
 
-				w, ok := windows[sym]
-				if !ok {
+				w := rt.getWindow(sym)
+				if w == nil {
 					w = flow.NewWindow(windowDur, minUSD)
-					windows[sym] = w
+					rt.setWindow(sym, w)
 				}
 				w.Add(flow.Event{Ts: e.Ts, USD: e.USD, IsBuy: strings.EqualFold(e.Side, "BUY")})
+				rt.record(sym, e)
 				st.mu.Lock()
 				st.UpdatedAt = time.Now().UTC()
 				st.Events++
@@ -179,7 +313,7 @@ func main() {
 			}
 
 			if time.Since(lastSummary) >= 15*time.Second {
-				printLiqSummary(windows)
+				printLiqSummary(rt)
 				lastSummary = time.Now()
 			}
 		}
@@ -293,7 +427,7 @@ func parseLiquidationObject(data []byte) (liqEvt, bool) {
 	return e, true
 }
 
-func printLiqSummary(windows map[string]*flow.Window) {
+func printLiqSummary(rt *liqsRuntime) {
 	type row struct {
 		Sym     string
 		Total   float64
@@ -301,8 +435,14 @@ func printLiqSummary(windows map[string]*flow.Window) {
 		SellUSD float64
 		MaxOne  float64
 	}
-	rows := make([]row, 0, len(windows))
-	for sym, w := range windows {
+	rt.mu.RLock()
+	pairs := make(map[string]*flow.Window, len(rt.windows))
+	for sym, w := range rt.windows {
+		pairs[sym] = w
+	}
+	rt.mu.RUnlock()
+	rows := make([]row, 0, len(pairs))
+	for sym, w := range pairs {
 		s := w.Snapshot()
 		if s.TotalUSD <= 0 {
 			continue

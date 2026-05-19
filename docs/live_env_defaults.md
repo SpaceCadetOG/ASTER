@@ -1,4 +1,4 @@
-# Live-Lite Environment Knobs
+# Live Environment Knobs
 
 ## Live Routing Policy
 
@@ -39,8 +39,8 @@ Notes:
 - `LIVE_ALLOW_SHORTS`: default `true`
 - `LIVE_DRY_RUN`: default `true`
 - `LIVE_ENABLE_LIVE_TRADING`: default `false`
-- For cautious real-money validation, prefer `scripts/run_live_safe_logged.sh`.
-- For normal live trading with anti-churn guards still enforced, prefer `scripts/run_live_balanced_logged.sh`.
+- For cautious validation, prefer `scripts/run_live_logged.sh` with `LIVE_LAUNCH_MODE=paper`.
+- For live operation, prefer `scripts/run_live_logged.sh` with `LIVE_LAUNCH_MODE=live`.
 - `LIVE_ENTRY_OFFSET_BPS`: default `2`
 - `LIVE_GRADE_TOP_N`: default `6`
 - `LIVE_KILL_CLOSE_POSITIONS`: default `false`
@@ -162,7 +162,6 @@ Notes:
 - `LIVE_MAINT2_END_HOUR`: default `18`
 - `LIVE_MAINT2_END_MIN`: default `0`
 - `LIVE_MAINT2_FORCE_FLAT`: default `true`
-- `LIVE_MAINT2_HOOK_TIMEOUT_SEC`: default `900`
 - `LIVE_MAINT2_START_HOUR`: default `16`
 - `LIVE_MAINT2_START_MIN`: default `0`
 - `LIVE_MAINT_ENABLE`: default `true`

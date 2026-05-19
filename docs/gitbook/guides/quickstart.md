@@ -60,13 +60,13 @@ LIVE_DRY_RUN=0 LIVE_ENABLE_LIVE_TRADING=1 go run ./cmd/live
 
 Use isolated margin defaults and keep risk shell enabled.
 
-## 6) Pi operator start
+## 6) Logged host/manual start
 
-On the Pi, the normal operator entrypoint is:
+The current logged operator entrypoint is:
 
 ```bash
-cd /home/traderbot/actions-runner/_work/ASTER/ASTER/scripts
-bash run_live_logged.sh
+cd /Users/victorogbebor/2026/go-machine
+bash scripts/run_live_logged.sh
 ```
 
 That script:
@@ -74,7 +74,7 @@ That script:
 - writes rotating logs to `ASTER_LOG_DIR` if set
 - launches the `cmd/live` runtime
 
-Recommended Pi overrides:
+Recommended host overrides:
 - `ASTER_LOG_DIR=/home/traderbot/aster-logs`
 - `LIVE_STATE_DIR=/opt/aster/state`
 

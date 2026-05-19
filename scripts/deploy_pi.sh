@@ -3,14 +3,6 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 BIN_DIR="${BIN_DIR:-/opt/aster/bin}"
-SERVICES=(
-  aster-modules-tmux
-)
-LEGACY_SERVICES=(
-  aster-tape
-  aster-whale
-  aster-live
-)
 
 cd "${REPO_DIR}"
 
@@ -27,37 +19,26 @@ go build -o "${BIN_DIR}/long" ./cmd/long
 go build -o "${BIN_DIR}/short" ./cmd/short
 chmod +x "${BIN_DIR}/tape" "${BIN_DIR}/whale" "${BIN_DIR}/live" "${BIN_DIR}/liqs" "${BIN_DIR}/oflow" "${BIN_DIR}/long" "${BIN_DIR}/short"
 
-echo "[deploy] installing unit files"
-sudo cp systemd/aster-tape.service /etc/systemd/system/
-sudo cp systemd/aster-whale.service /etc/systemd/system/
-sudo cp systemd/aster-live.service /etc/systemd/system/
-sudo cp systemd/aster-modules-tmux.service /etc/systemd/system/
-sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
-sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/
-sudo mkdir -p /opt/aster/scripts
-sudo cp scripts/tmux_module_runner.sh /opt/aster/scripts/
-sudo cp scripts/start_tmux_modules.sh /opt/aster/scripts/
-sudo cp scripts/reconcile_on_boot.sh /opt/aster/scripts/
-sudo cp scripts/maintenance_midnight.sh /opt/aster/scripts/
-sudo cp scripts/maintenance_eod.sh /opt/aster/scripts/
-sudo cp scripts/auto_update_aster.sh /opt/aster/scripts/
-sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh /opt/aster/scripts/auto_update_aster.sh
-sudo systemctl daemon-reload
+echo "[deploy] syncing env templates"
+sudo mkdir -p /opt/aster/env
+sudo cp systemd/env/live.env.example /opt/aster/env/live.env.example
+sudo cp systemd/env/long.env.example /opt/aster/env/long.env.example
+sudo cp systemd/env/short.env.example /opt/aster/env/short.env.example
+sudo cp systemd/env/tape.env.example /opt/aster/env/tape.env.example
+sudo cp systemd/env/whale.env.example /opt/aster/env/whale.env.example
+sudo cp systemd/env/liqs.env.example /opt/aster/env/liqs.env.example
+sudo cp systemd/env/oflow.env.example /opt/aster/env/oflow.env.example
 
-echo "[deploy] stopping legacy standalone services"
-for svc in "${LEGACY_SERVICES[@]}"; do
-  sudo systemctl disable --now "${svc}" || true
-done
+cat <<EOF
+[deploy] complete
 
-echo "[deploy] restarting services"
-for svc in "${SERVICES[@]}"; do
-  sudo systemctl enable --now "${svc}" || true
-  sudo systemctl restart "${svc}" || true
-done
+The legacy Pi tmux/systemd orchestration layer has been removed from this repo.
+This helper now only builds binaries and refreshes env examples under:
+  ${BIN_DIR}
+  /opt/aster/env
 
-sudo systemctl enable --now aster-autoupdate.timer || true
-
-echo "[deploy] status"
-for svc in "${SERVICES[@]}" "${LEGACY_SERVICES[@]}"; do
-  systemctl --no-pager --full status "${svc}" || true
-done
+Start modules manually with commands such as:
+  go run ./cmd/live
+  go run ./cmd/long
+  go run ./cmd/short
+EOF

@@ -22,6 +22,13 @@ import (
 	"go-machine/internal/types"
 )
 
+func scannerLinkBase(envKey, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return fallback
+}
+
 func calcVWAP(bars []types.Candle) float64 {
 	var pv, v float64
 	for _, b := range bars {
@@ -178,6 +185,7 @@ func main() {
 		if tf == "" {
 			tf = "5m"
 		}
+		longScannerBase := scannerLinkBase("LONG_SCANNER_URL", "http://localhost:8080")
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `
@@ -185,7 +193,7 @@ func main() {
 <head><title>TraderBot SHORT Scanner</title></head>
 <body style="font-family:monospace;background:#111;color:#eee;">
 	<div style="margin-bottom:10px;">
-		<a href="http://34.174.250.99:8080/?symbol=%s&tf=%s" style="color:#7fffd4;">🟢 Long Scanner</a> |
+		<a href="%s/?symbol=%s&tf=%s" style="color:#7fffd4;">🟢 Long Scanner</a> |
 		&nbsp;&nbsp;|&nbsp;&nbsp;
 		<a href="/api/candles?symbol=%s&tf=%s&n=200" style="color:#9cf">candles (json)</a>
 		&nbsp;|&nbsp;
@@ -212,6 +220,7 @@ func main() {
 	<iframe src="/status" width="100%%" height="90%%" frameborder="0" style="border:none;"></iframe>
 </body>
 </html>`,
+			longScannerBase,
 			symbol, tf,
 			symbol, tf,
 			symbol, tf,

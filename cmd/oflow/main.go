@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go-machine/internal/flow"
+	"go-machine/internal/scanneruniverse"
 	"go-machine/internal/ws"
 )
 
@@ -38,13 +39,130 @@ type oflowStatus struct {
 	Events     int64     `json:"events"`
 }
 
+type oflowAssetSnapshot struct {
+	Symbol      string     `json:"symbol"`
+	Subscribed  bool       `json:"subscribed"`
+	Connected   bool       `json:"connected"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	WindowSec   int        `json:"window_sec"`
+	LargeUSD    float64    `json:"large_usd"`
+	Count       int        `json:"count"`
+	TotalUSD    float64    `json:"total_usd"`
+	BuyUSD      float64    `json:"buy_usd"`
+	SellUSD     float64    `json:"sell_usd"`
+	DeltaUSD    float64    `json:"delta_usd"`
+	LargeCount  int        `json:"large_count"`
+	BuyPct      float64    `json:"buy_pct"`
+	SellPct     float64    `json:"sell_pct"`
+	Score       float64    `json:"score"`
+	Signal      string     `json:"signal"`
+	LastUSD     float64    `json:"last_usd,omitempty"`
+	LastSide    string     `json:"last_side,omitempty"`
+	LastTradeAt *time.Time `json:"last_trade_at,omitempty"`
+}
+
+type oflowAssetState struct {
+	LastUSD     float64
+	LastSide    string
+	LastTradeAt time.Time
+}
+
+type oflowRuntime struct {
+	mu      sync.RWMutex
+	windows map[string]*flow.Window
+	assets  map[string]oflowAssetState
+}
+
+func newOflowRuntime() *oflowRuntime {
+	return &oflowRuntime{
+		windows: make(map[string]*flow.Window),
+		assets:  make(map[string]oflowAssetState),
+	}
+}
+
+func (r *oflowRuntime) setWindow(symbol string, w *flow.Window) {
+	r.mu.Lock()
+	r.windows[symbol] = w
+	r.mu.Unlock()
+}
+
+func (r *oflowRuntime) getWindow(symbol string) *flow.Window {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.windows[symbol]
+}
+
+func (r *oflowRuntime) record(symbol string, usd float64, side string, ts time.Time) {
+	r.mu.Lock()
+	r.assets[symbol] = oflowAssetState{
+		LastUSD:     usd,
+		LastSide:    side,
+		LastTradeAt: ts,
+	}
+	r.mu.Unlock()
+}
+
+func (r *oflowRuntime) snapshot(symbol string, st *oflowStatus) oflowAssetSnapshot {
+	stats := flow.Stats{}
+	asset := oflowAssetState{}
+	if w := r.getWindow(symbol); w != nil {
+		stats = w.Snapshot()
+	}
+	r.mu.RLock()
+	asset = r.assets[symbol]
+	r.mu.RUnlock()
+	score := 50.0
+	total := stats.BuyUSD + stats.SellUSD + 1
+	if total > 0 {
+		score = clamp(50+50*clamp(stats.DeltaUSD/total, -1, 1)+5*float64(stats.LargeCount), 0, 100)
+	}
+	signal := "NEUTRAL"
+	if score > 70 {
+		signal = "BULL"
+	} else if score < 30 {
+		signal = "BEAR"
+	}
+	out := oflowAssetSnapshot{
+		Symbol:     symbol,
+		Subscribed: r.getWindow(symbol) != nil,
+		Connected:  st.snapshot().Connected,
+		UpdatedAt:  st.snapshot().UpdatedAt,
+		WindowSec:  st.snapshot().WindowSec,
+		LargeUSD:   st.snapshot().LargeUSD,
+		Count:      stats.Count,
+		TotalUSD:   stats.TotalUSD,
+		BuyUSD:     stats.BuyUSD,
+		SellUSD:    stats.SellUSD,
+		DeltaUSD:   stats.DeltaUSD,
+		LargeCount: stats.LargeCount,
+		BuyPct:     stats.BuyPct,
+		SellPct:    stats.SellPct,
+		Score:      score,
+		Signal:     signal,
+		LastUSD:    asset.LastUSD,
+		LastSide:   asset.LastSide,
+	}
+	if !asset.LastTradeAt.IsZero() {
+		out.LastTradeAt = &asset.LastTradeAt
+	}
+	return out
+}
+
 func (s *oflowStatus) snapshot() oflowStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return *s
 }
 
-func startStatusServer(addr string, st *oflowStatus) {
+func normalizeAssetSymbol(raw string) string {
+	s := strings.ToUpper(strings.TrimSpace(raw))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.TrimSuffix(s, "USDT")
+	s = strings.TrimSuffix(s, "USD")
+	return s
+}
+
+func startStatusServer(addr string, st *oflowStatus, rt *oflowRuntime) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return
@@ -58,6 +176,15 @@ func startStatusServer(addr string, st *oflowStatus) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st.snapshot())
 	})
+	mux.HandleFunc("/api/asset", func(w http.ResponseWriter, r *http.Request) {
+		symbol := normalizeAssetSymbol(r.URL.Query().Get("symbol"))
+		if symbol == "" {
+			http.Error(w, "missing symbol", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rt.snapshot(symbol, st))
+	})
 	go func() {
 		fmt.Println("oflow status server:", addr)
 		if err := http.ListenAndServe(addr, mux); err != nil {
@@ -67,9 +194,11 @@ func startStatusServer(addr string, st *oflowStatus) {
 }
 
 func main() {
-	syms := parseSymbols("OFLOW_SYMBOLS", []string{"btcusdt", "ethusdt", "solusdt"})
+	syms := scanneruniverse.ResolveCSVOrScanner("OFLOW_SYMBOLS", []string{"btcusdt", "ethusdt", "solusdt"}, []string{
+		envStr("OFLOW_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
+	})
 	windowSec := envInt("OFLOW_WINDOW_SEC", 20)
-	largeUSD := envFloat("OFLOW_LARGE_USD", 5000)
+	largeUSD := envFloat("OFLOW_LARGE_USD", 100)
 	printEveryMS := envInt("OFLOW_PRINT_EVERY_MS", 1000)
 	topN := envInt("OFLOW_TOP_N", 5)
 	if topN <= 0 {
@@ -77,7 +206,7 @@ func main() {
 	}
 
 	windowDur := time.Duration(windowSec) * time.Second
-	windows := make(map[string]*flow.Window, len(syms))
+	rt := newOflowRuntime()
 	st := &oflowStatus{
 		StartedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
@@ -86,7 +215,7 @@ func main() {
 		TopN:      topN,
 	}
 	for _, s := range syms {
-		windows[strings.ToUpper(strings.TrimSuffix(s, "usdt"))] = flow.NewWindow(windowDur, largeUSD)
+		rt.setWindow(strings.ToUpper(strings.TrimSuffix(s, "usdt")), flow.NewWindow(windowDur, largeUSD))
 	}
 
 	streams := make([]string, 0, len(syms))
@@ -96,13 +225,13 @@ func main() {
 	wsURL := "wss://fstream.asterdex.com/stream?streams=" + strings.Join(streams, "/")
 	fmt.Printf("oflow started (window=%ds, large>=$%.0f)\n", windowSec, largeUSD)
 	fmt.Println(wsURL)
-	startStatusServer(envStr("OFLOW_HTTP_ADDR", ":8090"), st)
+	startStatusServer(envStr("OFLOW_HTTP_ADDR", ":8090"), st, rt)
 
 	go func() {
 		tk := time.NewTicker(time.Duration(printEveryMS) * time.Millisecond)
 		defer tk.Stop()
 		for range tk.C {
-			printOflow(windows, windowSec, topN)
+			printOflow(rt, windowSec, topN)
 		}
 	}()
 
@@ -155,16 +284,18 @@ func main() {
 				side = "BUY"
 			}
 			symbol := strings.ToUpper(strings.TrimSuffix(strings.TrimSpace(t.S), "USDT"))
-			w, ok := windows[symbol]
-			if !ok {
+			w := rt.getWindow(symbol)
+			if w == nil {
 				w = flow.NewWindow(windowDur, largeUSD)
-				windows[symbol] = w
+				rt.setWindow(symbol, w)
 			}
+			eventTS := time.UnixMilli(t.T)
 			w.Add(flow.Event{
-				Ts:    time.UnixMilli(t.T),
+				Ts:    eventTS,
 				USD:   usd,
 				IsBuy: !t.M,
 			})
+			rt.record(symbol, usd, side, eventTS)
 			st.mu.Lock()
 			st.UpdatedAt = time.Now().UTC()
 			st.Events++
@@ -186,7 +317,7 @@ func envStr(k, def string) string {
 	return s
 }
 
-func printOflow(windows map[string]*flow.Window, windowSec int, topN int) {
+func printOflow(rt *oflowRuntime, windowSec int, topN int) {
 	type row struct {
 		Sym        string
 		Score      float64
@@ -195,8 +326,14 @@ func printOflow(windows map[string]*flow.Window, windowSec int, topN int) {
 		Sell       float64
 		LargeCount int
 	}
-	rows := make([]row, 0, len(windows))
-	for sym, w := range windows {
+	rt.mu.RLock()
+	pairs := make(map[string]*flow.Window, len(rt.windows))
+	for sym, w := range rt.windows {
+		pairs[sym] = w
+	}
+	rt.mu.RUnlock()
+	rows := make([]row, 0, len(pairs))
+	for sym, w := range pairs {
 		s := w.Snapshot()
 		if s.Count == 0 {
 			continue
@@ -231,25 +368,6 @@ func printOflow(windows map[string]*flow.Window, windowSec int, topN int) {
 		fmt.Printf("%s score=%.0f delta=$%+.0f buy=$%.0f sell=$%.0f large=%d window=%ds signal=%s\n",
 			rows[i].Sym, rows[i].Score, rows[i].Delta, rows[i].Buy, rows[i].Sell, rows[i].LargeCount, windowSec, signal)
 	}
-}
-
-func parseSymbols(envName string, def []string) []string {
-	raw := strings.TrimSpace(os.Getenv(envName))
-	if raw == "" {
-		return def
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		s := strings.ToLower(strings.TrimSpace(p))
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		return def
-	}
-	return out
 }
 
 func envFloat(k string, def float64) float64 {

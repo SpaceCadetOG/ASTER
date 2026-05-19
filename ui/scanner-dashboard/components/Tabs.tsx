@@ -7,7 +7,7 @@ const tabs: { key: DashboardTab; label: string }[] = [
   { key: "inplay", label: "In-Play" },
   { key: "long", label: "Long Scanner" },
   { key: "short", label: "Short Scanner" },
-  { key: "live", label: "Live-Lite Portal" },
+  { key: "live", label: "Live Portal" },
   { key: "asset", label: "Asset Detail" }
 ];
 

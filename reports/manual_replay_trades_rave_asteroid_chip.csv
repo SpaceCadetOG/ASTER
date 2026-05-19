@@ -1,4 +1,0 @@
-label,symbol,side,entry_ts,entry_price,notional,candles,duration_min
-CHIP canonical,CHIPUSDT,BUY,2026-04-21 19:36:52,0.05793,23.17,data/CHIPUSDT_1m.csv,1406
-RAVE ref,RAVEUSDT,BUY,2026-04-20 21:19:22,1.203131,23.17,data/RAVEUSDT_1m.csv,1406
-ASTEROID ref,ASTEROIDUSDT,BUY,2026-04-20 23:06:24,0.000464,23.17,data/ASTEROIDUSDT_1m.csv,1406

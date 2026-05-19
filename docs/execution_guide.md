@@ -215,7 +215,7 @@ go run ./cmd/exec
 - `Invalid API-key, IP, or permissions`
   - Only relevant when you intentionally force legacy `ASTER_AUTH_MODE=hmac`.
 
-## 10) Live-Lite Runtime Ops (Dual Maintenance)
+## 10) Live Runtime Ops (Dual Maintenance)
 
 - Margin mode enforced per trade: `LIVE_MARGIN_TYPE=ISOLATED`
 - Maintenance windows (`America/Chicago`):

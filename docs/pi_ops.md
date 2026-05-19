@@ -1,21 +1,35 @@
-# Pi Runtime Ops
+# Legacy Host Ops
 
-## 1) Build Audit (compile only)
+This page documents the current interim host workflow while ASTER is still
+transitioning toward a GCP deployment model. It is no longer the source of
+truth for a permanent Pi-specific orchestration stack.
+
+## Scope
+
+Use this page if you need to:
+- build the current binaries on a local or dedicated Linux host
+- refresh the `/opt/aster` binary/env layout with `scripts/deploy_pi.sh`
+- run the core commands manually during the migration window
+
+The old tmux/autoupdate/systemd orchestration layer was removed from the repo
+in Cleanup Pass 1.
+
+## Compile-only verification
 
 ```bash
 GOCACHE=/tmp/go-build go test ./... -run TestDoesNotExist
 ```
 
-## 2) Manual module checks (Mac or Pi)
+## Manual command checks
 
 ```bash
-go run ./cmd/tape
-go run ./cmd/whale
 go run ./cmd/long
 go run ./cmd/short
+go run ./cmd/tape
+go run ./cmd/whale
 ```
 
-Exec auth + account checks:
+Exchange/account checks:
 
 ```bash
 ASTER_CONFIG=~/.aster.yaml ASTER_AUTH_MODE=agent EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=auth_check go run ./cmd/exec
@@ -24,143 +38,50 @@ ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=o
 ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com EXEC_ACTION=position EXEC_SYMBOL=BTCUSDT go run ./cmd/exec
 ```
 
-Expected auth setup for live agent mode:
-- `ASTER_AUTH_MODE=agent`
-- `ASTER_USER=<main wallet>`
-- `ASTER_SIGNER=<approved API wallet>`
-- `ASTER_PRIVATE_KEY=<signer private key>`
-- `ASTER_CHAIN_ID=1666`
-- `ASTER_BASE_URL=https://fapi.asterdex.com`
-
-Preflight before any live restart:
-
-```bash
-ASTER_CONFIG=/etc/aster/.aster.yaml \
-ASTER_AUTH_MODE=agent \
-EXEC_BASE_URL=https://fapi.asterdex.com \
-EXEC_ACTION=auth_check \
-go run ./cmd/exec
-```
-
-Only proceed to live if `auth_check` succeeds on `/fapi/v3/agent`, `/account`, `/balance`, and `/openOrders`.
-
-Live dry run:
+Live dry-run:
 
 ```bash
 ASTER_CONFIG=~/.aster.yaml EXEC_BASE_URL=https://fapi.asterdex.com LIVE_DRY_RUN=1 LIVE_SHOW_ACCOUNT=1 LIVE_ACCOUNT_ASSETS= go run ./cmd/live
 ```
 
-Expected behavior:
-- IN-PLAY long/short sections print each loop.
-- If nothing is eligible: `live: no trade candidate`.
-- Account snapshot shows `availableUSDT`, balances list, and active positions list.
-- In live mode, `live` now refuses to continue when account auth is unhealthy at boot unless `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH=1` is explicitly set.
-
-## 3) Install systemd units on Pi
-
-```bash
-sudo cp systemd/aster-*.service /etc/systemd/system/
-sudo cp systemd/env/*.env.example /opt/aster/env/ || true
-sudo mkdir -p /opt/aster/scripts
-sudo cp scripts/tmux_module_runner.sh scripts/start_tmux_modules.sh scripts/reconcile_on_boot.sh scripts/maintenance_midnight.sh scripts/maintenance_eod.sh /opt/aster/scripts/
-sudo chmod +x /opt/aster/scripts/tmux_module_runner.sh /opt/aster/scripts/start_tmux_modules.sh /opt/aster/scripts/reconcile_on_boot.sh /opt/aster/scripts/maintenance_midnight.sh /opt/aster/scripts/maintenance_eod.sh
-sudo systemctl daemon-reload
-sudo systemctl disable --now aster-live aster-tape aster-whale || true
-sudo systemctl enable --now aster-modules-tmux
-```
-
-## 3b) tmux sessions (one per module)
-
-```bash
-tmux ls
-tmux attach -t aster-live
-tmux attach -t aster-tape
-tmux attach -t aster-whale
-```
-
-## 4) Deploy binaries + restart
+## Interim host helper
 
 ```bash
 scripts/deploy_pi.sh
 ```
 
-## 5) tmux dashboard
+This helper is intentionally kept for now as a temporary bridge. It refreshes
+host binaries and env examples, but it no longer installs or enables the old
+tmux/autoupdate/systemd orchestration.
+
+## Logged foreground run
 
 ```bash
-scripts/tmux_aster.sh
+cd /Users/victorogbebor/2026/go-machine
+bash scripts/run_live_logged.sh
 ```
 
-Layout:
-- Tab 1 `gitaction`
-- Tab 2 `live`
-- Tab 3 `scanners` split: long | short
-- Tab 4 `flow` cross split: tape | whale | liqs | oflow
+## Recommended host paths
 
-## 6) One-step bot start (recommended)
+- env: `/opt/aster/env/live.env`
+- state: `/opt/aster/state`
+- logs: `/home/traderbot/aster-logs`
+
+Set for stable state persistence:
 
 ```bash
-scripts/start_bot.sh
+LIVE_STATE_DIR=/opt/aster/state
 ```
 
-Options:
-- skip rebuild/redeploy and only restart + attach tmux:
+Set for off-repo runtime logs:
 
 ```bash
-SKIP_DEPLOY=1 scripts/start_bot.sh
-```
-- include extra services (`liqs/oflow/long/short`) in restart script:
-
-```bash
-START_EXTRA_SERVICES=1 scripts/start_bot.sh
+ASTER_LOG_DIR=/home/traderbot/aster-logs
 ```
 
-## 7) One-step bot stop
+## Maintenance and payout timing
 
-```bash
-scripts/stop_bot.sh
-```
-
-## 8) Maintenance + payout timing (CT)
-
-- Night maintenance: `00:00-01:30` (`LIVE_MAINT1_*`, minute-precision with `*_MIN` envs; global low-liquidity window).
-- EOD maintenance: `16:00-18:00` (`LIVE_MAINT2_*`), with force-flat at `16:00`.
-- EOD daily report/receipt dispatch default: `18:00 CT` (`LIVE_TG_DAILY_REPORT_*`).
-- 7-day payout anchor: `16:00` (`LIVE_PAYOUT_ANCHOR_*`).
-- Set `LIVE_STATE_DIR=/opt/aster/state` so restarts always load/save the same state files regardless of cwd.
-- Payout SLA: action/notification completed by `16:15` (`LIVE_PAYOUT_DEADLINE_MIN=15`).
-- Payout files:
-  - state: `out/payout_state.json`
-  - ledger: `out/payouts.csv`
-
-## 9) Auto update on every commit (minimum downtime)
-
-Install/enable once:
-
-```bash
-cd /opt/aster
-sudo cp systemd/aster-autoupdate.service /etc/systemd/system/
-sudo cp systemd/aster-autoupdate.timer /etc/systemd/system/
-sudo cp scripts/auto_update_aster.sh /opt/aster/scripts/
-sudo chmod +x /opt/aster/scripts/auto_update_aster.sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now aster-autoupdate.timer
-```
-
-Check it:
-
-```bash
-systemctl status aster-autoupdate.timer --no-pager
-systemctl list-timers --all | rg aster-autoupdate
-tail -f /opt/aster/out/autoupdate.log
-```
-
-Manual trigger:
-
-```bash
-sudo systemctl start aster-autoupdate.service
-```
-
-How it works:
-- Polls `origin/main` every minute.
-- If no new commit: does nothing.
-- If new commit: fast-forward pull, rebuild binaries, restart `aster-modules-tmux`.
+Operational timing remains env-driven:
+- maintenance windows: `LIVE_MAINT1_*`, `LIVE_MAINT2_*`
+- pre-EOD exit window: `LIVE_PRE_EOD_EXIT_*`
+- payout/report windows: `LIVE_PAYOUT_*`, `LIVE_TG_*`
