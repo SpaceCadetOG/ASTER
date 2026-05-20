@@ -1,0 +1,20 @@
+[Unit]
+Description=ASTER long scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ogbebortrading
+WorkingDirectory=/opt/aster/repo
+EnvironmentFile=/opt/aster/env/long.env
+Environment=ASTER_LOG_DIR=/opt/aster/logs
+ExecStart=/opt/aster/bin/long
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=aster-long
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=ASTER liquidation monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ogbebortrading
+WorkingDirectory=/opt/aster/repo
+EnvironmentFile=/opt/aster/env/liqs.env
+Environment=ASTER_LOG_DIR=/opt/aster/logs
+ExecStart=/opt/aster/bin/liqs
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=aster-liqs
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
