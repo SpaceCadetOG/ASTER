@@ -393,6 +393,97 @@ pre {
   overflow-x: auto;
 }
 
+.hotlist-ticker {
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(17, 17, 19, 0.98), rgba(14, 14, 16, 0.98));
+  position: relative;
+}
+
+.hotlist-ticker::before,
+.hotlist-ticker::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 56px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.hotlist-ticker::before {
+  left: 0;
+  background: linear-gradient(90deg, rgba(17, 17, 19, 0.98), rgba(17, 17, 19, 0));
+}
+
+.hotlist-ticker::after {
+  right: 0;
+  background: linear-gradient(270deg, rgba(17, 17, 19, 0.98), rgba(17, 17, 19, 0));
+}
+
+.hotlist-track {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  width: max-content;
+  padding: 14px 0;
+  will-change: transform;
+  animation: hotlist-scroll 34s linear infinite;
+}
+
+.hotlist-card {
+  min-width: 300px;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(25, 25, 28, 0.98), rgba(18, 18, 20, 0.98));
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.hotlist-card:hover {
+  border-color: rgba(89, 227, 154, 0.24);
+  transform: translateY(-1px);
+}
+
+.hotlist-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.hotlist-topline strong {
+  font-size: 1rem;
+}
+
+.hotlist-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.hotlist-card small {
+  color: var(--muted);
+}
+
+@keyframes hotlist-scroll {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(calc(-50% - 7px));
+  }
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -598,6 +689,15 @@ pre {
   font-size: 0.82rem;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .hotlist-track {
+    animation: none;
+    width: 100%;
+    overflow-x: auto;
+    padding: 14px;
+  }
+}
+
 @media (max-width: 1180px) {
   .hero-grid,
   .runtime-grid {
@@ -616,6 +716,11 @@ pre {
 
   .context-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hotlist-card {
+    min-width: 260px;
+    max-width: 260px;
   }
 }
 
