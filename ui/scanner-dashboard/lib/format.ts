@@ -1,16 +1,16 @@
 export function formatNumber(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "-";
+    return "N/A";
   }
   return value.toLocaleString("en-US", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
   });
 }
 
 export function formatCompactUsd(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "-";
+    return "N/A";
   }
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -20,33 +20,47 @@ export function formatCompactUsd(value: number | null | undefined): string {
   }).format(value);
 }
 
+export function formatUsd(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  }).format(value);
+}
+
 export function formatPercent(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
-    return "-";
+    return "N/A";
   }
   return `${value >= 0 ? "+" : ""}${formatNumber(value, digits)}%`;
 }
 
 export function formatTime(value: string | undefined): string {
   if (!value) {
-    return "-";
+    return "N/A";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  const month = date.toLocaleString("en-US", {
+  return date.toLocaleString("en-US", {
     month: "short",
-    timeZone: "UTC"
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short"
   });
-  const day = date.getUTCDate();
-  let hours = date.getUTCHours();
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-  const meridiem = hours >= 12 ? "PM" : "AM";
-  hours = hours % 12;
-  if (hours === 0) {
-    hours = 12;
-  }
-  return `${month} ${day}, ${hours}:${minutes}:${seconds} ${meridiem} UTC`;
+}
+
+export function formatKeyLabel(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
 }

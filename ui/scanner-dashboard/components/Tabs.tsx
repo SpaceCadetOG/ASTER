@@ -2,13 +2,14 @@
 
 import type { DashboardTab } from "@/lib/types";
 
-const tabs: { key: DashboardTab; label: string }[] = [
+const tabs: Array<{ key: DashboardTab; label: string }> = [
   { key: "overview", label: "Overview" },
-  { key: "inplay", label: "In-Play" },
-  { key: "long", label: "Long Scanner" },
-  { key: "short", label: "Short Scanner" },
-  { key: "live", label: "Live Portal" },
-  { key: "asset", label: "Asset Detail" }
+  { key: "scanners", label: "Scanners" },
+  { key: "hotlist", label: "Live Hotlist / In-Play" },
+  { key: "runtime", label: "Runtime" },
+  { key: "paper", label: "Paper" },
+  { key: "asset", label: "Asset Detail" },
+  { key: "health", label: "Health" }
 ];
 
 export function Tabs({
@@ -20,13 +21,13 @@ export function Tabs({
 }) {
   return (
     <div className="tabs">
-      {tabs.map((t) => (
+      {tabs.map((tab) => (
         <button
-          key={t.key}
-          className={`tab ${active === t.key ? "active" : ""}`}
-          onClick={() => onChange(t.key)}
+          key={tab.key}
+          className={`tab ${active === tab.key ? "active" : ""}`}
+          onClick={() => onChange(tab.key)}
         >
-          {t.label}
+          {tab.label}
         </button>
       ))}
     </div>

@@ -1,25 +1,26 @@
-import type { ModuleCardData } from "@/lib/types";
+import type { ModuleSummary } from "@/lib/types";
 
-export function ModuleStrip({ modules }: { modules: ModuleCardData[] }) {
+export function ModuleStrip({ modules }: { modules: ModuleSummary[] }) {
   return (
     <div className="module-grid">
-      {modules.map((m) => (
-        <div key={m.key} className="module-card">
+      {modules.map((module) => (
+        <div key={module.id} className="module-card">
           <div className="module-top">
-            <strong>{m.label}</strong>
-            <span
-              className={`status-dot ${
-                m.status === "ok"
-                  ? "status-ok"
-                  : m.status === "warn"
-                    ? "status-warn"
-                    : "status-down"
-              }`}
-            />
+            <div>
+              <strong>{module.label}</strong>
+              <div className="subtle" style={{ marginTop: 4 }}>
+                {module.capability === "asset-detail"
+                  ? "Asset-scoped"
+                  : "Status-only: asset-scoped endpoint not available."}
+              </div>
+            </div>
+            <span className={`badge ${module.connected ? "tone-positive" : "tone-negative"}`}>
+              {module.connected ? "Connected" : "Disconnected"}
+            </span>
           </div>
-          <div className="subtle module-source">{m.source}</div>
+          <div className="subtle module-source">{module.url}</div>
           <div className="subtle module-note" style={{ marginTop: 6 }}>
-            {m.note}
+            {module.note}
           </div>
         </div>
       ))}
