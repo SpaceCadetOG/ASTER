@@ -11,6 +11,35 @@ steps:
         "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:latest",
         "ui/scanner-dashboard",
       ]
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "push",
+        "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:$SHORT_SHA",
+      ]
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "push",
+        "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:latest",
+      ]
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    entrypoint: "gcloud"
+    args:
+      [
+        "run",
+        "deploy",
+        "scanner-dashboard",
+        "--project=$PROJECT_ID",
+        "--region=us-south1",
+        "--platform=managed",
+        "--image=us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:$SHORT_SHA",
+        "--allow-unauthenticated",
+        "--port=8080",
+        "--vpc-connector=scanner-dashboard-conn",
+        "--vpc-egress=private-ranges-only",
+        "--set-env-vars=SCANNER_LONG_URL=http://10.10.10.2:8080,SCANNER_SHORT_URL=http://10.10.10.2:8081,SCANNER_LIVE_URL=http://10.20.10.2:8787,SCANNER_OFLOW_URL=http://10.10.10.2:8090,SCANNER_TAPE_URL=http://10.10.10.2:8091,SCANNER_WHALE_URL=http://10.10.10.2:8092,SCANNER_LIQS_URL=http://10.10.10.2:8093",
+      ]
 
 images:
   - "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:$SHORT_SHA"
