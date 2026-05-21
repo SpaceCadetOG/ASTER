@@ -40,31 +40,44 @@ type oflowStatus struct {
 }
 
 type oflowAssetSnapshot struct {
-	Symbol      string     `json:"symbol"`
-	Subscribed  bool       `json:"subscribed"`
-	Connected   bool       `json:"connected"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	WindowSec   int        `json:"window_sec"`
-	LargeUSD    float64    `json:"large_usd"`
-	Count       int        `json:"count"`
-	TotalUSD    float64    `json:"total_usd"`
-	BuyUSD      float64    `json:"buy_usd"`
-	SellUSD     float64    `json:"sell_usd"`
-	DeltaUSD    float64    `json:"delta_usd"`
-	LargeCount  int        `json:"large_count"`
-	BuyPct      float64    `json:"buy_pct"`
-	SellPct     float64    `json:"sell_pct"`
-	Score       float64    `json:"score"`
-	Signal      string     `json:"signal"`
-	LastUSD     float64    `json:"last_usd,omitempty"`
-	LastSide    string     `json:"last_side,omitempty"`
-	LastTradeAt *time.Time `json:"last_trade_at,omitempty"`
+	Symbol      string       `json:"symbol"`
+	Subscribed  bool         `json:"subscribed"`
+	Connected   bool         `json:"connected"`
+	UpdatedAt   time.Time    `json:"updated_at"`
+	WindowSec   int          `json:"window_sec"`
+	LargeUSD    float64      `json:"large_usd"`
+	Count       int          `json:"count"`
+	TotalUSD    float64      `json:"total_usd"`
+	BuyUSD      float64      `json:"buy_usd"`
+	SellUSD     float64      `json:"sell_usd"`
+	DeltaUSD    float64      `json:"delta_usd"`
+	LargeCount  int          `json:"large_count"`
+	BuyPct      float64      `json:"buy_pct"`
+	SellPct     float64      `json:"sell_pct"`
+	Score       float64      `json:"score"`
+	Signal      string       `json:"signal"`
+	LastUSD     float64      `json:"last_usd,omitempty"`
+	LastSide    string       `json:"last_side,omitempty"`
+	LastTradeAt *time.Time   `json:"last_trade_at,omitempty"`
+	Recent      []oflowPrint `json:"recent,omitempty"`
+}
+
+type oflowPrint struct {
+	Ts         time.Time `json:"ts"`
+	Side       string    `json:"side"`
+	USD        float64   `json:"usd"`
+	Score      float64   `json:"score"`
+	Signal     string    `json:"signal"`
+	DeltaUSD   float64   `json:"delta_usd"`
+	WindowSec  int       `json:"window_sec"`
+	LargeCount int       `json:"large_count"`
 }
 
 type oflowAssetState struct {
 	LastUSD     float64
 	LastSide    string
 	LastTradeAt time.Time
+	Recent      []oflowPrint
 }
 
 type oflowRuntime struct {
@@ -92,13 +105,17 @@ func (r *oflowRuntime) getWindow(symbol string) *flow.Window {
 	return r.windows[symbol]
 }
 
-func (r *oflowRuntime) record(symbol string, usd float64, side string, ts time.Time) {
+func (r *oflowRuntime) record(symbol string, usd float64, side string, ts time.Time, recent oflowPrint) {
 	r.mu.Lock()
-	r.assets[symbol] = oflowAssetState{
-		LastUSD:     usd,
-		LastSide:    side,
-		LastTradeAt: ts,
+	asset := r.assets[symbol]
+	asset.LastUSD = usd
+	asset.LastSide = side
+	asset.LastTradeAt = ts
+	asset.Recent = append(asset.Recent, recent)
+	if len(asset.Recent) > 20 {
+		asset.Recent = append([]oflowPrint(nil), asset.Recent[len(asset.Recent)-20:]...)
 	}
+	r.assets[symbol] = asset
 	r.mu.Unlock()
 }
 
@@ -141,6 +158,7 @@ func (r *oflowRuntime) snapshot(symbol string, st *oflowStatus) oflowAssetSnapsh
 		Signal:     signal,
 		LastUSD:    asset.LastUSD,
 		LastSide:   asset.LastSide,
+		Recent:     append([]oflowPrint(nil), asset.Recent...),
 	}
 	if !asset.LastTradeAt.IsZero() {
 		out.LastTradeAt = &asset.LastTradeAt
@@ -198,7 +216,7 @@ func main() {
 		envStr("OFLOW_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
 	windowSec := envInt("OFLOW_WINDOW_SEC", 20)
-	largeUSD := envFloat("OFLOW_LARGE_USD", 100)
+	largeUSD := envFloat("OFLOW_LARGE_USD", 50)
 	printEveryMS := envInt("OFLOW_PRINT_EVERY_MS", 1000)
 	topN := envInt("OFLOW_TOP_N", 5)
 	if topN <= 0 {
@@ -295,7 +313,25 @@ func main() {
 				USD:   usd,
 				IsBuy: !t.M,
 			})
-			rt.record(symbol, usd, side, eventTS)
+			s := w.Snapshot()
+			total := s.BuyUSD + s.SellUSD + 1
+			score := clamp(50+50*clamp(s.DeltaUSD/total, -1, 1)+5*float64(s.LargeCount), 0, 100)
+			signal := "NEUTRAL"
+			if score > 70 {
+				signal = "BULL"
+			} else if score < 30 {
+				signal = "BEAR"
+			}
+			rt.record(symbol, usd, side, eventTS, oflowPrint{
+				Ts:         eventTS,
+				Side:       side,
+				USD:        usd,
+				Score:      score,
+				Signal:     signal,
+				DeltaUSD:   s.DeltaUSD,
+				WindowSec:  windowSec,
+				LargeCount: s.LargeCount,
+			})
 			st.mu.Lock()
 			st.UpdatedAt = time.Now().UTC()
 			st.Events++

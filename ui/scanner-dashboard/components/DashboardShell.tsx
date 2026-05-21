@@ -108,15 +108,20 @@ export function DashboardShell() {
   useEffect(() => {
     if (!selectedSymbol) return;
     let cancelled = false;
-    getAssetDetail(selectedSymbol)
-      .then((payload) => {
-        if (!cancelled) {
-          setDetail(payload);
-        }
-      })
-      .catch(() => undefined);
+    const run = () => {
+      getAssetDetail(selectedSymbol)
+        .then((payload) => {
+          if (!cancelled) {
+            setDetail(payload);
+          }
+        })
+        .catch(() => undefined);
+    };
+    run();
+    const timer = setInterval(run, 4000);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, [selectedSymbol]);
 

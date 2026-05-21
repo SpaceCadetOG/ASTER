@@ -57,6 +57,21 @@ export function formatTime(value: string | undefined): string {
   });
 }
 
+export function formatClockTime(value: string | undefined): string {
+  if (!value) {
+    return "N/A";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
 export function formatKeyLabel(value: string): string {
   return value
     .replace(/[_-]+/g, " ")

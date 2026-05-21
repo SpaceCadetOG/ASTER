@@ -1,11 +1,27 @@
 import {
+  formatClockTime,
   formatCompactUsd,
   formatKeyLabel,
   formatNumber,
   formatPercent,
-  formatTime
+  formatTime,
+  formatUsd
 } from "@/lib/format";
 import type { AssetDetail, ModuleSummary } from "@/lib/types";
+
+type CandlePoint = {
+  t: string;
+  C: number;
+};
+
+type FeedEntry = {
+  id: string;
+  time: string;
+  side?: string;
+  accent?: "positive" | "negative" | "amber" | "muted";
+  primary: string;
+  secondary?: string;
+};
 
 function gradeTone(value?: string) {
   const key = (value || "N/A").toUpperCase();
@@ -77,6 +93,117 @@ function extractModuleFields(module: ModuleSummary) {
     .map((key) => ({ key, value: String(status[key]) }));
 }
 
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function toString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function toTone(side: string) {
+  if (/BUY/i.test(side)) return "positive" as const;
+  if (/SELL/i.test(side)) return "negative" as const;
+  return "muted" as const;
+}
+
+function toneClass(tone?: FeedEntry["accent"]) {
+  if (tone === "positive") return "tone-positive";
+  if (tone === "negative") return "tone-negative";
+  if (tone === "amber") return "tone-amber";
+  return "tone-muted";
+}
+
+function moduleFeedEntries(module: ModuleSummary): FeedEntry[] {
+  const recent = Array.isArray(module.status?.recent) ? module.status?.recent : [];
+  return recent
+    .map((item, index) => {
+      const row = item as Record<string, unknown>;
+      const side = toString(row.side);
+      const usd = toNumber(row.usd);
+      const ts = toString(row.ts);
+
+      if (module.id === "tape") {
+        return {
+          id: `${module.id}-${index}-${ts}`,
+          time: formatClockTime(ts),
+          side,
+          accent: toTone(side),
+          primary: `${side || "TRADE"} ${formatUsd(usd, 0)}`,
+          secondary: `price ${formatNumber(toNumber(row.price), 4)} · qty ${formatNumber(toNumber(row.qty), 4)}`
+        };
+      }
+
+      if (module.id === "whale") {
+        const burst = row.burst ? "burst YES" : "burst NO";
+        const dominant = toString(row.dominant_side) || "NEUTRAL";
+        return {
+          id: `${module.id}-${index}-${ts}`,
+          time: formatClockTime(ts),
+          side,
+          accent: usd !== null && usd >= 50_000 ? "amber" : toTone(side),
+          primary: `${side || "FLOW"} ${formatUsd(usd, 0)} ${toString(row.tier)}`.trim(),
+          secondary: `window ${formatNumber(toNumber(row.window_count), 0)} · buy% ${formatNumber(toNumber(row.buy_pct), 0)} · ${burst} · dominant ${dominant}`
+        };
+      }
+
+      if (module.id === "oflow") {
+        const signal = toString(row.signal) || "NEUTRAL";
+        const score = formatNumber(toNumber(row.score), 0);
+        return {
+          id: `${module.id}-${index}-${ts}`,
+          time: formatClockTime(ts),
+          side,
+          accent: signal === "BULL" ? "positive" : signal === "BEAR" ? "negative" : "muted",
+          primary: `${side || "FLOW"} ${formatUsd(usd, 0)} · ${signal} ${score}`,
+          secondary: `delta ${formatUsd(toNumber(row.delta_usd), 0)} · large ${formatNumber(
+            toNumber(row.large_count),
+            0
+          )} · window ${formatNumber(toNumber(row.window_sec), 0)}s`
+        };
+      }
+
+      if (module.id === "liqs") {
+        return {
+          id: `${module.id}-${index}-${ts}`,
+          time: formatClockTime(ts),
+          side,
+          accent: toTone(side),
+          primary: `LIQ ${side || "FLOW"} ${formatUsd(usd, 0)}`,
+          secondary: `price ${formatNumber(toNumber(row.price), 4)} · qty ${formatNumber(toNumber(row.qty), 4)}`
+        };
+      }
+
+      return null;
+    })
+    .filter(Boolean)
+    .reverse() as FeedEntry[];
+}
+
+function buildChartPath(points: CandlePoint[]) {
+  if (!points.length) {
+    return { path: "", latest: null as number | null, change: null as number | null };
+  }
+  const closes = points.map((point) => point.C);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = Math.max(max - min, 0.000001);
+  const coords = points.map((point, index) => {
+    const x = (index / Math.max(points.length - 1, 1)) * 100;
+    const y = 100 - ((point.C - min) / span) * 100;
+    return `${x},${y}`;
+  });
+  const latest = closes[closes.length - 1];
+  const first = closes[0];
+  const change = first ? ((latest - first) / first) * 100 : 0;
+  return { path: coords.join(" "), latest, change };
+}
+
 function JsonAccordion({
   title,
   payload
@@ -89,6 +216,34 @@ function JsonAccordion({
       <summary>{title}</summary>
       <pre>{JSON.stringify(payload || { unavailable: true }, null, 2)}</pre>
     </details>
+  );
+}
+
+function CurrentStatusChart({ candles }: { candles: CandlePoint[] }) {
+  const { path, latest, change } = buildChartPath(candles);
+  return (
+    <div className="status-chart-card">
+      <div className="status-chart-head">
+        <div>
+          <div className="tile-label">Price Path</div>
+          <strong>{formatNumber(latest, latest && latest > 100 ? 2 : 4)}</strong>
+        </div>
+        <span className={numericTone(change)}>{formatPercent(change, 2)}</span>
+      </div>
+      {path ? (
+        <svg viewBox="0 0 100 100" className="status-chart" preserveAspectRatio="none">
+          <polyline
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.6"
+            points={path}
+            className={numericTone(change)}
+          />
+        </svg>
+      ) : (
+        <div className="empty-state">Price path unavailable.</div>
+      )}
+    </div>
   );
 }
 
@@ -106,6 +261,9 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
   const longSummary = setupSummary(detail.analytics.longConfluence);
   const shortSummary = setupSummary(detail.analytics.shortConfluence);
   const sessionTags = detail.primaryScanner?.active || [];
+  const candles: CandlePoint[] = (detail.analytics.candles?.data || [])
+    .filter((point) => typeof point?.C === "number" && typeof point?.t === "string")
+    .map((point) => ({ t: point.t, C: point.C }));
 
   return (
     <section className="asset-detail-stack">
@@ -138,42 +296,53 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
 
       <div className="detail-grid">
         <article className="panel">
-          <h3>Scanner Context</h3>
-          <div className="context-grid">
-            <div className="context-item">
-              <span>Last Price</span>
-              <strong>{formatNumber(row?.lastPrice, row && row.lastPrice > 100 ? 2 : 4)}</strong>
+          <div className="section-head">
+            <div>
+              <div className="tile-label">Scanner Context</div>
+              <h3>Current Status</h3>
             </div>
-            <div className="context-item">
-              <span>24h Volume</span>
-              <strong>{formatCompactUsd(row?.volumeUsd)}</strong>
-            </div>
-            <div className="context-item">
-              <span>Open Interest</span>
-              <strong>{formatCompactUsd(row?.openInterestUsd)}</strong>
-            </div>
-            <div className="context-item">
-              <span>Funding</span>
-              <strong className={numericTone(row?.fundingRatePct)}>
-                {formatPercent(row?.fundingRatePct, 4)}
-              </strong>
-            </div>
+            <span className="subtle">{formatTime(detail.generatedAt)}</span>
           </div>
-          <div className="session-pills">
-            {sessionTags.length ? (
-              sessionTags.map((session) => (
-                <span
-                  key={session}
-                  className={`pill ${
-                    /OVERLAP|NEW_YORK|LONDON/i.test(session) ? "pill-active" : ""
-                  }`}
-                >
-                  {formatKeyLabel(session)}
-                </span>
-              ))
-            ) : (
-              <span className="pill">No active session</span>
-            )}
+          <div className="status-context-layout">
+            <CurrentStatusChart candles={candles} />
+            <div>
+              <div className="context-grid">
+                <div className="context-item">
+                  <span>Last Price</span>
+                  <strong>{formatNumber(row?.lastPrice, row && row.lastPrice > 100 ? 2 : 4)}</strong>
+                </div>
+                <div className="context-item">
+                  <span>24h Volume</span>
+                  <strong>{formatCompactUsd(row?.volumeUsd)}</strong>
+                </div>
+                <div className="context-item">
+                  <span>Open Interest</span>
+                  <strong>{formatCompactUsd(row?.openInterestUsd)}</strong>
+                </div>
+                <div className="context-item">
+                  <span>Funding</span>
+                  <strong className={numericTone(row?.fundingRatePct)}>
+                    {formatPercent(row?.fundingRatePct, 4)}
+                  </strong>
+                </div>
+              </div>
+              <div className="session-pills">
+                {sessionTags.length ? (
+                  sessionTags.map((session) => (
+                    <span
+                      key={session}
+                      className={`pill ${
+                        /OVERLAP|NEW_YORK|LONDON/i.test(session) ? "pill-active" : ""
+                      }`}
+                    >
+                      {formatKeyLabel(session)}
+                    </span>
+                  ))
+                ) : (
+                  <span className="pill">No active session</span>
+                )}
+              </div>
+            </div>
           </div>
         </article>
 
@@ -249,13 +418,11 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
                   <strong>{module.label}</strong>
                   <div className="subtle">
                     {module.capability === "asset-detail"
-                      ? "Asset-scoped"
+                      ? `Asset-scoped for ${detail.symbol}`
                       : "Status-only: asset-scoped endpoint not available."}
                   </div>
                 </div>
-                <span
-                  className={`badge ${module.connected ? "tone-positive" : "tone-negative"}`}
-                >
+                <span className={`badge ${module.connected ? "tone-positive" : "tone-negative"}`}>
                   {module.connected ? "Connected" : "Disconnected"}
                 </span>
               </div>
@@ -277,6 +444,43 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
               <div className="panel-copy">{module.note}</div>
             </div>
           ))}
+        </div>
+      </article>
+
+      <article className="panel">
+        <h3>Live Module Prints</h3>
+        <div className="module-grid">
+          {detail.modules.map((module) => {
+            const entries = moduleFeedEntries(module);
+            return (
+              <div key={`${module.id}-feed`} className="module-card">
+                <div className="module-heading">
+                  <div>
+                    <strong>{module.label} Feed</strong>
+                    <div className="subtle">Streaming the clicked asset: {detail.symbol}</div>
+                  </div>
+                  <span className={`badge ${module.connected ? "tone-positive" : "tone-muted"}`}>
+                    {module.connected ? "Live Poll" : "Unavailable"}
+                  </span>
+                </div>
+                {entries.length ? (
+                  <div className="feed-list">
+                    {entries.map((entry) => (
+                      <div key={entry.id} className="feed-row">
+                        <span className="feed-time">{entry.time}</span>
+                        <strong className={toneClass(entry.accent)}>{entry.primary}</strong>
+                        {entry.secondary ? <span className="feed-meta">{entry.secondary}</span> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    No recent {module.label.toLowerCase()} prints yet for {detail.symbol}.
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </article>
 

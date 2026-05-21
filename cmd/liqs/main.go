@@ -202,7 +202,7 @@ func startStatusServer(addr string, st *liqsStatus, rt *liqsRuntime) {
 
 func main() {
 	syms := parseSymbols("LIQ_SYMBOLS", nil)
-	minUSD := envFloat("LIQ_MIN_USD", 0)
+	minUSD := envFloat("LIQ_MIN_USD", 500)
 	windowSec := envInt("LIQ_WINDOW_SEC", 60)
 	printRaw := envBool("LIQ_PRINT_RAW", false)
 	tier1 := envFloat("LIQ_TIER1_USD", 20000)

@@ -213,7 +213,7 @@ func main() {
 		envStr("TAPE_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
 
-	minUSD := 50.0
+	minUSD := 500.0
 	if v := strings.TrimSpace(os.Getenv("TAPE_MIN_USD")); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
 			minUSD = f

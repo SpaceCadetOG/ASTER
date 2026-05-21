@@ -43,28 +43,41 @@ type whaleAssetState struct {
 	LastUSD     float64
 	LastSide    string
 	LastTradeAt time.Time
+	Recent      []whalePrint
+}
+
+type whalePrint struct {
+	Ts           time.Time `json:"ts"`
+	Side         string    `json:"side"`
+	USD          float64   `json:"usd"`
+	Tier         string    `json:"tier"`
+	WindowCount  int       `json:"window_count"`
+	BuyPct       float64   `json:"buy_pct"`
+	Burst        bool      `json:"burst"`
+	DominantSide string    `json:"dominant_side"`
 }
 
 type whaleAssetSnapshot struct {
-	Symbol       string     `json:"symbol"`
-	Subscribed   bool       `json:"subscribed"`
-	Connected    bool       `json:"connected"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	MinUSD       float64    `json:"min_usd"`
-	WindowSec    int        `json:"window_sec"`
-	Count        int        `json:"count"`
-	TotalUSD     float64    `json:"total_usd"`
-	BuyUSD       float64    `json:"buy_usd"`
-	SellUSD      float64    `json:"sell_usd"`
-	DeltaUSD     float64    `json:"delta_usd"`
-	LargeCount   int        `json:"large_count"`
-	BuyPct       float64    `json:"buy_pct"`
-	SellPct      float64    `json:"sell_pct"`
-	Burst        bool       `json:"burst"`
-	DominantSide string     `json:"dominant_side"`
-	LastUSD      float64    `json:"last_usd,omitempty"`
-	LastSide     string     `json:"last_side,omitempty"`
-	LastTradeAt  *time.Time `json:"last_trade_at,omitempty"`
+	Symbol       string       `json:"symbol"`
+	Subscribed   bool         `json:"subscribed"`
+	Connected    bool         `json:"connected"`
+	UpdatedAt    time.Time    `json:"updated_at"`
+	MinUSD       float64      `json:"min_usd"`
+	WindowSec    int          `json:"window_sec"`
+	Count        int          `json:"count"`
+	TotalUSD     float64      `json:"total_usd"`
+	BuyUSD       float64      `json:"buy_usd"`
+	SellUSD      float64      `json:"sell_usd"`
+	DeltaUSD     float64      `json:"delta_usd"`
+	LargeCount   int          `json:"large_count"`
+	BuyPct       float64      `json:"buy_pct"`
+	SellPct      float64      `json:"sell_pct"`
+	Burst        bool         `json:"burst"`
+	DominantSide string       `json:"dominant_side"`
+	LastUSD      float64      `json:"last_usd,omitempty"`
+	LastSide     string       `json:"last_side,omitempty"`
+	LastTradeAt  *time.Time   `json:"last_trade_at,omitempty"`
+	Recent       []whalePrint `json:"recent,omitempty"`
 }
 
 type whaleRuntime struct {
@@ -98,13 +111,17 @@ func (r *whaleRuntime) getWindow(symbol string) *flow.Window {
 	return r.windows[symbol]
 }
 
-func (r *whaleRuntime) record(symbol string, usd float64, side string, ts time.Time) {
+func (r *whaleRuntime) record(symbol string, usd float64, side string, ts time.Time, recent whalePrint) {
 	r.mu.Lock()
-	r.assets[symbol] = whaleAssetState{
-		LastUSD:     usd,
-		LastSide:    side,
-		LastTradeAt: ts,
+	asset := r.assets[symbol]
+	asset.LastUSD = usd
+	asset.LastSide = side
+	asset.LastTradeAt = ts
+	asset.Recent = append(asset.Recent, recent)
+	if len(asset.Recent) > 20 {
+		asset.Recent = append([]whalePrint(nil), asset.Recent[len(asset.Recent)-20:]...)
 	}
+	r.assets[symbol] = asset
 	r.mu.Unlock()
 }
 
@@ -143,6 +160,7 @@ func (r *whaleRuntime) snapshot(symbol string, st *whaleStatus, burstCount int, 
 		DominantSide: dominant,
 		LastUSD:      asset.LastUSD,
 		LastSide:     asset.LastSide,
+		Recent:       append([]whalePrint(nil), asset.Recent...),
 	}
 	if !asset.LastTradeAt.IsZero() {
 		out.LastTradeAt = &asset.LastTradeAt
@@ -193,8 +211,8 @@ func main() {
 	syms := scanneruniverse.ResolveCSVOrScanner("WHALE_SYMBOLS", defaultTapeSymbols(), []string{
 		envStr("WHALE_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
-	minUSD := envFloat("WHALE_MIN_USD", 100)
-	tier1 := envFloat("WHALE_TIER1_USD", 100)
+	minUSD := envFloat("WHALE_MIN_USD", 500)
+	tier1 := envFloat("WHALE_TIER1_USD", 500)
 	tier2 := envFloat("WHALE_TIER2_USD", 500)
 	tier3 := envFloat("WHALE_TIER3_USD", 1000)
 	tier4 := envFloat("WHALE_TIER4_USD", 5000)
@@ -291,7 +309,6 @@ func main() {
 				USD:   usd,
 				IsBuy: isBuy,
 			})
-			rt.record(symbol, usd, plainSide, eventTS)
 			st.mu.Lock()
 			st.UpdatedAt = time.Now().UTC()
 			st.Events++
@@ -341,6 +358,22 @@ func main() {
 			} else if s.SellPct >= imbalancePct {
 				dominant = " dominant:SELL"
 			}
+			dominantSide := "NEUTRAL"
+			if s.BuyPct >= imbalancePct {
+				dominantSide = "BUY"
+			} else if s.SellPct >= imbalancePct {
+				dominantSide = "SELL"
+			}
+			rt.record(symbol, usd, plainSide, eventTS, whalePrint{
+				Ts:           eventTS,
+				Side:         plainSide,
+				USD:          usd,
+				Tier:         tier,
+				WindowCount:  s.Count,
+				BuyPct:       buyPct,
+				Burst:        s.Count >= burstCount,
+				DominantSide: dominantSide,
+			})
 
 			sec := eventTS.Format("15:04:05")
 			usdText := colorByWhaleTier(usd, tier1, tier2, tier3, tier4, compactUSD(usd))
