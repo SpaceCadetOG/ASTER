@@ -1,0 +1,20 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      [
+        "build",
+        "-f",
+        "ui/scanner-dashboard/Dockerfile",
+        "-t",
+        "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:$SHORT_SHA",
+        "-t",
+        "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:latest",
+        "ui/scanner-dashboard",
+      ]
+
+images:
+  - "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:$SHORT_SHA"
+  - "us-south1-docker.pkg.dev/$PROJECT_ID/aster-apps/scanner-dashboard:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

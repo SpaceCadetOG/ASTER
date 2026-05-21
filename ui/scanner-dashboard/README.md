@@ -38,6 +38,18 @@ npm run dev
 
 Open: `http://localhost:3000`
 
+## Cloud Run Notes
+
+The dashboard is currently intended for a read-only Cloud Run deploy.
+
+Safest first deploy:
+
+- set `SCANNER_USE_MOCK=true`
+- do not inject exchange credentials
+- do not expose execution controls
+
+Cloud Run private backend access to the Go APIs is a later deployment step.
+
 ## Module Status Ports
 - `cmd/oflow` -> `OFLOW_HTTP_ADDR` (default `:8090`)
 - `cmd/tape` -> `TAPE_HTTP_ADDR` (default `:8091`)
