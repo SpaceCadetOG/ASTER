@@ -315,6 +315,15 @@ function normalizeModuleSymbol(raw: string): string {
   return raw.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/USDT$/, "").replace(/USD$/, "");
 }
 
+function redactEndpointDisplay(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname + parsed.search;
+  } catch {
+    return url.replace(/^https?:\/\/[^/]+/i, "") || "private backend";
+  }
+}
+
 function normalizeModule(
   id: ModuleSummary["id"],
   baseUrl: string,
@@ -331,9 +340,11 @@ function normalizeModule(
   return {
     id,
     label: id === "oflow" ? "OFlow" : id.charAt(0).toUpperCase() + id.slice(1),
-    url: assetScoped
+    url: redactEndpointDisplay(
+      assetScoped
       ? `${baseUrl}/api/asset?symbol=${encodeURIComponent(symbol)}`
-      : `${baseUrl}/api/status`,
+      : `${baseUrl}/api/status`
+    ),
     connected: Boolean(status),
     capability: assetScoped ? "asset-detail" : "module-status-only",
     status,
@@ -395,7 +406,17 @@ function buildEndpointStatus(
   failedEndpoint?: string,
   lastUpdated?: string
 ): EndpointStatus {
-  return { id, label, url, connected, scope, state, detail, failedEndpoint, lastUpdated };
+  return {
+    id,
+    label,
+    url: redactEndpointDisplay(url),
+    connected,
+    scope,
+    state,
+    detail,
+    failedEndpoint: failedEndpoint ? redactEndpointDisplay(failedEndpoint) : undefined,
+    lastUpdated
+  };
 }
 
 async function buildAnalytics(

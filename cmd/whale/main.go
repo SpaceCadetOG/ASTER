@@ -209,6 +209,8 @@ func startStatusServer(addr string, st *whaleStatus, rt *whaleRuntime, burstCoun
 
 func main() {
 	syms := scanneruniverse.ResolveCSVOrScanner("WHALE_SYMBOLS", defaultTapeSymbols(), []string{
+		envStr("WHALE_LONG_STATUS_URL", "http://127.0.0.1:8080/api/status"),
+		envStr("WHALE_SHORT_STATUS_URL", "http://127.0.0.1:8081/api/status"),
 		envStr("WHALE_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
 	minUSD := envFloat("WHALE_MIN_USD", 500)

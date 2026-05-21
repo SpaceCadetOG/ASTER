@@ -49,9 +49,12 @@ function setupSummary(data: Record<string, unknown> | null) {
     };
   }
   const score = data.score;
-  const trend =
-    data.trend || data.bias || data.direction || data.label || data.regime || "Unavailable";
-  const effort = data.effort || data.participation || data.intensity || "Unavailable";
+  const trend = stringifySummaryValue(
+    data.trend || data.bias || data.direction || data.label || data.regime || "Unavailable"
+  );
+  const effort = stringifySummaryValue(
+    data.effort || data.participation || data.intensity || "Unavailable"
+  );
   const note = [
     data.order_block,
     data.orderBlock,
@@ -64,10 +67,26 @@ function setupSummary(data: Record<string, unknown> | null) {
     .trim();
   return {
     score: typeof score === "number" ? formatNumber(score, 2) : String(score || "N/A"),
-    trend: String(trend),
-    effort: String(effort),
+    trend,
+    effort,
     note: note || "No order block or absorption notes returned."
   };
+}
+
+function stringifySummaryValue(value: unknown): string {
+  if (value === null || value === undefined) return "Unavailable";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => stringifySummaryValue(item)).join(", ");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${formatKeyLabel(key)} ${stringifySummaryValue(item)}`)
+      .join(" · ");
+  }
+  return "Unavailable";
 }
 
 function extractModuleFields(module: ModuleSummary) {

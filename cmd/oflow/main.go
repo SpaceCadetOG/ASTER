@@ -213,6 +213,8 @@ func startStatusServer(addr string, st *oflowStatus, rt *oflowRuntime) {
 
 func main() {
 	syms := scanneruniverse.ResolveCSVOrScanner("OFLOW_SYMBOLS", []string{"btcusdt", "ethusdt", "solusdt"}, []string{
+		envStr("OFLOW_LONG_STATUS_URL", "http://127.0.0.1:8080/api/status"),
+		envStr("OFLOW_SHORT_STATUS_URL", "http://127.0.0.1:8081/api/status"),
 		envStr("OFLOW_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
 	windowSec := envInt("OFLOW_WINDOW_SEC", 20)

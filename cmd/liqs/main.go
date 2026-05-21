@@ -18,12 +18,12 @@ import (
 )
 
 type liqEvt struct {
-	Symbol string
-	Side   string
-	Price  float64
-	Qty    float64
-	Ts     time.Time
-	USD    float64
+	Symbol string    `json:"symbol"`
+	Side   string    `json:"side"`
+	Price  float64   `json:"price"`
+	Qty    float64   `json:"qty"`
+	Ts     time.Time `json:"ts"`
+	USD    float64   `json:"usd"`
 }
 
 type liqsStatus struct {

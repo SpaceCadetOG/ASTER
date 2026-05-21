@@ -210,6 +210,8 @@ func startStatusServer(addr string, st *tapeStatus, rt *tapeRuntime) {
 
 func main() {
 	syms := scanneruniverse.ResolveCSVOrScanner("TAPE_SYMBOLS", defaultTapeSymbols(), []string{
+		envStr("TAPE_LONG_STATUS_URL", "http://127.0.0.1:8080/api/status"),
+		envStr("TAPE_SHORT_STATUS_URL", "http://127.0.0.1:8081/api/status"),
 		envStr("TAPE_LIVE_STATUS_URL", "http://127.0.0.1:8787/api/status"),
 	})
 
