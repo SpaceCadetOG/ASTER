@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { formatCompactUsd, formatNumber, formatPercent } from "@/lib/format";
 import type { LiveScanItem, ScannerRow, ScannerSide } from "@/lib/types";
 
@@ -19,10 +20,11 @@ type LiveTableProps = {
 
 function gradeTone(value?: string) {
   const key = (value || "N/A").toUpperCase();
-  if (key === "A+" || key === "A") return "tone-positive";
-  if (key === "B") return "tone-amber";
-  if (key === "C") return "tone-orange";
-  if (key === "D") return "tone-negative";
+  if (key === "A+") return "grade-aplus";
+  if (key === "A") return "grade-a";
+  if (key === "B") return "grade-b";
+  if (key === "C") return "grade-c";
+  if (key === "D") return "grade-d";
   return "tone-muted";
 }
 
@@ -31,6 +33,28 @@ function numericTone(value: number | null | undefined) {
   if (value > 0) return "tone-positive";
   if (value < 0) return "tone-negative";
   return "tone-muted";
+}
+
+function directionalArrow(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "•";
+  if (value > 0) return "▲";
+  if (value < 0) return "▼";
+  return "•";
+}
+
+function DirectionalValue({
+  value,
+  children
+}: {
+  value: number | null | undefined;
+  children: ReactNode;
+}) {
+  return (
+    <span className={`directional-value ${numericTone(value)}`}>
+      <span className="directional-arrow">{directionalArrow(value)}</span>
+      <span>{children}</span>
+    </span>
+  );
 }
 
 export function AssetTable(props: ScannerTableProps | LiveTableProps) {
@@ -73,11 +97,25 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                 </td>
                 <td>{formatNumber(row.score, 2)}</td>
                 <td>{formatNumber(row.lastPrice, row.lastPrice > 100 ? 2 : 4)}</td>
-                <td className={numericTone(row.dayUtc24h)}>{formatPercent(row.dayUtc24h, 1)}</td>
-                <td className={numericTone(row.utc4hPct)}>{formatPercent(row.utc4hPct, 1)}</td>
-                <td className={numericTone(row.utc1hPct)}>{formatPercent(row.utc1hPct, 1)}</td>
-                <td className={numericTone(row.fundingRatePct)}>
-                  {formatPercent(row.fundingRatePct, 4)}
+                <td>
+                  <DirectionalValue value={row.dayUtc24h}>
+                    {formatPercent(row.dayUtc24h, 1)}
+                  </DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.utc4hPct}>
+                    {formatPercent(row.utc4hPct, 1)}
+                  </DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.utc1hPct}>
+                    {formatPercent(row.utc1hPct, 1)}
+                  </DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.fundingRatePct}>
+                    {formatPercent(row.fundingRatePct, 4)}
+                  </DirectionalValue>
                 </td>
                 <td>{formatCompactUsd(row.volumeUsd)}</td>
                 <td>{formatCompactUsd(row.openInterestUsd)}</td>
@@ -132,10 +170,18 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                   <span className={`badge ${gradeTone(row.grade)}`}>{row.grade}</span>
                 </td>
                 <td>{formatNumber(row.score, 2)}</td>
-                <td className={numericTone(row.slope)}>{formatNumber(row.slope, 3)}</td>
-                <td className={numericTone(row.dayUtc)}>{formatPercent(row.dayUtc, 1)}</td>
-                <td className={numericTone(row.utc4h)}>{formatPercent(row.utc4h, 1)}</td>
-                <td className={numericTone(row.utc1h)}>{formatPercent(row.utc1h, 1)}</td>
+                <td>
+                  <DirectionalValue value={row.slope}>{formatNumber(row.slope, 3)}</DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.dayUtc}>{formatPercent(row.dayUtc, 1)}</DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.utc4h}>{formatPercent(row.utc4h, 1)}</DirectionalValue>
+                </td>
+                <td>
+                  <DirectionalValue value={row.utc1h}>{formatPercent(row.utc1h, 1)}</DirectionalValue>
+                </td>
                 <td>{formatCompactUsd(row.volumeUsd)}</td>
                 <td>{formatNumber(row.price, row.price > 100 ? 2 : 4)}</td>
               </tr>
@@ -170,8 +216,12 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
             <div className="hotlist-metrics">
               <span className={`badge ${gradeTone(row.grade)}`}>{row.grade}</span>
               <span>Score {formatNumber(row.score, 2)}</span>
-              <span className={numericTone(row.slope)}>Slope {formatNumber(row.slope, 3)}</span>
-              <span className={numericTone(row.dayUtc)}>{formatPercent(row.dayUtc, 1)}</span>
+              <span>
+                <DirectionalValue value={row.slope}>Slope {formatNumber(row.slope, 3)}</DirectionalValue>
+              </span>
+              <span>
+                <DirectionalValue value={row.dayUtc}>{formatPercent(row.dayUtc, 1)}</DirectionalValue>
+              </span>
               <span>{formatCompactUsd(row.volumeUsd)}</span>
               <span>{formatNumber(row.price, row.price > 100 ? 2 : 4)}</span>
             </div>

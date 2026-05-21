@@ -25,10 +25,11 @@ type FeedEntry = {
 
 function gradeTone(value?: string) {
   const key = (value || "N/A").toUpperCase();
-  if (key === "A+" || key === "A") return "tone-positive";
-  if (key === "B") return "tone-amber";
-  if (key === "C") return "tone-orange";
-  if (key === "D") return "tone-negative";
+  if (key === "A+") return "grade-aplus";
+  if (key === "A") return "grade-a";
+  if (key === "B") return "grade-b";
+  if (key === "C") return "grade-c";
+  if (key === "D") return "grade-d";
   return "tone-muted";
 }
 

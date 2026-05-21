@@ -308,6 +308,7 @@ pre {
   display: grid;
   gap: 16px;
   min-width: 0;
+  align-items: start;
 }
 
 .overview-grid,
@@ -325,7 +326,7 @@ pre {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .accordion-grid,
@@ -587,6 +588,20 @@ pre {
   color: var(--muted);
 }
 
+.directional-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.directional-arrow {
+  display: inline-block;
+  min-width: 0.8em;
+  font-size: 0.78em;
+  line-height: 1;
+}
+
 .badge,
 .pill {
   display: inline-flex;
@@ -625,6 +640,36 @@ pre {
   color: var(--gray);
 }
 
+.grade-aplus {
+  color: #a64eff;
+  border-color: rgba(166, 78, 255, 0.35);
+  background: rgba(166, 78, 255, 0.15);
+}
+
+.grade-a {
+  color: #4fc3ff;
+  border-color: rgba(79, 195, 255, 0.32);
+  background: rgba(79, 195, 255, 0.15);
+}
+
+.grade-b {
+  color: #00cc66;
+  border-color: rgba(0, 204, 102, 0.3);
+  background: rgba(0, 204, 102, 0.12);
+}
+
+.grade-c {
+  color: #ffb347;
+  border-color: rgba(255, 179, 71, 0.34);
+  background: rgba(255, 179, 71, 0.14);
+}
+
+.grade-d {
+  color: #ff3333;
+  border-color: rgba(255, 51, 51, 0.34);
+  background: rgba(255, 51, 51, 0.14);
+}
+
 .kv-list {
   display: grid;
   gap: 8px;
@@ -653,16 +698,21 @@ pre {
 }
 
 .module-card {
+  align-self: start;
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 14px;
   background: linear-gradient(180deg, rgba(21, 21, 23, 0.98), rgba(17, 17, 19, 0.98));
 }
 
+.module-card .empty-state {
+  padding: 12px 14px;
+}
+
 .feed-list {
   display: grid;
   gap: 8px;
-  max-height: 320px;
+  max-height: 280px;
   overflow-y: auto;
   padding-right: 4px;
 }
