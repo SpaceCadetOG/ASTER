@@ -2,8 +2,8 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "ASTER Scanner Dashboard",
-  description: "Tabbed scanner UI for long/short/in-play/confluence views"
+  title: "ASTER Unified Operator Portal",
+  description: "Unified ASTER operator dashboard for scanners, runtime, paper, and asset detail"
 };
 
 export default function RootLayout({

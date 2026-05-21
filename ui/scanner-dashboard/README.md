@@ -1,15 +1,19 @@
-# ASTER Scanner Dashboard (Next.js)
+# ASTER Unified Operator Portal
 
-Tabbed browser UI for existing scanner stack, without rewriting trading logic.
+`ui/scanner-dashboard` is the only ASTER frontend app and the canonical Cloud Run UI.
 
-## Tabs
+It preserves the existing dark operator shell while adding richer scanner storytelling, live hotlist drilldown, runtime status, paper placeholders, asset detail, and backend health views.
+
+## Product Areas
 - Overview
-- In-Play
-- Long Confluence
-- Short Confluence
+- Scanners
+- Live Hotlist / In-Play
+- Runtime
+- Paper
 - Asset Detail
+- Health
 
-All asset rows are clickable and open detail context.
+All browser-side calls stay behind Next API routes so the client does not call private backend URLs directly.
 
 ## Data Sources
 - `SCANNER_LONG_URL` (default `http://127.0.0.1:8080`)
@@ -18,16 +22,16 @@ All asset rows are clickable and open detail context.
   - expects `/api/status` and `/api/confluence`
 - `SCANNER_LIVE_URL` (default `http://127.0.0.1:8787`)
   - expects `/api/status`
-- `SCANNER_OFLOW_URL` (default `http://127.0.0.1:8090`)
-  - expects `/api/status`
-- `SCANNER_TAPE_URL` (default `http://127.0.0.1:8091`)
-  - expects `/api/status`
-- `SCANNER_WHALE_URL` (default `http://127.0.0.1:8092`)
-  - expects `/api/status`
-- `SCANNER_LIQS_URL` (default `http://127.0.0.1:8093`)
-  - expects `/api/status`
+- `SCANNER_OFLOW_URL` or `OFLOW_URL` (default `http://127.0.0.1:8090`)
+  - expects `/api/status`, optionally `/api/asset?symbol=...`
+- `SCANNER_TAPE_URL` or `TAPE_URL` (default `http://127.0.0.1:8091`)
+  - expects `/api/status`, optionally `/api/asset?symbol=...`
+- `SCANNER_WHALE_URL` or `WHALE_URL` (default `http://127.0.0.1:8092`)
+  - expects `/api/status`, optionally `/api/asset?symbol=...`
+- `SCANNER_LIQS_URL` or `LIQS_URL` (default `http://127.0.0.1:8093`)
+  - expects `/api/status`, optionally `/api/asset?symbol=...`
 
-`SCANNER_USE_MOCK=true` forces mock data.
+Production behavior is real data only. If an upstream backend is unavailable, the UI shows explicit unavailable, stale, or disconnected state and does not invent rows.
 
 ## Run
 ```bash
@@ -40,13 +44,13 @@ Open: `http://localhost:3000`
 
 ## Cloud Run Notes
 
-The dashboard is currently intended for a read-only Cloud Run deploy.
+The Cloud Run service name remains `scanner-dashboard`.
 
-Safest first deploy:
+This frontend is intentionally read-only:
 
-- set `SCANNER_USE_MOCK=true`
-- do not inject exchange credentials
 - do not expose execution controls
+- do not inject exchange credentials into the browser
+- do not add live enable, submit, close, pause, or resume buttons
 
 Cloud Run private backend access to the Go APIs is a later deployment step.
 

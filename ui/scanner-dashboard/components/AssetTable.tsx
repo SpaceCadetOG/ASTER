@@ -1,72 +1,145 @@
-import type { AssetRow } from "@/lib/types";
+import { formatCompactUsd, formatNumber, formatPercent } from "@/lib/format";
+import type { LiveScanItem, ScannerRow, ScannerSide } from "@/lib/types";
 
-function num(v: number | undefined, d = 2): string {
-  if (v === undefined || Number.isNaN(v)) return "-";
-  return v.toFixed(d);
+type ScannerTableProps = {
+  kind: "scanner";
+  side: ScannerSide;
+  rows: ScannerRow[];
+  emptyMessage: string;
+  onSelect: (symbol: string, side: ScannerSide) => void;
+};
+
+type LiveTableProps = {
+  kind: "live";
+  rows: Array<LiveScanItem & { scannerSide: ScannerSide }>;
+  emptyMessage: string;
+  onSelect: (symbol: string, side: ScannerSide) => void;
+};
+
+function gradeTone(value?: string) {
+  const key = (value || "N/A").toUpperCase();
+  if (key === "A+" || key === "A") return "tone-positive";
+  if (key === "B") return "tone-amber";
+  if (key === "C") return "tone-orange";
+  if (key === "D") return "tone-negative";
+  return "tone-muted";
 }
 
-function money(v: number | undefined): string {
-  if (!v) return "-";
-  if (Math.abs(v) >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
-  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
-  return v.toFixed(2);
+function numericTone(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "tone-muted";
+  if (value > 0) return "tone-positive";
+  if (value < 0) return "tone-negative";
+  return "tone-muted";
 }
 
-export function AssetTable({
-  rows,
-  onSelect
-}: {
-  rows: AssetRow[];
-  onSelect: (symbol: string) => void;
-}) {
+export function AssetTable(props: ScannerTableProps | LiveTableProps) {
+  if (!props.rows.length) {
+    return <div className="empty-state">{props.emptyMessage}</div>;
+  }
+
+  if (props.kind === "scanner") {
+    return (
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Grade</th>
+              <th>Score</th>
+              <th>Last</th>
+              <th>24h %</th>
+              <th>4h %</th>
+              <th>1h %</th>
+              <th>Funding</th>
+              <th>24h Volume</th>
+              <th>Open Interest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.rows.map((row) => (
+              <tr key={`${props.side}-${row.symbol}`} className="asset-row">
+                <td>
+                  <button
+                    className="table-link"
+                    onClick={() => props.onSelect(row.symbol, props.side)}
+                  >
+                    <strong>{row.symbol}</strong>
+                    <small>{row.reason || `${props.side} scanner row`}</small>
+                  </button>
+                </td>
+                <td>
+                  <span className={`badge ${gradeTone(row.grade)}`}>{row.grade}</span>
+                </td>
+                <td>{formatNumber(row.score, 2)}</td>
+                <td>{formatNumber(row.lastPrice, row.lastPrice > 100 ? 2 : 4)}</td>
+                <td className={numericTone(row.dayUtc24h)}>{formatPercent(row.dayUtc24h, 1)}</td>
+                <td className={numericTone(row.utc4hPct)}>{formatPercent(row.utc4hPct, 1)}</td>
+                <td className={numericTone(row.utc1hPct)}>{formatPercent(row.utc1hPct, 1)}</td>
+                <td className={numericTone(row.fundingRatePct)}>
+                  {formatPercent(row.fundingRatePct, 4)}
+                </td>
+                <td>{formatCompactUsd(row.volumeUsd)}</td>
+                <td>{formatCompactUsd(row.openInterestUsd)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
   return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>Symbol</th>
-          <th>Price</th>
-          <th>Long</th>
-          <th>Short</th>
-          <th>In-Play</th>
-          <th>Funding %</th>
-          <th>Volume</th>
-          <th>OI</th>
-          <th>State</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr
-            key={r.symbol}
-            className="asset-row"
-            onClick={() => onSelect(r.symbol)}
-          >
-            <td>
-              <strong>{r.symbol}</strong>
-            </td>
-            <td>{num(r.price, r.price > 1000 ? 2 : 6)}</td>
-            <td>{num(r.longScore)}</td>
-            <td>{num(r.shortScore)}</td>
-            <td>{num(r.inPlayScore)}</td>
-            <td className={(r.funding || 0) >= 0 ? "good" : "bad"}>
-              {num(r.funding, 4)}
-            </td>
-            <td>{money(r.volume)}</td>
-            <td>{money(r.openInterest)}</td>
-            <td>
-              <span className="pill">{r.state || "-"}</span>
-            </td>
-          </tr>
-        ))}
-        {rows.length === 0 ? (
+    <div className="table-wrap">
+      <table className="table">
+        <thead>
           <tr>
-            <td colSpan={9} className="muted">
-              (none)
-            </td>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Grade</th>
+            <th>Score</th>
+            <th>Slope</th>
+            <th>24h %</th>
+            <th>4h %</th>
+            <th>1h %</th>
+            <th>24h Volume</th>
+            <th>Last</th>
           </tr>
-        ) : null}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {props.rows.map((row) => (
+            <tr key={`${row.scannerSide}-${row.symbol}-${row.side}`} className="asset-row">
+              <td>
+                <button
+                  className="table-link"
+                  onClick={() => props.onSelect(row.symbol, row.scannerSide)}
+                >
+                  <strong>{row.symbol}</strong>
+                  <small>{row.state || "Live hotlist"}</small>
+                </button>
+              </td>
+              <td>
+                <span
+                  className={`badge ${
+                    row.side.toUpperCase() === "LONG" ? "tone-positive" : "tone-negative"
+                  }`}
+                >
+                  {row.side}
+                </span>
+              </td>
+              <td>
+                <span className={`badge ${gradeTone(row.grade)}`}>{row.grade}</span>
+              </td>
+              <td>{formatNumber(row.score, 2)}</td>
+              <td className={numericTone(row.slope)}>{formatNumber(row.slope, 3)}</td>
+              <td className={numericTone(row.dayUtc)}>{formatPercent(row.dayUtc, 1)}</td>
+              <td className={numericTone(row.utc4h)}>{formatPercent(row.utc4h, 1)}</td>
+              <td className={numericTone(row.utc1h)}>{formatPercent(row.utc1h, 1)}</td>
+              <td>{formatCompactUsd(row.volumeUsd)}</td>
+              <td>{formatNumber(row.price, row.price > 100 ? 2 : 4)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
