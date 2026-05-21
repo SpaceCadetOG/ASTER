@@ -191,12 +191,12 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 }
 
 func loadRecentPaperViews(eventLog *stats.EventLogger, limit int) ([]livePaperClosedView, []livePaperDecisionView) {
-	if eventLog == nil || strings.TrimSpace(eventLog.Path()) == "" {
-		return nil, nil
+	if eventLog == nil || limit <= 0 {
+		return []livePaperClosedView{}, []livePaperDecisionView{}
 	}
-	events, err := stats.LoadEvents(eventLog.Path(), nil, nil)
-	if err != nil || len(events) == 0 {
-		return nil, nil
+	events := eventLog.Recent(limit * 8)
+	if len(events) == 0 {
+		return []livePaperClosedView{}, []livePaperDecisionView{}
 	}
 	closed := make([]livePaperClosedView, 0, limit)
 	decisions := make([]livePaperDecisionView, 0, limit)
@@ -267,4 +267,19 @@ func loadRecentPaperViews(eventLog *stats.EventLogger, limit int) ([]livePaperCl
 		}
 	}
 	return closed, decisions
+}
+
+func cloneLivePaperSnapshot(src *livePaperSnapshot) *livePaperSnapshot {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.OpenPositions = append(make([]livePaperPositionView, 0, len(src.OpenPositions)), src.OpenPositions...)
+	dst.RecentClosed = append(make([]livePaperClosedView, 0, len(src.RecentClosed)), src.RecentClosed...)
+	dst.RecentDecisions = make([]livePaperDecisionView, len(src.RecentDecisions))
+	for i := range src.RecentDecisions {
+		dst.RecentDecisions[i] = src.RecentDecisions[i]
+		dst.RecentDecisions[i].GateReasons = append([]string(nil), src.RecentDecisions[i].GateReasons...)
+	}
+	return &dst
 }

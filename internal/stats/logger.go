@@ -15,6 +15,7 @@ type EventLogger struct {
 	toStdout  bool
 	enabled   bool
 	simulated bool
+	recent    []Event
 }
 
 func NewEventLogger(path string, enabled, toStdout, simulated bool) *EventLogger {
@@ -46,10 +47,14 @@ func (l *EventLogger) Emit(e Event) {
 		fmt.Println(string(b))
 	}
 	if l.path == "" {
+		l.mu.Lock()
+		l.appendRecentLocked(e)
+		l.mu.Unlock()
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.appendRecentLocked(e)
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
 		return
 	}
@@ -59,4 +64,31 @@ func (l *EventLogger) Emit(e Event) {
 	}
 	defer f.Close()
 	_, _ = f.Write(append(b, '\n'))
+}
+
+func (l *EventLogger) Recent(limit int) []Event {
+	if l == nil || limit <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.recent) == 0 {
+		return nil
+	}
+	if limit > len(l.recent) {
+		limit = len(l.recent)
+	}
+	start := len(l.recent) - limit
+	out := make([]Event, limit)
+	copy(out, l.recent[start:])
+	return out
+}
+
+func (l *EventLogger) appendRecentLocked(e Event) {
+	const maxRecentEvents = 256
+	l.recent = append(l.recent, e)
+	if len(l.recent) > maxRecentEvents {
+		copy(l.recent, l.recent[len(l.recent)-maxRecentEvents:])
+		l.recent = l.recent[:maxRecentEvents]
+	}
 }

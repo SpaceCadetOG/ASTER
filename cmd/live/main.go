@@ -1231,9 +1231,8 @@ type liveStatus struct {
 }
 
 type liveStatusStore struct {
-	mu           sync.RWMutex
-	cur          liveStatus
-	paperProvider func() *livePaperSnapshot
+	mu  sync.RWMutex
+	cur liveStatus
 }
 
 type maintenanceWindow struct {
@@ -2044,18 +2043,6 @@ func main() {
 		}
 		return accountHealthSummary{State: "healthy"}
 	})
-	statusStore.SetPaperProvider(func() *livePaperSnapshot {
-		if paper == nil || !paper.enabled {
-			return nil
-		}
-		meta := map[string]symbolMeta{}
-		if snap, ok := runtimeLoop.latestWatcher(); ok {
-			meta = copySymbolMetaMap(snap.MetaBySym)
-		} else if snap, ok := runtimeLoop.latestScanner(); ok {
-			meta = copySymbolMetaMap(snap.MetaBySym)
-		}
-		return buildLivePaperSnapshot(modeCtrl.operatingMode(), paper, meta, eventLog, 12)
-	})
 	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 350)) * time.Millisecond
 	if decisionEvery < 250*time.Millisecond {
 		decisionEvery = 250 * time.Millisecond
@@ -2508,7 +2495,7 @@ func main() {
 		if inMaint && !paperIgnoresMaintenance {
 			reason := blockedWindowReason(maintWindow)
 			fmt.Printf("live: %s window=%s session=%s\n", reason, maintWindow.Name, sessionTag(localMaintNow))
-			statusStore.Set(liveStatus{
+			st := liveStatus{
 				Generated:       now,
 				Mode:            string(operatingMode),
 				ModeState:       "blocked",
@@ -2518,7 +2505,12 @@ func main() {
 				TopDecision:     "blocked",
 				TopDecisionWhy:  reason,
 				TopRejectReason: reason,
-			})
+			}
+			if paper != nil && paper.enabled {
+				st.PaperSummary = paper.Summary(metaBySymbol)
+				st.Paper = buildLivePaperSnapshot(operatingMode, paper, metaBySymbol, eventLog, 12)
+			}
+			statusStore.Set(st)
 			waitAndReport()
 			continue
 		}
@@ -2531,7 +2523,7 @@ func main() {
 				healthBlockReason, healthBlocked = entriesBlockedByAccountHealth(healthSnap.Summary)
 			}
 			if healthBlocked {
-				statusStore.Set(liveStatus{
+				st := liveStatus{
 					Generated:       now,
 					Mode:            string(operatingMode),
 					ModeState:       "blocked",
@@ -2541,7 +2533,12 @@ func main() {
 					TopDecision:     "blocked",
 					TopDecisionWhy:  healthBlockReason,
 					TopRejectReason: healthBlockReason,
-				})
+				}
+				if paper != nil && paper.enabled {
+					st.PaperSummary = paper.Summary(metaBySymbol)
+					st.Paper = buildLivePaperSnapshot(operatingMode, paper, metaBySymbol, eventLog, 12)
+				}
+				statusStore.Set(st)
 				waitAndReport()
 				continue
 			}
@@ -2574,6 +2571,7 @@ func main() {
 			}
 			if paper.enabled {
 				st.PaperSummary = paper.Summary(metaBySymbol)
+				st.Paper = buildLivePaperSnapshot(runtimeModeManualOnly, paper, metaBySymbol, eventLog, 12)
 			}
 			if best, ok := selectTopRuntimeCandidate(cands); ok {
 				st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
@@ -2620,6 +2618,7 @@ func main() {
 		}
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
+			st.Paper = buildLivePaperSnapshot(runtimeModePaperAuto, paper, metaBySymbol, eventLog, 12)
 		}
 		best, ok := selectTopRuntimeCandidate(cands)
 		if !ok {
@@ -2690,6 +2689,7 @@ func main() {
 		paperAutoLogDecision(best, decision, dispatch)
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
+			st.Paper = buildLivePaperSnapshot(runtimeModePaperAuto, paper, metaBySymbol, eventLog, 12)
 		}
 		statusStore.Set(st)
 		waitAndReport()
@@ -19798,26 +19798,14 @@ func (s *liveStatusStore) Set(v liveStatus) {
 	s.mu.Unlock()
 }
 
-func (s *liveStatusStore) SetPaperProvider(fn func() *livePaperSnapshot) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.paperProvider = fn
-	s.mu.Unlock()
-}
-
 func (s *liveStatusStore) Snapshot() liveStatus {
 	if s == nil {
 		return liveStatus{}
 	}
 	s.mu.RLock()
 	cur := s.cur
-	provider := s.paperProvider
 	s.mu.RUnlock()
-	if provider != nil {
-		cur.Paper = provider()
-	}
+	cur.Paper = cloneLivePaperSnapshot(cur.Paper)
 	return cur
 }
 
@@ -19826,6 +19814,18 @@ func startLiveStatusServer(addr string, s *liveStatusStore) error {
 	if addr == "" {
 		return nil
 	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	fmt.Println("live status server:", addr)
+	go func() {
+		_ = http.Serve(ln, newLiveStatusMux(s))
+	}()
+	return nil
+}
+
+func newLiveStatusMux(s *liveStatusStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -19833,22 +19833,24 @@ func startLiveStatusServer(addr string, s *liveStatusStore) error {
 	})
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		defer func() {
+			if recover() != nil {
+				http.Error(w, `{"error":"status_snapshot_panic"}`+"\n", http.StatusInternalServerError)
+			}
+		}()
 		_ = json.NewEncoder(w).Encode(s.Snapshot())
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		defer func() {
+			if recover() != nil {
+				http.Error(w, "status_snapshot_panic\n", http.StatusInternalServerError)
+			}
+		}()
 		b, _ := json.MarshalIndent(s.Snapshot(), "", "  ")
 		_, _ = w.Write(b)
 	})
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	fmt.Println("live status server:", addr)
-	go func() {
-		_ = http.Serve(ln, mux)
-	}()
-	return nil
+	return mux
 }
 
 func mapFloat(v any) float64 {
