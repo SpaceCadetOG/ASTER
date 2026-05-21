@@ -171,6 +171,10 @@ export function DashboardShell() {
   const runtimeGenerated = data?.live?.generated || data?.generatedAt;
   const paperHero = paperAccountHero(data);
   const runtimeAccountSummary = data?.live?.paper?.summary || data?.live?.paperSummary || "Unavailable";
+  const selectedSummaryRow =
+    data?.longScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
+    data?.shortScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
+    liveRows.find((row) => row.symbol === selectedSymbol);
 
   const handleSelect = (symbol: string, side: ScannerSide) => {
     setSelectedSymbol(symbol);
@@ -763,7 +767,12 @@ export function DashboardShell() {
       <footer className="footer-strip">
         <span>Selected symbol: {selectedSymbol || "None"}</span>
         <span>Selected side: {selectedSide.toUpperCase()}</span>
-        <span>Top day move: {formatPercent(data.live?.scannerLongs?.[0]?.dayUtc, 1)}</span>
+        <span>
+          Selected move: {selectedSummaryRow ? formatPercent("dayUtc24h" in selectedSummaryRow ? selectedSummaryRow.dayUtc24h : selectedSummaryRow.dayUtc, 1) : "N/A"}
+        </span>
+        <span>
+          Selected score: {selectedSummaryRow ? formatNumber(selectedSummaryRow.score, 2) : "N/A"}
+        </span>
       </footer>
     </main>
   );

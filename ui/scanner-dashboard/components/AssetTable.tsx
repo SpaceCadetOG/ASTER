@@ -88,14 +88,16 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                     className="table-link"
                     onClick={() => props.onSelect(row.symbol, props.side)}
                   >
-                    <strong>{row.symbol}</strong>
+                    <strong className="table-symbol">{row.symbol}</strong>
                     <small>{row.reason || `${props.side} scanner row`}</small>
                   </button>
                 </td>
                 <td>
                   <span className={`grade-text ${gradeTone(row.grade)}`}>{row.grade}</span>
                 </td>
-                <td>{formatNumber(row.score, 2)}</td>
+                <td>
+                  <strong className="table-score">{formatNumber(row.score, 2)}</strong>
+                </td>
                 <td>{formatNumber(row.lastPrice, row.lastPrice > 100 ? 2 : 4)}</td>
                 <td>
                   <DirectionalValue value={row.dayUtc24h}>
@@ -153,7 +155,7 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                     className="table-link"
                     onClick={() => props.onSelect(row.symbol, row.scannerSide)}
                   >
-                    <strong>{row.symbol}</strong>
+                    <strong className="table-symbol">{row.symbol}</strong>
                     <small>{row.state || "Live hotlist"}</small>
                   </button>
                 </td>
@@ -169,7 +171,9 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                 <td>
                   <span className={`grade-text ${gradeTone(row.grade)}`}>{row.grade}</span>
                 </td>
-                <td>{formatNumber(row.score, 2)}</td>
+                <td>
+                  <strong className="table-score">{formatNumber(row.score, 2)}</strong>
+                </td>
                 <td>
                   <DirectionalValue value={row.slope}>{formatNumber(row.slope, 3)}</DirectionalValue>
                 </td>
