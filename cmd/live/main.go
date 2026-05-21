@@ -429,6 +429,7 @@ type runtimeModeController struct {
 	dryRun            bool
 	enableLiveTrading bool
 	paperEnabled      bool
+	requestedMode     runtimeOperatingMode
 }
 
 func newRuntimeModeController(dryRun, enableLiveTrading, paperEnabled bool) *runtimeModeController {
@@ -436,6 +437,7 @@ func newRuntimeModeController(dryRun, enableLiveTrading, paperEnabled bool) *run
 		dryRun:            dryRun,
 		enableLiveTrading: enableLiveTrading,
 		paperEnabled:      paperEnabled,
+		requestedMode:     parseRuntimeOperatingMode(envStr("LIVE_RUNTIME_MODE", string(runtimeModeManualOnly))),
 	}
 }
 
@@ -468,6 +470,32 @@ func (m *runtimeModeController) setPaper() {
 	m.dryRun = true
 	m.enableLiveTrading = false
 	m.paperEnabled = true
+}
+
+func (m *runtimeModeController) operatingMode() runtimeOperatingMode {
+	if m == nil {
+		return runtimeModeManualOnly
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	switch m.requestedMode {
+	case runtimeModePaperAuto:
+		if m.dryRun && !m.enableLiveTrading && m.paperEnabled {
+			return runtimeModePaperAuto
+		}
+	case runtimeModeLiveAuto:
+		return runtimeModeManualOnly
+	}
+	return runtimeModeManualOnly
+}
+
+func (m *runtimeModeController) requestedOperatingMode() runtimeOperatingMode {
+	if m == nil {
+		return runtimeModeManualOnly
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.requestedMode
 }
 
 type operatorDecision struct {
@@ -522,13 +550,13 @@ type EntryEligibilitySummary struct {
 }
 
 type operatorSuggestion struct {
-	Symbol       string
-	Side         string
-	Source       string
-	PreferredLev int
+	Symbol          string
+	Side            string
+	Source          string
+	PreferredLev    int
 	PreferredMargin float64
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
 }
 
 type symbolMeta struct {
@@ -677,11 +705,19 @@ type paperPosition struct {
 	LastMark               float64
 	EntryReason            string
 	EntryStrategyID        string
+	EntryMode              string
 	EntryGrade             string
 	EntryState             inplay.State
 	EntryTrigger           string
 	ExitProfile            string
 	EntryConf              float64
+	EntryConfluenceScore   float64
+	EntrySignalReasons     []string
+	EntrySignalSources     []string
+	EntryDecisionReasons   []string
+	EntryDecisionRejects   []string
+	EntryDecisionReject    string
+	EntryDecisionProof     []string
 	DiscoveryScore         float64
 	TriggerScore           float64
 	ExecutionScore         float64
@@ -1152,6 +1188,8 @@ type liveExecSnapshot struct {
 
 type liveStatus struct {
 	Generated       time.Time           `json:"generated"`
+	Mode            string              `json:"mode,omitempty"`
+	ModeState       string              `json:"mode_state,omitempty"`
 	DryRun          bool                `json:"dry_run"`
 	LiveEnabled     bool                `json:"live_enabled"`
 	ScannerBias     string              `json:"scanner_bias,omitempty"`
@@ -1181,6 +1219,7 @@ type liveStatus struct {
 	ShortInPlay     int                 `json:"short_inplay"`
 	AvailableUSDT   float64             `json:"available_usdt"`
 	PaperSummary    string              `json:"paper_summary,omitempty"`
+	Paper           *livePaperSnapshot  `json:"paper,omitempty"`
 	PayoutCycleID   string              `json:"payout_cycle_id,omitempty"`
 	PayoutNextAt    string              `json:"payout_next_at,omitempty"`
 	PayoutLastAmt   float64             `json:"payout_last_amount,omitempty"`
@@ -1192,8 +1231,9 @@ type liveStatus struct {
 }
 
 type liveStatusStore struct {
-	mu  sync.RWMutex
-	cur liveStatus
+	mu           sync.RWMutex
+	cur          liveStatus
+	paperProvider func() *livePaperSnapshot
 }
 
 type maintenanceWindow struct {
@@ -1287,6 +1327,7 @@ func main() {
 	leverageMode := strings.ToLower(envStr("LIVE_LEVERAGE_MODE", "grade")) // grade|fixed|auto
 	leverageFixed := envInt("LIVE_LEVERAGE_FIXED", 2)
 	leverageMin := envInt("LIVE_LEVERAGE_MIN", 2)
+	leverageMax := envInt("LIVE_MAX_LEVERAGE", 20)
 	stopMode := strings.ToLower(envStr("LIVE_STOP_MODE", "hybrid"))
 	targetMode := strings.ToLower(envStr("LIVE_TARGET_MODE", "hybrid"))
 	vpMinTargetPct := envFloat("LIVE_VP_MIN_TARGET_PCT", 0.10)
@@ -1779,6 +1820,9 @@ func main() {
 	if dryRun {
 		modeLabel = "PAPER"
 	}
+	if modeCtrl.requestedOperatingMode() == runtimeModeLiveAuto {
+		fmt.Println("live: LIVE_RUNTIME_MODE=live_auto requested but live-auto remains disabled; continuing in manual_only mode")
+	}
 	for _, line := range startupSummaryLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
@@ -2000,6 +2044,18 @@ func main() {
 		}
 		return accountHealthSummary{State: "healthy"}
 	})
+	statusStore.SetPaperProvider(func() *livePaperSnapshot {
+		if paper == nil || !paper.enabled {
+			return nil
+		}
+		meta := map[string]symbolMeta{}
+		if snap, ok := runtimeLoop.latestWatcher(); ok {
+			meta = copySymbolMetaMap(snap.MetaBySym)
+		} else if snap, ok := runtimeLoop.latestScanner(); ok {
+			meta = copySymbolMetaMap(snap.MetaBySym)
+		}
+		return buildLivePaperSnapshot(modeCtrl.operatingMode(), paper, meta, eventLog, 12)
+	})
 	decisionEvery := time.Duration(envInt("LIVE_DECISION_MS", 350)) * time.Millisecond
 	if decisionEvery < 250*time.Millisecond {
 		decisionEvery = 250 * time.Millisecond
@@ -2029,6 +2085,7 @@ func main() {
 			}
 			lastDayUTCResetKey = resetKey
 		}
+		operatingMode := runtimeModeManualOnly
 		if modeCtrl != nil {
 			modeDryRun, modeLiveEnabled, modePaperEnabled := modeCtrl.snapshot()
 			dryRun = modeDryRun
@@ -2036,6 +2093,7 @@ func main() {
 			if paper != nil {
 				paper.enabled = modePaperEnabled
 			}
+			operatingMode = modeCtrl.operatingMode()
 		}
 		cacheStatsStart := featureCache.statsSnapshot()
 		localMaintNow := now.In(maintLoc)
@@ -2095,14 +2153,14 @@ func main() {
 		shortInPlay := append([]inplay.Entry(nil), watchSnap.ShortInPlay...)
 		metaBySymbol := copySymbolMetaMap(watchSnap.MetaBySym)
 		cmdCtx.setMeta(metaBySymbol)
-			longCurrent := sideEntryMap(longInPlay)
-			shortCurrent := sideEntryMap(shortInPlay)
-			flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
-			wallSignals = copyWallSignalsMap(watchSnap.WallSignalsBySy)
-			momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
-			paperDepth := map[string]aster.OrderBook{}
-			// Manual-only mode: no autonomous trade management/exits.
-			inCriticalProtection := execMgr != nil && execMgr.hasCriticalProtectionState()
+		longCurrent := sideEntryMap(longInPlay)
+		shortCurrent := sideEntryMap(shortInPlay)
+		flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
+		wallSignals = copyWallSignalsMap(watchSnap.WallSignalsBySy)
+		momBySymbol := buildMomentumIndex(longInPlay, shortInPlay)
+		paperDepth := map[string]aster.OrderBook{}
+		// Manual-only mode: no autonomous trade management/exits.
+		inCriticalProtection := execMgr != nil && execMgr.hasCriticalProtectionState()
 		if !inMaint {
 			if paper.enabled && tg != nil && tg.Enabled() {
 				if now.After(nextTradeUpdateAt) {
@@ -2202,7 +2260,7 @@ func main() {
 		}
 		externalFlow := externalFlowFeed.Snapshot(now)
 		if paper.enabled {
-			paper.ApplyMomentumExit(now, momBySymbol, metaBySymbol, paperDepth, externalFlow)
+			runPaperLifecycle(now, paper, metaBySymbol, paperDepth, longCurrent, shortCurrent, momBySymbol, flowMetricsBySymbol, externalFlow)
 		}
 		if execMgr != nil {
 			execMgr.ApplyMomentumExit(now, momBySymbol, flowMetricsBySymbol, externalFlow)
@@ -2452,6 +2510,8 @@ func main() {
 			fmt.Printf("live: %s window=%s session=%s\n", reason, maintWindow.Name, sessionTag(localMaintNow))
 			statusStore.Set(liveStatus{
 				Generated:       now,
+				Mode:            string(operatingMode),
+				ModeState:       "blocked",
 				DryRun:          dryRun,
 				LiveEnabled:     safety.enableLiveTrading,
 				AvailableUSDT:   acct.AvailableUSDT,
@@ -2473,6 +2533,8 @@ func main() {
 			if healthBlocked {
 				statusStore.Set(liveStatus{
 					Generated:       now,
+					Mode:            string(operatingMode),
+					ModeState:       "blocked",
 					DryRun:          dryRun,
 					LiveEnabled:     safety.enableLiveTrading,
 					AvailableUSDT:   acct.AvailableUSDT,
@@ -2491,11 +2553,12 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		// Hard lock: scanner/manual only. Auto-entry is disabled for both paper and live.
-		manualOnlyScannerMode := true
+		manualOnlyScannerMode := operatingMode != runtimeModePaperAuto
 		if manualOnlyScannerMode {
 			st := liveStatus{
 				Generated:     now,
+				Mode:          string(runtimeModeManualOnly),
+				ModeState:     "manual_only",
 				DryRun:        dryRun,
 				LiveEnabled:   safety.enableLiveTrading,
 				LongInPlay:    len(longInPlay),
@@ -2512,17 +2575,7 @@ func main() {
 			if paper.enabled {
 				st.PaperSummary = paper.Summary(metaBySymbol)
 			}
-			if len(cands) > 0 {
-				sort.SliceStable(cands, func(i, j int) bool {
-					if cands[i].Entry.CurrentScore == cands[j].Entry.CurrentScore {
-						if cands[i].Entry.ScoreSlope == cands[j].Entry.ScoreSlope {
-							return cands[i].Entry.Rank < cands[j].Entry.Rank
-						}
-						return cands[i].Entry.ScoreSlope > cands[j].Entry.ScoreSlope
-					}
-					return cands[i].Entry.CurrentScore > cands[j].Entry.CurrentScore
-				})
-				best := cands[0]
+			if best, ok := selectTopRuntimeCandidate(cands); ok {
 				st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
 				st.TopSide = best.Side
 				st.TopGrade = best.Entry.CurrentGrade
@@ -2547,6 +2600,100 @@ func main() {
 			waitAndReport()
 			continue
 		}
+
+		st := liveStatus{
+			Generated:     now,
+			Mode:          string(runtimeModePaperAuto),
+			ModeState:     "paper_auto_enabled",
+			DryRun:        dryRun,
+			LiveEnabled:   false,
+			LongInPlay:    len(longInPlay),
+			ShortInPlay:   len(shortInPlay),
+			AvailableUSDT: acct.AvailableUSDT,
+			Exec:          liveExecSnapshot{},
+			Live:          liveAccountSnapshot{},
+		}
+		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
+		if execMgr != nil {
+			st.Exec = execMgr.Snapshot(10)
+			st.Live = execMgr.LiveAccountSnapshot(10)
+		}
+		if paper != nil && paper.enabled {
+			st.PaperSummary = paper.Summary(metaBySymbol)
+		}
+		best, ok := selectTopRuntimeCandidate(cands)
+		if !ok {
+			st.TopDecision = "paper_auto_enabled"
+			st.TopDecisionWhy = "no_candidates"
+			statusStore.Set(st)
+			waitAndReport()
+			continue
+		}
+		st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
+		st.TopSide = best.Side
+		st.TopGrade = best.Entry.CurrentGrade
+		st.TopScore = best.Entry.CurrentScore
+		st.TopSlope = best.Entry.ScoreSlope
+		st.TopTriggerState = best.TriggerState
+		st.TopExitProfile = best.ExitProfile
+		st.TopDiscovery = best.DiscoveryScore
+		st.TopTrigger = best.TriggerScore
+		st.TopExecution = best.ExecutionScore
+		st.TopCombined = best.CombinedScore
+		st.TopRegimeTag = best.Sig.RegimeTag
+		currentSideEntries := longCurrent
+		if strings.EqualFold(best.Side, "SELL") {
+			currentSideEntries = shortCurrent
+		}
+		decision := buildPaperAutoExecutionDecision(paperAutoDecisionCtx{
+			Now:                 now,
+			LocalMaintNow:       localMaintNow,
+			Candidate:           best,
+			MetaBySymbol:        metaBySymbol,
+			EntryDepth:          paperDepth,
+			Paper:               paper,
+			CurrentEntries:      currentSideEntries,
+			RiskShell:           riskShell,
+			RiskFallbackStopPct: riskFallbackStopPct,
+			RiskHoldHours:       riskHoldHours,
+			LeverageMode:        leverageMode,
+			LeverageFixed:       leverageFixed,
+			LeverageMin:         leverageMin,
+			MaxLeverage:         leverageMax,
+			EffectiveReserve:    effectiveReserve,
+			EffectiveMargin:     effectiveMargin,
+			AvailableUSDT:       acct.AvailableUSDT,
+			OBFilterEnable:      obFilterEnable,
+			OBLevels:            obLevels,
+			OBImbMin:            obImbMin,
+			OBMaxSpreadBps:      obMaxSpreadBps,
+			MaxOpenPos:          maxOpenPos,
+			MaxOpenPerSide:      maxOpenPerSide,
+			EventLog:            eventLog,
+		})
+		emitPaperAutoDecisionEvent(eventLog, now, best, decision)
+		recordCandidateDecision(cmdCtx, best, decision.RejectReason)
+		dispatch := dispatchPaperAutoDecision(operatingMode, now, decision, best, entryBps, effectiveMargin, computeLeverage(best, leverageMode, leverageFixed, leverageMin, leverageMax), metaBySymbol, paperDepth, currentSideEntries, paperAutoDispatchHooks{
+			Paper: func(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry) (*paperPosition, error) {
+				if paper == nil {
+					return nil, fmt.Errorf("paper_disabled")
+				}
+				return paper.MaybeEnter(now, c, entryBps, margin, leverage, meta, depth, current)
+			},
+		})
+		if dispatch.Position != nil {
+			annotatePaperPositionFromDecision(dispatch.Position, best, decision)
+			_ = paper.save()
+			emitPaperAutoPositionOpenEvent(eventLog, now, best, dispatch.Position, decision)
+		}
+		applyPaperAutoDecisionStatus(&st, decision, dispatch)
+		paperAutoLogDecision(best, decision, dispatch)
+		if paper != nil && paper.enabled {
+			st.PaperSummary = paper.Summary(metaBySymbol)
+		}
+		statusStore.Set(st)
+		waitAndReport()
+		continue
 
 		waitAndReport()
 	}
@@ -13435,6 +13582,14 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 				pnlPct = ((entry - exit) / entry) * 100.0
 			}
 		}
+		proofMin := 0.0
+		if !pos.FirstProtectAt.IsZero() && !pos.OpenedAt.IsZero() && !pos.FirstProtectAt.Before(pos.OpenedAt) {
+			proofMin = pos.FirstProtectAt.Sub(pos.OpenedAt).Minutes()
+		}
+		failureMin := 0.0
+		if net < 0 {
+			failureMin = holdMin
+		}
 		riskR := 0.0
 		if entry > 0 && stop > 0 {
 			risk := math.Abs(entry-stop) * qty
@@ -13443,35 +13598,45 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 			}
 		}
 		p.eventLog.Emit(stats.Event{
-			Timestamp:    now,
-			Type:         "POSITION_CLOSE",
-			Simulated:    true,
-			Symbol:       symbol,
-			Side:         side,
-			TF:           "1m",
-			Strategy:     pos.EntryReason,
-			TriggerState: pos.EntryTrigger,
-			ExitProfile:  pos.ExitProfile,
-			EntryPx:      entry,
-			ExitPx:       exit,
-			MarkPx:       markPx,
-			LastPx:       lastPx,
-			TriggerRef:   triggerRef,
-			RiskR:        riskR,
-			HoldMin:      holdMin,
-			MFER:         pos.MaxFavorableR,
-			MAER:         pos.MaxAdverseR,
-			CaptureRatio: pos.CaptureRatio,
-			MaxGivebackR: pos.MaxGivebackR,
-			PnLUSD:       net,
-			PnLPct:       pnlPct,
-			Fees:         fee,
-			Discovery:    pos.DiscoveryScore,
-			Trigger:      pos.TriggerScore,
-			Execution:    pos.ExecutionScore,
-			Combined:     pos.CombinedScore,
-			StopDistPct:  pos.StopDistancePct,
-			Reason:       reason,
+			Timestamp:       now,
+			Type:            "POSITION_CLOSE",
+			Simulated:       true,
+			Symbol:          symbol,
+			Side:            side,
+			Source:          firstNonEmpty(strings.TrimSpace(pos.EntryMode), "paper"),
+			Mode:            firstNonEmpty(strings.TrimSpace(pos.EntryMode), "paper"),
+			TF:              "1m",
+			Strategy:        pos.EntryReason,
+			SetupFamily:     pos.EntrySetupFamily,
+			Grade:           pos.EntryGrade,
+			State:           string(pos.EntryState),
+			TriggerState:    pos.EntryTrigger,
+			ExitProfile:     pos.ExitProfile,
+			ConfluenceScore: pos.EntryConfluenceScore,
+			StrategyReasons: append([]string(nil), pos.EntrySignalReasons...),
+			StrategySources: append([]string(nil), pos.EntrySignalSources...),
+			EntryPx:         entry,
+			ExitPx:          exit,
+			MarkPx:          markPx,
+			LastPx:          lastPx,
+			TriggerRef:      triggerRef,
+			RiskR:           riskR,
+			HoldMin:         holdMin,
+			ProofMin:        proofMin,
+			FailureMin:      failureMin,
+			MFER:            pos.MaxFavorableR,
+			MAER:            pos.MaxAdverseR,
+			CaptureRatio:    pos.CaptureRatio,
+			MaxGivebackR:    pos.MaxGivebackR,
+			PnLUSD:          net,
+			PnLPct:          pnlPct,
+			Fees:            fee,
+			Discovery:       pos.DiscoveryScore,
+			Trigger:         pos.TriggerScore,
+			Execution:       pos.ExecutionScore,
+			Combined:        pos.CombinedScore,
+			StopDistPct:     pos.StopDistancePct,
+			Reason:          reason,
 		})
 	}
 	if err := w.Write(row); err != nil {
@@ -16505,6 +16670,7 @@ func sessionScannerBoost(c candidate, now time.Time) float64 {
 
 func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targetMode string, vpMinTargetPct float64, inertiaEnable bool, inertiaScoreMin, inertiaSlowMin, inertiaFastMax float64, inertiaSlowN, inertiaFastN int, reversalVolSpike float64, flow map[string]flowMetrics) candidate {
 	raw := strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol))
+	_ = reversalVolSpike
 	if cache == nil {
 		cand.Strat = "none"
 		return cand
@@ -16551,190 +16717,60 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		cand.RejectReason = "STATE_INERTIA_KILL"
 		return cand
 	}
-	if strings.EqualFold(cand.Strat, "exhaustion_flip_short") {
-		if envBool("LIVE_ENABLE_OFI", true) && cand.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && cand.OFIZ > envFloat("LIVE_REV_SHORT_MAX_OFI_Z", -0.80) {
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "short_ofi_not_ready"
-			return cand
-		}
-		confirmVWAP := cand.SessionVWAP > 0 && cand.LastClose < cand.SessionVWAP && cand.FastSlope <= 0
-		confirmEMA := cand.EMA9 > 0 && cand.LastClose < cand.EMA9 && cand.FastSlope <= 0
-		lowerHighPrinted := cand.SlowSlope < 0 && cand.FastSlope < 0 && cand.Entry.FailedBounceCount >= 1
-		bounceLowBroken := cand.Entry.FailedReclaimCount >= 1 && cand.FastSlope <= -0.10
-		panicFlush := cand.Entry.BarsSincePeak <= 1 && cand.Entry.DrawdownFromPeakPct <= -6
-		if panicFlush && !confirmVWAP && !confirmEMA && !bounceLowBroken {
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "panic_flush_no_bounce_confirmation"
-			return cand
-		}
-		if !(confirmVWAP || confirmEMA || bounceLowBroken || (lowerHighPrinted && cand.Entry.FailedBounceCount >= 1)) {
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "short_no_failed_reclaim_yet"
-			return cand
-		}
-		entryPx := cand.LastClose
-		if entryPx <= 0 {
-			entryPx = fc[len(fc)-1].C
-		}
-		failedHigh := 0.0
-		lookback := minInt(len(fc), envInt("LIVE_EXHAUSTION_STOP_LOOKBACK_BARS", 12))
-		for i := len(fc) - lookback; i < len(fc); i++ {
-			if i < 0 {
-				continue
-			}
-			failedHigh = maxFloat(failedHigh, fc[i].H)
-		}
-		stopPx := maxFloat(failedHigh, maxFloat(cand.EMA9, cand.SessionVWAP))
-		stopPad := envFloat("LIVE_EXHAUSTION_STOP_PAD_PCT", 0.0035)
-		if stopPx > 0 {
-			stopPx *= 1 + stopPad
-		}
-		if stopPx <= entryPx {
-			stopPx = entryPx * (1 + envFloat("LIVE_EXHAUSTION_MIN_STOP_PCT", 0.02))
-		}
-		risk := stopPx - entryPx
-		tp1 := entryPx - risk*envFloat("LIVE_EXHAUSTION_TP1_R", 0.8)
-		tp2 := entryPx - risk*envFloat("LIVE_EXHAUSTION_TP2_R", 1.6)
-		baseConf := envFloat("LIVE_EXHAUSTION_BASE_CONF", 0.60)
-		confBoost := min(0.20, cand.Entry.IntradayReversalScore*0.02+float64(cand.Entry.FailedReclaimCount)*0.03)
-		cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
-		cand.Sig = strategies.Signal{
-			Active:       true,
-			Name:         "exhaustion_flip_short",
-			Side:         features.SideShort,
-			Entry:        entryPx,
-			Stop:         stopPx,
-			TP1:          tp1,
-			TP2:          tp2,
-			Confidence:   cand.Conf,
-			RejectReason: "",
-			Reasons: []string{
-				fmt.Sprintf("drawdown_from_peak_pct=%.2f", cand.Entry.DrawdownFromPeakPct),
-				fmt.Sprintf("intraday_reversal_score=%.2f", cand.Entry.IntradayReversalScore),
-				fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-				fmt.Sprintf("failed_reclaim_count=%d", cand.Entry.FailedReclaimCount),
-				fmt.Sprintf("failed_bounce_count=%d", cand.Entry.FailedBounceCount),
-				fmt.Sprintf("entry_style=%s", cand.Entry.EntryStyle),
-				fmt.Sprintf("meta_state=%s", cand.Entry.MetaState),
-			},
-			Tags: []string{"reversal_watch", "late_unwind"},
-		}
-		cand.RejectReason = ""
-		return cand
+	rtCtx := &strategies.RuntimeSignalContext{
+		RequestedStrategy:     cand.Strat,
+		Side:                  toFeatureSide(cand.Side),
+		CandidateState:        string(cand.Entry.State),
+		LastClose:             cand.LastClose,
+		EMA9:                  cand.EMA9,
+		SessionVWAP:           cand.SessionVWAP,
+		FastSlope:             cand.FastSlope,
+		SlowSlope:             cand.SlowSlope,
+		OFIZ:                  cand.OFIZ,
+		OFISamples:            cand.OFISamples,
+		ATRPct:                cand.ATRPct,
+		FailedReclaimCount:    cand.Entry.FailedReclaimCount,
+		FailedBounceCount:     cand.Entry.FailedBounceCount,
+		FailedBreakdownCount:  cand.Entry.FailedBreakdownCount,
+		FailedBreakLowCount:   cand.Entry.FailedBreakLowCount,
+		BarsSincePeak:         cand.Entry.BarsSincePeak,
+		BarsSinceTrough:       cand.Entry.BarsSinceTrough,
+		DrawdownFromPeakPct:   cand.Entry.DrawdownFromPeakPct,
+		DrawupFromTroughPct:   cand.Entry.DrawupFromTroughPct,
+		IntradayReversalScore: cand.Entry.IntradayReversalScore,
+		BullReversalScore:     cand.Entry.BullReversalScore,
 	}
-	if strings.EqualFold(cand.Strat, "exhaustion_flip_long") {
-		if envBool("LIVE_ENABLE_OFI", true) && cand.OFISamples >= envInt("LIVE_OFI_MIN_SAMPLES", 8) && cand.OFIZ < envFloat("LIVE_REV_LONG_MIN_OFI_Z", 0.80) {
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "long_ofi_not_ready"
-			return cand
-		}
-		confirmVWAP := cand.SessionVWAP > 0 && cand.LastClose > cand.SessionVWAP && cand.FastSlope >= 0
-		confirmEMA := cand.EMA9 > 0 && cand.LastClose > cand.EMA9 && cand.FastSlope >= 0
-		higherLowPrinted := cand.SlowSlope > 0 && cand.FastSlope > 0 && cand.Entry.FailedBreakdownCount >= 1
-		bounceHighBroken := cand.Entry.FailedBreakLowCount >= 1 && cand.FastSlope >= 0.10
-		failedBreakdownTrap := cand.Entry.FailedBreakdownCount >= 1 && (confirmVWAP || confirmEMA || cand.FastSlope >= 0.05)
-		firstGreen := cand.Entry.BarsSinceTrough <= 1 && cand.Entry.DrawupFromTroughPct >= 4
-		if firstGreen && !(failedBreakdownTrap || confirmVWAP || confirmEMA) {
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "first_green_candle_no_structure"
-			return cand
-		}
-		if !(failedBreakdownTrap || confirmVWAP || confirmEMA || (higherLowPrinted && bounceHighBroken)) {
-			if cand.Entry.FailedBreakdownCount == 0 && cand.Entry.FailedBreakLowCount == 0 {
+	if strings.EqualFold(cand.Strat, "exhaustion_flip_short") ||
+		strings.EqualFold(cand.Strat, "exhaustion_flip_long") ||
+		strings.EqualFold(cand.Strat, "mom_reversal_short") {
+		sig, handled := strategies.EvaluateRuntimeSignal(strategies.Context{
+			Symbol:       raw,
+			TF:           "1m",
+			ScannerScore: cand.Entry.CurrentScore,
+			ScannerGrade: cand.Entry.CurrentGrade,
+			ScoreSlope:   cand.Entry.ScoreSlope,
+			DayUTCPct:    cand.DayUTC24h,
+			UTC4hPct:     cand.UTC4hPct,
+			UTC1hPct:     cand.UTC1hPct,
+			EntryStyle:   cand.Entry.EntryStyle,
+			MetaState:    cand.Entry.MetaState,
+			Snapshot:     snap,
+			Candles:      fc,
+			Runtime:      rtCtx,
+		})
+		if handled {
+			if !sig.Active || strings.TrimSpace(sig.RejectReason) != "" {
 				cand.Strat = "none"
 				cand.Conf = 0
-				cand.RejectReason = "dead_cat_bounce_no_failed_breakdown"
+				cand.RejectReason = sig.RejectReason
 				return cand
 			}
-			cand.Strat = "none"
-			cand.Conf = 0
-			cand.RejectReason = "long_no_reclaim_hold_yet"
+			cand.Sig = sig
+			cand.Strat = sig.Name
+			cand.Conf = sig.Confidence
+			cand.RejectReason = sig.RejectReason
 			return cand
 		}
-		entryPx := cand.LastClose
-		if entryPx <= 0 {
-			entryPx = fc[len(fc)-1].C
-		}
-		failedLow := 0.0
-		lookback := minInt(len(fc), envInt("LIVE_EXHAUSTION_LONG_STOP_LOOKBACK_BARS", 12))
-		for i := len(fc) - lookback; i < len(fc); i++ {
-			if i < 0 {
-				continue
-			}
-			if failedLow == 0 || fc[i].L < failedLow {
-				failedLow = fc[i].L
-			}
-		}
-		stopPx := failedLow
-		if cand.EMA9 > 0 {
-			stopPx = minPositive(stopPx, cand.EMA9)
-		}
-		if cand.SessionVWAP > 0 {
-			stopPx = minPositive(stopPx, cand.SessionVWAP)
-		}
-		stopPad := envFloat("LIVE_EXHAUSTION_LONG_STOP_PAD_PCT", 0.0035)
-		if stopPx > 0 {
-			stopPx *= 1 - stopPad
-		}
-		if stopPx <= 0 || stopPx >= entryPx {
-			stopPx = entryPx * (1 - envFloat("LIVE_EXHAUSTION_LONG_MIN_STOP_PCT", 0.02))
-		}
-		risk := entryPx - stopPx
-		tp1 := entryPx + risk*envFloat("LIVE_EXHAUSTION_LONG_TP1_R", 0.8)
-		tp2 := entryPx + risk*envFloat("LIVE_EXHAUSTION_LONG_TP2_R", 1.6)
-		baseConf := envFloat("LIVE_EXHAUSTION_LONG_BASE_CONF", 0.60)
-		confBoost := min(0.20, cand.Entry.BullReversalScore*0.025+float64(cand.Entry.FailedBreakdownCount)*0.03)
-		cand.Conf = clamp(baseConf+confBoost, 0, 0.88)
-		cand.Sig = strategies.Signal{
-			Active:       true,
-			Name:         "exhaustion_flip_long",
-			Side:         features.SideLong,
-			Entry:        entryPx,
-			Stop:         stopPx,
-			TP1:          tp1,
-			TP2:          tp2,
-			Confidence:   cand.Conf,
-			RejectReason: "",
-			Reasons: []string{
-				fmt.Sprintf("drawup_from_trough_pct=%.2f", cand.Entry.DrawupFromTroughPct),
-				fmt.Sprintf("bull_reversal_score=%.2f", cand.Entry.BullReversalScore),
-				fmt.Sprintf("ofi_z=%.2f", cand.OFIZ),
-				fmt.Sprintf("failed_breakdown_count=%d", cand.Entry.FailedBreakdownCount),
-				fmt.Sprintf("failed_break_low_count=%d", cand.Entry.FailedBreakLowCount),
-				fmt.Sprintf("entry_style=%s", cand.Entry.EntryStyle),
-				fmt.Sprintf("meta_state=%s", cand.Entry.MetaState),
-			},
-			Tags: []string{"reversal_watch_long", "short_exhausting"},
-		}
-		cand.RejectReason = ""
-		return cand
-	}
-	if strings.EqualFold(cand.Strat, "mom_reversal_short") {
-		lastVol := fc[len(fc)-1].V
-		avgVol := smaVolume(fc, 20)
-		volSpike := 0.0
-		if avgVol > 0 {
-			volSpike = lastVol / avgVol
-		}
-		if cand.LastClose < cand.EMA9 && volSpike >= reversalVolSpike {
-			cand.Conf = 0.62 + min(0.18, (volSpike-reversalVolSpike)*0.05)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "mom_reversal_short",
-				Side:   features.SideShort,
-			}
-			cand.RejectReason = ""
-			return cand
-		}
-		cand.Strat = "none"
-		cand.Conf = 0
-		cand.RejectReason = "mom_reversal_short_not_ready"
-		return cand
 	}
 	if envBool("LIVE_SIMPLE_MODE", true) {
 		return applySimpleContinuationFallback(cand)
@@ -16781,18 +16817,25 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		MetaState:    cand.Entry.MetaState,
 		Snapshot:     snap,
 		Candles:      fc,
+		Runtime:      rtCtx,
 	}
 	cs := rt.Eval(ctx)
 	if len(cs) == 0 {
 		if cand.Strat == "mom_reversal" {
-			cand.Conf = 0.35 + min(0.25, abs(cand.Entry.ScoreSlope)*0.15)
-			cand.Sig = strategies.Signal{
-				Active: true,
-				Name:   "mom_reversal",
-				Side:   toFeatureSide(cand.Side),
+			sig, handled := strategies.EvaluateRuntimeSignal(ctx)
+			if handled {
+				if !sig.Active || strings.TrimSpace(sig.RejectReason) != "" {
+					cand.Strat = "none"
+					cand.Conf = 0
+					cand.RejectReason = sig.RejectReason
+					return cand
+				}
+				cand.Sig = sig
+				cand.Strat = sig.Name
+				cand.Conf = sig.Confidence
+				cand.RejectReason = sig.RejectReason
+				return cand
 			}
-			cand.RejectReason = ""
-			return cand
 		}
 		return applySimpleContinuationFallback(cand)
 	}
@@ -16804,19 +16847,17 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 			break
 		}
 	}
+	chosen = strategies.ApplySharedInvalidations(ctx, chosen)
+	if strings.TrimSpace(chosen.RejectReason) != "" || !chosen.Active {
+		cand.Strat = "none"
+		cand.Conf = 0
+		cand.RejectReason = chosen.RejectReason
+		return cand
+	}
 	cand.Sig = chosen
 	cand.Strat = chosen.Name
 	cand.Conf = chosen.Confidence
 	cand.RejectReason = chosen.RejectReason
-	if strings.EqualFold(cand.Side, "BUY") &&
-		cand.Entry.State == inplay.StateCooling &&
-		(cand.Strat == "failed_auction_magnet" || cand.Strat == "bos_pb" || cand.Strat == "fa") &&
-		cand.SessionVWAP > 0 && cand.EMA9 > 0 &&
-		cand.LastClose < cand.SessionVWAP && cand.LastClose < cand.EMA9 {
-		cand.Strat = "none"
-		cand.Conf = 0
-		cand.RejectReason = "VWAP_EMA_LONG_INVALIDATION"
-	}
 	return cand
 }
 
@@ -19757,13 +19798,27 @@ func (s *liveStatusStore) Set(v liveStatus) {
 	s.mu.Unlock()
 }
 
+func (s *liveStatusStore) SetPaperProvider(fn func() *livePaperSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.paperProvider = fn
+	s.mu.Unlock()
+}
+
 func (s *liveStatusStore) Snapshot() liveStatus {
 	if s == nil {
 		return liveStatus{}
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cur
+	cur := s.cur
+	provider := s.paperProvider
+	s.mu.RUnlock()
+	if provider != nil {
+		cur.Paper = provider()
+	}
+	return cur
 }
 
 func startLiveStatusServer(addr string, s *liveStatusStore) error {
@@ -21117,7 +21172,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			pendingManual = len(c.execMgr.pendingManualRequests(0))
 		}
 		return notify.BuildEventHTML("🧭", "STATUS",
-			fmt.Sprintf("<b>Mode:</b> dry_run=%v live_enabled=%v", s.DryRun, s.LiveEnabled),
+			fmt.Sprintf("<b>Mode:</b> %s | <b>State:</b> %s | dry_run=%v live_enabled=%v", firstNonEmpty(s.Mode, "manual_only"), firstNonEmpty(s.ModeState, "unknown"), s.DryRun, s.LiveEnabled),
 			fmt.Sprintf("<b>In-Play:</b> long=%d short=%d", s.LongInPlay, s.ShortInPlay),
 			fmt.Sprintf("<b>Top:</b> %s %s | g=%s s=%.2f", cleanSymbol(s.TopSymbol), displayPositionSide(s.TopSide), s.TopGrade, s.TopScore),
 			fmt.Sprintf("<b>Available USDT:</b> %.2f", s.AvailableUSDT),
@@ -21332,8 +21387,13 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if !modeDryRun && modeLiveEnabled {
 			modeLabel = "LIVE"
 		}
+		effectiveMode := "manual_only"
+		if c.mode != nil {
+			effectiveMode = string(c.mode.operatingMode())
+		}
 		return notify.BuildEventHTML("🎛️", "MODE",
-			fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
+			fmt.Sprintf("<b>Execution posture:</b> %s", effectiveMode),
+			fmt.Sprintf("<b>Account mode:</b> %s", modeLabel),
 			fmt.Sprintf("<b>Dry Run:</b> %v", modeDryRun),
 			fmt.Sprintf("<b>Live Entries Enabled:</b> %v", modeLiveEnabled),
 			fmt.Sprintf("<b>Paper Entries Enabled:</b> %v", modePaperEnabled),

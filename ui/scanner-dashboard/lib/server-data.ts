@@ -41,10 +41,122 @@ type RawLiveStatus = {
   short_inplay?: number;
   available_usdt?: number;
   paper_summary?: string;
+  paper?: {
+    mode?: string;
+    summary?: string;
+    balance?: number;
+    reserve?: number;
+    equity?: number;
+    open_pnl?: number;
+    realized_today?: number;
+    open_count?: number;
+    recent_closed_count?: number;
+    recent_decision_count?: number;
+    open_positions?: Array<Record<string, unknown>>;
+    recent_closed?: Array<Record<string, unknown>>;
+    recent_decisions?: Array<Record<string, unknown>>;
+  };
   scanner_longs?: Array<Record<string, unknown>>;
   scanner_shorts?: Array<Record<string, unknown>>;
   exec?: Record<string, number>;
 };
+
+function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
+  if (!raw) {
+    return undefined;
+  }
+  return {
+    mode: typeof raw.mode === "string" ? raw.mode : undefined,
+    summary: typeof raw.summary === "string" ? raw.summary : undefined,
+    balance: Number(raw.balance || 0),
+    reserve: Number(raw.reserve || 0),
+    equity: Number(raw.equity || 0),
+    openPnl: Number(raw.open_pnl || 0),
+    realizedToday: Number(raw.realized_today || 0),
+    openCount: Number(raw.open_count || 0),
+    recentClosedCount: Number(raw.recent_closed_count || 0),
+    recentDecisionCount: Number(raw.recent_decision_count || 0),
+    openPositions: (raw.open_positions || []).map((row) => ({
+      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+      side: String(row.side || ""),
+      source: typeof row.source === "string" ? row.source : undefined,
+      mode: typeof row.mode === "string" ? row.mode : undefined,
+      strategy: typeof row.strategy === "string" ? row.strategy : undefined,
+      setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
+      grade: typeof row.grade === "string" ? row.grade : undefined,
+      state: typeof row.state === "string" ? row.state : undefined,
+      triggerState: typeof row.trigger_state === "string" ? row.trigger_state : undefined,
+      exitProfile: typeof row.exit_profile === "string" ? row.exit_profile : undefined,
+      entryPrice: Number(row.entry_price || 0),
+      markPrice: Number(row.mark_price || 0),
+      stopPrice: Number(row.stop_price || 0),
+      tp1: Number(row.tp1 || 0),
+      tp2: Number(row.tp2 || 0),
+      tp3: Number(row.tp3 || 0),
+      qty: Number(row.qty || 0),
+      margin: Number(row.margin || 0),
+      leverage: Number(row.leverage || 0),
+      unrealizedPnl: Number(row.unrealized_pnl || 0),
+      unrealizedPct: Number(row.unrealized_pct || 0),
+      realizedPnl: Number(row.realized_pnl || 0),
+      mfeR: Number(row.mfe_r || 0),
+      maeR: Number(row.mae_r || 0),
+      openedAt: typeof row.opened_at === "string" ? row.opened_at : undefined,
+      holdMin: Number(row.hold_min || 0),
+      entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined,
+      entryDecisionReject:
+        typeof row.entry_decision_reject === "string" ? row.entry_decision_reject : undefined
+    })),
+    recentClosed: (raw.recent_closed || []).map((row) => ({
+      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+      side: String(row.side || ""),
+      source: typeof row.source === "string" ? row.source : undefined,
+      mode: typeof row.mode === "string" ? row.mode : undefined,
+      strategy: typeof row.strategy === "string" ? row.strategy : undefined,
+      setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
+      grade: typeof row.grade === "string" ? row.grade : undefined,
+      state: typeof row.state === "string" ? row.state : undefined,
+      triggerState: typeof row.trigger_state === "string" ? row.trigger_state : undefined,
+      exitProfile: typeof row.exit_profile === "string" ? row.exit_profile : undefined,
+      entryPrice: Number(row.entry_price || 0),
+      exitPrice: Number(row.exit_price || 0),
+      pnlUsd: Number(row.pnl_usd || 0),
+      pnlPct: Number(row.pnl_pct || 0),
+      fees: Number(row.fees || 0),
+      riskR: Number(row.risk_r || 0),
+      holdMin: Number(row.hold_min || 0),
+      mfeR: Number(row.mfe_r || 0),
+      maeR: Number(row.mae_r || 0),
+      captureRatio: Number(row.capture_ratio || 0),
+      maxGivebackR: Number(row.max_giveback_r || 0),
+      exitReason: typeof row.exit_reason === "string" ? row.exit_reason : undefined,
+      closedAt: typeof row.closed_at === "string" ? row.closed_at : undefined
+    })),
+    recentDecisions: (raw.recent_decisions || []).map((row) => ({
+      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+      side: String(row.side || ""),
+      source: typeof row.source === "string" ? row.source : undefined,
+      mode: typeof row.mode === "string" ? row.mode : undefined,
+      strategy: typeof row.strategy === "string" ? row.strategy : undefined,
+      setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
+      grade: typeof row.grade === "string" ? row.grade : undefined,
+      state: typeof row.state === "string" ? row.state : undefined,
+      triggerState: typeof row.trigger_state === "string" ? row.trigger_state : undefined,
+      exitProfile: typeof row.exit_profile === "string" ? row.exit_profile : undefined,
+      score: Number(row.score || 0),
+      slope: Number(row.slope || 0),
+      confluenceScore: Number(row.confluence_score || 0),
+      entryPrice: Number(row.entry_price || 0),
+      stopDistancePct: Number(row.stop_distance_pct || 0),
+      approved: Boolean(row.approved),
+      rejectReason: typeof row.reject_reason === "string" ? row.reject_reason : undefined,
+      gateReasons: Array.isArray(row.gate_reasons)
+        ? row.gate_reasons.filter((v): v is string => typeof v === "string")
+        : [],
+      decidedAt: typeof row.decided_at === "string" ? row.decided_at : undefined
+    }))
+  };
+}
 
 type FetchResult<T> = {
   data: T | null;
@@ -253,6 +365,7 @@ function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: b
     shortInPlay: raw.short_inplay,
     availableUsdt: raw.available_usdt,
     paperSummary: raw.paper_summary,
+    paper: normalizePaper(raw.paper),
     scannerLongs: (raw.scanner_longs || []).map(normalizeLiveScanItem),
     scannerShorts: (raw.scanner_shorts || []).map(normalizeLiveScanItem),
     exec: raw.exec,

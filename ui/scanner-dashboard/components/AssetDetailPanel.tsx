@@ -23,16 +23,6 @@ type FeedEntry = {
   secondary?: string;
 };
 
-function gradeTone(value?: string) {
-  const key = (value || "N/A").toUpperCase();
-  if (key === "A+") return "grade-aplus";
-  if (key === "A") return "grade-a";
-  if (key === "B") return "grade-b";
-  if (key === "C") return "grade-c";
-  if (key === "D") return "grade-d";
-  return "tone-muted";
-}
-
 function numericTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "tone-muted";
   if (value > 0) return "tone-positive";
@@ -300,16 +290,12 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
           <div className="score-card">
             <span className="tile-label">Long Score</span>
             <strong>{formatNumber(detail.longScannerRow?.score, 2)}</strong>
-            <span className={`badge ${gradeTone(detail.longScannerRow?.grade)}`}>
-              {detail.longScannerRow?.grade || "N/A"}
-            </span>
+            <span>{detail.longScannerRow?.grade || "N/A"}</span>
           </div>
           <div className="score-card">
             <span className="tile-label">Short Score</span>
             <strong>{formatNumber(detail.shortScannerRow?.score, 2)}</strong>
-            <span className={`badge ${gradeTone(detail.shortScannerRow?.grade)}`}>
-              {detail.shortScannerRow?.grade || "N/A"}
-            </span>
+            <span>{detail.shortScannerRow?.grade || "N/A"}</span>
           </div>
         </div>
       </div>

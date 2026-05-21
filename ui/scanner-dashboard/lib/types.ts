@@ -84,12 +84,108 @@ export interface LiveView {
   shortInPlay?: number;
   availableUsdt?: number;
   paperSummary?: string;
+  paper?: PaperView;
   scannerLongs?: LiveScanItem[];
   scannerShorts?: LiveScanItem[];
   exec?: Record<string, number>;
   endpoint: string;
   connected: boolean;
   health: ConnectivityState;
+}
+
+export interface PaperPositionView {
+  symbol: string;
+  side: string;
+  source?: string;
+  mode?: string;
+  strategy?: string;
+  setupFamily?: string;
+  grade?: string;
+  state?: string;
+  triggerState?: string;
+  exitProfile?: string;
+  entryPrice: number;
+  markPrice: number;
+  stopPrice: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+  qty: number;
+  margin: number;
+  leverage: number;
+  unrealizedPnl: number;
+  unrealizedPct: number;
+  realizedPnl: number;
+  mfeR: number;
+  maeR: number;
+  openedAt?: string;
+  holdMin: number;
+  entryReason?: string;
+  entryDecisionReject?: string;
+}
+
+export interface PaperClosedTradeView {
+  symbol: string;
+  side: string;
+  source?: string;
+  mode?: string;
+  strategy?: string;
+  setupFamily?: string;
+  grade?: string;
+  state?: string;
+  triggerState?: string;
+  exitProfile?: string;
+  entryPrice: number;
+  exitPrice: number;
+  pnlUsd: number;
+  pnlPct: number;
+  fees: number;
+  riskR: number;
+  holdMin: number;
+  mfeR: number;
+  maeR: number;
+  captureRatio: number;
+  maxGivebackR: number;
+  exitReason?: string;
+  closedAt?: string;
+}
+
+export interface PaperDecisionView {
+  symbol: string;
+  side: string;
+  source?: string;
+  mode?: string;
+  strategy?: string;
+  setupFamily?: string;
+  grade?: string;
+  state?: string;
+  triggerState?: string;
+  exitProfile?: string;
+  score: number;
+  slope: number;
+  confluenceScore: number;
+  entryPrice: number;
+  stopDistancePct: number;
+  approved: boolean;
+  rejectReason?: string;
+  gateReasons?: string[];
+  decidedAt?: string;
+}
+
+export interface PaperView {
+  mode?: string;
+  summary?: string;
+  balance: number;
+  reserve: number;
+  equity: number;
+  openPnl: number;
+  realizedToday: number;
+  openCount: number;
+  recentClosedCount: number;
+  recentDecisionCount: number;
+  openPositions: PaperPositionView[];
+  recentClosed: PaperClosedTradeView[];
+  recentDecisions: PaperDecisionView[];
 }
 
 export interface EndpointStatus {

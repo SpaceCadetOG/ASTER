@@ -21,6 +21,13 @@ func NewEventLogger(path string, enabled, toStdout, simulated bool) *EventLogger
 	return &EventLogger{path: path, enabled: enabled, toStdout: toStdout, simulated: simulated}
 }
 
+func (l *EventLogger) Path() string {
+	if l == nil {
+		return ""
+	}
+	return l.path
+}
+
 func (l *EventLogger) Emit(e Event) {
 	if l == nil || !l.enabled {
 		return

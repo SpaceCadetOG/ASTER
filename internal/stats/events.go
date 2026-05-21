@@ -15,10 +15,17 @@ type Event struct {
 	Symbol            string    `json:"symbol,omitempty"`
 	Side              string    `json:"side,omitempty"`
 	Source            string    `json:"source,omitempty"`
+	Mode              string    `json:"mode,omitempty"`
 	TF                string    `json:"tf,omitempty"`
 	Strategy          string    `json:"strategy,omitempty"`
+	SetupFamily       string    `json:"setup_family,omitempty"`
+	Grade             string    `json:"grade,omitempty"`
+	State             string    `json:"state,omitempty"`
 	TriggerState      string    `json:"trigger_state,omitempty"`
 	ExitProfile       string    `json:"exit_profile,omitempty"`
+	ConfluenceScore   float64   `json:"confluence_score,omitempty"`
+	StrategyReasons   []string  `json:"strategy_reasons,omitempty"`
+	StrategySources   []string  `json:"strategy_sources,omitempty"`
 	Score             float64   `json:"score,omitempty"`
 	Slope             float64   `json:"slope,omitempty"`
 	VolumeRatio       float64   `json:"volume_ratio,omitempty"`
@@ -29,6 +36,8 @@ type Event struct {
 	TriggerRef        string    `json:"trigger_ref,omitempty"`
 	RiskR             float64   `json:"risk_r,omitempty"`
 	HoldMin           float64   `json:"hold_min,omitempty"`
+	ProofMin          float64   `json:"proof_min,omitempty"`
+	FailureMin        float64   `json:"failure_min,omitempty"`
 	MFER              float64   `json:"mfe_r,omitempty"`
 	MAER              float64   `json:"mae_r,omitempty"`
 	CaptureRatio      float64   `json:"capture_ratio,omitempty"`

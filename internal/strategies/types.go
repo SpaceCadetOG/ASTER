@@ -51,26 +51,26 @@ type FlowSnapshot struct {
 }
 
 type TrendSnapshot struct {
-	TF1mDir          string
-	TF3mDir          string
-	TF5mDir          string
-	TF15mDir         string
-	Slope1m          float64
-	Slope5m          float64
-	Slope15m         float64
-	AboveVWAP        bool
-	AboveEMA20       bool
-	AboveEMA50       bool
-	BelowVWAP        bool
-	BelowEMA20       bool
-	BelowEMA50       bool
-	Compression      bool
-	ImpulseUp        bool
-	ImpulseDown      bool
-	BreakoutLevel    float64
-	BreakdownLevel   float64
-	CompressionHigh  float64
-	CompressionLow   float64
+	TF1mDir         string
+	TF3mDir         string
+	TF5mDir         string
+	TF15mDir        string
+	Slope1m         float64
+	Slope5m         float64
+	Slope15m        float64
+	AboveVWAP       bool
+	AboveEMA20      bool
+	AboveEMA50      bool
+	BelowVWAP       bool
+	BelowEMA20      bool
+	BelowEMA50      bool
+	Compression     bool
+	ImpulseUp       bool
+	ImpulseDown     bool
+	BreakoutLevel   float64
+	BreakdownLevel  float64
+	CompressionHigh float64
+	CompressionLow  float64
 }
 
 type Target struct {
@@ -195,11 +195,36 @@ type Context struct {
 	SymbolStopouts90m int
 	Snapshot          features.Snapshot
 	Candles           []features.Candle
+	Runtime           *RuntimeSignalContext
 }
 
 type Strategy interface {
 	Name() string
 	Eval(ctx Context) Signal
+}
+
+type RuntimeSignalContext struct {
+	RequestedStrategy     string
+	Side                  features.Side
+	CandidateState        string
+	LastClose             float64
+	EMA9                  float64
+	SessionVWAP           float64
+	FastSlope             float64
+	SlowSlope             float64
+	OFIZ                  float64
+	OFISamples            int
+	ATRPct                float64
+	FailedReclaimCount    int
+	FailedBounceCount     int
+	FailedBreakdownCount  int
+	FailedBreakLowCount   int
+	BarsSincePeak         int
+	BarsSinceTrough       int
+	DrawdownFromPeakPct   float64
+	DrawupFromTroughPct   float64
+	IntradayReversalScore float64
+	BullReversalScore     float64
 }
 
 func clamp01(x float64) float64 {

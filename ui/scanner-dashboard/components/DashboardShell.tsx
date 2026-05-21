@@ -433,18 +433,180 @@ export function DashboardShell() {
       {tab === "paper" ? (
         <section className="panel-stack">
           <div className="panel runtime-grid">
-            <MetricTile label="Paper Summary" value={data.live?.paperSummary || "Unavailable"} />
-            <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
-            <MetricTile label="Pending Exec" value={String(data.live?.exec?.pending || 0)} />
-            <MetricTile label="Closed Exec" value={String(data.live?.exec?.closed || 0)} />
+            <MetricTile label="Paper Summary" value={data.live?.paper?.summary || data.live?.paperSummary || "Unavailable"} />
+            <MetricTile label="Open Paper" value={String(data.live?.paper?.openCount || 0)} />
+            <MetricTile label="Recent Closed" value={String(data.live?.paper?.recentClosedCount || 0)} />
+            <MetricTile label="Recent Decisions" value={String(data.live?.paper?.recentDecisionCount || 0)} />
             <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
           </div>
-          <div className="panel placeholder-grid">
-            <div className="placeholder-card">Detailed paper trades require future paper endpoints.</div>
-            <div className="placeholder-card">MFE/MAE unavailable if not exposed.</div>
-            <div className="placeholder-card">W/L unavailable if not exposed.</div>
-            <div className="placeholder-card">Exit reasons unavailable if not exposed.</div>
-            <div className="placeholder-card">Account/open positions placeholders remain read-only for now.</div>
+          <div className="panel runtime-grid">
+            <MetricTile
+              label="Mode"
+              value={data.live?.paper?.mode || (data.live?.dryRun ? "paper" : "unavailable")}
+            />
+            <MetricTile label="Dry Run" value={data.live?.dryRun ? "true" : "false"} />
+            <MetricTile label="Live Enabled" value={data.live?.liveEnabled ? "true" : "false"} />
+            <MetricTile label="Paper Equity" value={formatCompactUsd(data.live?.paper?.equity)} />
+            <MetricTile label="Paper Balance" value={formatCompactUsd(data.live?.paper?.balance)} />
+            <MetricTile label="Open PnL" value={formatCompactUsd(data.live?.paper?.openPnl)} />
+            <MetricTile label="Realized Today" value={formatCompactUsd(data.live?.paper?.realizedToday)} />
+          </div>
+
+          <div className="panel">
+            <h3>Open Paper Positions</h3>
+            {!data.live?.paper?.openPositions?.length ? (
+              <div className="placeholder-card">No active paper positions exposed by the runtime.</div>
+            ) : (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Strategy</th>
+                      <th>Grade</th>
+                      <th>State</th>
+                      <th>Entry</th>
+                      <th>Mark</th>
+                      <th>Stop</th>
+                      <th>TP</th>
+                      <th>PnL</th>
+                      <th>MFE/MAE</th>
+                      <th>Opened</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.live.paper.openPositions.map((pos) => (
+                      <tr key={`${pos.symbol}-${pos.side}-${pos.openedAt || pos.entryPrice}`}>
+                        <td>{pos.symbol}</td>
+                        <td>{pos.side}</td>
+                        <td>
+                          <strong>{pos.strategy || "N/A"}</strong>
+                          <br />
+                          <small>{pos.mode || pos.source || "paper"}</small>
+                        </td>
+                        <td>{pos.grade || "N/A"}</td>
+                        <td>{pos.state || "N/A"}</td>
+                        <td>{formatNumber(pos.entryPrice, 4)}</td>
+                        <td>{formatNumber(pos.markPrice, 4)}</td>
+                        <td>{formatNumber(pos.stopPrice, 4)}</td>
+                        <td>
+                          {formatNumber(pos.tp1, 4)}
+                          {pos.tp2 ? ` / ${formatNumber(pos.tp2, 4)}` : ""}
+                        </td>
+                        <td>
+                          <strong>{formatCompactUsd(pos.unrealizedPnl)}</strong>
+                          <br />
+                          <small>{formatPercent(pos.unrealizedPct, 2)}</small>
+                        </td>
+                        <td>
+                          {formatNumber(pos.mfeR, 2)} / {formatNumber(pos.maeR, 2)}
+                        </td>
+                        <td>{formatTime(pos.openedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="panel">
+            <h3>Recent Closed Paper Trades</h3>
+            {!data.live?.paper?.recentClosed?.length ? (
+              <div className="placeholder-card">No recent closed paper trades exposed by the runtime.</div>
+            ) : (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Closed</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Strategy</th>
+                      <th>Entry</th>
+                      <th>Exit</th>
+                      <th>PnL</th>
+                      <th>R</th>
+                      <th>MFE/MAE</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.live.paper.recentClosed.map((trade) => (
+                      <tr key={`${trade.symbol}-${trade.closedAt || trade.exitPrice}`}>
+                        <td>{formatTime(trade.closedAt)}</td>
+                        <td>{trade.symbol}</td>
+                        <td>{trade.side}</td>
+                        <td>
+                          <strong>{trade.strategy || "N/A"}</strong>
+                          <br />
+                          <small>{trade.mode || trade.source || "paper"}</small>
+                        </td>
+                        <td>{formatNumber(trade.entryPrice, 4)}</td>
+                        <td>{formatNumber(trade.exitPrice, 4)}</td>
+                        <td>
+                          <strong>{formatCompactUsd(trade.pnlUsd)}</strong>
+                          <br />
+                          <small>{formatPercent(trade.pnlPct, 2)}</small>
+                        </td>
+                        <td>{formatNumber(trade.riskR, 2)}</td>
+                        <td>
+                          {formatNumber(trade.mfeR, 2)} / {formatNumber(trade.maeR, 2)}
+                        </td>
+                        <td>{trade.exitReason || "N/A"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="panel">
+            <h3>Recent Paper Decisions</h3>
+            {!data.live?.paper?.recentDecisions?.length ? (
+              <div className="placeholder-card">No recent paper decisions exposed by the runtime.</div>
+            ) : (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th>Strategy</th>
+                      <th>Grade</th>
+                      <th>Score</th>
+                      <th>Decision</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.live.paper.recentDecisions.map((decision) => (
+                      <tr key={`${decision.symbol}-${decision.decidedAt || decision.entryPrice}`}>
+                        <td>{formatTime(decision.decidedAt)}</td>
+                        <td>{decision.symbol}</td>
+                        <td>{decision.side}</td>
+                        <td>
+                          <strong>{decision.strategy || "N/A"}</strong>
+                          <br />
+                          <small>{decision.setupFamily || decision.mode || "paper_auto"}</small>
+                        </td>
+                        <td>{decision.grade || "N/A"}</td>
+                        <td>
+                          {formatNumber(decision.score, 2)}
+                          <br />
+                          <small>slope {formatNumber(decision.slope, 3)}</small>
+                        </td>
+                        <td>{decision.approved ? "APPROVED" : "REJECTED"}</td>
+                        <td>{decision.rejectReason || decision.gateReasons?.[0] || "approved"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </section>
       ) : null}
