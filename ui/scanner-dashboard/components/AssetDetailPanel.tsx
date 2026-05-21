@@ -1,4 +1,5 @@
 import {
+  clampText,
   formatClockTime,
   formatCompactUsd,
   formatKeyLabel,
@@ -23,6 +24,16 @@ type FeedEntry = {
   secondary?: string;
 };
 
+function gradeTone(value?: string) {
+  const key = (value || "N/A").toUpperCase();
+  if (key === "A+") return "grade-aplus";
+  if (key === "A") return "grade-a";
+  if (key === "B") return "grade-b";
+  if (key === "C") return "grade-c";
+  if (key === "D") return "grade-d";
+  return "tone-muted";
+}
+
 function numericTone(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "tone-muted";
   if (value > 0) return "tone-positive";
@@ -40,11 +51,13 @@ function setupSummary(data: Record<string, unknown> | null) {
     };
   }
   const score = data.score;
-  const trend = stringifySummaryValue(
-    data.trend || data.bias || data.direction || data.label || data.regime || "Unavailable"
+  const trend = summarizeSetupFacet(
+    data.trend || data.bias || data.direction || data.label || data.regime || "Unavailable",
+    ["summary", "label", "direction", "bias", "state", "regime", "ema9", "ema21", "spread", "ratio"]
   );
-  const effort = stringifySummaryValue(
-    data.effort || data.participation || data.intensity || "Unavailable"
+  const effort = summarizeSetupFacet(
+    data.effort || data.participation || data.intensity || "Unavailable",
+    ["summary", "label", "intensity", "participation", "volume", "flow", "pressure", "absorption"]
   );
   const note = [
     data.order_block,
@@ -60,8 +73,35 @@ function setupSummary(data: Record<string, unknown> | null) {
     score: typeof score === "number" ? formatNumber(score, 2) : String(score || "N/A"),
     trend,
     effort,
-    note: note || "No order block or absorption notes returned."
+    note: clampText(note || "No order block or absorption notes returned.", 180)
   };
+}
+
+function summarizeSetupFacet(value: unknown, preferredKeys: string[]): string {
+  if (value === null || value === undefined) return "Unavailable";
+  if (typeof value === "string") return clampText(value, 96) || "Unavailable";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return clampText(value.slice(0, 3).map((item) => summarizeSetupFacet(item, preferredKeys)).join(" · "), 96);
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const parts = preferredKeys
+      .filter((key) => record[key] !== undefined && record[key] !== null && String(record[key]).trim() !== "")
+      .slice(0, 3)
+      .map((key) => `${formatKeyLabel(key)} ${formatSummaryLeaf(record[key])}`);
+    if (parts.length) {
+      return clampText(parts.join(" · "), 110);
+    }
+    return clampText(
+      Object.entries(record)
+        .slice(0, 3)
+        .map(([key, item]) => `${formatKeyLabel(key)} ${formatSummaryLeaf(item)}`)
+        .join(" · "),
+      110
+    );
+  }
+  return "Unavailable";
 }
 
 function stringifySummaryValue(value: unknown): string {
@@ -74,10 +114,30 @@ function stringifySummaryValue(value: unknown): string {
   }
   if (typeof value === "object") {
     return Object.entries(value as Record<string, unknown>)
-      .map(([key, item]) => `${formatKeyLabel(key)} ${stringifySummaryValue(item)}`)
+      .slice(0, 4)
+      .map(([key, item]) => `${formatKeyLabel(key)} ${formatSummaryLeaf(item)}`)
       .join(" · ");
   }
   return "Unavailable";
+}
+
+function formatSummaryLeaf(value: unknown): string {
+  if (typeof value === "number") {
+    return Math.abs(value) >= 100 ? formatNumber(value, 2) : formatNumber(value, 4);
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
+    return clampText(String(value), 48);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 3).map((item) => formatSummaryLeaf(item)).join(", ");
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .slice(0, 2)
+      .map(([key, item]) => `${formatKeyLabel(key)} ${formatSummaryLeaf(item)}`)
+      .join(", ");
+  }
+  return "N/A";
 }
 
 function extractModuleFields(module: ModuleSummary) {
@@ -290,12 +350,16 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
           <div className="score-card">
             <span className="tile-label">Long Score</span>
             <strong>{formatNumber(detail.longScannerRow?.score, 2)}</strong>
-            <span>{detail.longScannerRow?.grade || "N/A"}</span>
+            <span className={`grade-text grade-large ${gradeTone(detail.longScannerRow?.grade)}`}>
+              {detail.longScannerRow?.grade || "N/A"}
+            </span>
           </div>
           <div className="score-card">
             <span className="tile-label">Short Score</span>
             <strong>{formatNumber(detail.shortScannerRow?.score, 2)}</strong>
-            <span>{detail.shortScannerRow?.grade || "N/A"}</span>
+            <span className={`grade-text grade-large ${gradeTone(detail.shortScannerRow?.grade)}`}>
+              {detail.shortScannerRow?.grade || "N/A"}
+            </span>
           </div>
         </div>
       </div>
@@ -389,7 +453,7 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
               <strong>{longSummary.effort}</strong>
             </div>
           </div>
-          <p className="panel-copy">{longSummary.note}</p>
+          <p className="panel-copy summary-copy">{longSummary.note}</p>
           <JsonAccordion title="Long Confluence Raw" payload={detail.analytics.longConfluence} />
         </article>
 
@@ -409,7 +473,7 @@ export function AssetDetailPanel({ detail }: { detail?: AssetDetail }) {
               <strong>{shortSummary.effort}</strong>
             </div>
           </div>
-          <p className="panel-copy">{shortSummary.note}</p>
+          <p className="panel-copy summary-copy">{shortSummary.note}</p>
           <JsonAccordion title="Short Confluence Raw" payload={detail.analytics.shortConfluence} />
         </article>
       </div>

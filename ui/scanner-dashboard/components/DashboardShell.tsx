@@ -6,6 +6,7 @@ import { AssetTable } from "@/components/AssetTable";
 import { MetricTile } from "@/components/MetricTile";
 import { Tabs } from "@/components/Tabs";
 import {
+  clampText,
   formatCompactUsd,
   formatNumber,
   formatPercent,
@@ -60,9 +61,36 @@ function statusLabel(state: EndpointStatus["state"]) {
   return "UNAVAILABLE";
 }
 
+function gradeTone(value?: string) {
+  const key = (value || "N/A").toUpperCase();
+  if (key === "A+") return "grade-aplus";
+  if (key === "A") return "grade-a";
+  if (key === "B") return "grade-b";
+  if (key === "C") return "grade-c";
+  if (key === "D") return "grade-d";
+  return "tone-muted";
+}
+
+function summarizeAccountMode(connected?: boolean, dryRun?: boolean, liveEnabled?: boolean) {
+  if (!connected) return "Unavailable";
+  return `${dryRun ? "Paper" : "Live"} / ${liveEnabled ? "Enabled" : "Disabled"}`;
+}
+
+function paperAccountHero(data: DashboardData | null) {
+  const paper = data?.live?.paper;
+  if (!paper) return "Paper account unavailable.";
+  return [
+    `Balance ${formatCompactUsd(paper.balance)}`,
+    `Equity ${formatCompactUsd(paper.equity)}`,
+    `Open PnL ${formatCompactUsd(paper.openPnl)}`,
+    `Net Day ${formatCompactUsd((paper.realizedToday || 0) + (paper.openPnl || 0))}`
+  ].join("\n");
+}
+
 export function DashboardShell() {
   const [tab, setTab] = useState<DashboardTab>("overview");
   const [scannerTab, setScannerTab] = useState<"long" | "short" | "live">("long");
+  const [accountTab, setAccountTab] = useState<"paper" | "live">("paper");
   const [data, setData] = useState<DashboardData | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("");
   const [selectedSide, setSelectedSide] = useState<ScannerSide>("long");
@@ -141,6 +169,8 @@ export function DashboardShell() {
         : data?.longScanner || null;
 
   const runtimeGenerated = data?.live?.generated || data?.generatedAt;
+  const paperHero = paperAccountHero(data);
+  const runtimeAccountSummary = data?.live?.paper?.summary || data?.live?.paperSummary || "Unavailable";
 
   const handleSelect = (symbol: string, side: ScannerSide) => {
     setSelectedSymbol(symbol);
@@ -222,7 +252,11 @@ export function DashboardShell() {
           label="Top Candidate"
           value={`${data.live?.topSymbol || "N/A"} ${data.live?.topSide || ""}`.trim()}
         />
-        <MetricTile label="Top Grade" value={data.live?.topGrade || "N/A"} />
+        <MetricTile
+          label="Top Grade"
+          value={data.live?.topGrade || "N/A"}
+          valueClassName={`grade-text ${gradeTone(data.live?.topGrade)}`}
+        />
         <MetricTile label="Top Score" value={formatNumber(data.live?.topScore, 2)} />
         <MetricTile label="Top Slope" value={formatNumber(data.live?.topSlope, 3)} />
         <MetricTile
@@ -282,8 +316,8 @@ export function DashboardShell() {
                   <strong>{formatTime(runtimeGenerated)}</strong>
                 </div>
                 <div className="kv-row">
-                  <span>Paper Summary</span>
-                  <strong>{data.live?.paperSummary || "Unavailable"}</strong>
+                  <span>Account Summary</span>
+                  <strong>{clampText(runtimeAccountSummary, 110) || "Unavailable"}</strong>
                 </div>
               </div>
             </div>
@@ -418,7 +452,11 @@ export function DashboardShell() {
             label="Top Candidate"
             value={`${data.live?.topSymbol || "N/A"} ${data.live?.topSide || ""}`.trim()}
           />
-          <MetricTile label="Top Grade" value={data.live?.topGrade || "N/A"} />
+          <MetricTile
+            label="Top Grade"
+            value={data.live?.topGrade || "N/A"}
+            valueClassName={`grade-text ${gradeTone(data.live?.topGrade)}`}
+          />
           <MetricTile label="Top Score" value={formatNumber(data.live?.topScore, 2)} />
           <MetricTile label="Top Slope" value={formatNumber(data.live?.topSlope, 3)} />
           <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
@@ -426,30 +464,83 @@ export function DashboardShell() {
           <MetricTile label="Closed Exec" value={String(data.live?.exec?.closed || 0)} />
           <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
           <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
-          <MetricTile label="Paper Summary" value={data.live?.paperSummary || "Unavailable"} />
+          <MetricTile
+            label="Account Summary"
+            value={clampText(runtimeAccountSummary, 64) || "Unavailable"}
+          />
         </section>
       ) : null}
 
       {tab === "paper" ? (
         <section className="panel-stack">
-          <div className="panel runtime-grid">
-            <MetricTile label="Paper Summary" value={data.live?.paper?.summary || data.live?.paperSummary || "Unavailable"} />
-            <MetricTile label="Open Paper" value={String(data.live?.paper?.openCount || 0)} />
-            <MetricTile label="Recent Closed" value={String(data.live?.paper?.recentClosedCount || 0)} />
-            <MetricTile label="Recent Decisions" value={String(data.live?.paper?.recentDecisionCount || 0)} />
-            <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
-          </div>
-          <div className="panel runtime-grid">
-            <MetricTile
-              label="Mode"
-              value={data.live?.paper?.mode || (data.live?.dryRun ? "paper" : "unavailable")}
-            />
-            <MetricTile label="Dry Run" value={data.live?.dryRun ? "true" : "false"} />
-            <MetricTile label="Live Enabled" value={data.live?.liveEnabled ? "true" : "false"} />
-            <MetricTile label="Paper Equity" value={formatCompactUsd(data.live?.paper?.equity)} />
-            <MetricTile label="Paper Balance" value={formatCompactUsd(data.live?.paper?.balance)} />
-            <MetricTile label="Open PnL" value={formatCompactUsd(data.live?.paper?.openPnl)} />
-            <MetricTile label="Realized Today" value={formatCompactUsd(data.live?.paper?.realizedToday)} />
+          <div className="panel">
+            <div className="section-head">
+              <div>
+                <h3>Account Summary</h3>
+                <div className="panel-copy">Paper ledger and runtime account posture.</div>
+              </div>
+              <div className="subtabs">
+                <button
+                  className={`tab ${accountTab === "paper" ? "active" : ""}`}
+                  onClick={() => setAccountTab("paper")}
+                >
+                  Paper
+                </button>
+                <button
+                  className={`tab ${accountTab === "live" ? "active" : ""}`}
+                  onClick={() => setAccountTab("live")}
+                >
+                  Live
+                </button>
+              </div>
+            </div>
+            {accountTab === "paper" ? (
+              <div className="account-summary-grid">
+                <div className="tile tile-summary">
+                  <div className="tile-label">Paper Account</div>
+                  <div className="tile-value tile-value-large">
+                    {paperHero}
+                  </div>
+                  <div className="tile-subcopy">
+                    {clampText(runtimeAccountSummary, 160) || "Structured paper account view."}
+                  </div>
+                </div>
+                <MetricTile label="Balance" value={formatCompactUsd(data.live?.paper?.balance)} />
+                <MetricTile label="Equity" value={formatCompactUsd(data.live?.paper?.equity)} />
+                <MetricTile label="Reserve" value={formatCompactUsd(data.live?.paper?.reserve)} />
+                <MetricTile label="Open PnL" value={formatCompactUsd(data.live?.paper?.openPnl)} />
+                <MetricTile label="Realized Today" value={formatCompactUsd(data.live?.paper?.realizedToday)} />
+                <MetricTile
+                  label="Net Day"
+                  value={formatCompactUsd((data.live?.paper?.realizedToday || 0) + (data.live?.paper?.openPnl || 0))}
+                />
+                <MetricTile label="Open Positions" value={String(data.live?.paper?.openCount || 0)} />
+                <MetricTile label="Recent Closed" value={String(data.live?.paper?.recentClosedCount || 0)} />
+                <MetricTile label="Recent Decisions" value={String(data.live?.paper?.recentDecisionCount || 0)} />
+                <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
+              </div>
+            ) : (
+              <div className="account-summary-grid">
+                <MetricTile
+                  label="Runtime Mode"
+                  value={!data.live?.connected ? "UNAVAILABLE" : data.live?.dryRun ? "DRY_RUN" : "LIVE"}
+                />
+                <MetricTile
+                  label="Trading Status"
+                  value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : "Disabled"}
+                />
+                <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
+                <MetricTile
+                  label="Account Mode"
+                  value={summarizeAccountMode(data.live?.connected, data.live?.dryRun, data.live?.liveEnabled)}
+                />
+                <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
+                <MetricTile label="Pending Exec" value={String(data.live?.exec?.pending || 0)} />
+                <MetricTile label="Closed Exec" value={String(data.live?.exec?.closed || 0)} />
+                <MetricTile label="Top Candidate" value={`${data.live?.topSymbol || "N/A"} ${data.live?.topSide || ""}`.trim()} />
+                <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
+              </div>
+            )}
           </div>
 
           <div className="panel">
@@ -485,7 +576,9 @@ export function DashboardShell() {
                           <br />
                           <small>{pos.mode || pos.source || "paper"}</small>
                         </td>
-                        <td>{pos.grade || "N/A"}</td>
+                        <td>
+                          <span className={`grade-text ${gradeTone(pos.grade)}`}>{pos.grade || "N/A"}</span>
+                        </td>
                         <td>{pos.state || "N/A"}</td>
                         <td>{formatNumber(pos.entryPrice, 4)}</td>
                         <td>{formatNumber(pos.markPrice, 4)}</td>
@@ -524,6 +617,7 @@ export function DashboardShell() {
                       <th>Symbol</th>
                       <th>Side</th>
                       <th>Strategy</th>
+                      <th>Grade</th>
                       <th>Entry</th>
                       <th>Exit</th>
                       <th>PnL</th>
@@ -542,6 +636,9 @@ export function DashboardShell() {
                           <strong>{trade.strategy || "N/A"}</strong>
                           <br />
                           <small>{trade.mode || trade.source || "paper"}</small>
+                        </td>
+                        <td>
+                          <span className={`grade-text ${gradeTone(trade.grade)}`}>{trade.grade || "N/A"}</span>
                         </td>
                         <td>{formatNumber(trade.entryPrice, 4)}</td>
                         <td>{formatNumber(trade.exitPrice, 4)}</td>
@@ -593,13 +690,17 @@ export function DashboardShell() {
                           <br />
                           <small>{decision.setupFamily || decision.mode || "paper_auto"}</small>
                         </td>
-                        <td>{decision.grade || "N/A"}</td>
+                        <td>
+                          <span className={`grade-text ${gradeTone(decision.grade)}`}>{decision.grade || "N/A"}</span>
+                        </td>
                         <td>
                           {formatNumber(decision.score, 2)}
                           <br />
                           <small>slope {formatNumber(decision.slope, 3)}</small>
                         </td>
-                        <td>{decision.approved ? "APPROVED" : "REJECTED"}</td>
+                        <td className={decision.approved ? "tone-positive" : "tone-negative"}>
+                          {decision.approved ? "APPROVED" : "REJECTED"}
+                        </td>
                         <td>{decision.rejectReason || decision.gateReasons?.[0] || "approved"}</td>
                       </tr>
                     ))}

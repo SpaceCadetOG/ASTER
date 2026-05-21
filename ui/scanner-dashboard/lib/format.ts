@@ -79,3 +79,10 @@ export function formatKeyLabel(value: string): string {
     .trim()
     .replace(/\b\w/g, (match) => match.toUpperCase());
 }
+
+export function clampText(value: string | null | undefined, max = 120): string {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}

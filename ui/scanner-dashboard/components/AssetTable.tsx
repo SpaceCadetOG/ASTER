@@ -25,6 +25,16 @@ function numericTone(value: number | null | undefined) {
   return "tone-muted";
 }
 
+function gradeTone(value?: string) {
+  const key = (value || "N/A").toUpperCase();
+  if (key === "A+") return "grade-aplus";
+  if (key === "A") return "grade-a";
+  if (key === "B") return "grade-b";
+  if (key === "C") return "grade-c";
+  if (key === "D") return "grade-d";
+  return "tone-muted";
+}
+
 function directionalArrow(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "•";
   if (value > 0) return "▲";
@@ -82,7 +92,9 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                     <small>{row.reason || `${props.side} scanner row`}</small>
                   </button>
                 </td>
-                <td>{row.grade}</td>
+                <td>
+                  <span className={`grade-text ${gradeTone(row.grade)}`}>{row.grade}</span>
+                </td>
                 <td>{formatNumber(row.score, 2)}</td>
                 <td>{formatNumber(row.lastPrice, row.lastPrice > 100 ? 2 : 4)}</td>
                 <td>
@@ -154,7 +166,9 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                     {row.side}
                   </span>
                 </td>
-                <td>{row.grade}</td>
+                <td>
+                  <span className={`grade-text ${gradeTone(row.grade)}`}>{row.grade}</span>
+                </td>
                 <td>{formatNumber(row.score, 2)}</td>
                 <td>
                   <DirectionalValue value={row.slope}>{formatNumber(row.slope, 3)}</DirectionalValue>
@@ -200,7 +214,7 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
               </span>
             </div>
             <div className="hotlist-metrics">
-              <span>{row.grade}</span>
+              <span className={`grade-text ${gradeTone(row.grade)}`}>{row.grade}</span>
               <span>Score {formatNumber(row.score, 2)}</span>
               <span>
                 <DirectionalValue value={row.slope}>Slope {formatNumber(row.slope, 3)}</DirectionalValue>
