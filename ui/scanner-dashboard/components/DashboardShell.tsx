@@ -68,6 +68,7 @@ export function DashboardShell() {
   const [selectedSide, setSelectedSide] = useState<ScannerSide>("long");
   const [detail, setDetail] = useState<AssetDetail | undefined>(undefined);
   const [error, setError] = useState("");
+  const [hasInitializedSelection, setHasInitializedSelection] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,7 +80,7 @@ export function DashboardShell() {
         setData(payload);
         setError("");
 
-        if (!selectedSymbol) {
+        if (!hasInitializedSelection) {
           const initial =
             payload.live?.topSymbol ||
             payload.longScanner?.rows[0]?.symbol ||
@@ -87,6 +88,7 @@ export function DashboardShell() {
             "";
           if (initial) {
             setSelectedSymbol(initial);
+            setHasInitializedSelection(true);
           }
         }
       } catch (err) {
@@ -101,7 +103,7 @@ export function DashboardShell() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [selectedSymbol]);
+  }, [hasInitializedSelection]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
@@ -288,6 +290,7 @@ export function DashboardShell() {
               kind="live"
               rows={liveRows.slice(0, 12)}
               emptyMessage={hotlistEmpty}
+              variant="ticker"
               onSelect={handleSelect}
             />
           </div>
@@ -347,6 +350,7 @@ export function DashboardShell() {
                 kind="live"
                 rows={liveRows}
                 emptyMessage={hotlistEmpty}
+                variant="table"
                 onSelect={handleSelect}
               />
             </div>
@@ -377,6 +381,7 @@ export function DashboardShell() {
             kind="live"
             rows={liveRows}
             emptyMessage={hotlistEmpty}
+            variant="table"
             onSelect={handleSelect}
           />
         </section>

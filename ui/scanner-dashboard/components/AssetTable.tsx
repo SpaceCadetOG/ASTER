@@ -14,6 +14,7 @@ type LiveTableProps = {
   rows: Array<LiveScanItem & { scannerSide: ScannerSide }>;
   emptyMessage: string;
   onSelect: (symbol: string, side: ScannerSide) => void;
+  variant?: "ticker" | "table";
 };
 
 function gradeTone(value?: string) {
@@ -80,6 +81,63 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                 </td>
                 <td>{formatCompactUsd(row.volumeUsd)}</td>
                 <td>{formatCompactUsd(row.openInterestUsd)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  if (props.variant !== "ticker") {
+    return (
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Grade</th>
+              <th>Score</th>
+              <th>Slope</th>
+              <th>24h %</th>
+              <th>4h %</th>
+              <th>1h %</th>
+              <th>24h Volume</th>
+              <th>Last</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.rows.map((row) => (
+              <tr key={`${row.scannerSide}-${row.symbol}-${row.side}`} className="asset-row">
+                <td>
+                  <button
+                    className="table-link"
+                    onClick={() => props.onSelect(row.symbol, row.scannerSide)}
+                  >
+                    <strong>{row.symbol}</strong>
+                    <small>{row.state || "Live hotlist"}</small>
+                  </button>
+                </td>
+                <td>
+                  <span
+                    className={`badge ${
+                      row.side.toUpperCase() === "LONG" ? "tone-positive" : "tone-negative"
+                    }`}
+                  >
+                    {row.side}
+                  </span>
+                </td>
+                <td>
+                  <span className={`badge ${gradeTone(row.grade)}`}>{row.grade}</span>
+                </td>
+                <td>{formatNumber(row.score, 2)}</td>
+                <td className={numericTone(row.slope)}>{formatNumber(row.slope, 3)}</td>
+                <td className={numericTone(row.dayUtc)}>{formatPercent(row.dayUtc, 1)}</td>
+                <td className={numericTone(row.utc4h)}>{formatPercent(row.utc4h, 1)}</td>
+                <td className={numericTone(row.utc1h)}>{formatPercent(row.utc1h, 1)}</td>
+                <td>{formatCompactUsd(row.volumeUsd)}</td>
+                <td>{formatNumber(row.price, row.price > 100 ? 2 : 4)}</td>
               </tr>
             ))}
           </tbody>
