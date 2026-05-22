@@ -692,7 +692,7 @@ export function DashboardShell() {
                         <td>
                           <strong>{decision.strategy || "N/A"}</strong>
                           <br />
-                          <small>{decision.setupFamily || decision.mode || "paper_auto"}</small>
+                          <small>{decision.setupFamily || decision.mode || "paper"}</small>
                         </td>
                         <td>
                           <span className={`grade-text ${gradeTone(decision.grade)}`}>{decision.grade || "N/A"}</span>

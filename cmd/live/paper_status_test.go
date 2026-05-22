@@ -108,7 +108,7 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 	if snap.OpenCount != 1 || len(snap.OpenPositions) != 1 {
 		t.Fatalf("expected one open position, got %+v", snap)
 	}
-	if snap.OpenPositions[0].Symbol != "BTCUSDT" || snap.OpenPositions[0].Mode != "paper_auto" {
+	if snap.OpenPositions[0].Symbol != "BTCUSDT" || snap.OpenPositions[0].Mode != "paper" {
 		t.Fatalf("unexpected open position payload: %+v", snap.OpenPositions[0])
 	}
 	if len(snap.RecentClosed) != 1 || snap.RecentClosed[0].Symbol != "ETHUSDT" {
@@ -165,7 +165,7 @@ func TestLiveStatusStoreSnapshotClonesPaperSlices(t *testing.T) {
 	}
 }
 
-func TestStatusMuxReturnsQuicklyInPaperAndPaperAutoModes(t *testing.T) {
+func TestStatusMuxReturnsQuicklyInPaperModes(t *testing.T) {
 	cases := []liveStatus{
 		{
 			Mode:        "paper",
@@ -181,13 +181,13 @@ func TestStatusMuxReturnsQuicklyInPaperAndPaperAutoModes(t *testing.T) {
 			},
 		},
 		{
-			Mode:        "paper_auto",
-			ModeState:   "paper_auto_enabled",
+			Mode:        "paper",
+			ModeState:   "paper_enabled",
 			DryRun:      true,
 			LiveEnabled: false,
 			Paper: &livePaperSnapshot{
-				Mode:            "paper_auto",
-				Summary:         "paper_auto ok",
+				Mode:            "paper",
+				Summary:         "paper ok",
 				OpenPositions:   []livePaperPositionView{},
 				RecentClosed:    []livePaperClosedView{},
 				RecentDecisions: []livePaperDecisionView{},
@@ -224,12 +224,12 @@ func TestStatusMuxReturnsQuicklyInPaperAndPaperAutoModes(t *testing.T) {
 func TestStatusMuxRepeatedCallsDoNotDeadlock(t *testing.T) {
 	store := newLiveStatusStore()
 	store.Set(liveStatus{
-		Mode:        "paper_auto",
-		ModeState:   "paper_auto_enabled",
+		Mode:        "paper",
+		ModeState:   "paper_enabled",
 		DryRun:      true,
 		LiveEnabled: false,
 		Paper: &livePaperSnapshot{
-			Mode:            "paper_auto",
+			Mode:            "paper",
 			OpenPositions:   []livePaperPositionView{},
 			RecentClosed:    []livePaperClosedView{},
 			RecentDecisions: []livePaperDecisionView{},
@@ -244,7 +244,7 @@ func TestStatusMuxRepeatedCallsDoNotDeadlock(t *testing.T) {
 		if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode %d failed: %v", i, err)
 		}
-		if payload.Mode != "paper_auto" {
+		if payload.Mode != "paper" {
 			t.Fatalf("unexpected payload on iteration %d: %+v", i, payload)
 		}
 	}

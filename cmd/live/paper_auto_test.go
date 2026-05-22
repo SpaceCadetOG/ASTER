@@ -104,7 +104,7 @@ func TestApplyPaperAutoDecisionStatusReportsState(t *testing.T) {
 	decision, _ := testPaperAutoDecision()
 	st := liveStatus{}
 	applyPaperAutoDecisionStatus(&st, decision, paperAutoDispatchResult{Attempted: true, Entered: true})
-	if st.Mode != string(runtimeModePaperAuto) || st.ModeState != "paper_auto_entered" {
+	if st.Mode != "paper" || st.ModeState != "paper_entered" {
 		t.Fatalf("unexpected status: %+v", st)
 	}
 }

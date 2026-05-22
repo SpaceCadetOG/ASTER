@@ -33,6 +33,32 @@ func parseRuntimeOperatingMode(raw string) runtimeOperatingMode {
 	}
 }
 
+func surfacedRuntimeMode(mode runtimeOperatingMode) string {
+	if mode == runtimeModePaperAuto {
+		return "paper"
+	}
+	return string(mode)
+}
+
+func surfacedPaperLabel(raw string) string {
+	value := strings.TrimSpace(raw)
+	if strings.EqualFold(value, string(runtimeModePaperAuto)) {
+		return "paper"
+	}
+	if value == "" {
+		return "paper"
+	}
+	return value
+}
+
+func surfacedPaperState(raw string) string {
+	value := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(value), "paper_auto_") {
+		return "paper_" + strings.TrimPrefix(value, "paper_auto_")
+	}
+	return value
+}
+
 func selectTopRuntimeCandidate(cands []candidate) (candidate, bool) {
 	if len(cands) == 0 {
 		return candidate{}, false
@@ -378,31 +404,31 @@ func applyPaperAutoDecisionStatus(st *liveStatus, decision strategies.ExecutionD
 	if st == nil {
 		return
 	}
-	st.Mode = string(runtimeModePaperAuto)
+	st.Mode = surfacedRuntimeMode(runtimeModePaperAuto)
 	switch {
 	case dispatch.Entered:
-		st.ModeState = "paper_auto_entered"
-		st.TopDecision = "paper_auto_entered"
+		st.ModeState = "paper_entered"
+		st.TopDecision = "paper_entered"
 		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry")
 		st.TopRejectReason = ""
 	case dispatch.Attempted && dispatch.RejectReason != "":
-		st.ModeState = "paper_auto_candidate_rejected"
-		st.TopDecision = "paper_auto_candidate_rejected"
+		st.ModeState = "paper_candidate_rejected"
+		st.TopDecision = "paper_candidate_rejected"
 		st.TopDecisionWhy = dispatch.RejectReason
 		st.TopRejectReason = dispatch.RejectReason
 	case !decision.Approved:
-		st.ModeState = "paper_auto_candidate_rejected"
-		st.TopDecision = "paper_auto_candidate_rejected"
+		st.ModeState = "paper_candidate_rejected"
+		st.TopDecision = "paper_candidate_rejected"
 		st.TopDecisionWhy = firstNonEmpty(decision.RejectReason, "not_approved")
 		st.TopRejectReason = firstNonEmpty(decision.RejectReason, "not_approved")
 	case dispatch.Attempted:
-		st.ModeState = "paper_auto_entry_attempted"
-		st.TopDecision = "paper_auto_entry_attempted"
+		st.ModeState = "paper_entry_attempted"
+		st.TopDecision = "paper_entry_attempted"
 		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry")
 		st.TopRejectReason = ""
 	default:
-		st.ModeState = "paper_auto_enabled"
-		st.TopDecision = "paper_auto_enabled"
+		st.ModeState = "paper_enabled"
+		st.TopDecision = "paper_enabled"
 		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "ready")
 		st.TopRejectReason = ""
 	}
@@ -412,16 +438,16 @@ func paperAutoLogDecision(c candidate, decision strategies.ExecutionDecision, di
 	sym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	switch {
 	case !decision.Approved:
-		fmt.Printf("live: paper_auto reject %s side=%s strat=%s reason=%s\n",
+		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s\n",
 			sym, c.Side, c.Strat, firstNonEmpty(decision.RejectReason, "not_approved"))
 	case dispatch.Attempted && dispatch.Entered:
-		fmt.Printf("live: paper_auto entered %s side=%s strat=%s conf=%.2f\n",
+		fmt.Printf("live: paper entered %s side=%s strat=%s conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
 	case dispatch.Attempted && dispatch.RejectReason != "":
-		fmt.Printf("live: paper_auto attempt_failed %s side=%s strat=%s reason=%s\n",
+		fmt.Printf("live: paper attempt_failed %s side=%s strat=%s reason=%s\n",
 			sym, c.Side, c.Strat, dispatch.RejectReason)
 	default:
-		fmt.Printf("live: paper_auto entry_attempted %s side=%s strat=%s conf=%.2f\n",
+		fmt.Printf("live: paper entry_attempted %s side=%s strat=%s conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
 	}
 }

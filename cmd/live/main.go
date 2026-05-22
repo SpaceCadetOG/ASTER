@@ -2497,7 +2497,7 @@ func main() {
 			fmt.Printf("live: %s window=%s session=%s\n", reason, maintWindow.Name, sessionTag(localMaintNow))
 			st := liveStatus{
 				Generated:       now,
-				Mode:            string(operatingMode),
+				Mode:            surfacedRuntimeMode(operatingMode),
 				ModeState:       "blocked",
 				DryRun:          dryRun,
 				LiveEnabled:     safety.enableLiveTrading,
@@ -2525,7 +2525,7 @@ func main() {
 			if healthBlocked {
 				st := liveStatus{
 					Generated:       now,
-					Mode:            string(operatingMode),
+					Mode:            surfacedRuntimeMode(operatingMode),
 					ModeState:       "blocked",
 					DryRun:          dryRun,
 					LiveEnabled:     safety.enableLiveTrading,
@@ -2601,8 +2601,8 @@ func main() {
 
 		st := liveStatus{
 			Generated:     now,
-			Mode:          string(runtimeModePaperAuto),
-			ModeState:     "paper_auto_enabled",
+			Mode:          surfacedRuntimeMode(runtimeModePaperAuto),
+			ModeState:     "paper_enabled",
 			DryRun:        dryRun,
 			LiveEnabled:   false,
 			LongInPlay:    len(longInPlay),
@@ -2622,7 +2622,7 @@ func main() {
 		}
 		best, ok := selectTopRuntimeCandidate(cands)
 		if !ok {
-			st.TopDecision = "paper_auto_enabled"
+			st.TopDecision = "paper_enabled"
 			st.TopDecisionWhy = "no_candidates"
 			statusStore.Set(st)
 			waitAndReport()

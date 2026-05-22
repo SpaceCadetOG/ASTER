@@ -140,8 +140,8 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 		openRows = append(openRows, livePaperPositionView{
 			Symbol:         strings.ToUpper(strings.TrimSpace(aster.RawSymbol(pos.Symbol))),
 			Side:           strings.ToUpper(strings.TrimSpace(pos.Side)),
-			Source:         firstNonEmpty(strings.TrimSpace(pos.EntryMode), "paper"),
-			Mode:           firstNonEmpty(strings.TrimSpace(pos.EntryMode), "paper"),
+			Source:         surfacedPaperLabel(pos.EntryMode),
+			Mode:           surfacedPaperLabel(pos.EntryMode),
 			Strategy:       firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason)),
 			SetupFamily:    pos.EntrySetupFamily,
 			Grade:          pos.EntryGrade,
@@ -174,7 +174,7 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 
 	recentClosed, recentDecisions := loadRecentPaperViews(eventLog, limit)
 	return &livePaperSnapshot{
-		Mode:            string(mode),
+		Mode:            surfacedRuntimeMode(mode),
 		Summary:         p.Summary(meta),
 		Balance:         p.balance,
 		Reserve:         p.reserve,
@@ -213,8 +213,8 @@ func loadRecentPaperViews(eventLog *stats.EventLogger, limit int) ([]livePaperCl
 			closed = append(closed, livePaperClosedView{
 				Symbol:       strings.ToUpper(strings.TrimSpace(ev.Symbol)),
 				Side:         strings.ToUpper(strings.TrimSpace(ev.Side)),
-				Source:       ev.Source,
-				Mode:         ev.Mode,
+				Source:       surfacedPaperLabel(ev.Source),
+				Mode:         surfacedPaperLabel(ev.Mode),
 				Strategy:     ev.Strategy,
 				SetupFamily:  ev.SetupFamily,
 				Grade:        ev.Grade,
@@ -246,8 +246,8 @@ func loadRecentPaperViews(eventLog *stats.EventLogger, limit int) ([]livePaperCl
 			decisions = append(decisions, livePaperDecisionView{
 				Symbol:       strings.ToUpper(strings.TrimSpace(ev.Symbol)),
 				Side:         strings.ToUpper(strings.TrimSpace(ev.Side)),
-				Source:       ev.Source,
-				Mode:         ev.Mode,
+				Source:       surfacedPaperLabel(ev.Source),
+				Mode:         surfacedPaperLabel(ev.Mode),
 				Strategy:     ev.Strategy,
 				SetupFamily:  ev.SetupFamily,
 				Grade:        ev.Grade,

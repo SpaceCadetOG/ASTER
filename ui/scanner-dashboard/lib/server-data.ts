@@ -65,8 +65,10 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
   if (!raw) {
     return undefined;
   }
+  const normalizePaperLabel = (value: unknown) =>
+    typeof value === "string" && value.trim().toLowerCase() === "paper_auto" ? "paper" : typeof value === "string" ? value : undefined;
   return {
-    mode: typeof raw.mode === "string" ? raw.mode : undefined,
+    mode: normalizePaperLabel(raw.mode),
     summary: typeof raw.summary === "string" ? raw.summary : undefined,
     balance: Number(raw.balance || 0),
     reserve: Number(raw.reserve || 0),
@@ -79,8 +81,8 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
     openPositions: (raw.open_positions || []).map((row) => ({
       symbol: normalizeDisplaySymbol(String(row.symbol || "")),
       side: String(row.side || ""),
-      source: typeof row.source === "string" ? row.source : undefined,
-      mode: typeof row.mode === "string" ? row.mode : undefined,
+      source: normalizePaperLabel(row.source),
+      mode: normalizePaperLabel(row.mode),
       strategy: typeof row.strategy === "string" ? row.strategy : undefined,
       setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
       grade: typeof row.grade === "string" ? row.grade : undefined,
@@ -110,8 +112,8 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
     recentClosed: (raw.recent_closed || []).map((row) => ({
       symbol: normalizeDisplaySymbol(String(row.symbol || "")),
       side: String(row.side || ""),
-      source: typeof row.source === "string" ? row.source : undefined,
-      mode: typeof row.mode === "string" ? row.mode : undefined,
+      source: normalizePaperLabel(row.source),
+      mode: normalizePaperLabel(row.mode),
       strategy: typeof row.strategy === "string" ? row.strategy : undefined,
       setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
       grade: typeof row.grade === "string" ? row.grade : undefined,
@@ -135,8 +137,8 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
     recentDecisions: (raw.recent_decisions || []).map((row) => ({
       symbol: normalizeDisplaySymbol(String(row.symbol || "")),
       side: String(row.side || ""),
-      source: typeof row.source === "string" ? row.source : undefined,
-      mode: typeof row.mode === "string" ? row.mode : undefined,
+      source: normalizePaperLabel(row.source),
+      mode: normalizePaperLabel(row.mode),
       strategy: typeof row.strategy === "string" ? row.strategy : undefined,
       setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
       grade: typeof row.grade === "string" ? row.grade : undefined,
