@@ -70,7 +70,7 @@ func sortCandidatesForRuntime(cands []candidate) {
 	})
 }
 
-type paperAutoDecisionCtx struct {
+type paperDecisionCtx struct {
 	Now                 time.Time
 	LocalMaintNow       time.Time
 	Candidate           candidate
@@ -97,9 +97,9 @@ type paperAutoDecisionCtx struct {
 	EventLog            *stats.EventLogger
 }
 
-func buildPaperAutoExecutionDecision(ctx paperAutoDecisionCtx) strategies.ExecutionDecision {
-	riskDec := paperAutoRiskDecision(ctx)
-	preflight := paperAutoPreflightVerdict(ctx)
+func buildPaperExecutionDecision(ctx paperDecisionCtx) strategies.ExecutionDecision {
+	riskDec := paperRiskDecision(ctx)
+	preflight := paperPreflightVerdict(ctx)
 	admission := strategies.AdmissionSummary{
 		LifecycleStage: ctx.Candidate.LifecycleStage,
 		TriggerStage:   ctx.Candidate.TriggerStage,
@@ -119,7 +119,7 @@ func buildPaperAutoExecutionDecision(ctx paperAutoDecisionCtx) strategies.Execut
 	)
 }
 
-func paperAutoRiskDecision(ctx paperAutoDecisionCtx) risk.Decision {
+func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(ctx.Candidate.Entry.Symbol)))
 	meta := ctx.MetaBySymbol[raw]
 	entryPx := ctx.Candidate.Sig.Entry
@@ -155,7 +155,7 @@ func paperAutoRiskDecision(ctx paperAutoDecisionCtx) risk.Decision {
 	})
 }
 
-func paperAutoPreflightVerdict(ctx paperAutoDecisionCtx) strategies.PreflightVerdict {
+func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	reasons := make([]string, 0, 3)
 	pre := deepQueuePreflight(ctx.Candidate, queueDeepPreflightCtx{
 		Now:                 ctx.Now,
@@ -184,7 +184,7 @@ func paperAutoPreflightVerdict(ctx paperAutoDecisionCtx) strategies.PreflightVer
 	if reason := strings.TrimSpace(pre.RejectReason); reason != "" {
 		reasons = append(reasons, reason)
 	}
-	if reason := strings.TrimSpace(paperAutoPaperRejectReason(ctx)); reason != "" && !containsString(reasons, reason) {
+	if reason := strings.TrimSpace(paperPaperRejectReason(ctx)); reason != "" && !containsString(reasons, reason) {
 		reasons = append(reasons, reason)
 	}
 	verdict := strategies.PreflightVerdict{
@@ -199,7 +199,7 @@ func paperAutoPreflightVerdict(ctx paperAutoDecisionCtx) strategies.PreflightVer
 	return verdict
 }
 
-func paperAutoPaperRejectReason(ctx paperAutoDecisionCtx) string {
+func paperPaperRejectReason(ctx paperDecisionCtx) string {
 	p := ctx.Paper
 	if p == nil || !p.enabled {
 		return "paper_disabled"
@@ -239,38 +239,38 @@ func paperAutoPaperRejectReason(ctx paperAutoDecisionCtx) string {
 	return ""
 }
 
-type paperAutoEnterFunc func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error)
+type paperEnterFunc func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error)
 
-type paperAutoDispatchHooks struct {
-	Paper paperAutoEnterFunc
+type paperDispatchHooks struct {
+	Paper paperEnterFunc
 	Live  func() error
 }
 
-type paperAutoDispatchResult struct {
+type paperDispatchResult struct {
 	Attempted    bool
 	Entered      bool
 	RejectReason string
 	Position     *paperPosition
 }
 
-func dispatchPaperAutoDecision(mode runtimeOperatingMode, now time.Time, decision strategies.ExecutionDecision, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry, hooks paperAutoDispatchHooks) paperAutoDispatchResult {
+func dispatchPaperDecision(mode runtimeOperatingMode, now time.Time, decision strategies.ExecutionDecision, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry, hooks paperDispatchHooks) paperDispatchResult {
 	if mode != runtimeModePaper {
-		return paperAutoDispatchResult{}
+		return paperDispatchResult{}
 	}
 	if !decision.Approved {
-		return paperAutoDispatchResult{RejectReason: firstNonEmpty(decision.RejectReason, "not_approved")}
+		return paperDispatchResult{RejectReason: firstNonEmpty(decision.RejectReason, "not_approved")}
 	}
 	if hooks.Paper == nil {
-		return paperAutoDispatchResult{RejectReason: "paper_entry_unavailable"}
+		return paperDispatchResult{RejectReason: "paper_entry_unavailable"}
 	}
 	pos, err := hooks.Paper(now, c, entryBps, margin, leverage, meta, depth, current)
 	if err != nil {
-		return paperAutoDispatchResult{
+		return paperDispatchResult{
 			Attempted:    true,
 			RejectReason: strings.TrimSpace(err.Error()),
 		}
 	}
-	return paperAutoDispatchResult{
+	return paperDispatchResult{
 		Attempted: true,
 		Entered:   pos != nil,
 		Position:  pos,
@@ -294,7 +294,7 @@ func annotatePaperPositionFromDecision(pos *paperPosition, c candidate, decision
 	}
 }
 
-func emitPaperAutoDecisionEvent(log *stats.EventLogger, now time.Time, c candidate, decision strategies.ExecutionDecision) {
+func emitPaperDecisionEvent(log *stats.EventLogger, now time.Time, c candidate, decision strategies.ExecutionDecision) {
 	if log == nil {
 		return
 	}
@@ -336,7 +336,7 @@ func emitPaperAutoDecisionEvent(log *stats.EventLogger, now time.Time, c candida
 	})
 }
 
-func emitPaperAutoPositionOpenEvent(log *stats.EventLogger, now time.Time, c candidate, pos *paperPosition, decision strategies.ExecutionDecision) {
+func emitPaperPositionOpenEvent(log *stats.EventLogger, now time.Time, c candidate, pos *paperPosition, decision strategies.ExecutionDecision) {
 	if log == nil || pos == nil {
 		return
 	}
@@ -390,7 +390,7 @@ func runPaperLifecycle(now time.Time, paper *paperTrader, meta map[string]symbol
 	paper.CheckExit(now, meta, depth, longCurrent, shortCurrent, mom, flow)
 }
 
-func applyPaperAutoDecisionStatus(st *liveStatus, decision strategies.ExecutionDecision, dispatch paperAutoDispatchResult) {
+func applyPaperDecisionStatus(st *liveStatus, decision strategies.ExecutionDecision, dispatch paperDispatchResult) {
 	if st == nil {
 		return
 	}
@@ -424,7 +424,7 @@ func applyPaperAutoDecisionStatus(st *liveStatus, decision strategies.ExecutionD
 	}
 }
 
-func paperAutoLogDecision(c candidate, decision strategies.ExecutionDecision, dispatch paperAutoDispatchResult) {
+func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispatch paperDispatchResult) {
 	sym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	switch {
 	case !decision.Approved:

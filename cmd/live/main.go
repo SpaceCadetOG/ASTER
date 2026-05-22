@@ -2644,7 +2644,7 @@ func main() {
 		if strings.EqualFold(best.Side, "SELL") {
 			currentSideEntries = shortCurrent
 		}
-		decision := buildPaperAutoExecutionDecision(paperAutoDecisionCtx{
+		decision := buildPaperExecutionDecision(paperDecisionCtx{
 			Now:                 now,
 			LocalMaintNow:       localMaintNow,
 			Candidate:           best,
@@ -2670,9 +2670,9 @@ func main() {
 			MaxOpenPerSide:      maxOpenPerSide,
 			EventLog:            eventLog,
 		})
-		emitPaperAutoDecisionEvent(eventLog, now, best, decision)
+		emitPaperDecisionEvent(eventLog, now, best, decision)
 		recordCandidateDecision(cmdCtx, best, decision.RejectReason)
-		dispatch := dispatchPaperAutoDecision(operatingMode, now, decision, best, entryBps, effectiveMargin, computeLeverage(best, leverageMode, leverageFixed, leverageMin, leverageMax), metaBySymbol, paperDepth, currentSideEntries, paperAutoDispatchHooks{
+		dispatch := dispatchPaperDecision(operatingMode, now, decision, best, entryBps, effectiveMargin, computeLeverage(best, leverageMode, leverageFixed, leverageMin, leverageMax), metaBySymbol, paperDepth, currentSideEntries, paperDispatchHooks{
 			Paper: func(now time.Time, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry) (*paperPosition, error) {
 				if paper == nil {
 					return nil, fmt.Errorf("paper_disabled")
@@ -2683,10 +2683,10 @@ func main() {
 		if dispatch.Position != nil {
 			annotatePaperPositionFromDecision(dispatch.Position, best, decision)
 			_ = paper.save()
-			emitPaperAutoPositionOpenEvent(eventLog, now, best, dispatch.Position, decision)
+			emitPaperPositionOpenEvent(eventLog, now, best, dispatch.Position, decision)
 		}
-		applyPaperAutoDecisionStatus(&st, decision, dispatch)
-		paperAutoLogDecision(best, decision, dispatch)
+		applyPaperDecisionStatus(&st, decision, dispatch)
+		paperLogDecision(best, decision, dispatch)
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
 			st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, metaBySymbol, eventLog, 12)

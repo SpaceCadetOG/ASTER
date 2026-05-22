@@ -34,11 +34,11 @@ func TestRuntimeModeControllerEnablesPaperModeWhenExplicit(t *testing.T) {
 	}
 }
 
-func TestDispatchPaperAutoDecisionManualOnlySkipsDispatch(t *testing.T) {
-	decision, cand := testPaperAutoDecision()
+func TestDispatchPaperDecisionManualOnlySkipsDispatch(t *testing.T) {
+	decision, cand := testPaperDecision()
 	paperCalls := 0
 	liveCalls := 0
-	out := dispatchPaperAutoDecision(runtimeModeManualOnly, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
+	out := dispatchPaperDecision(runtimeModeManualOnly, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{}, nil
@@ -56,11 +56,11 @@ func TestDispatchPaperAutoDecisionManualOnlySkipsDispatch(t *testing.T) {
 	}
 }
 
-func TestDispatchPaperAutoDecisionApprovedUsesPaperOnly(t *testing.T) {
-	decision, cand := testPaperAutoDecision()
+func TestDispatchPaperDecisionApprovedUsesPaperOnly(t *testing.T) {
+	decision, cand := testPaperDecision()
 	paperCalls := 0
 	liveCalls := 0
-	out := dispatchPaperAutoDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
+	out := dispatchPaperDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{Symbol: "BTCUSDT"}, nil
@@ -81,12 +81,12 @@ func TestDispatchPaperAutoDecisionApprovedUsesPaperOnly(t *testing.T) {
 	}
 }
 
-func TestDispatchPaperAutoDecisionRejectedSkipsEntry(t *testing.T) {
-	decision, cand := testPaperAutoDecision()
+func TestDispatchPaperDecisionRejectedSkipsEntry(t *testing.T) {
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.RejectReason = "risk_reject"
 	paperCalls := 0
-	out := dispatchPaperAutoDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
+	out := dispatchPaperDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{}, nil
@@ -100,10 +100,10 @@ func TestDispatchPaperAutoDecisionRejectedSkipsEntry(t *testing.T) {
 	}
 }
 
-func TestApplyPaperAutoDecisionStatusReportsState(t *testing.T) {
-	decision, _ := testPaperAutoDecision()
+func TestApplyPaperDecisionStatusReportsState(t *testing.T) {
+	decision, _ := testPaperDecision()
 	st := liveStatus{}
-	applyPaperAutoDecisionStatus(&st, decision, paperAutoDispatchResult{Attempted: true, Entered: true})
+	applyPaperDecisionStatus(&st, decision, paperDispatchResult{Attempted: true, Entered: true})
 	if st.Mode != "paper" || st.ModeState != "paper_entered" {
 		t.Fatalf("unexpected status: %+v", st)
 	}
@@ -141,15 +141,15 @@ func TestRunPaperLifecycleClosesPositionAndRetainsPaperOnly(t *testing.T) {
 	}
 }
 
-func TestEmitPaperAutoDecisionEventCapturesRejectTelemetry(t *testing.T) {
-	decision, cand := testPaperAutoDecision()
+func TestEmitPaperDecisionEventCapturesRejectTelemetry(t *testing.T) {
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.RejectReason = "risk_reject"
 	decision.Rejects = []string{"risk_reject", "paper_block"}
 	logPath := filepath.Join(t.TempDir(), "events.jsonl")
 	logger := stats.NewEventLogger(logPath, true, false, true)
 	now := time.Now().UTC()
-	emitPaperAutoDecisionEvent(logger, now, cand, decision)
+	emitPaperDecisionEvent(logger, now, cand, decision)
 	events, err := stats.LoadEvents(logPath, nil, nil)
 	if err != nil {
 		t.Fatalf("LoadEvents error: %v", err)
@@ -165,8 +165,8 @@ func TestEmitPaperAutoDecisionEventCapturesRejectTelemetry(t *testing.T) {
 	}
 }
 
-func TestEmitPaperAutoPositionOpenEventCarriesDecisionMetadata(t *testing.T) {
-	decision, cand := testPaperAutoDecision()
+func TestEmitPaperPositionOpenEventCarriesDecisionMetadata(t *testing.T) {
+	decision, cand := testPaperDecision()
 	pos := &paperPosition{
 		Symbol:           "BTCUSDT",
 		Side:             "BUY",
@@ -190,7 +190,7 @@ func TestEmitPaperAutoPositionOpenEventCarriesDecisionMetadata(t *testing.T) {
 	annotatePaperPositionFromDecision(pos, cand, decision)
 	logPath := filepath.Join(t.TempDir(), "events.jsonl")
 	logger := stats.NewEventLogger(logPath, true, false, true)
-	emitPaperAutoPositionOpenEvent(logger, time.Now().UTC(), cand, pos, decision)
+	emitPaperPositionOpenEvent(logger, time.Now().UTC(), cand, pos, decision)
 	events, err := stats.LoadEvents(logPath, nil, nil)
 	if err != nil {
 		t.Fatalf("LoadEvents error: %v", err)
@@ -271,7 +271,7 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 	}
 }
 
-func testPaperAutoDecision() (strategies.ExecutionDecision, candidate) {
+func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 	sig := strategies.Signal{
 		Active:     true,
 		Name:       "paper_test",
