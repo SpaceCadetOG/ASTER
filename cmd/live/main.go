@@ -22776,10 +22776,76 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			lines = append(lines, fmt.Sprintf("<b>Debug:</b> rawSide=%s | normalized=%s | pnlDelta=%+.2f", strings.ToUpper(strings.TrimSpace(p.Side)), normalizePositionSide(p.Side), p.UnrealizedPnL-p.ExchangeUnreal))
 		}
 		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
-	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no", strings.HasPrefix(cmd, "/manage"):
-		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
-			"Ground-zero mode is active.",
-			"Management/trade commands are disabled.",
+	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no":
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
+		}
+		pending := c.execMgr.pendingManualRequests(0)
+		if len(pending) == 0 {
+			return notify.BuildEventHTML("ℹ️", "MANAGE", "No pending manual trades")
+		}
+		if len(pending) > 1 {
+			return notify.BuildEventHTML("ℹ️", "MANAGE",
+				"More than one manual trade is pending.",
+				"Use <code>/manage SYMBOL y</code> or <code>/manage SYMBOL n</code>.",
+			)
+		}
+		req := pending[0]
+		approve := cmd == "y" || cmd == "yes"
+		if approve {
+			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
+				return notify.BuildEventHTML("⚠️", "MANAGE", err.Error())
+			}
+			return notify.BuildEventHTML("✅", "MANAGEMENT ENABLED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+				"The bot is now managing this live trade with exchange protection and lifecycle logic.",
+			)
+		}
+		c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
+		return notify.BuildEventHTML("🟡", "MANAGEMENT DECLINED",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+			"Bot management was declined for this live trade.",
+		)
+	case strings.HasPrefix(cmd, "/manage"):
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "MANAGE", "live execution manager unavailable")
+		}
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manage SYMBOL y|n</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			lines := []string{"<code>/manage SYMBOL y|n</code>"}
+			for _, req := range c.execMgr.pendingManualRequests(3) {
+				lines = append(lines, fmt.Sprintf("%s %s qty=%.6f entry=%s", cleanSymbol(req.Symbol), displayPositionSide(req.Side), req.Qty, fmtPrice(req.Entry)))
+			}
+			return notify.BuildEventHTML("ℹ️", "MANAGE", lines...)
+		}
+		req, ok := c.execMgr.pendingManualRequest(sym)
+		if !ok {
+			return notify.BuildEventHTML("ℹ️", "MANAGE", fmt.Sprintf("No pending manual trade for %s", cleanSymbol(sym)))
+		}
+		if len(fields) >= 3 && (strings.EqualFold(fields[2], "y") || strings.EqualFold(fields[2], "yes")) {
+			if _, err := c.execMgr.activateManualManagement(req, time.Now().UTC(), "MANUAL_APPROVED"); err != nil {
+				return notify.BuildEventHTML("⚠️", "MANAGE", err.Error())
+			}
+			return notify.BuildEventHTML("✅", "MANAGEMENT ENABLED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+				"The bot is now managing this live trade with exchange protection and lifecycle logic.",
+			)
+		}
+		if len(fields) >= 3 && (strings.EqualFold(fields[2], "n") || strings.EqualFold(fields[2], "no")) {
+			c.execMgr.markManualRequestDeclined(req, time.Now().UTC())
+			return notify.BuildEventHTML("🟡", "MANAGEMENT DECLINED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+				"Bot management was declined for this live trade.",
+			)
+		}
+		return notify.BuildEventHTML("ℹ️", "MANAGE",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Lev:</b> %dx | <b>Margin:</b> $%.2f", req.Qty, maxInt(1, req.Leverage), req.Margin),
+			fmt.Sprintf("<b>Entry:</b> %s", fmtPrice(req.Entry)),
+			"Reply <code>/manage SYMBOL y</code> to let the bot manage it, or <code>/manage SYMBOL n</code> to decline.",
 		)
 	case cmd == "/mode":
 		modeDryRun := true
@@ -22839,11 +22905,217 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			)
 		}
 		return notify.BuildEventHTML("🔎", "WHY", fmt.Sprintf("%s is not in the current market snapshot", cleanSymbol(sym)))
-	case strings.HasPrefix(cmd, "/manual "), strings.HasPrefix(cmd, "/entry "), strings.HasPrefix(cmd, "/suggest "), strings.HasPrefix(cmd, "/unmanage "), strings.HasPrefix(cmd, "/pause"), strings.HasPrefix(cmd, "/resume"):
-		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
-			"Ground-zero mode is active.",
-			"Trade/management commands are disabled.",
+	case strings.HasPrefix(cmd, "/manual "), strings.HasPrefix(cmd, "/entry "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		side := ""
+		if len(fields) >= 3 {
+			if parsed, ok := parseUserPositionSide(fields[2]); ok {
+				side = parsed
+			}
+		}
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/manual SYMBOL [LONG|SHORT]</code>")
+		}
+		if d, ok := c.getDecision(sym); ok {
+			if side == "" {
+				side = d.Side
+			}
+			return manualAssistResponse(sym, firstNonEmpty(side, d.Side), d, c.getMeta()[sym])
+		}
+		meta := c.getMeta()[sym]
+		return notify.BuildEventHTML("🧭", "MANUAL ENTRY",
+			fmt.Sprintf("<b>Symbol:</b> %s", cleanSymbol(sym)),
+			fmt.Sprintf("<b>Last:</b> %s | <b>24h:</b> %.2f%% | <b>Vol:</b> %.2fM", fmtPrice(meta.LastPrice), meta.Move24h, meta.VolumeUSD/1_000_000.0),
+			"Decision state not cached yet. Wait for the next scan or use /why SYMBOL.",
 		)
+	case strings.HasPrefix(cmd, "/suggest "):
+		if len(fields) < 3 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		side, ok := parseUserPositionSide(fields[2])
+		if sym == "" || !ok {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/suggest SYMBOL LONG|SHORT</code>")
+		}
+		s := c.addSuggestion(sym, side, "telegram", 0, 0)
+		lines := []string{
+			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
+			fmt.Sprintf("<b>Watch TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
+			"Candidate aging/freshness will be relaxed for this symbol only",
+			"Risk, liquidity, session, and sizing gates still apply",
+		}
+		if d, ok := c.getDecision(sym); ok {
+			lines = append(lines, fmt.Sprintf("<b>Latest:</b> %s | g=%s s=%.2f slope=%+.3f", firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
+		}
+		return notify.BuildEventHTML("📝", "SUGGESTION ARMED", lines...)
+	case strings.HasPrefix(cmd, "/trade "):
+		if len(fields) < 3 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		side, ok := parseUserPositionSide(fields[2])
+		if sym == "" || !ok {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/trade SYMBOL LONG|SHORT [LEV]</code>")
+		}
+		preferredLev := 0
+		if len(fields) >= 4 {
+			lev, ok := allowedOperatorLeverage(fields[3])
+			if !ok {
+				return notify.BuildEventHTML("❓", "LEV USAGE",
+					"<code>/trade SYMBOL LONG|SHORT [LEV]</code>",
+					"Allowed leverage values: <code>20x</code>, <code>10x</code>, <code>5x</code>, <code>3x</code>",
+				)
+			}
+			preferredLev = lev
+		}
+		if c.execMgr != nil && c.execMgr.HasActiveSymbol(sym) {
+			return notify.BuildEventHTML("ℹ️", "TRADE REQUEST SKIPPED",
+				fmt.Sprintf("%s already has an active managed position", cleanSymbol(sym)),
+			)
+		}
+		s := c.addSuggestion(sym, side, "telegram_trade", preferredLev, 0)
+		modeDryRun, modeLiveEnabled, _ := true, false, false
+		if c.mode != nil {
+			modeDryRun, modeLiveEnabled, _ = c.mode.snapshot()
+		}
+		modeLabel := "PAPER"
+		if !modeDryRun && modeLiveEnabled {
+			modeLabel = "LIVE"
+		}
+		lines := []string{
+			fmt.Sprintf("<b>Symbol:</b> %s %s", cleanSymbol(sym), displayPositionSide(side)),
+			fmt.Sprintf("<b>Mode:</b> %s", modeLabel),
+			fmt.Sprintf("<b>Priority TTL:</b> until %s", s.ExpiresAt.In(time.Local).Format("15:04 MST")),
+			"Priority watch is armed for this symbol and side with elevated watcher cadence.",
+			"Next evaluation will process it ahead of normal candidate competition while still respecting hard safety gates.",
+			"This does not bypass liquidity, stop, funding, or session protection.",
+		}
+		if s.PreferredLev > 0 {
+			lines = append(lines, fmt.Sprintf("<b>Requested leverage:</b> %dx", s.PreferredLev))
+		}
+		if d, ok := c.getDecision(sym); ok {
+			lines = append(lines, fmt.Sprintf("<b>Latest:</b> side=%s reason=%s grade=%s score=%.2f slope=%+.3f",
+				displayPositionSide(d.Side), firstNonEmpty(d.RejectReason, "eligible"), d.Grade, d.Score, d.Slope))
+		}
+		if meta, ok := c.getMeta()[sym]; ok {
+			lines = append(lines, fmt.Sprintf("<b>Snapshot:</b> dayUTC=%.2f%% | utc4h=%.2f%% | utc1h=%.2f%% | 24h=%.2f%% | vol=%.2fM | last=%s",
+				meta.DayUTC24h, meta.UTC4hPct, meta.UTC1hPct, meta.Move24h, meta.VolumeUSD/1_000_000.0, fmtPrice(meta.LastPrice)))
+		}
+		return notify.BuildEventHTML("🎯", "TRADE REQUEST ARMED", lines...)
+	case strings.HasPrefix(cmd, "/protect "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/protect SYMBOL</code>")
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "PROTECT", "live execution manager unavailable")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		lp, found := c.execMgr.LivePositionBySymbol(sym)
+		if found {
+			sym = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(lp.Symbol)))
+		}
+		p, ok := c.execMgr.trackedPosition(sym)
+		if !ok || p == nil || !c.execMgr.isActive(p) {
+			return notify.BuildEventHTML("ℹ️", "PROTECT", fmt.Sprintf("No active position for %s", cleanSymbol(sym)))
+		}
+		p.ProtectionPending = true
+		p.ProtectionRetryAfter = time.Now().UTC()
+		if err := c.execMgr.placeOrReplaceStop(p); err != nil {
+			return notify.BuildManagementStatusCard(notify.ManageStateAttachingProtection, sym, p.Side,
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
+				fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
+				fmt.Sprintf("<b>Error:</b> %s", summarizeOneLine(err.Error(), 140)),
+			)
+		}
+		lines := []string{
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(sym), displayPositionSide(p.Side)),
+			fmt.Sprintf("<b>Status:</b> %s", manualProtectionStatus(p)),
+		}
+		if guidance := manualTrendCaptureGuidance(p.WinnerLifecycle); guidance != "" {
+			lines = append(lines, guidance)
+		}
+		return notify.BuildManagementStatusCard(notify.ManageStateProtected, sym, p.Side, lines...)
+	case strings.HasPrefix(cmd, "/unmanage "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/unmanage SYMBOL</code>")
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("⚠️", "UNMANAGE", "live execution manager unavailable")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/unmanage SYMBOL</code>")
+		}
+		if passive, ok := c.execMgr.passiveManualPositionBySymbol(sym); ok {
+			return notify.BuildEventHTML("ℹ️", "UNMANAGE",
+				fmt.Sprintf("<b>%s %s</b> is already manual-only", cleanSymbol(passive.Symbol), displayPositionSide(passive.Side)),
+			)
+		}
+		p, ok := c.execMgr.deactivateManualManagement(sym, time.Now().UTC())
+		if !ok {
+			return notify.BuildEventHTML("ℹ️", "UNMANAGE", fmt.Sprintf("No active managed manual trade for %s", cleanSymbol(sym)))
+		}
+		_ = c.execMgr.save()
+		lines := []string{
+			fmt.Sprintf("<b>%s %s</b> is now manual-only", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			"<b>Bot management:</b> disabled for this open trade",
+		}
+		if hasLiveProtectiveOrder(p) {
+			lines = append(lines, fmt.Sprintf("<b>Existing exchange stop retained:</b> %s", fmtPrice(p.StopPrice)))
+		} else {
+			lines = append(lines, "<b>Exchange stop:</b> none confirmed by bot")
+		}
+		return notify.BuildEventHTML("🟡", "UNMANAGED", lines...)
+	case strings.HasPrefix(cmd, "/pause"):
+		if c.safety.pauseFile == "" {
+			return notify.BuildEventHTML("⚠️", "PAUSE", "Pause file is not configured")
+		}
+		_ = os.WriteFile(c.safety.pauseFile, []byte(time.Now().Format(time.RFC3339)+" manual pause\n"), 0o644)
+		return notify.BuildEventHTML("⏸️", "ENTRIES PAUSED", "Risk management remains active")
+	case strings.HasPrefix(cmd, "/resume"):
+		if c.safety.pauseFile == "" {
+			return notify.BuildEventHTML("⚠️", "RESUME", "Pause file is not configured")
+		}
+		_ = os.Remove(c.safety.pauseFile)
+		return notify.BuildEventHTML("▶️", "ENTRIES RESUMED", "New entries are enabled")
+	case strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/flatten SYMBOL</code>")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>")
+		}
+		now := time.Now().UTC()
+		meta := c.getMeta()
+		closed := false
+		if c.execMgr != nil {
+			ok, err := c.execMgr.ForceCloseSymbol(sym, "TG_CLOSE_SYMBOL")
+			if err != nil {
+				return notify.BuildEventHTML("❌", "CLOSE FAILED", fmt.Sprintf("%s: %v", cleanSymbol(sym), err))
+			}
+			closed = closed || ok
+		}
+		if c.paper != nil && c.paper.enabled {
+			closed = closed || c.paper.ForceCloseSymbol(now, sym, meta, map[string]aster.OrderBook{}, "TG_CLOSE_SYMBOL")
+		}
+		if !closed {
+			return notify.BuildEventHTML("ℹ️", "NO ACTIVE POSITION", cleanSymbol(sym))
+		}
+		return notify.BuildEventHTML("✅", "CLOSE REQUESTED", cleanSymbol(sym))
+	case strings.HasPrefix(cmd, "/closeall"):
+		now := time.Now().UTC()
+		meta := c.getMeta()
+		if c.execMgr != nil {
+			_ = c.execMgr.ForceCloseAll("TG_CLOSE_ALL")
+		}
+		if c.paper != nil && c.paper.enabled {
+			c.paper.ForceCloseAll(now, meta, map[string]aster.OrderBook{}, "TG_CLOSE_ALL")
+		}
+		return notify.BuildEventHTML("⚠️", "CLOSE ALL REQUESTED", "All open positions are being closed")
 	default:
 		return ""
 	}
