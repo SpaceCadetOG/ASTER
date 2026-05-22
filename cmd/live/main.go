@@ -1373,9 +1373,9 @@ func main() {
 	if gradeTopN <= 0 {
 		gradeTopN = 6
 	}
-	strategyTopN := envInt("LIVE_STRATEGY_TOP_N", 3)
-	if strategyTopN <= 0 {
-		strategyTopN = 3
+	strategyTopN := envInt("LIVE_STRATEGY_TOP_N", 0)
+	if strategyTopN < 0 {
+		strategyTopN = 0
 	}
 	maxOpenPos := envInt("LIVE_MAX_OPEN_POS", 1)
 	if maxOpenPos <= 0 {
@@ -16577,9 +16577,7 @@ func rankWithStrategy(cache *featureRuntimeCache, in []candidate, topN int, stop
 	}
 	out := make([]candidate, len(in))
 	copy(out, in)
-	if topN > len(out) {
-		topN = len(out)
-	}
+	topN = normalizeStrategyTopN(topN, len(out))
 	for i := 0; i < topN; i++ {
 		out[i] = enrichCandidate(cache, out[i], stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, flow)
 	}
@@ -16595,6 +16593,16 @@ func rankWithStrategy(cache *featureRuntimeCache, in []candidate, topN int, stop
 		return out[i].FinalRank > out[j].FinalRank
 	})
 	return out
+}
+
+func normalizeStrategyTopN(topN, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	if topN <= 0 || topN > total {
+		return total
+	}
+	return topN
 }
 
 func finalSortRank(c candidate, cfg rankSortConfig, rel reliability.Store) float64 {
@@ -16772,7 +16780,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 			return cand
 		}
 	}
-	if envBool("LIVE_SIMPLE_MODE", true) {
+	if envBool("LIVE_SIMPLE_MODE", false) {
 		return applySimpleContinuationFallback(cand)
 	}
 	rt := strategies.NewRouter(strategies.RouterConfig{
@@ -16782,10 +16790,10 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		AllowWarmup:               true,
 		WarmupSlopeMin:            0,
 		MaxOne:                    true,
-		EnableVPSetups:            envBool("LIVE_ENABLE_VP_SETUPS", false),
+		EnableVPSetups:            envBool("LIVE_ENABLE_VP_SETUPS", true),
 		MinVPConfidence:           envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
-		UseVPReversal:             envBool("LIVE_USE_VP_REVERSAL", false),
-		EnableInstitutionalPA:     envBool("LIVE_ENABLE_INSTITUTIONAL_PA", false),
+		UseVPReversal:             envBool("LIVE_USE_VP_REVERSAL", true),
+		EnableInstitutionalPA:     envBool("LIVE_ENABLE_INSTITUTIONAL_PA", true),
 		UseSessionRegimeRisk:      true,
 		AllowDeadZoneOnlyAPlus:    true,
 		RequireOrderFlowHandshake: envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
