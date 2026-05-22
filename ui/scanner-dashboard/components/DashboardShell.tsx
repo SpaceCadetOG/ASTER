@@ -18,6 +18,7 @@ import type {
   DashboardTab,
   EndpointStatus,
   LiveScanItem,
+  LiveView,
   ScannerSide,
   ScannerView
 } from "@/lib/types";
@@ -71,9 +72,54 @@ function gradeTone(value?: string) {
   return "tone-muted";
 }
 
-function summarizeAccountMode(connected?: boolean, dryRun?: boolean, liveEnabled?: boolean) {
-  if (!connected) return "Unavailable";
-  return `${dryRun ? "Paper" : "Live"} / ${liveEnabled ? "Enabled" : "Disabled"}`;
+function labelRuntimeToken(value?: string) {
+  if (!value) return "UNKNOWN";
+  return value.replaceAll("_", " ").toUpperCase();
+}
+
+function runtimePosture(live?: LiveView | null) {
+  if (!live?.connected) {
+    return {
+      modeLabel: "UNAVAILABLE",
+      stateLabel: "DISCONNECTED",
+      accountLabel: "Unavailable",
+      tradingLabel: "Unavailable",
+      tone: "tone-muted"
+    };
+  }
+
+  const inferredMode = live.liveEnabled && !live.dryRun ? "live_auto" : live.dryRun ? "paper" : "manual_only";
+  const mode = live.mode || inferredMode;
+  const modeLabel = labelRuntimeToken(mode);
+  const stateLabel = labelRuntimeToken(live.modeState || mode);
+
+  if (mode === "live_auto") {
+    return {
+      modeLabel,
+      stateLabel,
+      accountLabel: "Live auto engine",
+      tradingLabel: live.liveEnabled ? "Entries Armed" : "Entries Blocked",
+      tone: live.liveEnabled ? "tone-positive" : "tone-amber"
+    };
+  }
+
+  if (mode === "paper") {
+    return {
+      modeLabel,
+      stateLabel,
+      accountLabel: "Paper engine",
+      tradingLabel: "Paper Validation",
+      tone: "tone-amber"
+    };
+  }
+
+  return {
+    modeLabel,
+    stateLabel,
+    accountLabel: "Manual-only scanner",
+    tradingLabel: "Auto Entries Off",
+    tone: "tone-muted"
+  };
 }
 
 function paperAccountHero(data: DashboardData | null) {
@@ -169,6 +215,7 @@ export function DashboardShell() {
         : data?.longScanner || null;
 
   const runtimeGenerated = data?.live?.generated || data?.generatedAt;
+  const posture = runtimePosture(data?.live);
   const paperHero = paperAccountHero(data);
   const runtimeAccountSummary = data?.live?.paper?.summary || data?.live?.paperSummary || "Unavailable";
   const selectedSummaryRow =
@@ -265,13 +312,8 @@ export function DashboardShell() {
         <MetricTile label="Top Slope" value={formatNumber(data.live?.topSlope, 3)} />
         <MetricTile
           label="Runtime Mode"
-          value={
-            !data.live?.connected
-              ? "UNAVAILABLE"
-              : data.live?.dryRun
-                ? "DRY_RUN"
-                : "LIVE"
-          }
+          value={posture.modeLabel}
+          valueClassName={posture.tone}
         />
         <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
       </section>
@@ -306,14 +348,16 @@ export function DashboardShell() {
               <h3>Runtime Snapshot</h3>
               <div className="kv-list">
                 <div className="kv-row">
-                  <span>Paper / Live</span>
-                  <strong>
-                    {!data.live?.connected
-                      ? "Unavailable"
-                      : `${data.live?.dryRun ? "Paper Mode" : "Live Mode"} / ${
-                          data.live?.liveEnabled ? "Enabled" : "Disabled"
-                        }`}
-                  </strong>
+                  <span>Operating Mode</span>
+                  <strong className={posture.tone}>{posture.modeLabel}</strong>
+                </div>
+                <div className="kv-row">
+                  <span>Mode State</span>
+                  <strong>{posture.stateLabel}</strong>
+                </div>
+                <div className="kv-row">
+                  <span>Trading Posture</span>
+                  <strong>{posture.tradingLabel}</strong>
                 </div>
                 <div className="kv-row">
                   <span>Generated</span>
@@ -434,23 +478,16 @@ export function DashboardShell() {
         <section className="panel runtime-grid">
           <MetricTile
             label="Runtime Mode"
-            value={
-              !data.live?.connected
-                ? "UNAVAILABLE"
-                : data.live?.dryRun
-                  ? "DRY_RUN"
-                  : "LIVE"
-            }
+            value={posture.modeLabel}
+            valueClassName={posture.tone}
           />
           <MetricTile
-            label="Trading Status"
-            value={
-              !data.live?.connected
-                ? "Unavailable"
-                : data.live.liveEnabled
-                  ? "Enabled"
-                  : "Disabled"
-            }
+            label="Runtime State"
+            value={posture.stateLabel}
+          />
+          <MetricTile
+            label="Trading Posture"
+            value={posture.tradingLabel}
           />
           <MetricTile
             label="Top Candidate"
@@ -527,16 +564,21 @@ export function DashboardShell() {
               <div className="account-summary-grid">
                 <MetricTile
                   label="Runtime Mode"
-                  value={!data.live?.connected ? "UNAVAILABLE" : data.live?.dryRun ? "DRY_RUN" : "LIVE"}
+                  value={posture.modeLabel}
+                  valueClassName={posture.tone}
                 />
                 <MetricTile
-                  label="Trading Status"
-                  value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : "Disabled"}
+                  label="Runtime State"
+                  value={posture.stateLabel}
                 />
                 <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
                 <MetricTile
+                  label="Trading Posture"
+                  value={posture.tradingLabel}
+                />
+                <MetricTile
                   label="Account Mode"
-                  value={summarizeAccountMode(data.live?.connected, data.live?.dryRun, data.live?.liveEnabled)}
+                  value={posture.accountLabel}
                 />
                 <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
                 <MetricTile label="Pending Exec" value={String(data.live?.exec?.pending || 0)} />

@@ -74,6 +74,8 @@ export const mockDashboardData: DashboardData = {
   },
   live: {
     generated: now,
+    mode: "paper",
+    modeState: "paper_enabled",
     dryRun: true,
     liveEnabled: false,
     endpoint: "http://127.0.0.1:8787/api/status",

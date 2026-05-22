@@ -9,6 +9,7 @@ import type {
   LiveScanItem,
   LiveView,
   ModuleSummary,
+  RuntimeMode,
   ScannerRow,
   ScannerSide,
   ScannerView
@@ -25,6 +26,8 @@ type RawScannerSnapshot = {
 
 type RawLiveStatus = {
   generated?: string;
+  mode?: string;
+  mode_state?: string;
   dry_run?: boolean;
   live_enabled?: boolean;
   scanner_bias?: string;
@@ -339,6 +342,13 @@ function normalizeLiveScanItem(raw: Record<string, unknown>): LiveScanItem {
   };
 }
 
+function normalizeRuntimeMode(value?: string): RuntimeMode | undefined {
+  if (value === "manual_only" || value === "paper" || value === "live_auto") {
+    return value;
+  }
+  return undefined;
+}
+
 function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: boolean): LiveView | null {
   if (!raw) {
     return {
@@ -351,6 +361,8 @@ function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: b
   }
   return {
     generated: raw.generated,
+    mode: normalizeRuntimeMode(raw.mode),
+    modeState: raw.mode_state,
     dryRun: raw.dry_run,
     liveEnabled: raw.live_enabled,
     scannerBias: raw.scanner_bias,
