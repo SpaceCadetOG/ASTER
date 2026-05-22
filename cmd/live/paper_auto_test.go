@@ -22,11 +22,11 @@ func TestRuntimeModeControllerDefaultsToManualOnly(t *testing.T) {
 	}
 }
 
-func TestRuntimeModeControllerEnablesPaperAutoOnlyWhenExplicit(t *testing.T) {
-	t.Setenv("LIVE_RUNTIME_MODE", "paper_auto")
+func TestRuntimeModeControllerEnablesPaperModeWhenExplicit(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_MODE", "paper")
 	ctrl := newRuntimeModeController(true, false, true)
-	if got := ctrl.operatingMode(); got != runtimeModePaperAuto {
-		t.Fatalf("expected paper_auto, got %s", got)
+	if got := ctrl.operatingMode(); got != runtimeModePaper {
+		t.Fatalf("expected paper, got %s", got)
 	}
 	ctrl = newRuntimeModeController(true, false, false)
 	if got := ctrl.operatingMode(); got != runtimeModeManualOnly {
@@ -60,7 +60,7 @@ func TestDispatchPaperAutoDecisionApprovedUsesPaperOnly(t *testing.T) {
 	decision, cand := testPaperAutoDecision()
 	paperCalls := 0
 	liveCalls := 0
-	out := dispatchPaperAutoDecision(runtimeModePaperAuto, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
+	out := dispatchPaperAutoDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{Symbol: "BTCUSDT"}, nil
@@ -86,7 +86,7 @@ func TestDispatchPaperAutoDecisionRejectedSkipsEntry(t *testing.T) {
 	decision.Approved = false
 	decision.RejectReason = "risk_reject"
 	paperCalls := 0
-	out := dispatchPaperAutoDecision(runtimeModePaperAuto, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
+	out := dispatchPaperAutoDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperAutoDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{}, nil
@@ -199,7 +199,7 @@ func TestEmitPaperAutoPositionOpenEventCarriesDecisionMetadata(t *testing.T) {
 		t.Fatalf("expected one event, got %d", len(events))
 	}
 	ev := events[0]
-	if ev.Type != "POSITION_OPEN" || ev.Source != "paper_auto" || ev.Mode != "paper_auto" {
+	if ev.Type != "POSITION_OPEN" || ev.Source != "paper" || ev.Mode != "paper" {
 		t.Fatalf("unexpected open event: %+v", ev)
 	}
 	if ev.SetupFamily != "reversal" || ev.ConfluenceScore != decision.Signal.ConfluenceScore.TotalScore {
@@ -227,7 +227,7 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 		Margin:               50,
 		Leverage:             3,
 		Stop:                 99,
-		EntryMode:            "paper_auto",
+		EntryMode:            "paper",
 		EntryReason:          "exhaustion_flip_long",
 		EntrySetupFamily:     "reversal",
 		EntryGrade:           "A",
@@ -260,7 +260,7 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 		t.Fatalf("expected one close event, got %d", len(events))
 	}
 	ev := events[0]
-	if ev.Type != "POSITION_CLOSE" || ev.Source != "paper_auto" || ev.Mode != "paper_auto" {
+	if ev.Type != "POSITION_CLOSE" || ev.Source != "paper" || ev.Mode != "paper" {
 		t.Fatalf("unexpected close event identity: %+v", ev)
 	}
 	if ev.Reason != "SL" || ev.MFER != 1.3 || ev.MAER != 0.4 {
@@ -274,7 +274,7 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 func testPaperAutoDecision() (strategies.ExecutionDecision, candidate) {
 	sig := strategies.Signal{
 		Active:     true,
-		Name:       "paper_auto_test",
+		Name:       "paper_test",
 		Side:       features.SideLong,
 		Entry:      100,
 		Stop:       99,
@@ -312,7 +312,7 @@ func testPaperAutoDecision() (strategies.ExecutionDecision, candidate) {
 			CandidateScore: cand.Entry.CurrentScore,
 			FinalRank:      cand.FinalRank,
 		},
-		"paper_auto_test",
+		"paper_test",
 	)
 	return decision, cand
 }

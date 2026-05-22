@@ -202,7 +202,7 @@ func loadRecentPaperViews(eventLog *stats.EventLogger, limit int) ([]livePaperCl
 	decisions := make([]livePaperDecisionView, 0, limit)
 	for i := len(events) - 1; i >= 0 && (len(closed) < limit || len(decisions) < limit); i-- {
 		ev := events[i]
-		if !strings.EqualFold(strings.TrimSpace(ev.Source), "paper_auto") && !strings.EqualFold(strings.TrimSpace(ev.Mode), "paper_auto") {
+		if !strings.EqualFold(strings.TrimSpace(ev.Source), "paper") && !strings.EqualFold(strings.TrimSpace(ev.Mode), "paper") {
 			continue
 		}
 		switch ev.Type {

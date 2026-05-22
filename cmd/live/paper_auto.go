@@ -18,14 +18,14 @@ type runtimeOperatingMode string
 
 const (
 	runtimeModeManualOnly runtimeOperatingMode = "manual_only"
-	runtimeModePaperAuto  runtimeOperatingMode = "paper_auto"
+	runtimeModePaper      runtimeOperatingMode = "paper"
 	runtimeModeLiveAuto   runtimeOperatingMode = "live_auto"
 )
 
 func parseRuntimeOperatingMode(raw string) runtimeOperatingMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case string(runtimeModePaperAuto):
-		return runtimeModePaperAuto
+	case string(runtimeModePaper):
+		return runtimeModePaper
 	case string(runtimeModeLiveAuto):
 		return runtimeModeLiveAuto
 	default:
@@ -34,17 +34,11 @@ func parseRuntimeOperatingMode(raw string) runtimeOperatingMode {
 }
 
 func surfacedRuntimeMode(mode runtimeOperatingMode) string {
-	if mode == runtimeModePaperAuto {
-		return "paper"
-	}
 	return string(mode)
 }
 
 func surfacedPaperLabel(raw string) string {
 	value := strings.TrimSpace(raw)
-	if strings.EqualFold(value, string(runtimeModePaperAuto)) {
-		return "paper"
-	}
 	if value == "" {
 		return "paper"
 	}
@@ -52,11 +46,7 @@ func surfacedPaperLabel(raw string) string {
 }
 
 func surfacedPaperState(raw string) string {
-	value := strings.TrimSpace(raw)
-	if strings.HasPrefix(strings.ToLower(value), "paper_auto_") {
-		return "paper_" + strings.TrimPrefix(value, "paper_auto_")
-	}
-	return value
+	return strings.TrimSpace(raw)
 }
 
 func selectTopRuntimeCandidate(cands []candidate) (candidate, bool) {
@@ -124,7 +114,7 @@ func buildPaperAutoExecutionDecision(ctx paperAutoDecisionCtx) strategies.Execut
 		riskDec,
 		preflight,
 		admission,
-		"paper_auto",
+		"paper",
 		firstNonEmpty(strings.TrimSpace(ctx.Candidate.Strat), "unknown"),
 	)
 }
@@ -200,7 +190,7 @@ func paperAutoPreflightVerdict(ctx paperAutoDecisionCtx) strategies.PreflightVer
 	verdict := strategies.PreflightVerdict{
 		Checked:  true,
 		Approved: len(reasons) == 0,
-		Source:   "paper_auto",
+		Source:   "paper",
 		Reasons:  append([]string(nil), reasons...),
 	}
 	if len(reasons) > 0 {
@@ -264,7 +254,7 @@ type paperAutoDispatchResult struct {
 }
 
 func dispatchPaperAutoDecision(mode runtimeOperatingMode, now time.Time, decision strategies.ExecutionDecision, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry, hooks paperAutoDispatchHooks) paperAutoDispatchResult {
-	if mode != runtimeModePaperAuto {
+	if mode != runtimeModePaper {
 		return paperAutoDispatchResult{}
 	}
 	if !decision.Approved {
@@ -291,7 +281,7 @@ func annotatePaperPositionFromDecision(pos *paperPosition, c candidate, decision
 	if pos == nil {
 		return
 	}
-	pos.EntryMode = string(runtimeModePaperAuto)
+	pos.EntryMode = string(runtimeModePaper)
 	pos.EntryConfluenceScore = decision.Signal.ConfluenceScore.TotalScore
 	pos.EntrySignalReasons = append([]string(nil), decision.Signal.Reasons...)
 	pos.EntrySignalSources = append([]string(nil), decision.Signal.SignalSource...)
@@ -319,8 +309,8 @@ func emitPaperAutoDecisionEvent(log *stats.EventLogger, now time.Time, c candida
 		Simulated:       true,
 		Symbol:          strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
 		Side:            strings.ToUpper(strings.TrimSpace(c.Side)),
-		Source:          "paper_auto",
-		Mode:            string(runtimeModePaperAuto),
+		Source:          "paper",
+		Mode:            string(runtimeModePaper),
 		TF:              "1m",
 		Strategy:        firstNonEmpty(strings.TrimSpace(decision.Signal.Name), strings.TrimSpace(c.Strat)),
 		SetupFamily:     c.SetupFamily,
@@ -357,7 +347,7 @@ func emitPaperAutoPositionOpenEvent(log *stats.EventLogger, now time.Time, c can
 		Simulated:       true,
 		Symbol:          strings.ToUpper(strings.TrimSpace(aster.RawSymbol(pos.Symbol))),
 		Side:            strings.ToUpper(strings.TrimSpace(pos.Side)),
-		Source:          "paper_auto",
+		Source:          "paper",
 		Mode:            pos.EntryMode,
 		TF:              "1m",
 		Strategy:        firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason)),
@@ -404,7 +394,7 @@ func applyPaperAutoDecisionStatus(st *liveStatus, decision strategies.ExecutionD
 	if st == nil {
 		return
 	}
-	st.Mode = surfacedRuntimeMode(runtimeModePaperAuto)
+	st.Mode = surfacedRuntimeMode(runtimeModePaper)
 	switch {
 	case dispatch.Entered:
 		st.ModeState = "paper_entered"

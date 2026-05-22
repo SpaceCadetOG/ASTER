@@ -479,9 +479,9 @@ func (m *runtimeModeController) operatingMode() runtimeOperatingMode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	switch m.requestedMode {
-	case runtimeModePaperAuto:
+	case runtimeModePaper:
 		if m.dryRun && !m.enableLiveTrading && m.paperEnabled {
-			return runtimeModePaperAuto
+			return runtimeModePaper
 		}
 	case runtimeModeLiveAuto:
 		return runtimeModeManualOnly
@@ -2550,7 +2550,7 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		manualOnlyScannerMode := operatingMode != runtimeModePaperAuto
+		manualOnlyScannerMode := operatingMode != runtimeModePaper
 		if manualOnlyScannerMode {
 			st := liveStatus{
 				Generated:     now,
@@ -2601,7 +2601,7 @@ func main() {
 
 		st := liveStatus{
 			Generated:     now,
-			Mode:          surfacedRuntimeMode(runtimeModePaperAuto),
+			Mode:          surfacedRuntimeMode(runtimeModePaper),
 			ModeState:     "paper_enabled",
 			DryRun:        dryRun,
 			LiveEnabled:   false,
@@ -2618,7 +2618,7 @@ func main() {
 		}
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
-			st.Paper = buildLivePaperSnapshot(runtimeModePaperAuto, paper, metaBySymbol, eventLog, 12)
+			st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, metaBySymbol, eventLog, 12)
 		}
 		best, ok := selectTopRuntimeCandidate(cands)
 		if !ok {
@@ -2689,7 +2689,7 @@ func main() {
 		paperAutoLogDecision(best, decision, dispatch)
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
-			st.Paper = buildLivePaperSnapshot(runtimeModePaperAuto, paper, metaBySymbol, eventLog, 12)
+			st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, metaBySymbol, eventLog, 12)
 		}
 		statusStore.Set(st)
 		waitAndReport()

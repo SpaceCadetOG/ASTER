@@ -22,9 +22,9 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 		Simulated:       true,
 		Symbol:          "BTCUSDT",
 		Side:            "BUY",
-		Source:          "paper_auto",
-		Mode:            "paper_auto",
-		Strategy:        "paper_auto_test",
+		Source:          "paper",
+		Mode:            "paper",
+		Strategy:        "paper_test",
 		SetupFamily:     "reversal",
 		Grade:           "A",
 		State:           "IN_PLAY",
@@ -34,7 +34,7 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 		EntryPx:         100,
 		StopDistPct:     1.0,
 		GateAllow:       &allow,
-		GateReasons:     []string{"paper_auto"},
+		GateReasons:     []string{"paper"},
 	})
 	logger.Emit(stats.Event{
 		Timestamp:    now.Add(-1 * time.Minute),
@@ -42,8 +42,8 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 		Simulated:    true,
 		Symbol:       "ETHUSDT",
 		Side:         "SELL",
-		Source:       "paper_auto",
-		Mode:         "paper_auto",
+		Source:       "paper",
+		Mode:         "paper",
 		Strategy:     "exhaustion_flip_short",
 		SetupFamily:  "reversal",
 		Grade:        "B",
@@ -85,9 +85,9 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 				MaxFavorableR:    1.5,
 				MaxAdverseR:      0.3,
 				LastMark:         101.5,
-				EntryMode:        "paper_auto",
-				EntryReason:      "paper_auto_test",
-				EntryStrategyID:  "paper_auto_test",
+				EntryMode:        "paper",
+				EntryReason:      "paper_test",
+				EntryStrategyID:  "paper_test",
 				EntrySetupFamily: "reversal",
 				EntryGrade:       "A",
 				EntryTrigger:     "ready",
@@ -101,7 +101,7 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 		"BTCUSDT": {LastPrice: 101.5},
 	}
 
-	snap := buildLivePaperSnapshot(runtimeModePaperAuto, paper, meta, logger, 5)
+	snap := buildLivePaperSnapshot(runtimeModePaper, paper, meta, logger, 5)
 	if snap == nil {
 		t.Fatal("expected paper snapshot")
 	}
@@ -146,10 +146,10 @@ func TestBuildLivePaperSnapshotEmptyStateUsesSafeArrays(t *testing.T) {
 func TestLiveStatusStoreSnapshotClonesPaperSlices(t *testing.T) {
 	store := newLiveStatusStore()
 	store.Set(liveStatus{
-		Mode:   "paper_auto",
+		Mode:   "paper",
 		DryRun: true,
 		Paper: &livePaperSnapshot{
-			Mode:          "paper_auto",
+			Mode:          "paper",
 			OpenCount:     1,
 			OpenPositions: []livePaperPositionView{{Symbol: "BTCUSDT"}},
 		},

@@ -66,7 +66,7 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
     return undefined;
   }
   const normalizePaperLabel = (value: unknown) =>
-    typeof value === "string" && value.trim().toLowerCase() === "paper_auto" ? "paper" : typeof value === "string" ? value : undefined;
+    typeof value === "string" ? value : undefined;
   return {
     mode: normalizePaperLabel(raw.mode),
     summary: typeof raw.summary === "string" ? raw.summary : undefined,
