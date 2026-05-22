@@ -69,9 +69,9 @@ pre {
 
 .page {
   width: 100%;
-  max-width: 1440px;
+  max-width: min(1920px, calc(100vw - 24px));
   margin: 0 auto;
-  padding: 28px 18px 48px;
+  padding: clamp(18px, 2vw, 28px) clamp(12px, 1.5vw, 22px) 48px;
   overflow-x: clip;
 }
 
@@ -205,7 +205,7 @@ pre {
 }
 
 .hero-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   margin-bottom: 18px;
 }
 
@@ -214,7 +214,7 @@ pre {
 }
 
 .runtime-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .placeholder-grid,
@@ -329,17 +329,17 @@ pre {
 .overview-grid,
 .overview-columns,
 .detail-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
 }
 
 .context-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   margin-bottom: 14px;
 }
 
 .status-context-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 1.2fr) minmax(320px, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -392,7 +392,7 @@ pre {
 
 .score-strip {
   display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   width: min(100%, 420px);
 }
@@ -471,6 +471,7 @@ pre {
 .table-wrap {
   overflow-x: auto;
   max-width: 100%;
+  scrollbar-gutter: stable both-edges;
 }
 
 .hotlist-ticker {
@@ -517,8 +518,8 @@ pre {
 }
 
 .hotlist-card {
-  min-width: 300px;
-  max-width: 300px;
+  min-width: clamp(220px, 20vw, 300px);
+  max-width: clamp(220px, 20vw, 300px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -589,11 +590,13 @@ pre {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .table td {
   font-size: 0.86rem;
   line-height: 1.35;
+  white-space: nowrap;
 }
 
 .table small,
@@ -623,6 +626,11 @@ pre {
 .table-link small {
   color: var(--muted);
   font-size: 0.8rem;
+  white-space: normal;
+}
+
+.table-link strong {
+  white-space: normal;
 }
 
 .table-symbol {
@@ -896,11 +904,6 @@ pre {
 }
 
 @media (max-width: 1180px) {
-  .hero-grid,
-  .runtime-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .overview-grid,
   .overview-columns,
   .detail-grid,
