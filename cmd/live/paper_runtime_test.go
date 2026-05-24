@@ -34,15 +34,23 @@ func TestRuntimeModeControllerEnablesPaperModeWhenExplicit(t *testing.T) {
 	}
 }
 
-func TestRuntimeModeControllerEnablesLiveAutoWhenExplicit(t *testing.T) {
-	t.Setenv("LIVE_RUNTIME_MODE", "live_auto")
+func TestRuntimeModeControllerEnablesLiveWhenExplicit(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_MODE", "live")
 	ctrl := newRuntimeModeController(false, true, false)
-	if got := ctrl.operatingMode(); got != runtimeModeLiveAuto {
-		t.Fatalf("expected live_auto, got %s", got)
+	if got := ctrl.operatingMode(); got != runtimeModeLive {
+		t.Fatalf("expected live, got %s", got)
 	}
 	ctrl = newRuntimeModeController(true, false, true)
 	if got := ctrl.operatingMode(); got != runtimeModeManualOnly {
 		t.Fatalf("expected manual_only until live flags are active, got %s", got)
+	}
+}
+
+func TestRuntimeModeControllerAcceptsLegacyLiveAutoAlias(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_MODE", "live_auto")
+	ctrl := newRuntimeModeController(false, true, false)
+	if got := ctrl.operatingMode(); got != runtimeModeLive {
+		t.Fatalf("expected legacy live_auto alias to resolve to live, got %s", got)
 	}
 }
 

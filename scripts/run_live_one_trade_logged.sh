@@ -45,7 +45,7 @@ pkill -9 -f 'cmd/live' 2>/dev/null || true
 
 export LIVE_DRY_RUN="${LIVE_DRY_RUN:-0}"
 export LIVE_ENABLE_LIVE_TRADING="${LIVE_ENABLE_LIVE_TRADING:-1}"
-export LIVE_RUNTIME_MODE="${LIVE_RUNTIME_MODE:-live_auto}"
+export LIVE_RUNTIME_MODE="${LIVE_RUNTIME_MODE:-live}"
 
 # True recovery profile: one total position, no recycling, no auto-managed imports.
 export LIVE_MAX_OPEN_POS="${LIVE_MAX_OPEN_POS:-1}"

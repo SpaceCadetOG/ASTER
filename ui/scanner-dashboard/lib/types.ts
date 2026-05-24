@@ -11,7 +11,7 @@ export type ScannerSide = "long" | "short";
 export type Grade = "A+" | "A" | "B" | "C" | "D" | "N/A";
 export type LoadState = "unavailable" | "empty" | "ready";
 export type ConnectivityState = "live" | "stale" | "disconnected" | "unavailable";
-export type RuntimeMode = "manual_only" | "paper" | "live_auto";
+export type RuntimeMode = "manual_only" | "paper" | "live";
 
 export interface ScannerRow {
   symbol: string;

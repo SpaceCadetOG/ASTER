@@ -19,15 +19,15 @@ type runtimeOperatingMode string
 const (
 	runtimeModeManualOnly runtimeOperatingMode = "manual_only"
 	runtimeModePaper      runtimeOperatingMode = "paper"
-	runtimeModeLiveAuto   runtimeOperatingMode = "live_auto"
+	runtimeModeLive       runtimeOperatingMode = "live"
 )
 
 func parseRuntimeOperatingMode(raw string) runtimeOperatingMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(runtimeModePaper):
 		return runtimeModePaper
-	case string(runtimeModeLiveAuto):
-		return runtimeModeLiveAuto
+	case string(runtimeModeLive), "live_auto":
+		return runtimeModeLive
 	default:
 		return runtimeModeManualOnly
 	}

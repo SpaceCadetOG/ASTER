@@ -343,8 +343,11 @@ function normalizeLiveScanItem(raw: Record<string, unknown>): LiveScanItem {
 }
 
 function normalizeRuntimeMode(value?: string): RuntimeMode | undefined {
-  if (value === "manual_only" || value === "paper" || value === "live_auto") {
+  if (value === "manual_only" || value === "paper" || value === "live") {
     return value;
+  }
+  if (value === "live_auto") {
+    return "live";
   }
   return undefined;
 }

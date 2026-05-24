@@ -69,7 +69,7 @@ case "${launch_mode,,}" in
   y|yes|live)
     export LIVE_ENABLE_LIVE_TRADING=1
     export LIVE_DRY_RUN=0
-    export LIVE_RUNTIME_MODE=live_auto
+    export LIVE_RUNTIME_MODE=live
     mode_label="LIVE"
     ;;
   n|no|paper|dry|dry-run)

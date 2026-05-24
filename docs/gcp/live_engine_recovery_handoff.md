@@ -13,7 +13,7 @@ runtime start without discarding the current paper-runtime surface.
   available again.
 - Keep `manual_only` as the default mode.
 - Route explicit `LIVE_RUNTIME_MODE=paper` to paper validation.
-- Route explicit `LIVE_RUNTIME_MODE=live_auto` to the recovered live engine only
+- Route explicit `LIVE_RUNTIME_MODE=live` to the recovered live engine only
   when live flags are also active.
 - Restore the safe, one-trade, balanced, and April small-account launch profiles.
 - Add `systemd/env/live.recovery.env.example` as a small paper-first env surface.
@@ -42,7 +42,7 @@ bash scripts/run_live_logged.sh --env /opt/aster/env/live.recovery.env
 
 Small live recovery after paper comparison:
 
-1. Change `LIVE_RUNTIME_MODE=live_auto`, `LIVE_DRY_RUN=0`, and
+1. Change `LIVE_RUNTIME_MODE=live`, `LIVE_DRY_RUN=0`, and
    `LIVE_ENABLE_LIVE_TRADING=1` in `/opt/aster/env/live.recovery.env`.
 2. Start the guarded live profile:
 

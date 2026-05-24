@@ -88,16 +88,16 @@ function runtimePosture(live?: LiveView | null) {
     };
   }
 
-  const inferredMode = live.liveEnabled && !live.dryRun ? "live_auto" : live.dryRun ? "paper" : "manual_only";
+  const inferredMode = live.liveEnabled && !live.dryRun ? "live" : live.dryRun ? "paper" : "manual_only";
   const mode = live.mode || inferredMode;
   const modeLabel = labelRuntimeToken(mode);
   const stateLabel = labelRuntimeToken(live.modeState || mode);
 
-  if (mode === "live_auto") {
+  if (mode === "live") {
     return {
       modeLabel,
       stateLabel,
-      accountLabel: "Live auto engine",
+      accountLabel: "Live engine",
       tradingLabel: live.liveEnabled ? "Entries Armed" : "Entries Blocked",
       tone: live.liveEnabled ? "tone-positive" : "tone-amber"
     };

@@ -483,9 +483,9 @@ func (m *runtimeModeController) operatingMode() runtimeOperatingMode {
 		if m.dryRun && !m.enableLiveTrading && m.paperEnabled {
 			return runtimeModePaper
 		}
-	case runtimeModeLiveAuto:
+	case runtimeModeLive:
 		if !m.dryRun && m.enableLiveTrading && !m.paperEnabled {
-			return runtimeModeLiveAuto
+			return runtimeModeLive
 		}
 	}
 	return runtimeModeManualOnly
@@ -1821,8 +1821,8 @@ func main() {
 		modeLabel = "PAPER"
 	}
 	startupOperatingMode := modeCtrl.operatingMode()
-	if modeCtrl.requestedOperatingMode() == runtimeModeLiveAuto && startupOperatingMode != runtimeModeLiveAuto {
-		fmt.Println("live: LIVE_RUNTIME_MODE=live_auto requested without active live flags; continuing in manual_only mode")
+	if modeCtrl.requestedOperatingMode() == runtimeModeLive && startupOperatingMode != runtimeModeLive {
+		fmt.Println("live: LIVE_RUNTIME_MODE=live requested without active live flags; continuing in manual_only mode")
 	}
 	for _, line := range startupSummaryLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
