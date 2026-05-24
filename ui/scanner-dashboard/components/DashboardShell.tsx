@@ -10,6 +10,8 @@ import {
   formatCompactUsd,
   formatNumber,
   formatPercent,
+  formatSignedUsd,
+  formatUsd,
   formatTime
 } from "@/lib/format";
 import type {
@@ -18,7 +20,6 @@ import type {
   DashboardTab,
   EndpointStatus,
   LiveScanItem,
-  LiveView,
   ScannerSide,
   ScannerView
 } from "@/lib/types";
@@ -72,65 +73,50 @@ function gradeTone(value?: string) {
   return "tone-muted";
 }
 
-function labelRuntimeToken(value?: string) {
-  if (!value) return "UNKNOWN";
-  return value.replaceAll("_", " ").toUpperCase();
+function numericTone(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "tone-muted";
+  if (value > 0) return "tone-positive";
+  if (value < 0) return "tone-negative";
+  return "tone-muted";
 }
 
-function runtimePosture(live?: LiveView | null) {
-  if (!live?.connected) {
-    return {
-      modeLabel: "UNAVAILABLE",
-      stateLabel: "DISCONNECTED",
-      accountLabel: "Unavailable",
-      tradingLabel: "Unavailable",
-      tone: "tone-muted"
-    };
-  }
-
-  const inferredMode = live.liveEnabled && !live.dryRun ? "live" : live.dryRun ? "paper" : "manual_only";
-  const mode = live.mode || inferredMode;
-  const modeLabel = labelRuntimeToken(mode);
-  const stateLabel = labelRuntimeToken(live.modeState || mode);
-
-  if (mode === "live") {
-    return {
-      modeLabel,
-      stateLabel,
-      accountLabel: "Live engine",
-      tradingLabel: live.liveEnabled ? "Entries Armed" : "Entries Blocked",
-      tone: live.liveEnabled ? "tone-positive" : "tone-amber"
-    };
-  }
-
-  if (mode === "paper") {
-    return {
-      modeLabel,
-      stateLabel,
-      accountLabel: "Paper engine",
-      tradingLabel: "Paper Validation",
-      tone: "tone-amber"
-    };
-  }
-
-  return {
-    modeLabel,
-    stateLabel,
-    accountLabel: "Manual-only scanner",
-    tradingLabel: "Auto Entries Off",
-    tone: "tone-muted"
-  };
+function summarizeAccountMode(connected?: boolean, dryRun?: boolean, liveEnabled?: boolean) {
+  if (!connected) return "Unavailable";
+  return `${dryRun ? "Paper" : "Live"} / ${liveEnabled ? "Enabled" : "Disabled"}`;
 }
 
 function paperAccountHero(data: DashboardData | null) {
   const paper = data?.live?.paper;
-  if (!paper) return "Paper account unavailable.";
-  return [
-    `Balance ${formatCompactUsd(paper.balance)}`,
-    `Equity ${formatCompactUsd(paper.equity)}`,
-    `Open PnL ${formatCompactUsd(paper.openPnl)}`,
-    `Net Day ${formatCompactUsd((paper.realizedToday || 0) + (paper.openPnl || 0))}`
-  ].join("\n");
+  if (!paper) return null;
+  const netDay = (paper.realizedToday || 0) + (paper.openPnl || 0);
+  return (
+    <div className="account-hero-list">
+      <div className="account-hero-row">
+        <span>Balance</span>
+        <strong>{formatUsdValue(paper.balance)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Equity</span>
+        <strong>{formatUsdValue(paper.equity)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Open PnL</span>
+        <strong className={numericTone(paper.openPnl)}>{formatSignedUsd(paper.openPnl)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Net Day</span>
+        <strong className={numericTone(netDay)}>{formatSignedUsd(netDay)}</strong>
+      </div>
+    </div>
+  );
+}
+
+function formatUsdValue(value: number | null | undefined) {
+  return formatUsd(value);
+}
+
+function normalizeTradeSide(value: string | undefined): ScannerSide {
+  return value?.toUpperCase() === "SELL" || value?.toUpperCase() === "SHORT" ? "short" : "long";
 }
 
 export function DashboardShell() {
@@ -215,9 +201,12 @@ export function DashboardShell() {
         : data?.longScanner || null;
 
   const runtimeGenerated = data?.live?.generated || data?.generatedAt;
-  const posture = runtimePosture(data?.live);
   const paperHero = paperAccountHero(data);
-  const runtimeAccountSummary = data?.live?.paper?.summary || data?.live?.paperSummary || "Unavailable";
+  const runtimeAccountSummary =
+    accountTab === "paper"
+      ? "Paper ledger snapshot from the live runtime. Click any paper asset row below to open Asset Detail."
+      : data?.live?.liveAccount?.healthDetail ||
+        "Live account snapshot from the runtime. Funds, equity, open PnL, and position counts remain read-only.";
   const selectedSummaryRow =
     data?.longScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
     data?.shortScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
@@ -227,6 +216,18 @@ export function DashboardShell() {
     setSelectedSymbol(symbol);
     setSelectedSide(side);
     setTab("asset");
+  };
+
+  const handleAssetJump = (symbol: string, fallbackSide?: ScannerSide | string) => {
+    const inferredSide: ScannerSide =
+      data?.longScanner?.rows.some((row) => row.symbol === symbol)
+        ? "long"
+        : data?.shortScanner?.rows.some((row) => row.symbol === symbol)
+          ? "short"
+          : liveRows.find((row) => row.symbol === symbol)?.scannerSide ||
+            (typeof fallbackSide === "string" ? normalizeTradeSide(fallbackSide) : fallbackSide) ||
+            selectedSide;
+    handleSelect(symbol, inferredSide);
   };
 
   if (!data) {
@@ -312,8 +313,13 @@ export function DashboardShell() {
         <MetricTile label="Top Slope" value={formatNumber(data.live?.topSlope, 3)} />
         <MetricTile
           label="Runtime Mode"
-          value={posture.modeLabel}
-          valueClassName={posture.tone}
+          value={
+            !data.live?.connected
+              ? "UNAVAILABLE"
+              : data.live?.dryRun
+                ? "DRY_RUN"
+                : "LIVE"
+          }
         />
         <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
       </section>
@@ -348,16 +354,14 @@ export function DashboardShell() {
               <h3>Runtime Snapshot</h3>
               <div className="kv-list">
                 <div className="kv-row">
-                  <span>Operating Mode</span>
-                  <strong className={posture.tone}>{posture.modeLabel}</strong>
-                </div>
-                <div className="kv-row">
-                  <span>Mode State</span>
-                  <strong>{posture.stateLabel}</strong>
-                </div>
-                <div className="kv-row">
-                  <span>Trading Posture</span>
-                  <strong>{posture.tradingLabel}</strong>
+                  <span>Paper / Live</span>
+                  <strong>
+                    {!data.live?.connected
+                      ? "Unavailable"
+                      : `${data.live?.dryRun ? "Paper Mode" : "Live Mode"} / ${
+                          data.live?.liveEnabled ? "Enabled" : "Disabled"
+                        }`}
+                  </strong>
                 </div>
                 <div className="kv-row">
                   <span>Generated</span>
@@ -478,16 +482,23 @@ export function DashboardShell() {
         <section className="panel runtime-grid">
           <MetricTile
             label="Runtime Mode"
-            value={posture.modeLabel}
-            valueClassName={posture.tone}
+            value={
+              !data.live?.connected
+                ? "UNAVAILABLE"
+                : data.live?.dryRun
+                  ? "DRY_RUN"
+                  : "LIVE"
+            }
           />
           <MetricTile
-            label="Runtime State"
-            value={posture.stateLabel}
-          />
-          <MetricTile
-            label="Trading Posture"
-            value={posture.tradingLabel}
+            label="Trading Status"
+            value={
+              !data.live?.connected
+                ? "Unavailable"
+                : data.live.liveEnabled
+                  ? "Enabled"
+                  : "Disabled"
+            }
           />
           <MetricTile
             label="Top Candidate"
@@ -540,20 +551,29 @@ export function DashboardShell() {
                 <div className="tile tile-summary">
                   <div className="tile-label">Paper Account</div>
                   <div className="tile-value tile-value-large">
-                    {paperHero}
+                    {paperHero || "Paper account unavailable."}
                   </div>
                   <div className="tile-subcopy">
                     {clampText(runtimeAccountSummary, 160) || "Structured paper account view."}
                   </div>
                 </div>
-                <MetricTile label="Balance" value={formatCompactUsd(data.live?.paper?.balance)} />
-                <MetricTile label="Equity" value={formatCompactUsd(data.live?.paper?.equity)} />
-                <MetricTile label="Reserve" value={formatCompactUsd(data.live?.paper?.reserve)} />
-                <MetricTile label="Open PnL" value={formatCompactUsd(data.live?.paper?.openPnl)} />
-                <MetricTile label="Realized Today" value={formatCompactUsd(data.live?.paper?.realizedToday)} />
+                <MetricTile label="Balance" value={formatUsdValue(data.live?.paper?.balance)} />
+                <MetricTile label="Equity" value={formatUsdValue(data.live?.paper?.equity)} />
+                <MetricTile label="Reserve" value={formatUsdValue(data.live?.paper?.reserve)} />
+                <MetricTile
+                  label="Open PnL"
+                  value={formatSignedUsd(data.live?.paper?.openPnl)}
+                  valueClassName={numericTone(data.live?.paper?.openPnl)}
+                />
+                <MetricTile
+                  label="Realized Today"
+                  value={formatSignedUsd(data.live?.paper?.realizedToday)}
+                  valueClassName={numericTone(data.live?.paper?.realizedToday)}
+                />
                 <MetricTile
                   label="Net Day"
-                  value={formatCompactUsd((data.live?.paper?.realizedToday || 0) + (data.live?.paper?.openPnl || 0))}
+                  value={formatSignedUsd((data.live?.paper?.realizedToday || 0) + (data.live?.paper?.openPnl || 0))}
+                  valueClassName={numericTone((data.live?.paper?.realizedToday || 0) + (data.live?.paper?.openPnl || 0))}
                 />
                 <MetricTile label="Open Positions" value={String(data.live?.paper?.openCount || 0)} />
                 <MetricTile label="Recent Closed" value={String(data.live?.paper?.recentClosedCount || 0)} />
@@ -564,22 +584,41 @@ export function DashboardShell() {
               <div className="account-summary-grid">
                 <MetricTile
                   label="Runtime Mode"
-                  value={posture.modeLabel}
-                  valueClassName={posture.tone}
+                  value={!data.live?.connected ? "UNAVAILABLE" : data.live?.dryRun ? "DRY_RUN" : "LIVE"}
                 />
                 <MetricTile
-                  label="Runtime State"
-                  value={posture.stateLabel}
+                  label="Trading Status"
+                  value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : "Disabled"}
                 />
-                <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
                 <MetricTile
-                  label="Trading Posture"
-                  value={posture.tradingLabel}
+                  label="Available USDT"
+                  value={formatUsdValue(data.live?.liveAccount?.availableUsdt ?? data.live?.availableUsdt)}
+                />
+                <MetricTile
+                  label="Live Equity"
+                  value={formatUsdValue(data.live?.liveAccount?.equity)}
+                />
+                <MetricTile
+                  label="Live Open PnL"
+                  value={formatSignedUsd(data.live?.liveAccount?.openPnl)}
+                  valueClassName={numericTone(data.live?.liveAccount?.openPnl)}
+                />
+                <MetricTile
+                  label="Live Realized Day"
+                  value={formatSignedUsd(data.live?.liveAccount?.realizedDay)}
+                  valueClassName={numericTone(data.live?.liveAccount?.realizedDay)}
                 />
                 <MetricTile
                   label="Account Mode"
-                  value={posture.accountLabel}
+                  value={summarizeAccountMode(data.live?.connected, data.live?.dryRun, data.live?.liveEnabled)}
                 />
+                <MetricTile
+                  label="Live Health"
+                  value={data.live?.liveAccount?.health || (!data.live?.connected ? "DISCONNECTED" : "UNKNOWN")}
+                />
+                <MetricTile label="Live Open Positions" value={String(data.live?.liveAccount?.openCount || 0)} />
+                <MetricTile label="Bot Positions" value={String(data.live?.liveAccount?.botCount || 0)} />
+                <MetricTile label="Manual Positions" value={String(data.live?.liveAccount?.manualCount || 0)} />
                 <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
                 <MetricTile label="Pending Exec" value={String(data.live?.exec?.pending || 0)} />
                 <MetricTile label="Closed Exec" value={String(data.live?.exec?.closed || 0)} />
@@ -615,9 +654,17 @@ export function DashboardShell() {
                   <tbody>
                     {data.live.paper.openPositions.map((pos) => (
                       <tr key={`${pos.symbol}-${pos.side}-${pos.openedAt || pos.entryPrice}`}>
-                        <td>{pos.symbol}</td>
-                        <td>{pos.side}</td>
                         <td>
+                          <button
+                            className="table-link paper-asset-link"
+                            onClick={() => handleAssetJump(pos.symbol, pos.side)}
+                          >
+                            <strong className="table-symbol">{pos.symbol}</strong>
+                            <small>{pos.setupFamily || pos.triggerState || "open position"}</small>
+                          </button>
+                        </td>
+                        <td>{pos.side}</td>
+                        <td className="paper-strategy-cell">
                           <strong>{pos.strategy || "N/A"}</strong>
                           <br />
                           <small>{pos.mode || pos.source || "paper"}</small>
@@ -633,10 +680,10 @@ export function DashboardShell() {
                           {formatNumber(pos.tp1, 4)}
                           {pos.tp2 ? ` / ${formatNumber(pos.tp2, 4)}` : ""}
                         </td>
-                        <td>
-                          <strong>{formatCompactUsd(pos.unrealizedPnl)}</strong>
+                        <td className={numericTone(pos.unrealizedPnl)}>
+                          <strong>{formatSignedUsd(pos.unrealizedPnl)}</strong>
                           <br />
-                          <small>{formatPercent(pos.unrealizedPct, 2)}</small>
+                          <small className="pnl-subvalue">{formatPercent(pos.unrealizedPct, 2)}</small>
                         </td>
                         <td>
                           {formatNumber(pos.mfeR, 2)} / {formatNumber(pos.maeR, 2)}
@@ -676,9 +723,17 @@ export function DashboardShell() {
                     {data.live.paper.recentClosed.map((trade) => (
                       <tr key={`${trade.symbol}-${trade.closedAt || trade.exitPrice}`}>
                         <td>{formatTime(trade.closedAt)}</td>
-                        <td>{trade.symbol}</td>
-                        <td>{trade.side}</td>
                         <td>
+                          <button
+                            className="table-link paper-asset-link"
+                            onClick={() => handleAssetJump(trade.symbol, trade.side)}
+                          >
+                            <strong className="table-symbol">{trade.symbol}</strong>
+                            <small>{trade.setupFamily || trade.triggerState || "closed trade"}</small>
+                          </button>
+                        </td>
+                        <td>{trade.side}</td>
+                        <td className="paper-strategy-cell">
                           <strong>{trade.strategy || "N/A"}</strong>
                           <br />
                           <small>{trade.mode || trade.source || "paper"}</small>
@@ -688,10 +743,10 @@ export function DashboardShell() {
                         </td>
                         <td>{formatNumber(trade.entryPrice, 4)}</td>
                         <td>{formatNumber(trade.exitPrice, 4)}</td>
-                        <td>
-                          <strong>{formatCompactUsd(trade.pnlUsd)}</strong>
+                        <td className={numericTone(trade.pnlUsd)}>
+                          <strong>{formatSignedUsd(trade.pnlUsd)}</strong>
                           <br />
-                          <small>{formatPercent(trade.pnlPct, 2)}</small>
+                          <small className="pnl-subvalue">{formatPercent(trade.pnlPct, 2)}</small>
                         </td>
                         <td>{formatNumber(trade.riskR, 2)}</td>
                         <td>
@@ -729,9 +784,17 @@ export function DashboardShell() {
                     {data.live.paper.recentDecisions.map((decision) => (
                       <tr key={`${decision.symbol}-${decision.decidedAt || decision.entryPrice}`}>
                         <td>{formatTime(decision.decidedAt)}</td>
-                        <td>{decision.symbol}</td>
-                        <td>{decision.side}</td>
                         <td>
+                          <button
+                            className="table-link paper-asset-link"
+                            onClick={() => handleAssetJump(decision.symbol, decision.side)}
+                          >
+                            <strong className="table-symbol">{decision.symbol}</strong>
+                            <small>{decision.setupFamily || decision.triggerState || "decision"}</small>
+                          </button>
+                        </td>
+                        <td>{decision.side}</td>
+                        <td className="paper-strategy-cell">
                           <strong>{decision.strategy || "N/A"}</strong>
                           <br />
                           <small>{decision.setupFamily || decision.mode || "paper"}</small>

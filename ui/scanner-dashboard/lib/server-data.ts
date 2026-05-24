@@ -9,7 +9,6 @@ import type {
   LiveScanItem,
   LiveView,
   ModuleSummary,
-  RuntimeMode,
   ScannerRow,
   ScannerSide,
   ScannerView
@@ -43,6 +42,18 @@ type RawLiveStatus = {
   long_inplay?: number;
   short_inplay?: number;
   available_usdt?: number;
+  live?: {
+    generated?: string;
+    health?: string;
+    health_detail?: string;
+    available_usdt?: number;
+    equity?: number;
+    realized_day?: number;
+    open_pnl?: number;
+    open_count?: number;
+    bot_count?: number;
+    manual_count?: number;
+  };
   paper_summary?: string;
   paper?: {
     mode?: string;
@@ -63,6 +74,24 @@ type RawLiveStatus = {
   scanner_shorts?: Array<Record<string, unknown>>;
   exec?: Record<string, number>;
 };
+
+function normalizeLiveAccount(raw: RawLiveStatus["live"] | undefined) {
+  if (!raw) {
+    return undefined;
+  }
+  return {
+    generated: typeof raw.generated === "string" ? raw.generated : undefined,
+    health: typeof raw.health === "string" ? raw.health : undefined,
+    healthDetail: typeof raw.health_detail === "string" ? raw.health_detail : undefined,
+    availableUsdt: Number(raw.available_usdt || 0),
+    equity: Number(raw.equity || 0),
+    realizedDay: Number(raw.realized_day || 0),
+    openPnl: Number(raw.open_pnl || 0),
+    openCount: Number(raw.open_count || 0),
+    botCount: Number(raw.bot_count || 0),
+    manualCount: Number(raw.manual_count || 0)
+  };
+}
 
 function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
   if (!raw) {
@@ -342,16 +371,6 @@ function normalizeLiveScanItem(raw: Record<string, unknown>): LiveScanItem {
   };
 }
 
-function normalizeRuntimeMode(value?: string): RuntimeMode | undefined {
-  if (value === "manual_only" || value === "paper" || value === "live") {
-    return value;
-  }
-  if (value === "live_auto") {
-    return "live";
-  }
-  return undefined;
-}
-
 function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: boolean): LiveView | null {
   if (!raw) {
     return {
@@ -364,7 +383,7 @@ function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: b
   }
   return {
     generated: raw.generated,
-    mode: normalizeRuntimeMode(raw.mode),
+    mode: raw.mode,
     modeState: raw.mode_state,
     dryRun: raw.dry_run,
     liveEnabled: raw.live_enabled,
@@ -381,6 +400,7 @@ function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: b
     longInPlay: raw.long_inplay,
     shortInPlay: raw.short_inplay,
     availableUsdt: raw.available_usdt,
+    liveAccount: normalizeLiveAccount(raw.live),
     paperSummary: raw.paper_summary,
     paper: normalizePaper(raw.paper),
     scannerLongs: (raw.scanner_longs || []).map(normalizeLiveScanItem),
