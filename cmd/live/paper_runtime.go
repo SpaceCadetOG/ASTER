@@ -281,6 +281,14 @@ func annotatePaperPositionFromDecision(pos *paperPosition, c candidate, decision
 	if pos == nil {
 		return
 	}
+	strategyID := firstKnownNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat), strings.TrimSpace(decision.Signal.Name))
+	entryReason := firstKnownNonEmpty(strings.TrimSpace(c.Strat), strings.TrimSpace(decision.Signal.Name), strategyID)
+	if strategyID != "" && (strings.TrimSpace(pos.EntryStrategyID) == "" || strings.EqualFold(strings.TrimSpace(pos.EntryStrategyID), "unknown")) {
+		pos.EntryStrategyID = strategyID
+	}
+	if entryReason != "" && (strings.TrimSpace(pos.EntryReason) == "" || strings.EqualFold(strings.TrimSpace(pos.EntryReason), "unknown")) {
+		pos.EntryReason = entryReason
+	}
 	pos.EntryMode = string(runtimeModePaper)
 	pos.EntryConfluenceScore = decision.Signal.ConfluenceScore.TotalScore
 	pos.EntrySignalReasons = append([]string(nil), decision.Signal.Reasons...)

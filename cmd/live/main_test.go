@@ -351,6 +351,9 @@ func TestPaperMaybeEnterActuallyOpensPosition(t *testing.T) {
 	if pp.Symbol != "BTCUSDT" {
 		t.Fatalf("expected BTCUSDT, got %s", pp.Symbol)
 	}
+	if pp.EntryStrategyID != "impulsive_long_starter" || pp.EntryReason != "impulsive_long_starter" {
+		t.Fatalf("expected paper starter strategy attribution, got id=%q reason=%q", pp.EntryStrategyID, pp.EntryReason)
+	}
 	if _, ok := p.positions["BTCUSDT"]; !ok {
 		t.Fatalf("expected position persisted in paper trader map")
 	}
@@ -4163,16 +4166,16 @@ func TestLiquidityRiskRejectReasonAllowsPostSweepReclaimHold(t *testing.T) {
 	t.Setenv("LIVE_OFI_MIN_SAMPLES", "8")
 	t.Setenv("LIVE_LIQUIDITY_SWEEP_MIN_OFI_Z", "0.15")
 	c := candidate{
-		Side:                 "BUY",
-		LiquidityRisk:        true,
-		LiquidityRiskReason:  "weak_low_below_entry",
-		LiquidityPoolLevel:   0.98,
-		LiquiditySweepSeen:   true,
+		Side:                  "BUY",
+		LiquidityRisk:         true,
+		LiquidityRiskReason:   "weak_low_below_entry",
+		LiquidityPoolLevel:    0.98,
+		LiquiditySweepSeen:    true,
 		LiquiditySweepBarsAgo: 1,
-		LastClose:            1.01,
-		ReclaimHold:          true,
-		OFISamples:           12,
-		OFIZ:                 0.42,
+		LastClose:             1.01,
+		ReclaimHold:           true,
+		OFISamples:            12,
+		OFIZ:                  0.42,
 		Entry: inplay.Entry{
 			State: inplay.StateInPlay,
 		},
@@ -4359,10 +4362,10 @@ func TestShouldSuppressDuplicateRejectSuppressesUnchangedRepeat(t *testing.T) {
 	cfg := acceptanceQueueConfig{RecentRejectTTL: 30 * time.Second}
 	mem := map[string]recentRejectMemory{}
 	c := candidate{
-		Side:         "BUY",
-		SpreadBps:    12.0,
-		ExtensionATR: 0.8,
-		FinalRank:    90,
+		Side:           "BUY",
+		SpreadBps:      12.0,
+		ExtensionATR:   0.8,
+		FinalRank:      90,
 		DiscoveryScore: 0.72,
 		CombinedScore:  0.74,
 		Entry: inplay.Entry{
@@ -4386,10 +4389,10 @@ func TestShouldSuppressDuplicateRejectAllowsMaterialStateChange(t *testing.T) {
 	cfg := acceptanceQueueConfig{RecentRejectTTL: 30 * time.Second}
 	mem := map[string]recentRejectMemory{}
 	c := candidate{
-		Side:         "BUY",
-		SpreadBps:    12.0,
-		ExtensionATR: 0.8,
-		FinalRank:    90,
+		Side:           "BUY",
+		SpreadBps:      12.0,
+		ExtensionATR:   0.8,
+		FinalRank:      90,
 		DiscoveryScore: 0.72,
 		CombinedScore:  0.74,
 		Entry: inplay.Entry{

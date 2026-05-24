@@ -291,6 +291,25 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 	}
 }
 
+func TestAnnotatePaperPositionRepairsUnknownStrategyMetadata(t *testing.T) {
+	decision, cand := testPaperDecision()
+	pos := &paperPosition{
+		Symbol:          "BTCUSDT",
+		Side:            "BUY",
+		EntryStrategyID: "unknown",
+	}
+	annotatePaperPositionFromDecision(pos, cand, decision)
+	if pos.EntryStrategyID != cand.Strat {
+		t.Fatalf("expected strategy id repaired from candidate strat, got %q", pos.EntryStrategyID)
+	}
+	if pos.EntryReason != cand.Strat {
+		t.Fatalf("expected entry reason repaired from candidate strat, got %q", pos.EntryReason)
+	}
+	if pos.EntryMode != string(runtimeModePaper) {
+		t.Fatalf("expected paper entry mode, got %q", pos.EntryMode)
+	}
+}
+
 func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 	sig := strategies.Signal{
 		Active:     true,

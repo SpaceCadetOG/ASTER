@@ -10348,7 +10348,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		return nil
 	}
 	entryReason := c.Strat
-	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
+	entryStrategyID := firstNonEmpty(firstKnownNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "unknown")
 	if starterOnly && !strings.EqualFold(entryReason, "continuation_fast_starter") {
 		if strings.EqualFold(c.Strat, "impulsive_short_starter") {
 			entryReason = "impulsive_short_starter"
@@ -13463,7 +13463,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			}
 		}
 	}
-	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
+	entryStrategyID := firstNonEmpty(firstKnownNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "unknown")
 	m := meta[raw]
 	if m.LastPrice <= 0 {
 		return nil, fmt.Errorf("no price for %s", raw)
@@ -22138,6 +22138,16 @@ func firstNonEmpty(v ...string) string {
 	for _, s := range v {
 		if strings.TrimSpace(s) != "" {
 			return s
+		}
+	}
+	return ""
+}
+
+func firstKnownNonEmpty(v ...string) string {
+	for _, s := range v {
+		trimmed := strings.TrimSpace(s)
+		if trimmed != "" && !strings.EqualFold(trimmed, "unknown") {
+			return trimmed
 		}
 	}
 	return ""
