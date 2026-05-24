@@ -143,6 +143,39 @@ func TestBuildLivePaperSnapshotEmptyStateUsesSafeArrays(t *testing.T) {
 	}
 }
 
+func TestEnrichPaperRuntimeStatusAddsModeAndPayloadToSparseStatus(t *testing.T) {
+	now := time.Now().UTC()
+	paper := &paperTrader{
+		enabled:   true,
+		balance:   1000,
+		reportLoc: time.UTC,
+		positions: map[string]*paperPosition{},
+		dayStats: map[string]*paperDayStats{
+			now.Format("2006-01-02"): {Net: 0},
+		},
+	}
+	st := liveStatus{
+		Generated:   now,
+		DryRun:      true,
+		LiveEnabled: false,
+	}
+
+	enrichPaperRuntimeStatus(&st, runtimeModePaper, paper, map[string]symbolMeta{}, nil)
+
+	if st.Mode != "paper" || st.ModeState != "paper_enabled" {
+		t.Fatalf("expected paper mode/status, got mode=%q state=%q", st.Mode, st.ModeState)
+	}
+	if !st.DryRun || st.LiveEnabled {
+		t.Fatalf("expected paper-safe runtime flags, got dry_run=%v live_enabled=%v", st.DryRun, st.LiveEnabled)
+	}
+	if st.Paper == nil {
+		t.Fatal("expected paper payload")
+	}
+	if st.Paper.OpenPositions == nil || st.Paper.RecentClosed == nil || st.Paper.RecentDecisions == nil {
+		t.Fatalf("expected safe paper arrays, got %+v", st.Paper)
+	}
+}
+
 func TestLiveStatusStoreSnapshotClonesPaperSlices(t *testing.T) {
 	store := newLiveStatusStore()
 	store.Set(liveStatus{

@@ -500,6 +500,23 @@ func (m *runtimeModeController) requestedOperatingMode() runtimeOperatingMode {
 	return m.requestedMode
 }
 
+func enrichPaperRuntimeStatus(st *liveStatus, operatingMode runtimeOperatingMode, paper *paperTrader, meta map[string]symbolMeta, eventLog *stats.EventLogger) {
+	if st == nil || operatingMode != runtimeModePaper {
+		return
+	}
+	st.Mode = surfacedRuntimeMode(runtimeModePaper)
+	if strings.TrimSpace(st.ModeState) == "" || strings.EqualFold(st.ModeState, string(runtimeModeManualOnly)) {
+		st.ModeState = "paper_enabled"
+	}
+	st.DryRun = true
+	st.LiveEnabled = false
+	if paper == nil || !paper.enabled {
+		return
+	}
+	st.PaperSummary = paper.Summary(meta)
+	st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, meta, eventLog, 12)
+}
+
 type operatorDecision struct {
 	Symbol             string
 	Side               string
@@ -2106,6 +2123,10 @@ func main() {
 		shortInPlay := append([]inplay.Entry(nil), watchSnap.ShortInPlay...)
 		metaBySymbol := copySymbolMetaMap(watchSnap.MetaBySym)
 		cmdCtx.setMeta(metaBySymbol)
+		publishStatus := func(st liveStatus) {
+			enrichPaperRuntimeStatus(&st, operatingMode, paper, metaBySymbol, eventLog)
+			statusStore.Set(st)
+		}
 		longCurrent := sideEntryMap(longInPlay)
 		shortCurrent := sideEntryMap(shortInPlay)
 		flowMetricsBySymbol := copyFlowMetricsMap(watchSnap.FlowBySym)
@@ -2485,7 +2506,7 @@ func main() {
 				st.PaperSummary = paper.Summary(metaBySymbol)
 				st.Paper = buildLivePaperSnapshot(operatingMode, paper, metaBySymbol, eventLog, 12)
 			}
-			statusStore.Set(st)
+			publishStatus(st)
 			waitAndReport()
 			continue
 		}
@@ -2513,7 +2534,7 @@ func main() {
 					st.PaperSummary = paper.Summary(metaBySymbol)
 					st.Paper = buildLivePaperSnapshot(operatingMode, paper, metaBySymbol, eventLog, 12)
 				}
-				statusStore.Set(st)
+				publishStatus(st)
 				waitAndReport()
 				continue
 			}
@@ -2566,7 +2587,7 @@ func main() {
 					fmt.Println("live: scanner-only no candidates")
 				}
 			}
-			statusStore.Set(st)
+			publishStatus(st)
 			waitAndReport()
 			continue
 		}
@@ -2943,7 +2964,7 @@ func main() {
 			st.PayoutLastType = ps.LastAction
 		}
 		if len(cands) == 0 {
-			statusStore.Set(st)
+			publishStatus(st)
 			topReject := ""
 			if cmdCtx != nil {
 				for _, sym := range append(symbolNamesFromEntries(longInPlay), symbolNamesFromEntries(shortInPlay)...) {
@@ -2965,7 +2986,7 @@ func main() {
 		}
 		if acceptanceCfg.MaxNewPositionsWindow > 0 && len(recentEntryAttempts) >= acceptanceCfg.MaxNewPositionsWindow {
 			st.TopRejectReason = "entry_window_limit"
-			statusStore.Set(st)
+			publishStatus(st)
 			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
@@ -2994,7 +3015,7 @@ func main() {
 		queueCandidates = filteredQueue
 		if len(queueCandidates) == 0 {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
-			statusStore.Set(st)
+			publishStatus(st)
 			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
@@ -3121,7 +3142,7 @@ func main() {
 		}
 		if !selected {
 			st.TopRejectReason = firstNonEmpty(strings.Join(selectionRejects, ";"), "selection_queue_empty")
-			statusStore.Set(st)
+			publishStatus(st)
 			if emitTerminal && verboseRejectLogging() {
 				fmt.Printf("signal: none (%s)\n", st.TopRejectReason)
 			}
@@ -3154,7 +3175,7 @@ func main() {
 		st.TopVPTargetMode = best.Sig.TargetMode
 		st.TopRejectReason = best.RejectReason
 		st.TopRegimeTag = best.Sig.RegimeTag
-		statusStore.Set(st)
+		publishStatus(st)
 		eligibility := newEligibilitySummary(best)
 		effectiveLev := computeLeverage(best, leverageMode, leverageFixed, leverageMin, safety.maxLeverage)
 		if cmdCtx != nil {
@@ -3269,7 +3290,7 @@ func main() {
 					recordCandidateDecision(cmdCtx, best, "external_liq_flow_against")
 					addEligibilityBlock(&eligibility, "external_liq_flow_against")
 					finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-					statusStore.Set(st)
+					publishStatus(st)
 					eventLog.Emit(stats.Event{
 						Timestamp: now,
 						Type:      "GATE_DECISION",
@@ -3297,7 +3318,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_same_side")
 				addEligibilityBlock(&eligibility, "symbol_cooldown_same_side")
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				eventLog.Emit(stats.Event{
 					Timestamp: now,
 					Type:      "GATE_DECISION",
@@ -3321,7 +3342,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, "symbol_cooldown_flip_side")
 				addEligibilityBlock(&eligibility, "symbol_cooldown_flip_side")
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				eventLog.Emit(stats.Event{
 					Timestamp: now,
 					Type:      "GATE_DECISION",
@@ -3344,7 +3365,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "intent_dedupe")
 			addEligibilityBlock(&eligibility, "intent_dedupe")
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			eventLog.Emit(stats.Event{
 				Timestamp: now,
 				Type:      "GATE_DECISION",
@@ -3373,7 +3394,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, obReason)
 				addEligibilityBlock(&eligibility, obReason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				eventLog.Emit(stats.Event{
 					Timestamp: now,
 					Type:      "GATE_DECISION",
@@ -3430,7 +3451,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, reason)
 			addEligibilityBlock(&eligibility, reason)
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: skip (%s reason=%s session=%s)\n", rawBest, reason, sessionBand)
 			waitAndReport()
 			continue
@@ -3453,7 +3474,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, riskDec.RejectReason)
 				addEligibilityBlock(&eligibility, riskDec.RejectReason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, riskDec.RejectReason)
 				waitAndReport()
 				continue
@@ -3567,7 +3588,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, reason)
 				addEligibilityBlock(&eligibility, reason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Println("live: safety skip:", reason)
 				if tgVerbose {
 					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
@@ -3583,7 +3604,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "event_lockout")
 			addEligibilityBlock(&eligibility, "event_lockout")
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Println("live: skip reason=event_lockout")
 			waitAndReport()
 			continue
@@ -3592,7 +3613,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "correlated_exposure_gate")
 			addEligibilityBlock(&eligibility, "correlated_exposure_gate")
 			finalizeEligibilityDecision(&eligibility, ladderPlan{}, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Println("live: skip reason=correlated_exposure_gate")
 			waitAndReport()
 			continue
@@ -3629,7 +3650,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, reason)
 			addEligibilityBlock(&eligibility, reason)
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 			waitAndReport()
 			continue
@@ -3648,7 +3669,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, ladderPlan.RejectReason)
 				addEligibilityBlock(&eligibility, ladderPlan.RejectReason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, ladderPlan.RejectReason)
 				waitAndReport()
 				continue
@@ -3661,7 +3682,7 @@ func main() {
 					recordCandidateDecision(cmdCtx, best, reason)
 					addEligibilityBlock(&eligibility, reason)
 					finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-					statusStore.Set(st)
+					publishStatus(st)
 					fmt.Printf("live: skip (%s reason=%s)\n", rawBest, reason)
 					waitAndReport()
 					continue
@@ -3675,7 +3696,7 @@ func main() {
 				fmt.Println(executionGovernorRejectLogLine(dec))
 				addEligibilityBlock(&eligibility, dec.Reason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Printf("live: skip (%s reason=%s)\n", rawBest, dec.Reason)
 				waitAndReport()
 				continue
@@ -3685,7 +3706,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, reason)
 			addEligibilityBlock(&eligibility, reason)
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			eventAllow := false
 			eventLog.Emit(stats.Event{
 				Timestamp:   now,
@@ -3714,7 +3735,7 @@ func main() {
 			if err != nil {
 				addEligibilityBlock(&eligibility, "account_balance_fetch")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Println("live: balance error:", err)
 				waitAndReport()
 				continue
@@ -3725,7 +3746,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, degradedReason)
 				addEligibilityBlock(&eligibility, degradedReason)
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Printf("live: degraded gate block symbol=%s reason=%s\n", strings.ToUpper(aster.RawSymbol(best.Entry.Symbol)), degradedReason)
 				waitAndReport()
 				continue
@@ -3738,7 +3759,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "min_available_usdt")
 			addEligibilityBlock(&eligibility, "min_available_usdt")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: safety skip (available %.4f < min required %.4f)\n", avail, safety.minAvailUSDT)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SAFETY SKIP",
@@ -3762,7 +3783,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "insufficient_usable")
 			addEligibilityBlock(&eligibility, "insufficient_usable")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: skip (available %.4f, usable %.4f < margin %.4f)\n", avail, usable, effectiveMargin)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: INSUFFICIENT USABLE",
@@ -3777,7 +3798,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "reserve_lock_active")
 			addEligibilityBlock(&eligibility, "reserve_lock_active")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: reserve lock active (base=%.4f reserve_target=%.4f)\n", baseBal, reserveGate.targetReserve)
 			if tgVerbose {
 				emitNotifyEvent(notifyDispatcher, notify.Event{
@@ -3804,7 +3825,7 @@ func main() {
 			if err != nil {
 				addEligibilityBlock(&eligibility, "position_check_error")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Println("live: position check error:", err)
 				waitAndReport()
 				continue
@@ -3814,7 +3835,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "max_open_positions")
 			addEligibilityBlock(&eligibility, "max_open_positions")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: skip (open positions=%d, max=%d)\n", openCount, maxOpenPos)
 			if tgVerbose {
 				tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: MAX OPEN POSITIONS",
@@ -3834,7 +3855,7 @@ func main() {
 				recordCandidateDecision(cmdCtx, best, "max_open_positions_side")
 				addEligibilityBlock(&eligibility, "max_open_positions_side")
 				finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-				statusStore.Set(st)
+				publishStatus(st)
 				fmt.Printf("live: skip (%s positions=%d, max per side=%d)\n", strings.ToUpper(strings.TrimSpace(best.Side)), openSideCount, maxOpenPerSide)
 				if tgVerbose {
 					tg.Sendf("%s", notify.BuildEventHTML("🛡️", "SKIP: SIDE FULL",
@@ -3850,7 +3871,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "max_tracked_entries")
 			addEligibilityBlock(&eligibility, "max_tracked_entries")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Printf("live: skip (active tracked entries=%d, max=%d)\n", execMgr.ActiveCount(), maxOpenPos)
 			waitAndReport()
 			continue
@@ -3860,7 +3881,7 @@ func main() {
 			recordCandidateDecision(cmdCtx, best, "exec_manager_unavailable")
 			addEligibilityBlock(&eligibility, "exec_manager_unavailable")
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			fmt.Println("live: execution manager unavailable")
 			waitAndReport()
 			continue
@@ -3872,12 +3893,12 @@ func main() {
 		chooseFinalDecision(&eligibility, ladderPlan)
 		if eligibility.FinalDecision != "full_entry" && eligibility.FinalDecision != "starter_entry" && eligibility.FinalDecision != "reentry_entry" {
 			finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-			statusStore.Set(st)
+			publishStatus(st)
 			waitAndReport()
 			continue
 		}
 		finalizeEligibilityDecision(&eligibility, ladderPlan, &st)
-		statusStore.Set(st)
+		publishStatus(st)
 		intentReason := "live_intent"
 		submitType := "ORDER_SUBMIT"
 		if ladderPlan.IsAdd {
@@ -4052,7 +4073,7 @@ func main() {
 		if !ok {
 			st.TopDecision = "paper_enabled"
 			st.TopDecisionWhy = "no_candidates"
-			statusStore.Set(st)
+			publishStatus(st)
 			waitAndReport()
 			continue
 		}
@@ -4119,7 +4140,7 @@ func main() {
 			st.PaperSummary = paper.Summary(metaBySymbol)
 			st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, metaBySymbol, eventLog, 12)
 		}
-		statusStore.Set(st)
+		publishStatus(st)
 		waitAndReport()
 		continue
 
