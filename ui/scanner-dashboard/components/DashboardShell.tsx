@@ -111,12 +111,107 @@ function paperAccountHero(data: DashboardData | null) {
   );
 }
 
+function runtimeAccountHero(data: DashboardData | null, runtimeAccount: ReturnType<typeof deriveRuntimeAccount>) {
+  const latestClosedTrade = data?.live?.paper?.recentClosed?.[0];
+  return (
+    <div className="account-hero-list">
+      <div className="account-hero-row">
+        <span>Source</span>
+        <strong>{runtimeAccount.source === "live" ? "Live Account" : runtimeAccount.source === "paper" ? "Paper Fallback" : "Unavailable"}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Balance</span>
+        <strong>{formatUsdValue(runtimeAccount.balance)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Equity</span>
+        <strong>{formatUsdValue(runtimeAccount.equity)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Open PnL</span>
+        <strong className={numericTone(runtimeAccount.openPnl)}>{formatSignedUsd(runtimeAccount.openPnl)}</strong>
+      </div>
+      <div className="account-hero-row">
+        <span>Latest Exit</span>
+        <strong className={latestClosedTrade ? numericTone(latestClosedTrade.pnlUsd) : "tone-muted"}>
+          {latestClosedTrade
+            ? `${latestClosedTrade.symbol} ${formatSignedUsd(latestClosedTrade.pnlUsd)}`
+            : "No recent exits"}
+        </strong>
+      </div>
+    </div>
+  );
+}
+
 function formatUsdValue(value: number | null | undefined) {
   return formatUsd(value);
 }
 
 function normalizeTradeSide(value: string | undefined): ScannerSide {
   return value?.toUpperCase() === "SELL" || value?.toUpperCase() === "SHORT" ? "short" : "long";
+}
+
+function deriveRuntimeAccount(data: DashboardData | null) {
+  const liveAccount = data?.live?.liveAccount;
+  const paper = data?.live?.paper;
+  const hasLiveSnapshot =
+    !!liveAccount &&
+    (
+      Math.abs(liveAccount.availableUsdt || 0) > 0.000001 ||
+      Math.abs(liveAccount.equity || 0) > 0.000001 ||
+      Math.abs(liveAccount.openPnl || 0) > 0.000001 ||
+      Math.abs(liveAccount.realizedDay || 0) > 0.000001 ||
+      (liveAccount.openCount || 0) > 0 ||
+      (liveAccount.botCount || 0) > 0 ||
+      (liveAccount.manualCount || 0) > 0
+    );
+
+  if (hasLiveSnapshot && liveAccount) {
+    return {
+      source: "live" as const,
+      balance: liveAccount.availableUsdt,
+      availableUsdt: liveAccount.availableUsdt,
+      equity: liveAccount.equity,
+      openPnl: liveAccount.openPnl,
+      realizedDay: liveAccount.realizedDay,
+      openCount: liveAccount.openCount,
+      botCount: liveAccount.botCount,
+      manualCount: liveAccount.manualCount,
+      health: liveAccount.health || "LIVE",
+      healthDetail: liveAccount.healthDetail
+    };
+  }
+
+  if (paper) {
+    return {
+      source: "paper" as const,
+      balance: paper.balance,
+      availableUsdt: Math.max(0, paper.balance - paper.reserve),
+      equity: paper.equity,
+      openPnl: paper.openPnl,
+      realizedDay: paper.realizedToday,
+      openCount: paper.openCount,
+      botCount: 0,
+      manualCount: 0,
+      health: data?.live?.connected ? "PAPER_FALLBACK" : "DISCONNECTED",
+      healthDetail:
+        "Live account snapshot unavailable, showing paper/runtime balances while auto trading is disabled."
+    };
+  }
+
+  return {
+    source: "none" as const,
+    balance: 0,
+    availableUsdt: data?.live?.availableUsdt || 0,
+    equity: 0,
+    openPnl: 0,
+    realizedDay: 0,
+    openCount: 0,
+    botCount: 0,
+    manualCount: 0,
+    health: data?.live?.connected ? "UNKNOWN" : "DISCONNECTED",
+    healthDetail: undefined
+  };
 }
 
 export function DashboardShell() {
@@ -202,10 +297,13 @@ export function DashboardShell() {
 
   const runtimeGenerated = data?.live?.generated || data?.generatedAt;
   const paperHero = paperAccountHero(data);
+  const runtimeAccount = deriveRuntimeAccount(data);
+  const liveHero = runtimeAccountHero(data, runtimeAccount);
+  const latestClosedTrade = data?.live?.paper?.recentClosed?.[0];
   const runtimeAccountSummary =
     accountTab === "paper"
       ? "Paper ledger snapshot from the live runtime. Click any paper asset row below to open Asset Detail."
-      : data?.live?.liveAccount?.healthDetail ||
+      : runtimeAccount.healthDetail ||
         "Live account snapshot from the runtime. Funds, equity, open PnL, and position counts remain read-only.";
   const selectedSummaryRow =
     data?.longScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
@@ -582,6 +680,15 @@ export function DashboardShell() {
               </div>
             ) : (
               <div className="account-summary-grid">
+                <div className="tile tile-summary">
+                  <div className="tile-label">Live Account View</div>
+                  <div className="tile-value tile-value-large">
+                    {liveHero}
+                  </div>
+                  <div className="tile-subcopy">
+                    {clampText(runtimeAccountSummary, 180) || "Runtime account summary unavailable."}
+                  </div>
+                </div>
                 <MetricTile
                   label="Runtime Mode"
                   value={!data.live?.connected ? "UNAVAILABLE" : data.live?.dryRun ? "DRY_RUN" : "LIVE"}
@@ -591,38 +698,43 @@ export function DashboardShell() {
                   value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : "Disabled"}
                 />
                 <MetricTile
+                  label="Account Balance"
+                  value={formatUsdValue(runtimeAccount.balance)}
+                />
+                <MetricTile
                   label="Available USDT"
-                  value={formatUsdValue(data.live?.liveAccount?.availableUsdt ?? data.live?.availableUsdt)}
+                  value={formatUsdValue(runtimeAccount.availableUsdt)}
                 />
                 <MetricTile
-                  label="Live Equity"
-                  value={formatUsdValue(data.live?.liveAccount?.equity)}
+                  label="Account Equity"
+                  value={formatUsdValue(runtimeAccount.equity)}
                 />
                 <MetricTile
-                  label="Live Open PnL"
-                  value={formatSignedUsd(data.live?.liveAccount?.openPnl)}
-                  valueClassName={numericTone(data.live?.liveAccount?.openPnl)}
+                  label="Open PnL"
+                  value={formatSignedUsd(runtimeAccount.openPnl)}
+                  valueClassName={numericTone(runtimeAccount.openPnl)}
                 />
                 <MetricTile
-                  label="Live Realized Day"
-                  value={formatSignedUsd(data.live?.liveAccount?.realizedDay)}
-                  valueClassName={numericTone(data.live?.liveAccount?.realizedDay)}
+                  label="Realized Day"
+                  value={formatSignedUsd(runtimeAccount.realizedDay)}
+                  valueClassName={numericTone(runtimeAccount.realizedDay)}
                 />
                 <MetricTile
                   label="Account Mode"
-                  value={summarizeAccountMode(data.live?.connected, data.live?.dryRun, data.live?.liveEnabled)}
+                  value={runtimeAccount.source === "paper"
+                    ? "Paper / Disabled"
+                    : summarizeAccountMode(data.live?.connected, data.live?.dryRun, data.live?.liveEnabled)}
                 />
                 <MetricTile
                   label="Live Health"
-                  value={data.live?.liveAccount?.health || (!data.live?.connected ? "DISCONNECTED" : "UNKNOWN")}
+                  value={runtimeAccount.health}
                 />
-                <MetricTile label="Live Open Positions" value={String(data.live?.liveAccount?.openCount || 0)} />
-                <MetricTile label="Bot Positions" value={String(data.live?.liveAccount?.botCount || 0)} />
-                <MetricTile label="Manual Positions" value={String(data.live?.liveAccount?.manualCount || 0)} />
+                <MetricTile label="Open Positions" value={String(runtimeAccount.openCount || 0)} />
+                <MetricTile label="Bot Positions" value={String(runtimeAccount.botCount || 0)} />
+                <MetricTile label="Manual Positions" value={String(runtimeAccount.manualCount || 0)} />
                 <MetricTile label="Open Exec" value={String(data.live?.exec?.open || 0)} />
                 <MetricTile label="Pending Exec" value={String(data.live?.exec?.pending || 0)} />
                 <MetricTile label="Closed Exec" value={String(data.live?.exec?.closed || 0)} />
-                <MetricTile label="Top Candidate" value={`${data.live?.topSymbol || "N/A"} ${data.live?.topSide || ""}`.trim()} />
                 <MetricTile label="Generated" value={formatTime(runtimeGenerated)} />
               </div>
             )}
@@ -699,6 +811,7 @@ export function DashboardShell() {
 
           <div className="panel">
             <h3>Recent Closed Paper Trades</h3>
+            <div className="panel-copy">Trade history from the runtime event log.</div>
             {!data.live?.paper?.recentClosed?.length ? (
               <div className="placeholder-card">No recent closed paper trades exposed by the runtime.</div>
             ) : (
