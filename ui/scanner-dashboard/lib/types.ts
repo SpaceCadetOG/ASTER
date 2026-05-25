@@ -106,6 +106,31 @@ export interface LiveAccountView {
   openCount: number;
   botCount: number;
   manualCount: number;
+  positions?: LiveAccountPositionView[];
+}
+
+export interface LiveAccountPositionView {
+  symbol: string;
+  side: string;
+  source?: string;
+  manageState?: string;
+  protectionState?: string;
+  managed: boolean;
+  protected: boolean;
+  qty: number;
+  entryPrice: number;
+  markPrice: number;
+  lastPrice: number;
+  spreadBps: number;
+  unrealizedPnl: number;
+  unrealizedPnlPct: number;
+  realizedPnl: number;
+  exchangeUnreal: number;
+  leverage: number;
+  margin: number;
+  stopPrice: number;
+  holdMin: number;
+  entryReason?: string;
 }
 
 export interface PaperPositionView {

@@ -53,6 +53,7 @@ type RawLiveStatus = {
     open_count?: number;
     bot_count?: number;
     manual_count?: number;
+    positions?: Array<Record<string, unknown>>;
   };
   paper_summary?: string;
   paper?: {
@@ -89,7 +90,30 @@ function normalizeLiveAccount(raw: RawLiveStatus["live"] | undefined) {
     openPnl: Number(raw.open_pnl || 0),
     openCount: Number(raw.open_count || 0),
     botCount: Number(raw.bot_count || 0),
-    manualCount: Number(raw.manual_count || 0)
+    manualCount: Number(raw.manual_count || 0),
+    positions: (raw.positions || []).map((row) => ({
+      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+      side: String(row.side || ""),
+      source: typeof row.source === "string" ? row.source : undefined,
+      manageState: typeof row.manage_state === "string" ? row.manage_state : undefined,
+      protectionState: typeof row.protection_state === "string" ? row.protection_state : undefined,
+      managed: Boolean(row.managed),
+      protected: Boolean(row.protected),
+      qty: Number(row.qty || 0),
+      entryPrice: Number(row.entry_price || 0),
+      markPrice: Number(row.mark_price || 0),
+      lastPrice: Number(row.last_price || 0),
+      spreadBps: Number(row.spread_bps || 0),
+      unrealizedPnl: Number(row.unrealized_pnl || 0),
+      unrealizedPnlPct: Number(row.unrealized_pnl_pct || 0),
+      realizedPnl: Number(row.realized_pnl || 0),
+      exchangeUnreal: Number(row.exchange_unreal || 0),
+      leverage: Number(row.leverage || 0),
+      margin: Number(row.margin || 0),
+      stopPrice: Number(row.stop_price || 0),
+      holdMin: Number(row.hold_min || 0),
+      entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined
+    }))
   };
 }
 
