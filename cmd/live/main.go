@@ -298,41 +298,41 @@ type livePriceQuote struct {
 }
 
 type liveAccountPosition struct {
-	Symbol           string
-	Side             string
-	Source           string
-	ManageState      string
-	ProtectionState  string
-	Managed          bool
-	Protected        bool
-	Qty              float64
-	EntryPrice       float64
-	MarkPrice        float64
-	LastPrice        float64
-	SpreadBps        float64
-	UnrealizedPnL    float64
-	UnrealizedPnLPct float64
-	RealizedPnL      float64
-	ExchangeUnreal   float64
-	Leverage         int
-	Margin           float64
-	StopPrice        float64
-	HoldMin          float64
-	EntryReason      string
+	Symbol           string  `json:"symbol"`
+	Side             string  `json:"side"`
+	Source           string  `json:"source"`
+	ManageState      string  `json:"manage_state,omitempty"`
+	ProtectionState  string  `json:"protection_state,omitempty"`
+	Managed          bool    `json:"managed"`
+	Protected        bool    `json:"protected"`
+	Qty              float64 `json:"qty"`
+	EntryPrice       float64 `json:"entry_price"`
+	MarkPrice        float64 `json:"mark_price"`
+	LastPrice        float64 `json:"last_price"`
+	SpreadBps        float64 `json:"spread_bps"`
+	UnrealizedPnL    float64 `json:"unrealized_pnl"`
+	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
+	RealizedPnL      float64 `json:"realized_pnl"`
+	ExchangeUnreal   float64 `json:"exchange_unreal"`
+	Leverage         int     `json:"leverage"`
+	Margin           float64 `json:"margin"`
+	StopPrice        float64 `json:"stop_price"`
+	HoldMin          float64 `json:"hold_min"`
+	EntryReason      string  `json:"entry_reason,omitempty"`
 }
 
 type liveAccountSnapshot struct {
-	Generated     time.Time
-	Health        string
-	HealthDetail  string
-	AvailableUSDT float64
-	Equity        float64
-	RealizedDay   float64
-	OpenPnL       float64
-	OpenCount     int
-	BotCount      int
-	ManualCount   int
-	Positions     []liveAccountPosition
+	Generated     time.Time             `json:"generated"`
+	Health        string                `json:"health,omitempty"`
+	HealthDetail  string                `json:"health_detail,omitempty"`
+	AvailableUSDT float64               `json:"available_usdt"`
+	Equity        float64               `json:"equity"`
+	RealizedDay   float64               `json:"realized_day"`
+	OpenPnL       float64               `json:"open_pnl"`
+	OpenCount     int                   `json:"open_count"`
+	BotCount      int                   `json:"bot_count"`
+	ManualCount   int                   `json:"manual_count"`
+	Positions     []liveAccountPosition `json:"positions,omitempty"`
 }
 
 type manualManageRequest struct {
