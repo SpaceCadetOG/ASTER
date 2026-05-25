@@ -19545,24 +19545,43 @@ func accountSnapshotFromUserData(snap aster.UserDataSnapshot, assets []string) a
 }
 
 func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, assets []string) (accountSnapshot, error) {
-	if snap, ok := userDataSnapshotFresh(userData); ok {
-		return accountSnapshotFromUserData(snap, assets), nil
-	}
 	snap := accountSnapshot{}
-	bals, err := cachedBalances(rest)
-	if err != nil {
-		return snap, err
+	if userSnap, ok := userDataSnapshotFresh(userData); ok {
+		acct := accountSnapshotFromUserData(userSnap, assets)
+		if len(acct.Positions) > 0 {
+			return acct, nil
+		}
+		// User data can be fresh for balances while omitting existing positions.
+		// Keep the fast balance snapshot, but let REST positionRisk fill live exposure.
+		snap = acct
 	}
-	snap.Balances = filterBalances(bals, assets)
-	for _, b := range bals {
-		if strings.EqualFold(strings.TrimSpace(b.Asset), "USDT") {
-			snap.AvailableUSDT = b.AvailableBalance
-			break
+	if len(snap.Balances) == 0 && snap.AvailableUSDT == 0 {
+		bals, err := cachedBalances(rest)
+		if err != nil {
+			return snap, err
+		}
+		snap.Balances = filterBalances(bals, assets)
+		for _, b := range bals {
+			if strings.EqualFold(strings.TrimSpace(b.Asset), "USDT") {
+				snap.AvailableUSDT = b.AvailableBalance
+				break
+			}
 		}
 	}
 	rows, err := cachedPositionRisk(rest, "")
 	if err != nil {
+		if len(snap.Balances) > 0 || snap.AvailableUSDT > 0 {
+			return snap, nil
+		}
 		return snap, err
+	}
+	appendPositionRiskRowsToSnapshot(&snap, rows)
+	return snap, nil
+}
+
+func appendPositionRiskRowsToSnapshot(snap *accountSnapshot, rows []map[string]any) {
+	if snap == nil {
+		return
 	}
 	for _, r := range rows {
 		amt := mapFloat(r["positionAmt"])
@@ -19596,7 +19615,6 @@ func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, a
 	sort.Slice(snap.Positions, func(i, j int) bool {
 		return snap.Positions[i].Unreal > snap.Positions[j].Unreal
 	})
-	return snap, nil
 }
 
 func (m *liveExecManager) runLiveAccountSnapshotLoop() {

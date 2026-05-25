@@ -1040,6 +1040,38 @@ func TestLiveAccountSnapshotRespectsLimit(t *testing.T) {
 	}
 }
 
+func TestAppendPositionRiskRowsToSnapshotKeepsUserDataBalance(t *testing.T) {
+	acct := accountSnapshot{AvailableUSDT: 6.06}
+	appendPositionRiskRowsToSnapshot(&acct, []map[string]any{
+		{
+			"symbol":                "DEXEUSDT",
+			"positionAmt":           "1.029",
+			"entryPrice":            "17.498",
+			"markPrice":             "17.479",
+			"unRealizedProfit":      "-0.02",
+			"isolatedWallet":        "6.01",
+			"positionInitialMargin": "6.01",
+			"leverage":              "3",
+		},
+	})
+	if acct.AvailableUSDT != 6.06 {
+		t.Fatalf("expected live balance to remain from user data, got %.4f", acct.AvailableUSDT)
+	}
+	if len(acct.Positions) != 1 {
+		t.Fatalf("expected one REST position, got %d", len(acct.Positions))
+	}
+	pos := acct.Positions[0]
+	if pos.Symbol != "DEXEUSDT" || pos.Side != "LONG" {
+		t.Fatalf("unexpected position identity: %+v", pos)
+	}
+	if pos.Margin != 6.01 || pos.Leverage != 3 {
+		t.Fatalf("unexpected margin/leverage: %+v", pos)
+	}
+	if pos.Mark != 17.479 || pos.Unreal != -0.02 {
+		t.Fatalf("unexpected mark/unrealized pnl: %+v", pos)
+	}
+}
+
 func TestLivePositionBySymbolNormalizesRawSymbol(t *testing.T) {
 	m := &liveExecManager{
 		liveAccount: liveAccountSnapshot{

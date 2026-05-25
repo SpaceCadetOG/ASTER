@@ -91,6 +91,10 @@ function displayRuntimeMode(data: DashboardData | null) {
   return data.live.dryRun ? "PAPER" : "LIVE";
 }
 
+function displayAvailableUsdt(data: DashboardData | null) {
+  return data?.live?.liveAccount?.availableUsdt || data?.live?.availableUsdt;
+}
+
 function normalizeTradeSide(value: string | undefined): ScannerSide {
   return value?.toUpperCase() === "SELL" || value?.toUpperCase() === "SHORT" ? "short" : "long";
 }
@@ -455,7 +459,7 @@ export function DashboardShell() {
           label="Runtime Mode"
           value={displayRuntimeMode(data)}
         />
-        <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
+        <MetricTile label="Available USDT" value={formatCompactUsd(displayAvailableUsdt(data))} />
       </section>
 
       <Tabs active={tab} onChange={setTab} />
