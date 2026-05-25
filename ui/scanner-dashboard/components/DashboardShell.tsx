@@ -288,6 +288,21 @@ export function DashboardShell() {
     ].sort((a, b) => b.score - a.score);
   }, [data]);
 
+  const scannerAssetOptions = useMemo<Array<{ symbol: string; side: ScannerSide; source: string; score: number }>>(() => {
+    const seen = new Set<string>();
+    const options: Array<{ symbol: string; side: ScannerSide; source: string; score: number }> = [];
+    const add = (symbol: string, side: ScannerSide, source: string, score: number) => {
+      const clean = symbol.trim();
+      if (!clean || seen.has(clean)) return;
+      seen.add(clean);
+      options.push({ symbol: clean, side, source, score });
+    };
+    (data?.longScanner?.rows || []).forEach((row) => add(row.symbol, "long", "Long", row.score));
+    (data?.shortScanner?.rows || []).forEach((row) => add(row.symbol, "short", "Short", row.score));
+    liveRows.forEach((row) => add(row.symbol, row.scannerSide, "Live", row.score));
+    return options.sort((a, b) => b.score - a.score || a.symbol.localeCompare(b.symbol));
+  }, [data, liveRows]);
+
   const selectedScanner =
     scannerTab === "short"
       ? data?.shortScanner || null
@@ -313,7 +328,14 @@ export function DashboardShell() {
   const handleSelect = (symbol: string, side: ScannerSide) => {
     setSelectedSymbol(symbol);
     setSelectedSide(side);
-    setTab("asset");
+    setTab("scanners");
+  };
+
+  const handleScannerAssetSelect = (value: string) => {
+    const selected = scannerAssetOptions.find((option) => option.symbol === value);
+    if (!selected) return;
+    setSelectedSymbol(selected.symbol);
+    setSelectedSide(selected.side);
   };
 
   const handleAssetJump = (symbol: string, fallbackSide?: ScannerSide | string) => {
@@ -511,25 +533,38 @@ export function DashboardShell() {
 
       {tab === "scanners" ? (
         <section className="panel-stack">
-          <div className="subtabs">
-            <button
-              className={`tab ${scannerTab === "long" ? "active" : ""}`}
-              onClick={() => setScannerTab("long")}
-            >
-              Long Scanner
-            </button>
-            <button
-              className={`tab ${scannerTab === "short" ? "active" : ""}`}
-              onClick={() => setScannerTab("short")}
-            >
-              Short Scanner
-            </button>
-            <button
-              className={`tab ${scannerTab === "live" ? "active" : ""}`}
-              onClick={() => setScannerTab("live")}
-            >
-              Live Hotlist
-            </button>
+          <div className="scanner-toolbar">
+            <div className="subtabs">
+              <button
+                className={`tab ${scannerTab === "long" ? "active" : ""}`}
+                onClick={() => setScannerTab("long")}
+              >
+                Long Scanner
+              </button>
+              <button
+                className={`tab ${scannerTab === "short" ? "active" : ""}`}
+                onClick={() => setScannerTab("short")}
+              >
+                Short Scanner
+              </button>
+              <button
+                className={`tab ${scannerTab === "live" ? "active" : ""}`}
+                onClick={() => setScannerTab("live")}
+              >
+                Live Hotlist
+              </button>
+            </div>
+            <label className="asset-picker">
+              <span>Asset Detail</span>
+              <select value={selectedSymbol} onChange={(event) => handleScannerAssetSelect(event.target.value)}>
+                <option value="">Select asset</option>
+                {scannerAssetOptions.map((option) => (
+                  <option key={`${option.source}-${option.symbol}`} value={option.symbol}>
+                    {option.symbol} · {option.source} · {formatNumber(option.score, 1)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           {scannerTab === "live" ? (
@@ -560,6 +595,7 @@ export function DashboardShell() {
               />
             </div>
           )}
+          {selectedSymbol ? <AssetDetailPanel detail={detail} /> : null}
         </section>
       ) : null}
 
@@ -932,10 +968,6 @@ export function DashboardShell() {
             )}
           </div>
         </section>
-      ) : null}
-
-      {tab === "asset" ? (
-        <AssetDetailPanel detail={detail} />
       ) : null}
 
       {tab === "health" ? (

@@ -4,7 +4,6 @@ export type DashboardTab =
   | "hotlist"
   | "runtime"
   | "paper"
-  | "asset"
   | "health";
 
 export type ScannerSide = "long" | "short";
