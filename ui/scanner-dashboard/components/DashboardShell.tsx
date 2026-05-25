@@ -113,11 +113,17 @@ function paperAccountHero(data: DashboardData | null) {
 
 function runtimeAccountHero(data: DashboardData | null, runtimeAccount: ReturnType<typeof deriveRuntimeAccount>) {
   const latestClosedTrade = data?.live?.paper?.recentClosed?.[0];
+  const sourceLabel =
+    runtimeAccount.source === "live"
+      ? "Exchange Snapshot"
+      : runtimeAccount.source === "paper"
+        ? "Paper Fallback"
+        : "Unavailable";
   return (
     <div className="account-hero-list">
       <div className="account-hero-row">
         <span>Source</span>
-        <strong>{runtimeAccount.source === "live" ? "Live Account" : runtimeAccount.source === "paper" ? "Paper Fallback" : "Unavailable"}</strong>
+        <strong>{sourceLabel}</strong>
       </div>
       <div className="account-hero-row">
         <span>Balance</span>
@@ -717,7 +723,9 @@ export function DashboardShell() {
             ) : (
               <div className="account-summary-grid">
                 <div className="tile tile-summary">
-                  <div className="tile-label">Live Account View</div>
+                  <div className="tile-label">
+                    {runtimeAccount.source === "live" ? "Exchange Account View" : "Paper Fallback View"}
+                  </div>
                   <div className="tile-value tile-value-large">
                     {liveHero}
                   </div>
@@ -727,11 +735,11 @@ export function DashboardShell() {
                 </div>
                 <MetricTile
                   label="Runtime Mode"
-                  value={!data.live?.connected ? "UNAVAILABLE" : data.live?.dryRun ? "DRY_RUN" : "LIVE"}
+                  value={!data.live?.connected ? "UNAVAILABLE" : data.live?.mode?.toUpperCase() || (data.live?.dryRun ? "DRY_RUN" : "LIVE")}
                 />
                 <MetricTile
                   label="Trading Status"
-                  value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : "Disabled"}
+                  value={!data.live?.connected ? "Unavailable" : data.live?.liveEnabled ? "Enabled" : data.live?.dryRun ? "Paper Safe" : "Disabled"}
                 />
                 <MetricTile
                   label="Account Balance"
