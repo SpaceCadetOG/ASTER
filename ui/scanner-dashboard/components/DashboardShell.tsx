@@ -84,6 +84,13 @@ function formatUsdValue(value: number | null | undefined) {
   return formatUsd(value);
 }
 
+function displayRuntimeMode(data: DashboardData | null) {
+  if (!data?.live?.connected) return "UNAVAILABLE";
+  const mode = data.live.mode?.trim();
+  if (mode) return mode.toUpperCase();
+  return data.live.dryRun ? "PAPER" : "LIVE";
+}
+
 function normalizeTradeSide(value: string | undefined): ScannerSide {
   return value?.toUpperCase() === "SELL" || value?.toUpperCase() === "SHORT" ? "short" : "long";
 }
@@ -446,13 +453,7 @@ export function DashboardShell() {
         <MetricTile label="Top Slope" value={formatNumber(data.live?.topSlope, 3)} />
         <MetricTile
           label="Runtime Mode"
-          value={
-            !data.live?.connected
-              ? "UNAVAILABLE"
-              : data.live?.dryRun
-                ? "DRY_RUN"
-                : "LIVE"
-          }
+          value={displayRuntimeMode(data)}
         />
         <MetricTile label="Available USDT" value={formatCompactUsd(data.live?.availableUsdt)} />
       </section>
@@ -629,13 +630,7 @@ export function DashboardShell() {
         <section className="panel runtime-grid">
           <MetricTile
             label="Runtime Mode"
-            value={
-              !data.live?.connected
-                ? "UNAVAILABLE"
-                : data.live?.dryRun
-                  ? "DRY_RUN"
-                  : "LIVE"
-            }
+            value={displayRuntimeMode(data)}
           />
           <MetricTile
             label="Trading Status"
@@ -744,7 +739,7 @@ export function DashboardShell() {
               />
               <MetricTile
                 label="Runtime Mode"
-                value={!data?.live?.connected ? "UNAVAILABLE" : data.live?.mode?.toUpperCase() || (data.live?.dryRun ? "DRY_RUN" : "LIVE")}
+                value={displayRuntimeMode(data)}
               />
               <MetricTile
                 label="Trading Status"
