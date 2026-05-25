@@ -722,6 +722,8 @@ type paperPosition struct {
 	MaxFavorableR          float64
 	MaxAdverseR            float64
 	LastMark               float64
+	LastMarkSource         string
+	LastMarkAt             time.Time
 	EntryReason            string
 	EntryStrategyID        string
 	EntryMode              string
@@ -4212,15 +4214,11 @@ func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liv
 			if pos == nil {
 				continue
 			}
-			mark := meta[raw].LastPrice
-			upnl := 0.0
-			if mark > 0 {
-				if strings.EqualFold(pos.Side, "BUY") {
-					upnl = (mark - pos.Entry) * pos.Qty
-				} else {
-					upnl = (pos.Entry - mark) * pos.Qty
-				}
+			if strings.TrimSpace(pos.Symbol) == "" {
+				pos.Symbol = raw
 			}
+			markRes := resolvePaperPositionMark(pos, meta, nil)
+			upnl, _ := realizedFromFill(pos.Side, pos.Entry, markRes.Mark, pos.Qty)
 			snap.UnrealizedNow += upnl
 			snap.OpenPositionLines = append(snap.OpenPositionLines, fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", raw, pos.Side, firstNonEmpty(pos.EntryReason, "n/a"), upnl))
 		}
@@ -4262,13 +4260,11 @@ func buildClassicDigest(label string, now time.Time, p *paperTrader, meta map[st
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		if mark <= 0 {
-			mark = pos.Entry
-		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
 		upnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		openPnL += upnl
 	}
@@ -12727,16 +12723,9 @@ func (p *paperTrader) Summary(meta map[string]symbolMeta) string {
 		parts := make([]string, 0, len(p.positions))
 		for _, pos := range p.positions {
 			raw := strings.ToUpper(aster.RawSymbol(pos.Symbol))
-			m := meta[raw]
-			mark := m.LastPrice
-			pnl := 0.0
-			if mark > 0 {
-				if strings.EqualFold(pos.Side, "BUY") {
-					pnl = (mark - pos.Entry) * pos.Qty
-				} else {
-					pnl = (pos.Entry - mark) * pos.Qty
-				}
-			}
+			markRes := resolvePaperPositionMark(pos, meta, nil)
+			mark := markRes.Mark
+			pnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 			openPnL += pnl
 			parts = append(parts, fmt.Sprintf("%s %s e=%.6f m=%.6f q=%.6f upnl=%+.3f", raw, pos.Side, pos.Entry, mark, pos.Qty, pnl))
 		}
@@ -12768,15 +12757,12 @@ func (p *paperTrader) ConsoleSummary(meta map[string]symbolMeta) string {
 			continue
 		}
 		openCount++
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			continue
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		if strings.EqualFold(pos.Side, "BUY") {
-			openPnL += (mark - pos.Entry) * pos.Qty
-		} else {
-			openPnL += (pos.Entry - mark) * pos.Qty
-		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, markRes.Mark, pos.Qty)
+		openPnL += upnl
 	}
 	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
 	realized := 0.0
@@ -12806,15 +12792,12 @@ func (p *paperTrader) ConsolePositions(meta map[string]symbolMeta) []string {
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		upnl := 0.0
-		if mark > 0 {
-			if strings.EqualFold(pos.Side, "BUY") {
-				upnl = (mark - pos.Entry) * pos.Qty
-			} else {
-				upnl = (pos.Entry - mark) * pos.Qty
-			}
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		rows = append(rows, row{
 			sym:   raw,
 			side:  pos.Side,
@@ -13198,12 +13181,13 @@ func (p *paperTrader) ApplyFunding(now time.Time, meta map[string]symbolMeta, lo
 		if p.lastFundKey[key] != "" {
 			continue
 		}
-		m := meta[raw]
-		mark := m.LastPrice
-		if m.Bid > 0 && m.Ask > 0 {
-			mark = (m.Bid + m.Ask) / 2.0
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		if m.FundingRate == 0 || mark <= 0 {
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		m := markRes.Meta
+		mark := markRes.Mark
+		if m.FundingRate == 0 || mark <= 0 || markRes.Source == "entry_price" {
 			continue
 		}
 		if p.fundingExitEnable && fundingCostsPosition(pos.Side, m.FundingRate) {
@@ -13354,15 +13338,11 @@ func (p *paperTrader) slotReplacementCandidate(now time.Time, c candidate, meta 
 				continue
 			}
 		}
-		upnl := 0.0
-		mark := meta[raw].LastPrice
-		if mark > 0 {
-			if strings.EqualFold(pos.Side, "BUY") {
-				upnl = (mark - pos.Entry) * pos.Qty
-			} else {
-				upnl = (pos.Entry - mark) * pos.Qty
-			}
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, markRes.Mark, pos.Qty)
 		if upnl > p.slotReplaceMaxUpnl {
 			continue
 		}
@@ -13415,7 +13395,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	if len(p.positions) >= p.maxOpen {
 		if replacePos, reason := p.slotReplacementCandidate(now, c, meta, current); replacePos != nil {
-			p.exitPortion(now, replacePos, "SLOT_REPLACE", meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))].LastPrice, replacePos.Qty, meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))], depth[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))])
+			markRes := resolvePaperPositionMark(replacePos, meta, depth)
+			p.exitPortion(now, replacePos, "SLOT_REPLACE", markRes.Mark, replacePos.Qty, markRes.Meta, markRes.Book)
 			_ = p.save()
 			fmt.Printf("paper slot replace: closed %s %s reason=%s\n", replacePos.Symbol, replacePos.Side, reason)
 		}
@@ -13684,19 +13665,29 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		if pos == nil {
 			continue
 		}
-		m := meta[raw]
-		if m.LastPrice <= 0 && (m.Bid <= 0 || m.Ask <= 0) {
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
+		}
+		markRes := resolvePaperPositionMark(pos, meta, depth)
+		m := markRes.Meta
+		if markRes.Mark <= 0 {
 			continue
 		}
 		sideBuy := strings.EqualFold(pos.Side, "BUY")
-		markPx, lastPx := paperMarkLastPrices(m, depth[raw], p.markLastModel, p.markLastDivBps)
+		markPx, lastPx := paperMarkLastPrices(m, markRes.Book, p.markLastModel, p.markLastDivBps)
+		if markPx <= 0 {
+			markPx = markRes.Mark
+		}
+		if lastPx <= 0 {
+			lastPx = markPx
+		}
 		mark := markPx
 		if pos.LastMark > 0 && abs(mark-pos.LastMark)/maxFloat(pos.Entry, 1e-9) < 0.0006 {
 			pos.StallBars++
 		} else {
 			pos.StallBars = 0
 		}
-		pos.LastMark = mark
+		rememberPaperPositionMark(pos, now, paperMarkResolution{Mark: mark, Source: firstNonEmpty(markRes.Source, "mark"), Symbol: markRes.Symbol, Meta: m, Book: markRes.Book})
 		updateFavorableRPaper(pos, mark)
 		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
 		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
@@ -14036,11 +14027,12 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		if minMFER > 0 && pos.MaxFavorableR < minMFER {
 			continue
 		}
-		m := meta[raw]
-		mark := m.LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
+		markRes := resolvePaperPositionMark(pos, meta, depth)
+		m := markRes.Meta
+		mark := markRes.Mark
 		if mark <= 0 {
 			continue
 		}
@@ -14101,7 +14093,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				q := pos.Qty * dec.PartialExitPct
 				if q > 0 && q < pos.Qty {
 					logPaperProtectDecision(raw, pos, "PARTIAL", dec, pos.Stop, pos.Stop, false)
-					p.exitPortion(now, pos, "SOFT_LIQ_SPIKE_PARTIAL", mark, q, m, depth[raw])
+					p.exitPortion(now, pos, "SOFT_LIQ_SPIKE_PARTIAL", mark, q, m, markRes.Book)
 					changed = true
 					continue
 				}
@@ -14131,7 +14123,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			}
 			if dec.ImmediateExit {
 				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, depth[raw])
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, markRes.Book)
 				changed = true
 				continue
 			}
@@ -14140,7 +14132,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 					continue
 				}
 				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, depth[raw])
+				p.exitPortion(now, pos, dec.Reason, mark, pos.Qty, m, markRes.Book)
 				changed = true
 				continue
 			}
@@ -14169,7 +14161,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 		if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
 			continue
 		}
-		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, depth[raw])
+		p.exitPortion(now, pos, "MOMENTUM_FADE", mark, pos.Qty, m, markRes.Book)
 		changed = true
 	}
 	if changed {
@@ -14189,11 +14181,12 @@ func (p *paperTrader) ApplyPreEODExit(now time.Time, mom map[string]momentumView
 		if minHold > 0 && now.Sub(pos.OpenedAt) < minHold {
 			continue
 		}
-		m := meta[raw]
-		mark := m.LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
+		markRes := resolvePaperPositionMark(pos, meta, depth)
+		m := markRes.Meta
+		mark := markRes.Mark
 		if mark <= 0 {
 			continue
 		}
@@ -14203,7 +14196,7 @@ func (p *paperTrader) ApplyPreEODExit(now time.Time, mom map[string]momentumView
 		if reason == "" {
 			continue
 		}
-		p.exitPortion(now, pos, reason, mark, pos.Qty, m, depth[raw])
+		p.exitPortion(now, pos, reason, mark, pos.Qty, m, markRes.Book)
 		changed = true
 	}
 	if changed {
@@ -14219,11 +14212,11 @@ func (p *paperTrader) ForceCloseAll(now time.Time, meta map[string]symbolMeta, d
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.Entry
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+		markRes := resolvePaperPositionMark(pos, meta, depth)
+		p.exitPortion(now, pos, reason, markRes.Mark, pos.Qty, markRes.Meta, markRes.Book)
 	}
 	_ = p.save()
 }
@@ -14238,19 +14231,17 @@ func (p *paperTrader) ForceCloseNonWinners(now time.Time, meta map[string]symbol
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		if mark <= 0 {
-			mark = pos.Entry
-		}
+		markRes := resolvePaperPositionMark(pos, meta, depth)
+		mark := markRes.Mark
 		pnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		if pnl > 0 {
 			keptWinners++
 			continue
 		}
-		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+		p.exitPortion(now, pos, reason, mark, pos.Qty, markRes.Meta, markRes.Book)
 		closed++
 	}
 	_ = p.save()
@@ -14264,13 +14255,22 @@ func (p *paperTrader) ForceCloseSymbol(now time.Time, symbol string, meta map[st
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
 	pos := p.positions[raw]
 	if pos == nil {
+		for _, key := range paperSymbolLookupKeys(symbol) {
+			if candidate := p.positions[key]; candidate != nil {
+				raw = key
+				pos = candidate
+				break
+			}
+		}
+	}
+	if pos == nil {
 		return false
 	}
-	mark := meta[raw].LastPrice
-	if mark <= 0 {
-		mark = pos.Entry
+	if strings.TrimSpace(pos.Symbol) == "" {
+		pos.Symbol = raw
 	}
-	p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
+	markRes := resolvePaperPositionMark(pos, meta, depth)
+	p.exitPortion(now, pos, reason, markRes.Mark, pos.Qty, markRes.Meta, markRes.Book)
 	_ = p.save()
 	return true
 }
@@ -14494,20 +14494,12 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 	rows := make([]row, 0, len(p.positions))
 	totalUPnL := 0.0
 	for sym, pos := range p.positions {
-		mark := meta[sym].LastPrice
-		upnl := 0.0
-		upct := 0.0
-		if strings.EqualFold(pos.Side, "BUY") {
-			upnl = (mark - pos.Entry) * pos.Qty
-			if pos.Entry > 0 {
-				upct = ((mark - pos.Entry) / pos.Entry) * 100
-			}
-		} else {
-			upnl = (pos.Entry - mark) * pos.Qty
-			if pos.Entry > 0 {
-				upct = ((pos.Entry - mark) / pos.Entry) * 100
-			}
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = sym
 		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
+		upnl, upct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		totalUPnL += upnl
 		reason := strings.TrimSpace(pos.EntryReason)
 		if reason == "" {
@@ -14574,13 +14566,12 @@ func (p *paperTrader) TradeUpdateSignature(meta map[string]symbolMeta, topN int)
 	rows := make([]row, 0, len(p.positions))
 	totalUPnL := 0.0
 	for sym, pos := range p.positions {
-		mark := meta[sym].LastPrice
-		upnl := 0.0
-		if strings.EqualFold(pos.Side, "BUY") {
-			upnl = (mark - pos.Entry) * pos.Qty
-		} else {
-			upnl = (pos.Entry - mark) * pos.Qty
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = sym
 		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		totalUPnL += upnl
 		rows = append(rows, row{
 			sym:   sym,
@@ -15124,13 +15115,12 @@ func (p *paperTrader) LogEquity(now time.Time, meta map[string]symbolMeta) error
 	totalOpenPnL := 0.0
 	if len(p.positions) > 0 {
 		for sym, pos := range p.positions {
-			mark := meta[sym].LastPrice
-			pnl := 0.0
-			if strings.EqualFold(pos.Side, "BUY") {
-				pnl = (mark - pos.Entry) * pos.Qty
-			} else {
-				pnl = (pos.Entry - mark) * pos.Qty
+			if strings.TrimSpace(pos.Symbol) == "" {
+				pos.Symbol = sym
 			}
+			markRes := resolvePaperPositionMark(pos, meta, nil)
+			mark := markRes.Mark
+			pnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 			totalOpenPnL += pnl
 			if openSym == "" {
 				openSym = sym
@@ -22151,6 +22141,129 @@ func firstKnownNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+type paperMarkResolution struct {
+	Mark   float64
+	Source string
+	Symbol string
+	Meta   symbolMeta
+	Book   aster.OrderBook
+}
+
+func paperSymbolLookupKeys(symbol string) []string {
+	trimmed := strings.ToUpper(strings.TrimSpace(symbol))
+	if trimmed == "" {
+		return nil
+	}
+	added := map[string]bool{}
+	keys := make([]string, 0, 8)
+	add := func(v string) {
+		v = strings.ToUpper(strings.TrimSpace(v))
+		if v == "" || added[v] {
+			return
+		}
+		added[v] = true
+		keys = append(keys, v)
+	}
+	add(trimmed)
+	add(aster.RawSymbol(trimmed))
+	if strings.Contains(trimmed, "/") {
+		add(strings.ReplaceAll(trimmed, "/", ""))
+		parts := strings.Split(trimmed, "/")
+		if len(parts) == 2 && parts[0] != "" {
+			switch parts[1] {
+			case "USDT", "USD":
+				add(parts[0] + "USDT")
+				add(parts[0] + "-USD")
+			case "BTC", "ETH":
+				add(parts[0] + parts[1])
+				add(parts[0] + "-" + parts[1])
+			}
+		}
+	}
+	add(strings.ReplaceAll(trimmed, "-", ""))
+	if strings.HasSuffix(trimmed, "USD") && !strings.HasSuffix(trimmed, "USDT") {
+		add(strings.TrimSuffix(trimmed, "USD") + "USDT")
+	}
+	add(aster.NormSymbol(aster.RawSymbol(trimmed)))
+	return keys
+}
+
+func lookupPaperSymbolMeta(symbol string, meta map[string]symbolMeta) (symbolMeta, string, bool) {
+	if len(meta) == 0 {
+		return symbolMeta{}, "", false
+	}
+	for _, key := range paperSymbolLookupKeys(symbol) {
+		if m, ok := meta[key]; ok {
+			return m, key, true
+		}
+	}
+	for _, key := range paperSymbolLookupKeys(symbol) {
+		for metaKey, m := range meta {
+			if strings.EqualFold(strings.TrimSpace(metaKey), key) {
+				return m, metaKey, true
+			}
+		}
+	}
+	return symbolMeta{}, "", false
+}
+
+func lookupPaperOrderBook(symbol string, depth map[string]aster.OrderBook) (aster.OrderBook, string, bool) {
+	if len(depth) == 0 {
+		return aster.OrderBook{}, "", false
+	}
+	for _, key := range paperSymbolLookupKeys(symbol) {
+		if ob, ok := depth[key]; ok {
+			return ob, key, true
+		}
+	}
+	for _, key := range paperSymbolLookupKeys(symbol) {
+		for bookKey, ob := range depth {
+			if strings.EqualFold(strings.TrimSpace(bookKey), key) {
+				return ob, bookKey, true
+			}
+		}
+	}
+	return aster.OrderBook{}, "", false
+}
+
+func resolvePaperPositionMark(pos *paperPosition, meta map[string]symbolMeta, depth map[string]aster.OrderBook) paperMarkResolution {
+	if pos == nil {
+		return paperMarkResolution{Source: "none"}
+	}
+	m, metaKey, hasMeta := lookupPaperSymbolMeta(pos.Symbol, meta)
+	if hasMeta && m.LastPrice > 0 {
+		return paperMarkResolution{Mark: m.LastPrice, Source: "meta_last", Symbol: metaKey, Meta: m}
+	}
+	if hasMeta && m.Bid > 0 && m.Ask > 0 {
+		return paperMarkResolution{Mark: (m.Bid + m.Ask) / 2.0, Source: "meta_mid", Symbol: metaKey, Meta: m}
+	}
+	ob, bookKey, hasBook := lookupPaperOrderBook(pos.Symbol, depth)
+	if hasBook {
+		bid, ask := topOfBook(ob, 0)
+		if bid > 0 && ask > 0 {
+			return paperMarkResolution{Mark: (bid + ask) / 2.0, Source: "orderbook_mid", Symbol: bookKey, Meta: m, Book: ob}
+		}
+	}
+	if pos.LastMark > 0 {
+		return paperMarkResolution{Mark: pos.LastMark, Source: firstNonEmpty(pos.LastMarkSource, "last_known_mark"), Symbol: firstNonEmpty(metaKey, bookKey), Meta: m, Book: ob}
+	}
+	if pos.Entry > 0 {
+		return paperMarkResolution{Mark: pos.Entry, Source: "entry_price", Symbol: firstNonEmpty(metaKey, bookKey), Meta: m, Book: ob}
+	}
+	return paperMarkResolution{Source: "none", Symbol: firstNonEmpty(metaKey, bookKey), Meta: m, Book: ob}
+}
+
+func rememberPaperPositionMark(pos *paperPosition, now time.Time, res paperMarkResolution) {
+	if pos == nil || res.Mark <= 0 || res.Source == "entry_price" {
+		return
+	}
+	pos.LastMark = res.Mark
+	pos.LastMarkSource = res.Source
+	if !now.IsZero() {
+		pos.LastMarkAt = now.UTC()
+	}
 }
 
 func classifyRejectReason(reason string) RejectClass {

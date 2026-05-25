@@ -38,6 +38,8 @@ type livePaperPositionView struct {
 	ExitProfile    string    `json:"exit_profile,omitempty"`
 	EntryPrice     float64   `json:"entry_price"`
 	MarkPrice      float64   `json:"mark_price"`
+	MarkSource     string    `json:"mark_source,omitempty"`
+	LastMarkAt     time.Time `json:"last_mark_at,omitempty"`
 	StopPrice      float64   `json:"stop_price"`
 	TP1            float64   `json:"tp1,omitempty"`
 	TP2            float64   `json:"tp2,omitempty"`
@@ -128,13 +130,11 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			mark = pos.LastMark
+		if strings.TrimSpace(pos.Symbol) == "" {
+			pos.Symbol = raw
 		}
-		if mark <= 0 {
-			mark = pos.Entry
-		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
 		upnl, upct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		openPnL += upnl
 		openRows = append(openRows, livePaperPositionView{
@@ -150,6 +150,8 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 			ExitProfile:    pos.ExitProfile,
 			EntryPrice:     pos.Entry,
 			MarkPrice:      mark,
+			MarkSource:     markRes.Source,
+			LastMarkAt:     pos.LastMarkAt,
 			StopPrice:      pos.Stop,
 			TP1:            pos.TP1,
 			TP2:            pos.TP2,

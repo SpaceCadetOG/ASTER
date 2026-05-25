@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,57 @@ func TestBuildLivePaperSnapshotEmptyStateUsesSafeArrays(t *testing.T) {
 	}
 	if len(snap.OpenPositions) != 0 || len(snap.RecentClosed) != 0 || len(snap.RecentDecisions) != 0 {
 		t.Fatalf("expected empty arrays, got %+v", snap)
+	}
+}
+
+func TestPaperMarkResolutionNormalizesSymbolAndFallsBack(t *testing.T) {
+	pos := &paperPosition{Symbol: "IN-USD", Side: "BUY", Entry: 0.070, Qty: 10}
+	meta := map[string]symbolMeta{"INUSDT": {LastPrice: 0.074}}
+	res := resolvePaperPositionMark(pos, meta, nil)
+	if res.Mark != 0.074 || res.Source != "meta_last" {
+		t.Fatalf("expected normalized meta mark, got %+v", res)
+	}
+
+	pos = &paperPosition{Symbol: "IN/USDT", Side: "BUY", Entry: 0.070, Qty: 10, LastMark: 0.073, LastMarkSource: "meta_last"}
+	res = resolvePaperPositionMark(pos, map[string]symbolMeta{}, nil)
+	if res.Mark != 0.073 || res.Source != "meta_last" {
+		t.Fatalf("expected last known mark fallback, got %+v", res)
+	}
+
+	pos = &paperPosition{Symbol: "INUSDT", Side: "BUY", Entry: 0.070, Qty: 10}
+	res = resolvePaperPositionMark(pos, map[string]symbolMeta{}, nil)
+	if res.Mark != 0.070 || res.Source != "entry_price" {
+		t.Fatalf("expected entry price fallback, got %+v", res)
+	}
+}
+
+func TestPaperTradeUpdateMessageDoesNotDisplayZeroMarkOnSymbolMismatch(t *testing.T) {
+	now := time.Now().UTC()
+	paper := &paperTrader{
+		enabled:   true,
+		balance:   1000,
+		reportLoc: time.UTC,
+		maxOpen:   5,
+		positions: map[string]*paperPosition{
+			"IN-USD": {
+				Symbol:      "IN-USD",
+				Side:        "BUY",
+				Entry:       0.070,
+				Qty:         100,
+				Margin:      5,
+				Leverage:    2,
+				OpenedAt:    now.Add(-time.Minute),
+				EntryReason: "impulsive_long_starter",
+			},
+		},
+		dayStats: map[string]*paperDayStats{now.Format("2006-01-02"): {Net: 0}},
+	}
+	msg := paper.TradeUpdateMessage(map[string]symbolMeta{"INUSDT": {LastPrice: 0.074}}, 5)
+	if strings.Contains(msg, "0.000000") || strings.Contains(msg, "-100.00%") {
+		t.Fatalf("expected resolved mark in paper update, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "0.074000") {
+		t.Fatalf("expected normalized mark in paper update, got:\n%s", msg)
 	}
 }
 
