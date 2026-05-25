@@ -1374,6 +1374,7 @@ func main() {
 	riskFallbackStopPct := envFloat("LIVE_STOP_PCT", 3.0)
 	entryBps := envFloat("LIVE_ENTRY_OFFSET_BPS", 2)
 	showAccount := envBool("LIVE_SHOW_ACCOUNT", true)
+	statusAccount := envBool("LIVE_STATUS_ACCOUNT_ENABLE", true)
 	accountAssets := envCSV("LIVE_ACCOUNT_ASSETS", "")
 	if entryBps < 0 {
 		entryBps = -entryBps
@@ -2310,7 +2311,7 @@ func main() {
 		}
 
 		var acct accountSnapshot
-		if rest != nil && showAccount {
+		if rest != nil && (showAccount || statusAccount) {
 			snap, err := fetchAccountSnapshot(rest, func() *aster.UserDataState {
 				if execMgr != nil {
 					return execMgr.userDataState
@@ -2318,35 +2319,48 @@ func main() {
 				return nil
 			}(), accountAssets)
 			if err != nil {
-				fmt.Println("live: account snapshot error:", err)
+				if showAccount {
+					fmt.Println("live: account snapshot error:", err)
+				}
 			} else {
 				acct = snap
-				realizedToday := 0.0
 				if execMgr != nil {
-					realizedToday = execMgr.dayRealizedAt(now)
+					merged := execMgr.mergeLiveAccountSnapshot(now, snap)
+					if merged.Health == "" && (merged.AvailableUSDT > 0 || merged.Equity > 0 || merged.OpenCount > 0) {
+						merged.Health = "account_snapshot"
+					}
+					execMgr.mu.Lock()
+					execMgr.liveAccount = merged
+					execMgr.mu.Unlock()
 				}
-				printAccountSnapshot(snap, realizedToday)
-				dayKey := now.Format("2006-01-02")
-				eq := accountEquity(snap)
-				if eq > 0 && dayStartEq[dayKey] == 0 {
-					dayStartEq[dayKey] = eq
-				}
-				if safety.maxDailyLossPct > 0 && dayStartEq[dayKey] > 0 {
-					minEq := dayStartEq[dayKey] * (1.0 - safety.maxDailyLossPct/100.0)
-					if eq <= minEq && !killDay[dayKey] {
-						killDay[dayKey] = true
-						if safety.pauseFile != "" {
-							_ = os.WriteFile(safety.pauseFile, []byte(now.Format(time.RFC3339)+" daily loss kill-switch\n"), 0o644)
+				if showAccount {
+					realizedToday := 0.0
+					if execMgr != nil {
+						realizedToday = execMgr.dayRealizedAt(now)
+					}
+					printAccountSnapshot(snap, realizedToday)
+					dayKey := now.Format("2006-01-02")
+					eq := accountEquity(snap)
+					if eq > 0 && dayStartEq[dayKey] == 0 {
+						dayStartEq[dayKey] = eq
+					}
+					if safety.maxDailyLossPct > 0 && dayStartEq[dayKey] > 0 {
+						minEq := dayStartEq[dayKey] * (1.0 - safety.maxDailyLossPct/100.0)
+						if eq <= minEq && !killDay[dayKey] {
+							killDay[dayKey] = true
+							if safety.pauseFile != "" {
+								_ = os.WriteFile(safety.pauseFile, []byte(now.Format(time.RFC3339)+" daily loss kill-switch\n"), 0o644)
+							}
+							if safety.killClose && execMgr != nil {
+								_ = execMgr.ForceCloseAll("DAILY_LOSS_KILL")
+							}
+							msg := fmt.Sprintf("KILL_SWITCH daily loss hit: eq=%.4f start=%.4f limit=%.4f", eq, dayStartEq[dayKey], minEq)
+							fmt.Println("live:", msg)
+							tg.Sendf("%s", notify.BuildEventHTML("🛑", "KILL SWITCH",
+								fmt.Sprintf("<b>Equity:</b> %.4f", eq),
+								fmt.Sprintf("<b>Start:</b> %.4f | <b>Limit:</b> %.4f", dayStartEq[dayKey], minEq),
+							))
 						}
-						if safety.killClose && execMgr != nil {
-							_ = execMgr.ForceCloseAll("DAILY_LOSS_KILL")
-						}
-						msg := fmt.Sprintf("KILL_SWITCH daily loss hit: eq=%.4f start=%.4f limit=%.4f", eq, dayStartEq[dayKey], minEq)
-						fmt.Println("live:", msg)
-						tg.Sendf("%s", notify.BuildEventHTML("🛑", "KILL SWITCH",
-							fmt.Sprintf("<b>Equity:</b> %.4f", eq),
-							fmt.Sprintf("<b>Start:</b> %.4f | <b>Limit:</b> %.4f", dayStartEq[dayKey], minEq),
-						))
 					}
 				}
 			}
