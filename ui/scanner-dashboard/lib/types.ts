@@ -219,6 +219,8 @@ export interface PaperView {
   summary?: string;
   balance: number;
   reserve: number;
+  availableUsdt: number;
+  marginUsed: number;
   equity: number;
   openPnl: number;
   realizedToday: number;

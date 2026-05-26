@@ -134,7 +134,8 @@ function deriveRuntimeAccount(data: DashboardData | null) {
     return {
       source: "paper" as const,
       balance: paper.balance,
-      availableUsdt: Math.max(0, paper.balance - paper.reserve),
+      availableUsdt: paper.availableUsdt || Math.max(0, paper.balance - paper.reserve - paper.marginUsed),
+      marginUsed: paper.marginUsed,
       equity: paper.equity,
       openPnl: paper.openPnl,
       realizedDay: paper.realizedToday,
@@ -151,6 +152,7 @@ function deriveRuntimeAccount(data: DashboardData | null) {
     source: "none" as const,
     balance: 0,
     availableUsdt: data?.live?.availableUsdt || 0,
+    marginUsed: 0,
     equity: 0,
     openPnl: 0,
     realizedDay: 0,
@@ -193,7 +195,8 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
       summary:
         "Paper ledger snapshot from the live runtime. Click any paper asset row below to open Asset Detail.",
       balance: paper?.balance,
-      availableUsdt: paper ? Math.max(0, paper.balance - paper.reserve) : undefined,
+      availableUsdt: paper ? paper.availableUsdt || Math.max(0, paper.balance - paper.reserve - paper.marginUsed) : undefined,
+      marginUsed: paper?.marginUsed || 0,
       equity: paper?.equity,
       openPnl,
       realizedDay,
@@ -219,6 +222,7 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
       : "Live account snapshot is unavailable. Paper balances are not used in this Live view.",
     balance,
     availableUsdt: liveReady ? liveAccount?.availableUsdt : undefined,
+    marginUsed: liveReady ? Math.max(0, (balance || 0) - (liveAccount?.availableUsdt || 0)) : undefined,
     equity,
     openPnl,
     realizedDay,
@@ -727,6 +731,7 @@ export function DashboardShell() {
               <MetricTile label="Balance" value={formatUsdValue(tradeAccount.balance)} />
               <MetricTile label="Equity" value={formatUsdValue(tradeAccount.equity)} />
               <MetricTile label="Available USDT" value={formatUsdValue(tradeAccount.availableUsdt)} />
+              <MetricTile label="Margin Used" value={formatUsdValue(tradeAccount.marginUsed)} />
               <MetricTile
                 label="Open PnL"
                 value={formatSignedUsd(tradeAccount.openPnl)}

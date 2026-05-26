@@ -63,6 +63,8 @@ type RawLiveStatus = {
     summary?: string;
     balance?: number;
     reserve?: number;
+    available_usdt?: number;
+    margin_used?: number;
     equity?: number;
     open_pnl?: number;
     realized_today?: number;
@@ -132,6 +134,8 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
     summary: typeof raw.summary === "string" ? raw.summary : undefined,
     balance: Number(raw.balance || 0),
     reserve: Number(raw.reserve || 0),
+    availableUsdt: Number(raw.available_usdt || 0),
+    marginUsed: Number(raw.margin_used || 0),
     equity: Number(raw.equity || 0),
     openPnl: Number(raw.open_pnl || 0),
     realizedToday: Number(raw.realized_today || 0),

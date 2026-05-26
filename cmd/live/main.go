@@ -12860,16 +12860,9 @@ func (p *paperTrader) PositionsTable(meta map[string]symbolMeta) string {
 		if pos == nil {
 			continue
 		}
-		m := meta[raw]
-		mark := m.LastPrice
-		upnl := 0.0
-		if mark > 0 {
-			if strings.EqualFold(pos.Side, "BUY") {
-				upnl = (mark - pos.Entry) * pos.Qty
-			} else {
-				upnl = (pos.Entry - mark) * pos.Qty
-			}
-		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		mark := markRes.Mark
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		totalUPnL += upnl
 		totalMargin += pos.Margin
 		rows = append(rows, row{
@@ -12920,19 +12913,13 @@ func (p *paperTrader) Equity(meta map[string]symbolMeta) float64 {
 		return 0
 	}
 	openPnL := 0.0
-	for raw, pos := range p.positions {
+	for _, pos := range p.positions {
 		if pos == nil {
 			continue
 		}
-		mark := meta[raw].LastPrice
-		if mark <= 0 {
-			continue
-		}
-		if strings.EqualFold(pos.Side, "BUY") {
-			openPnL += (mark - pos.Entry) * pos.Qty
-		} else {
-			openPnL += (pos.Entry - mark) * pos.Qty
-		}
+		markRes := resolvePaperPositionMark(pos, meta, nil)
+		upnl, _ := realizedFromFill(pos.Side, pos.Entry, markRes.Mark, pos.Qty)
+		openPnL += upnl
 	}
 	return p.balance + openPnL
 }

@@ -14,6 +14,8 @@ type livePaperSnapshot struct {
 	Summary         string                  `json:"summary,omitempty"`
 	Balance         float64                 `json:"balance"`
 	Reserve         float64                 `json:"reserve"`
+	AvailableUSDT   float64                 `json:"available_usdt"`
+	MarginUsed      float64                 `json:"margin_used"`
 	Equity          float64                 `json:"equity"`
 	OpenPnL         float64                 `json:"open_pnl"`
 	RealizedToday   float64                 `json:"realized_today"`
@@ -126,6 +128,7 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 
 	openRows := make([]livePaperPositionView, 0, len(p.positions))
 	openPnL := 0.0
+	marginUsed := 0.0
 	for raw, pos := range p.positions {
 		if pos == nil {
 			continue
@@ -137,6 +140,7 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 		mark := markRes.Mark
 		upnl, upct := realizedFromFill(pos.Side, pos.Entry, mark, pos.Qty)
 		openPnL += upnl
+		marginUsed += pos.Margin
 		openRows = append(openRows, livePaperPositionView{
 			Symbol:         strings.ToUpper(strings.TrimSpace(aster.RawSymbol(pos.Symbol))),
 			Side:           strings.ToUpper(strings.TrimSpace(pos.Side)),
@@ -180,7 +184,9 @@ func buildLivePaperSnapshot(mode runtimeOperatingMode, p *paperTrader, meta map[
 		Summary:         p.Summary(meta),
 		Balance:         p.balance,
 		Reserve:         p.reserve,
-		Equity:          p.Equity(meta),
+		AvailableUSDT:   p.freeForEntries(),
+		MarginUsed:      marginUsed,
+		Equity:          p.balance + openPnL,
 		OpenPnL:         openPnL,
 		RealizedToday:   realizedToday,
 		OpenCount:       len(openRows),

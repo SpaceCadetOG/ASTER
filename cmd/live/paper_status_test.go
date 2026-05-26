@@ -109,6 +109,12 @@ func TestBuildLivePaperSnapshotIncludesOpenClosedAndDecisionViews(t *testing.T) 
 	if snap.OpenCount != 1 || len(snap.OpenPositions) != 1 {
 		t.Fatalf("expected one open position, got %+v", snap)
 	}
+	if snap.Balance != 1005 || snap.MarginUsed != 50 || snap.AvailableUSDT != 950 {
+		t.Fatalf("expected paper balance/free/margin to match terminal model, got balance=%.2f available=%.2f margin=%.2f", snap.Balance, snap.AvailableUSDT, snap.MarginUsed)
+	}
+	if snap.OpenPnL != 1.5 || snap.Equity != 1006.5 {
+		t.Fatalf("expected paper equity to use mark fallback open pnl, got openPnL=%.4f equity=%.4f", snap.OpenPnL, snap.Equity)
+	}
 	if snap.OpenPositions[0].Symbol != "BTCUSDT" || snap.OpenPositions[0].Mode != "paper" {
 		t.Fatalf("unexpected open position payload: %+v", snap.OpenPositions[0])
 	}
