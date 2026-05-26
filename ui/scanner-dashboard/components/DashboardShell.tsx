@@ -119,8 +119,9 @@ function deriveRuntimeAccount(data: DashboardData | null) {
   if (hasLiveSnapshot && liveAccount) {
     return {
       source: "live" as const,
-      balance: liveAccount.balance || liveAccount.marginBalance || liveAccount.equity,
+      balance: liveAccount.marginBalance || liveAccount.balance || liveAccount.equity,
       availableUsdt: liveAccount.availableUsdt,
+      marginUsed: liveAccount.marginUsed,
       equity: liveAccount.equity,
       openPnl: liveAccount.openPnl,
       realizedDay: liveAccount.realizedDay,
@@ -213,7 +214,7 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
 
   const openPnl = liveReady ? liveAccount?.openPnl || 0 : undefined;
   const realizedDay = liveReady ? liveAccount?.realizedDay || 0 : undefined;
-  const balance = liveReady ? liveAccount?.balance || liveAccount?.marginBalance || liveAccount?.equity : undefined;
+  const balance = liveReady ? liveAccount?.marginBalance || liveAccount?.balance || liveAccount?.equity : undefined;
   const equity = liveReady ? liveAccount?.equity || balance : undefined;
   return {
     source: liveReady ? "live" as const : "none" as const,
@@ -224,7 +225,7 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
       : "Live account snapshot is unavailable. Paper balances are not used in this Live view.",
     balance,
     availableUsdt: liveReady ? liveAccount?.availableUsdt : undefined,
-    marginUsed: liveReady ? Math.max(0, (balance || 0) - (liveAccount?.availableUsdt || 0)) : undefined,
+    marginUsed: liveReady ? liveAccount?.marginUsed || Math.max(0, (balance || 0) - (liveAccount?.availableUsdt || 0)) : undefined,
     equity,
     openPnl,
     realizedDay,

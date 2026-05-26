@@ -48,6 +48,7 @@ type RawLiveStatus = {
     health_detail?: string;
     balance?: number;
     margin_balance?: number;
+    margin_used?: number;
     available_usdt?: number;
     equity?: number;
     realized_day?: number;
@@ -84,42 +85,65 @@ function normalizeLiveAccount(raw: RawLiveStatus["live"] | undefined) {
   if (!raw) {
     return undefined;
   }
+  const positions = (raw.positions || []).map((row) => ({
+    symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+    side: String(row.side || ""),
+    source: typeof row.source === "string" ? row.source : undefined,
+    manageState: typeof row.manage_state === "string" ? row.manage_state : undefined,
+    protectionState: typeof row.protection_state === "string" ? row.protection_state : undefined,
+    managed: Boolean(row.managed),
+    protected: Boolean(row.protected),
+    qty: Number(row.qty || 0),
+    entryPrice: Number(row.entry_price || 0),
+    markPrice: Number(row.mark_price || 0),
+    lastPrice: Number(row.last_price || 0),
+    spreadBps: Number(row.spread_bps || 0),
+    unrealizedPnl: Number(row.unrealized_pnl || 0),
+    unrealizedPnlPct: Number(row.unrealized_pnl_pct || 0),
+    realizedPnl: Number(row.realized_pnl || 0),
+    exchangeUnreal: Number(row.exchange_unreal || 0),
+    leverage: Number(row.leverage || 0),
+    margin: Number(row.margin || 0),
+    stopPrice: Number(row.stop_price || 0),
+    holdMin: Number(row.hold_min || 0),
+    entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined
+  }));
+  const availableUsdt = Number(raw.available_usdt || 0);
+  const positionMargin = positions.reduce((sum, row) => sum + row.margin, 0);
+  const marginUsed =
+    raw.margin_used === null || raw.margin_used === undefined
+      ? positionMargin
+      : Number(raw.margin_used || 0);
+  const openPnl =
+    raw.open_pnl === null || raw.open_pnl === undefined
+      ? positions.reduce((sum, row) => sum + row.unrealizedPnl, 0)
+      : Number(raw.open_pnl || 0);
+  const positionBackedBalance = availableUsdt + marginUsed;
+  const hasPositionBackedValue = marginUsed > 0 || positions.length > 0;
+  const balance = hasPositionBackedValue
+    ? positionBackedBalance
+    : Number(raw.balance || raw.margin_balance || raw.equity || raw.available_usdt || 0);
+  const marginBalance = hasPositionBackedValue
+    ? positionBackedBalance
+    : Number(raw.margin_balance || raw.balance || raw.equity || raw.available_usdt || 0);
+  const equity = hasPositionBackedValue
+    ? positionBackedBalance + openPnl
+    : Number(raw.equity || balance + openPnl || 0);
   return {
     generated: typeof raw.generated === "string" ? raw.generated : undefined,
     health: typeof raw.health === "string" ? raw.health : undefined,
     healthDetail: typeof raw.health_detail === "string" ? raw.health_detail : undefined,
-    balance: Number(raw.balance || raw.margin_balance || raw.equity || raw.available_usdt || 0),
-    marginBalance: Number(raw.margin_balance || raw.balance || raw.equity || raw.available_usdt || 0),
-    availableUsdt: Number(raw.available_usdt || 0),
-    equity: Number(raw.equity || 0),
+    balance,
+    marginBalance,
+    marginUsed,
+    availableUsdt,
+    equity,
     realizedDay: Number(raw.realized_day || 0),
-    openPnl: Number(raw.open_pnl || 0),
+    openPnl,
     openCount: Number(raw.open_count || 0),
     botCount: Number(raw.bot_count || 0),
     manualCount: Number(raw.manual_count || 0),
-    positions: (raw.positions || []).map((row) => ({
-      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
-      side: String(row.side || ""),
-      source: typeof row.source === "string" ? row.source : undefined,
-      manageState: typeof row.manage_state === "string" ? row.manage_state : undefined,
-      protectionState: typeof row.protection_state === "string" ? row.protection_state : undefined,
-      managed: Boolean(row.managed),
-      protected: Boolean(row.protected),
-      qty: Number(row.qty || 0),
-      entryPrice: Number(row.entry_price || 0),
-      markPrice: Number(row.mark_price || 0),
-      lastPrice: Number(row.last_price || 0),
-      spreadBps: Number(row.spread_bps || 0),
-      unrealizedPnl: Number(row.unrealized_pnl || 0),
-      unrealizedPnlPct: Number(row.unrealized_pnl_pct || 0),
-      realizedPnl: Number(row.realized_pnl || 0),
-      exchangeUnreal: Number(row.exchange_unreal || 0),
-      leverage: Number(row.leverage || 0),
-      margin: Number(row.margin || 0),
-      stopPrice: Number(row.stop_price || 0),
-      holdMin: Number(row.hold_min || 0),
-      entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined
-    }))
+    positions
   };
 }
 

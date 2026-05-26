@@ -101,6 +101,7 @@ export interface LiveAccountView {
   healthDetail?: string;
   balance: number;
   marginBalance: number;
+  marginUsed: number;
   availableUsdt: number;
   equity: number;
   realizedDay: number;
