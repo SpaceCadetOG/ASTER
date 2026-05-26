@@ -92,7 +92,9 @@ function displayRuntimeMode(data: DashboardData | null) {
 }
 
 function displayAvailableUsdt(data: DashboardData | null) {
-  return data?.live?.liveAccount?.availableUsdt || data?.live?.availableUsdt;
+  const liveAccount = data?.live?.liveAccount;
+  if (hasUsableLiveAccount(data) && liveAccount) return liveAccount.availableUsdt;
+  return data?.live?.paper?.availableUsdt ?? data?.live?.availableUsdt;
 }
 
 function normalizeTradeSide(value: string | undefined): ScannerSide {
@@ -134,7 +136,7 @@ function deriveRuntimeAccount(data: DashboardData | null) {
     return {
       source: "paper" as const,
       balance: paper.balance,
-      availableUsdt: paper.availableUsdt || Math.max(0, paper.balance - paper.reserve - paper.marginUsed),
+      availableUsdt: paper.availableUsdt,
       marginUsed: paper.marginUsed,
       equity: paper.equity,
       openPnl: paper.openPnl,
@@ -195,7 +197,7 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
       summary:
         "Paper ledger snapshot from the live runtime. Click any paper asset row below to open Asset Detail.",
       balance: paper?.balance,
-      availableUsdt: paper ? paper.availableUsdt || Math.max(0, paper.balance - paper.reserve - paper.marginUsed) : undefined,
+      availableUsdt: paper?.availableUsdt,
       marginUsed: paper?.marginUsed || 0,
       equity: paper?.equity,
       openPnl,
@@ -247,6 +249,9 @@ export function DashboardShell() {
   const [scannerTab, setScannerTab] = useState<"long" | "short" | "live">("long");
   const [accountTab, setAccountTab] = useState<"paper" | "live">("paper");
   const [data, setData] = useState<DashboardData | null>(null);
+  const [lastLiveAccount, setLastLiveAccount] = useState<
+    NonNullable<NonNullable<DashboardData["live"]>["liveAccount"]> | undefined
+  >(undefined);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("");
   const [selectedSide, setSelectedSide] = useState<ScannerSide>("long");
   const [detail, setDetail] = useState<AssetDetail | undefined>(undefined);
@@ -261,6 +266,9 @@ export function DashboardShell() {
         const payload = await getDashboard();
         if (cancelled) return;
         setData(payload);
+        if (hasUsableLiveAccount(payload)) {
+          setLastLiveAccount(payload.live?.liveAccount);
+        }
         setError("");
 
         if (!hasInitializedSelection) {
@@ -316,6 +324,19 @@ export function DashboardShell() {
     ].sort((a, b) => b.score - a.score);
   }, [data]);
 
+  const accountData = useMemo<DashboardData | null>(() => {
+    if (!data || hasUsableLiveAccount(data) || !lastLiveAccount || !data.live) {
+      return data;
+    }
+    return {
+      ...data,
+      live: {
+        ...data.live,
+        liveAccount: lastLiveAccount
+      }
+    };
+  }, [data, lastLiveAccount]);
+
   const scannerAssetOptions = useMemo<Array<{ symbol: string; side: ScannerSide; source: string; score: number }>>(() => {
     const seen = new Set<string>();
     const options: Array<{ symbol: string; side: ScannerSide; source: string; score: number }> = [];
@@ -338,16 +359,16 @@ export function DashboardShell() {
         ? null
         : data?.longScanner || null;
 
-  const runtimeGenerated = runtimeGeneratedValue(data);
-  const runtimeAccount = deriveRuntimeAccount(data);
-  const tradeAccount = deriveTradeAccount(data, accountTab);
+  const runtimeGenerated = runtimeGeneratedValue(accountData);
+  const runtimeAccount = deriveRuntimeAccount(accountData);
+  const tradeAccount = deriveTradeAccount(accountData, accountTab);
   const runtimeAccountSummary =
     accountTab === "paper"
       ? tradeAccount.summary
       : runtimeAccount.healthDetail ||
         tradeAccount.summary;
-  const paperOpenPositions = data?.live?.paper?.openPositions || [];
-  const liveOpenPositions = data?.live?.liveAccount?.positions || [];
+  const paperOpenPositions = accountData?.live?.paper?.openPositions || [];
+  const liveOpenPositions = accountData?.live?.liveAccount?.positions || [];
   const tradeOpenPositions = accountTab === "paper" ? paperOpenPositions : liveOpenPositions;
   const selectedSummaryRow =
     data?.longScanner?.rows.find((row) => row.symbol === selectedSymbol) ||
@@ -464,7 +485,7 @@ export function DashboardShell() {
           label="Runtime Mode"
           value={displayRuntimeMode(data)}
         />
-        <MetricTile label="Available USDT" value={formatCompactUsd(displayAvailableUsdt(data))} />
+        <MetricTile label="Available USDT" value={formatCompactUsd(displayAvailableUsdt(accountData))} />
       </section>
 
       <Tabs active={tab} onChange={setTab} />
