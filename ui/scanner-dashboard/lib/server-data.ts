@@ -46,6 +46,8 @@ type RawLiveStatus = {
     generated?: string;
     health?: string;
     health_detail?: string;
+    balance?: number;
+    margin_balance?: number;
     available_usdt?: number;
     equity?: number;
     realized_day?: number;
@@ -84,6 +86,8 @@ function normalizeLiveAccount(raw: RawLiveStatus["live"] | undefined) {
     generated: typeof raw.generated === "string" ? raw.generated : undefined,
     health: typeof raw.health === "string" ? raw.health : undefined,
     healthDetail: typeof raw.health_detail === "string" ? raw.health_detail : undefined,
+    balance: Number(raw.balance || raw.margin_balance || raw.equity || raw.available_usdt || 0),
+    marginBalance: Number(raw.margin_balance || raw.balance || raw.equity || raw.available_usdt || 0),
     availableUsdt: Number(raw.available_usdt || 0),
     equity: Number(raw.equity || 0),
     realizedDay: Number(raw.realized_day || 0),

@@ -117,7 +117,7 @@ function deriveRuntimeAccount(data: DashboardData | null) {
   if (hasLiveSnapshot && liveAccount) {
     return {
       source: "live" as const,
-      balance: liveAccount.availableUsdt,
+      balance: liveAccount.balance || liveAccount.marginBalance || liveAccount.equity,
       availableUsdt: liveAccount.availableUsdt,
       equity: liveAccount.equity,
       openPnl: liveAccount.openPnl,
@@ -208,7 +208,8 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
 
   const openPnl = liveReady ? liveAccount?.openPnl || 0 : undefined;
   const realizedDay = liveReady ? liveAccount?.realizedDay || 0 : undefined;
-  const equity = liveReady ? liveAccount?.equity || liveAccount?.availableUsdt : undefined;
+  const balance = liveReady ? liveAccount?.balance || liveAccount?.marginBalance || liveAccount?.equity : undefined;
+  const equity = liveReady ? liveAccount?.equity || balance : undefined;
   return {
     source: liveReady ? "live" as const : "none" as const,
     title: "Live Account",
@@ -216,7 +217,7 @@ function deriveTradeAccount(data: DashboardData | null, accountTab: "paper" | "l
     summary: liveReady
       ? "Read-only exchange account snapshot from Aster. This shows real user funds; execution remains controlled by runtime safety flags."
       : "Live account snapshot is unavailable. Paper balances are not used in this Live view.",
-    balance: equity,
+    balance,
     availableUsdt: liveReady ? liveAccount?.availableUsdt : undefined,
     equity,
     openPnl,

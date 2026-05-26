@@ -992,6 +992,12 @@ func TestMergeLiveAccountSnapshotTracksBotAndManual(t *testing.T) {
 	if got.OpenCount != 2 {
 		t.Fatalf("expected 2 open positions, got %d", got.OpenCount)
 	}
+	if got.Balance != 150 {
+		t.Fatalf("expected balance to include available plus isolated margins, got %.4f", got.Balance)
+	}
+	if got.Equity <= got.AvailableUSDT {
+		t.Fatalf("expected equity to include margin account value, got avail %.4f equity %.4f", got.AvailableUSDT, got.Equity)
+	}
 	if got.BotCount != 1 || got.ManualCount != 1 {
 		t.Fatalf("expected bot/manual counts 1/1, got %d/%d", got.BotCount, got.ManualCount)
 	}
@@ -1040,8 +1046,8 @@ func TestLiveAccountSnapshotRespectsLimit(t *testing.T) {
 	}
 }
 
-func TestAppendPositionRiskRowsToSnapshotKeepsUserDataBalance(t *testing.T) {
-	acct := accountSnapshot{AvailableUSDT: 6.06}
+func TestAppendPositionRiskRowsToSnapshotBuildsMarginAccountValue(t *testing.T) {
+	acct := accountSnapshot{AvailableUSDT: 0.05}
 	appendPositionRiskRowsToSnapshot(&acct, []map[string]any{
 		{
 			"symbol":                "DEXEUSDT",
@@ -1054,8 +1060,8 @@ func TestAppendPositionRiskRowsToSnapshotKeepsUserDataBalance(t *testing.T) {
 			"leverage":              "3",
 		},
 	})
-	if acct.AvailableUSDT != 6.06 {
-		t.Fatalf("expected live balance to remain from user data, got %.4f", acct.AvailableUSDT)
+	if acct.AvailableUSDT != 0.05 {
+		t.Fatalf("expected available balance to remain free margin, got %.4f", acct.AvailableUSDT)
 	}
 	if len(acct.Positions) != 1 {
 		t.Fatalf("expected one REST position, got %d", len(acct.Positions))
@@ -1069,6 +1075,9 @@ func TestAppendPositionRiskRowsToSnapshotKeepsUserDataBalance(t *testing.T) {
 	}
 	if pos.Mark != 17.479 || pos.Unreal != -0.02 {
 		t.Fatalf("unexpected mark/unrealized pnl: %+v", pos)
+	}
+	if got := accountEquity(acct); got < 6.03 || got > 6.05 {
+		t.Fatalf("expected equity to include available+margin+uPnL, got %.4f", got)
 	}
 }
 

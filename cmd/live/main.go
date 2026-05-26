@@ -325,6 +325,8 @@ type liveAccountSnapshot struct {
 	Generated     time.Time             `json:"generated"`
 	Health        string                `json:"health,omitempty"`
 	HealthDetail  string                `json:"health_detail,omitempty"`
+	Balance       float64               `json:"balance"`
+	MarginBalance float64               `json:"margin_balance"`
 	AvailableUSDT float64               `json:"available_usdt"`
 	Equity        float64               `json:"equity"`
 	RealizedDay   float64               `json:"realized_day"`
@@ -19546,18 +19548,22 @@ func accountSnapshotFromUserData(snap aster.UserDataSnapshot, assets []string) a
 
 func fetchAccountSnapshot(rest *aster.RESTAuth, userData *aster.UserDataState, assets []string) (accountSnapshot, error) {
 	snap := accountSnapshot{}
+	var userDataFallback *accountSnapshot
 	if userSnap, ok := userDataSnapshotFresh(userData); ok {
 		acct := accountSnapshotFromUserData(userSnap, assets)
 		if len(acct.Positions) > 0 {
 			return acct, nil
 		}
-		// User data can be fresh for balances while omitting existing positions.
-		// Keep the fast balance snapshot, but let REST positionRisk fill live exposure.
-		snap = acct
+		// User data can be fresh for wallet balances while omitting existing positions.
+		// If positions must come from REST, prefer REST balances too so "available" matches Aster.
+		userDataFallback = &acct
 	}
 	if len(snap.Balances) == 0 && snap.AvailableUSDT == 0 {
 		bals, err := cachedBalances(rest)
 		if err != nil {
+			if userDataFallback != nil {
+				return *userDataFallback, nil
+			}
 			return snap, err
 		}
 		snap.Balances = filterBalances(bals, assets)
@@ -19827,6 +19833,7 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 			EntryReason:    entryReason,
 		}
 		out.OpenPnL += unreal
+		out.MarginBalance += rp.Margin
 		if src == "MANUAL" {
 			out.ManualCount++
 		} else {
@@ -19843,7 +19850,9 @@ func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSn
 		out.Health = "partial_price_guard"
 		out.HealthDetail = strings.Join(priceGuarded, ",")
 	}
-	out.Equity = acct.AvailableUSDT + out.OpenPnL
+	out.Balance = acct.AvailableUSDT + out.MarginBalance
+	out.MarginBalance = out.Balance
+	out.Equity = out.Balance + out.OpenPnL
 	return out
 }
 
@@ -20584,7 +20593,7 @@ func waitForNextCycle(cycleStart time.Time, scanEvery, reconEvery time.Duration,
 func accountEquity(s accountSnapshot) float64 {
 	eq := s.AvailableUSDT
 	for _, p := range s.Positions {
-		eq += p.Unreal
+		eq += p.Margin + p.Unreal
 	}
 	return eq
 }
