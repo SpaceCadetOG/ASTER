@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,11 +18,11 @@ import (
 	"go-machine/internal/strategies"
 )
 
-func TestRuntimeModeControllerDefaultsToManualOnly(t *testing.T) {
+func TestRuntimeModeControllerDefaultsToPaperWhenDryRun(t *testing.T) {
 	t.Setenv("LIVE_RUNTIME_MODE", "")
 	ctrl := newRuntimeModeController(true, false, true)
-	if got := ctrl.operatingMode(); got != runtimeModeManualOnly {
-		t.Fatalf("expected manual_only, got %s", got)
+	if got := ctrl.operatingMode(); got != runtimeModePaper {
+		t.Fatalf("expected paper, got %s", got)
 	}
 }
 
@@ -29,16 +33,28 @@ func TestRuntimeModeControllerEnablesPaperModeWhenExplicit(t *testing.T) {
 		t.Fatalf("expected paper, got %s", got)
 	}
 	ctrl = newRuntimeModeController(true, false, false)
-	if got := ctrl.operatingMode(); got != runtimeModeManualOnly {
-		t.Fatalf("expected manual_only when paper is not enabled, got %s", got)
+	if got := ctrl.operatingMode(); got != runtimeModeLive {
+		t.Fatalf("expected live fallback when paper is not enabled, got %s", got)
 	}
 }
 
-func TestDispatchPaperDecisionManualOnlySkipsDispatch(t *testing.T) {
+func TestRuntimeModeControllerTreatsLiveAliasesAsLive(t *testing.T) {
+	for _, raw := range []string{"live", "live_auto", "manual_only"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("LIVE_RUNTIME_MODE", raw)
+			ctrl := newRuntimeModeController(false, true, false)
+			if got := ctrl.operatingMode(); got != runtimeModeLive {
+				t.Fatalf("expected live, got %s", got)
+			}
+		})
+	}
+}
+
+func TestDispatchPaperDecisionLiveSkipsPaperDispatch(t *testing.T) {
 	decision, cand := testPaperDecision()
 	paperCalls := 0
 	liveCalls := 0
-	out := dispatchPaperDecision(runtimeModeManualOnly, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
+	out := dispatchPaperDecision(runtimeModeLive, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
 		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
 			paperCalls++
 			return &paperPosition{}, nil
@@ -49,7 +65,7 @@ func TestDispatchPaperDecisionManualOnlySkipsDispatch(t *testing.T) {
 		},
 	})
 	if out.Attempted || out.Entered {
-		t.Fatalf("expected no dispatch in manual_only, got %+v", out)
+		t.Fatalf("expected no paper dispatch in live mode, got %+v", out)
 	}
 	if paperCalls != 0 || liveCalls != 0 {
 		t.Fatalf("expected no paper/live calls, got paper=%d live=%d", paperCalls, liveCalls)
@@ -271,6 +287,159 @@ func TestPaperTradeCloseEventCarriesOutcomeTelemetry(t *testing.T) {
 	}
 }
 
+func TestBuildEntryQualityAccumulatorAllowsPenaltyOnlyCandidate(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
+	cand := candidate{
+		Strat:           "continuation_fast",
+		Side:            "BUY",
+		CombinedScore:   0.72,
+		Conf:            0.72,
+		ClosedBreakHold: true,
+		Entry: inplay.Entry{
+			ScoreSlope: 0.20,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, []string{"avoid_chase"})
+	if len(quality.HardBlockReasons) != 0 {
+		t.Fatalf("expected no hard blocks, got %+v", quality.HardBlockReasons)
+	}
+	if !containsString(quality.QualityFlags, "avoid_chase") {
+		t.Fatalf("expected avoid_chase quality flag, got %+v", quality.QualityFlags)
+	}
+	if quality.ScoreAfterPenalties < quality.MinScore {
+		t.Fatalf("expected penalties to keep candidate above min score, got after=%.2f min=%.2f", quality.ScoreAfterPenalties, quality.MinScore)
+	}
+	if quality.BlockReason != "" {
+		t.Fatalf("expected no quality block reason, got %q", quality.BlockReason)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorBlocksWhenPenaltyDropsBelowMinScore(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "BUY",
+		CombinedScore: 0.58,
+		Conf:          0.58,
+		Entry: inplay.Entry{
+			EntryStyle: "avoid_chase",
+			ScoreSlope: -0.01,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, []string{"late_chase_rapid_expansion"})
+	if len(quality.HardBlockReasons) != 0 {
+		t.Fatalf("expected no hard blocks for quality-only reject, got %+v", quality.HardBlockReasons)
+	}
+	if quality.BlockReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
+	}
+	if quality.ScoreAfterPenalties >= quality.MinScore {
+		t.Fatalf("expected penalized score below min, got after=%.2f min=%.2f", quality.ScoreAfterPenalties, quality.MinScore)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorPreservesHardSafetyBlock(t *testing.T) {
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "BUY",
+		CombinedScore: 0.90,
+		Conf:          0.90,
+	}
+	quality := buildEntryQualityAccumulator(cand, []string{"manual_position_active"})
+	if len(quality.HardBlockReasons) != 1 || quality.HardBlockReasons[0] != "manual_position_active" {
+		t.Fatalf("expected hard manual_position_active block, got %+v", quality.HardBlockReasons)
+	}
+	if quality.BlockReason != "hard_safety_block" {
+		t.Fatalf("expected hard_safety_block, got %q", quality.BlockReason)
+	}
+}
+
+func TestPaperPreflightRejectsUnresolvedStrategyLabels(t *testing.T) {
+	for _, strat := range []string{"none", "", "no_strategy", "unknown", "unresolved"} {
+		t.Run(stratLabel(strat), func(t *testing.T) {
+			ctx := testPaperDecisionCtx()
+			ctx.Candidate.Strat = strat
+			verdict := paperPreflightVerdict(ctx)
+			if verdict.Approved {
+				t.Fatalf("expected unresolved strategy %q to be rejected", strat)
+			}
+			if verdict.Reason != "strategy_unresolved" {
+				t.Fatalf("expected strategy_unresolved reason, got %q", verdict.Reason)
+			}
+			if verdict.Quality.BlockReason != "hard_safety_block" {
+				t.Fatalf("expected hard_safety_block, got %q", verdict.Quality.BlockReason)
+			}
+			if !containsString(verdict.Quality.HardBlockReasons, "strategy_unresolved") {
+				t.Fatalf("expected hard block reasons to include strategy_unresolved, got %+v", verdict.Quality.HardBlockReasons)
+			}
+		})
+	}
+}
+
+func TestPaperPreflightAllowsExecutableStrategy(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.Candidate.Strat = "vp_trend"
+	verdict := paperPreflightVerdict(ctx)
+	if !verdict.Approved {
+		t.Fatalf("expected executable strategy to pass, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
+	}
+}
+
+func TestDispatchPaperDecisionUnresolvedDoesNotCallMaybeEnter(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.RejectReason = "strategy_unresolved"
+	decision.Quality = strategies.EntryQualityAccumulator{
+		HardBlockReasons: []string{"strategy_unresolved"},
+		BlockReason:      "hard_safety_block",
+	}
+	paperCalls := 0
+	out := dispatchPaperDecision(runtimeModePaper, time.Now().UTC(), decision, cand, 2, 50, 3, nil, nil, nil, paperDispatchHooks{
+		Paper: func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error) {
+			paperCalls++
+			return &paperPosition{}, nil
+		},
+	})
+	if paperCalls != 0 {
+		t.Fatalf("expected unresolved candidate not to call MaybeEnter, got %d calls", paperCalls)
+	}
+	if out.RejectReason != "strategy_unresolved" {
+		t.Fatalf("expected strategy_unresolved reject, got %+v", out)
+	}
+}
+
+func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.RejectReason = "quality_score_too_low"
+	decision.Quality = strategies.EntryQualityAccumulator{
+		QualityFlags:        []string{"avoid_chase", "weak_slope"},
+		PenaltyTotal:        0.16,
+		ScoreBefore:         0.58,
+		ScoreAfterPenalties: 0.42,
+		MinScore:            0.52,
+		BlockReason:         "quality_score_too_low",
+	}
+	output := capturePaperRuntimeStdout(t, func() {
+		paperLogDecision(cand, decision, paperDispatchResult{})
+	})
+	for _, want := range []string{
+		"quality_flags=avoid_chase|weak_slope",
+		"penalty_total=0.16",
+		"score_before=0.58",
+		"score_after_penalties=0.42",
+		"min_score=0.52",
+		"hard_block_reasons=",
+		"block_reason=quality_score_too_low",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected log output to contain %q, got %q", want, output)
+		}
+	}
+}
+
 func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 	sig := strategies.Signal{
 		Active:     true,
@@ -315,4 +484,84 @@ func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 		"paper_test",
 	)
 	return decision, cand
+}
+
+func testPaperDecisionCtx() paperDecisionCtx {
+	_, cand := testPaperDecision()
+	return paperDecisionCtx{
+		Now:           time.Now().UTC(),
+		LocalMaintNow: time.Now(),
+		Candidate:     cand,
+		MetaBySymbol: map[string]symbolMeta{
+			"BTCUSDT": {LastPrice: 100},
+		},
+		EntryDepth:          map[string]aster.OrderBook{},
+		Paper:               testPaperRuntimePaper(),
+		CurrentEntries:      map[string]inplay.Entry{},
+		RiskShell:           risk.Config{},
+		RiskFallbackStopPct: 1,
+		RiskHoldHours:       1,
+		LeverageMode:        "fixed",
+		LeverageFixed:       3,
+		LeverageMin:         1,
+		MaxLeverage:         5,
+		EffectiveReserve:    0,
+		EffectiveMargin:     50,
+		AvailableUSDT:       1000,
+		OBFilterEnable:      false,
+		OBLevels:            5,
+		OBImbMin:            0,
+		OBMaxSpreadBps:      1000,
+		MaxOpenPos:          5,
+		MaxOpenPerSide:      5,
+	}
+}
+
+func testPaperRuntimePaper() *paperTrader {
+	return &paperTrader{
+		enabled:          true,
+		balance:          1000,
+		maxOpen:          5,
+		positions:        map[string]*paperPosition{},
+		dayStats:         map[string]*paperDayStats{},
+		lastFundKey:      map[string]string{},
+		lastExitAt:       map[string]time.Time{},
+		lastExitLoss:     map[string]bool{},
+		lastHarvestAt:    map[string]time.Time{},
+		symbolTradeDay:   map[string]string{},
+		symbolTradeCount: map[string]int{},
+		reportLoc:        time.UTC,
+	}
+}
+
+func stratLabel(strat string) string {
+	if strings.TrimSpace(strat) == "" {
+		return "empty"
+	}
+	return strat
+}
+
+func capturePaperRuntimeStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe error: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = orig
+	}()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("Copy error: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Read close error: %v", err)
+	}
+	return buf.String()
 }
