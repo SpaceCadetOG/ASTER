@@ -138,7 +138,7 @@ func TestBuildLivePaperSnapshotEmptyStateUsesSafeArrays(t *testing.T) {
 			now.Format("2006-01-02"): {Net: 0},
 		},
 	}
-	snap := buildLivePaperSnapshot(runtimeModeManualOnly, paper, map[string]symbolMeta{}, nil, 5)
+	snap := buildLivePaperSnapshot(runtimeModeLive, paper, map[string]symbolMeta{}, nil, 5)
 	if snap == nil {
 		t.Fatal("expected non-nil snapshot")
 	}
@@ -260,7 +260,7 @@ func TestStatusMuxReturnsQuicklyInPaperModes(t *testing.T) {
 	cases := []liveStatus{
 		{
 			Mode:        "paper",
-			ModeState:   "manual_only",
+			ModeState:   "scanner_only",
 			DryRun:      true,
 			LiveEnabled: false,
 			Paper: &livePaperSnapshot{

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -17,19 +18,18 @@ import (
 type runtimeOperatingMode string
 
 const (
-	runtimeModeManualOnly runtimeOperatingMode = "manual_only"
-	runtimeModePaper      runtimeOperatingMode = "paper"
-	runtimeModeLive       runtimeOperatingMode = "live"
+	runtimeModePaper runtimeOperatingMode = "paper"
+	runtimeModeLive  runtimeOperatingMode = "live"
 )
 
 func parseRuntimeOperatingMode(raw string) runtimeOperatingMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(runtimeModePaper):
 		return runtimeModePaper
-	case string(runtimeModeLive), "live_auto":
+	case string(runtimeModeLive), "live_auto", "manual_only":
 		return runtimeModeLive
 	default:
-		return runtimeModeManualOnly
+		return ""
 	}
 }
 
@@ -157,6 +157,9 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 
 func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	reasons := make([]string, 0, 3)
+	if !isExecutableStrategy(ctx.Candidate.Strat) {
+		reasons = append(reasons, "strategy_unresolved")
+	}
 	pre := deepQueuePreflight(ctx.Candidate, queueDeepPreflightCtx{
 		Now:                 ctx.Now,
 		LocalMaintNow:       ctx.LocalMaintNow,
@@ -187,14 +190,19 @@ func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	if reason := strings.TrimSpace(paperPaperRejectReason(ctx)); reason != "" && !containsString(reasons, reason) {
 		reasons = append(reasons, reason)
 	}
+	quality := buildEntryQualityAccumulator(ctx.Candidate, reasons)
 	verdict := strategies.PreflightVerdict{
 		Checked:  true,
-		Approved: len(reasons) == 0,
+		Approved: len(quality.HardBlockReasons) == 0 && strings.TrimSpace(quality.BlockReason) == "",
 		Source:   "paper",
-		Reasons:  append([]string(nil), reasons...),
+		Reasons:  append([]string(nil), quality.HardBlockReasons...),
+		Quality:  quality,
 	}
-	if len(reasons) > 0 {
-		verdict.Reason = reasons[0]
+	switch {
+	case len(quality.HardBlockReasons) > 0:
+		verdict.Reason = quality.HardBlockReasons[0]
+	case strings.TrimSpace(quality.BlockReason) != "":
+		verdict.Reason = quality.BlockReason
 	}
 	return verdict
 }
@@ -207,31 +215,6 @@ func paperPaperRejectReason(ctx paperDecisionCtx) string {
 	raw := strings.ToUpper(aster.RawSymbol(ctx.Candidate.Entry.Symbol))
 	if raw == "" {
 		return "empty_symbol"
-	}
-	if len(p.positions) >= p.maxOpen {
-		if replacePos, _ := p.slotReplacementCandidate(ctx.Now, ctx.Candidate, ctx.MetaBySymbol, ctx.CurrentEntries); replacePos == nil {
-			return "max_paper_positions"
-		}
-	}
-	if p.freeForEntries() < ctx.EffectiveMargin {
-		return "insufficient_usable_paper_balance"
-	}
-	if _, exists := p.positions[raw]; exists {
-		return "paper_symbol_already_open"
-	}
-	if t := p.lockUntil[raw]; !t.IsZero() && ctx.Now.Before(t) {
-		return "paper_symbol_lock_active"
-	}
-	if blocked, reason := p.blocksHarvestReentry(raw, ctx.Now, ctx.Candidate); blocked {
-		return reason
-	}
-	if blocked, reason := p.blocksSymbolTradeBudget(raw, ctx.Now, ctx.Candidate); blocked {
-		return reason
-	}
-	if p.lossCooldown > 0 {
-		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && ctx.Now.Sub(t) < p.lossCooldown {
-			return "paper_symbol_loss_cooldown"
-		}
 	}
 	if meta := ctx.MetaBySymbol[raw]; meta.LastPrice <= 0 {
 		return "paper_price_unavailable"
@@ -436,8 +419,20 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	sym := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	switch {
 	case !decision.Approved:
-		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s\n",
-			sym, c.Side, c.Strat, firstNonEmpty(decision.RejectReason, "not_approved"))
+		quality := decision.Quality
+		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
+			sym,
+			c.Side,
+			c.Strat,
+			firstNonEmpty(decision.RejectReason, "not_approved"),
+			strings.Join(quality.QualityFlags, "|"),
+			quality.PenaltyTotal,
+			quality.ScoreBefore,
+			quality.ScoreAfterPenalties,
+			quality.MinScore,
+			strings.Join(quality.HardBlockReasons, "|"),
+			firstNonEmpty(quality.BlockReason, decision.RejectReason, "not_approved"),
+		)
 	case dispatch.Attempted && dispatch.Entered:
 		fmt.Printf("live: paper entered %s side=%s strat=%s conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
@@ -447,5 +442,194 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	default:
 		fmt.Printf("live: paper entry_attempted %s side=%s strat=%s conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
+	}
+}
+
+func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.EntryQualityAccumulator {
+	scoreBefore := c.CombinedScore
+	if scoreBefore <= 0 {
+		scoreBefore = clamp(c.Conf, 0, 1)
+	}
+	minScore := runtimeMinQualityForCandidate(c)
+	acc := strategies.EntryQualityAccumulator{
+		ScoreBefore:         clamp(scoreBefore, 0, 1),
+		ScoreAfterPenalties: clamp(scoreBefore, 0, 1),
+		MinScore:            clamp(minScore, 0, 1),
+	}
+	for _, reason := range rejects {
+		addEntryQualityReason(&acc, c, reason)
+	}
+	addEntryQualityHeuristics(&acc, c)
+	acc.ScoreAfterPenalties = clamp(acc.ScoreBefore-acc.PenaltyTotal, 0, 1)
+	if len(acc.HardBlockReasons) > 0 {
+		acc.BlockReason = "hard_safety_block"
+	} else if acc.ScoreAfterPenalties < acc.MinScore {
+		acc.BlockReason = "quality_score_too_low"
+	}
+	return acc
+}
+
+func addEntryQualityReason(acc *strategies.EntryQualityAccumulator, c candidate, reason string) {
+	if acc == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	if qualityFlag, penalty, ok := classifyQualityPenaltyReason(c, reason); ok {
+		appendQualityPenalty(acc, qualityFlag, penalty)
+		return
+	}
+	appendHardBlock(acc, reason)
+}
+
+func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candidate) {
+	if acc == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") || candidateExhaustionActive(c) {
+		appendQualityPenalty(acc, "avoid_chase", 0.10)
+	}
+	if reason := strings.TrimSpace(chaseRejectReason(c, false)); reason != "" {
+		if qualityFlag, penalty, ok := classifyQualityPenaltyReason(c, reason); ok {
+			appendQualityPenalty(acc, qualityFlag, penalty)
+		}
+	}
+	if conflicting, magnitude := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)); conflicting {
+		extremePct := maxFloat(envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)*2.0, envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)+envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0))
+		if magnitude >= extremePct {
+			appendHardBlock(acc, "directional_dayutc_conflict_extreme")
+		} else {
+			penalty := envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY", 18.0) / 100.0
+			penalty += maxFloat(0.0, magnitude-envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)) * (envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PER_PCT", 2.0) / 100.0)
+			appendQualityPenalty(acc, "directional_dayutc_conflict", penalty)
+		}
+	}
+	if isContinuationStrategy(c) && !continuationStructureConfirmed(c) {
+		appendQualityPenalty(acc, "weaker_structure", 0.07)
+	}
+	if isContinuationStrategy(c) && candidateExtendedForBotAdd(c) && !hasFreshStructureReset(c) {
+		appendQualityPenalty(acc, "minor_extension", 0.06)
+	}
+	if weakOFIForCandidate(c) {
+		appendQualityPenalty(acc, "weak_ofi", 0.06)
+	}
+	if weakSlopeForCandidate(c) {
+		appendQualityPenalty(acc, "weak_slope", 0.06)
+	}
+	if c.Sig.ConfluenceScore.TotalScore > 0 && c.Sig.ConfluenceScore.TotalScore < envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48) {
+		appendQualityPenalty(acc, "imperfect_confluence", 0.08)
+	}
+}
+
+func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, bool) {
+	raw := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case raw == "":
+		return "", 0, false
+	case strings.Contains(raw, "avoid_chase"):
+		return "avoid_chase", 0.10, true
+	case strings.Contains(raw, "late_chase_fading_impulse"):
+		return "late_chase_fading_impulse", 0.10, true
+	case strings.Contains(raw, "late_chase_rapid_expansion"):
+		return "late_chase_rapid_expansion", 0.12, true
+	case strings.Contains(raw, "late_chase_extended_no_reset"), strings.Contains(raw, "late_extension_no_reset"):
+		return "minor_extension", 0.08, true
+	case strings.Contains(raw, "directional_dayutc_conflict"):
+		if conflicting, magnitude := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)); conflicting {
+			extremePct := maxFloat(envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)*2.0, envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)+envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0))
+			if magnitude >= extremePct {
+				return "", 0, false
+			}
+			penalty := envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY", 18.0) / 100.0
+			penalty += maxFloat(0.0, magnitude-envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)) * (envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PER_PCT", 2.0) / 100.0)
+			return "directional_dayutc_conflict", penalty, true
+		}
+		return "directional_dayutc_conflict", 0.10, true
+	case strings.Contains(raw, "continuation_no_structure_confirm"), strings.Contains(raw, "structure"):
+		return "weaker_structure", 0.07, true
+	case strings.Contains(raw, "below_min_confluence"), strings.Contains(raw, "low_conf"), strings.Contains(raw, "conf_"), strings.Contains(raw, "quality"):
+		return "imperfect_confluence", 0.08, true
+	case strings.Contains(raw, "ofi"):
+		return "weak_ofi", 0.06, true
+	case strings.Contains(raw, "weak_slope"), strings.Contains(raw, "late_cycle_short_weak_slope"):
+		return "weak_slope", 0.06, true
+	case strings.Contains(raw, "extension"):
+		return "minor_extension", 0.06, true
+	default:
+		return "", 0, false
+	}
+}
+
+func appendHardBlock(acc *strategies.EntryQualityAccumulator, reason string) {
+	reason = strings.TrimSpace(reason)
+	if acc == nil || reason == "" || containsString(acc.HardBlockReasons, reason) {
+		return
+	}
+	acc.HardBlockReasons = append(acc.HardBlockReasons, reason)
+}
+
+func appendQualityPenalty(acc *strategies.EntryQualityAccumulator, flag string, penalty float64) {
+	flag = strings.TrimSpace(flag)
+	if acc == nil || flag == "" {
+		return
+	}
+	if !containsString(acc.QualityFlags, flag) {
+		acc.QualityFlags = append(acc.QualityFlags, flag)
+	}
+	acc.PenaltyTotal += math.Max(0, penalty)
+}
+
+func runtimeMinQualityForCandidate(c candidate) float64 {
+	base := envFloat("LIVE_META_MIN_QUALITY", 0.52)
+	switch strategyFamily(c) {
+	case "ignite":
+		return clamp(envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(base, 0.50)), 0, 1)
+	case "rev":
+		return clamp(envFloat("LIVE_META_MIN_QUALITY_REV", min(base, 0.48)), 0, 1)
+	default:
+		return clamp(envFloat("LIVE_META_MIN_QUALITY_CONT", base), 0, 1)
+	}
+}
+
+func weakOFIForCandidate(c candidate) bool {
+	if c.OFISamples < maxInt(1, envInt("LIVE_OFI_MIN_SAMPLES", 8)) {
+		return false
+	}
+	switch strategyFamily(c) {
+	case "ignite":
+		threshold := envFloat("LIVE_IGNITE_MIN_OFI_Z", 0.0)
+		if strings.EqualFold(c.Side, "BUY") {
+			return c.OFIZ < threshold
+		}
+		return c.OFIZ > -threshold
+	case "cont":
+		threshold := envFloat("LIVE_CONT_FAST_MIN_OFI_Z", 0.35)
+		if strings.EqualFold(c.Side, "BUY") {
+			return c.OFIZ < threshold
+		}
+		return c.OFIZ > -threshold
+	default:
+		return false
+	}
+}
+
+func weakSlopeForCandidate(c candidate) bool {
+	switch strategyFamily(c) {
+	case "ignite":
+		threshold := envFloat("LIVE_IGNITE_MIN_SLOPE", 0.08)
+		if strings.EqualFold(c.Side, "BUY") {
+			return c.Entry.ScoreSlope < threshold
+		}
+		return c.Entry.ScoreSlope > -threshold
+	case "cont":
+		threshold := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+		if strings.EqualFold(c.Side, "BUY") {
+			return c.Entry.ScoreSlope < threshold
+		}
+		return c.Entry.ScoreSlope > -threshold
+	default:
+		return false
 	}
 }

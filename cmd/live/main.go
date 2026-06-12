@@ -83,6 +83,9 @@ type candidate struct {
 	CombinedScore          float64
 	TradeQuality           float64
 	SessionLabel           string
+	EntryTiming            string
+	CandidateAgeSeconds    float64
+	DistanceToVWAPPct      float64
 	QualityReasons         []string
 	LifecycleStage         string
 	LifecycleScans         int
@@ -270,6 +273,31 @@ type recentRejectMemory struct {
 	LastAttempt  time.Time
 }
 
+type runtimeProfile string
+
+const (
+	runtimeProfilePaperContinuationClean runtimeProfile = "paper_continuation_clean"
+	runtimeProfilePaperContinuationLoose runtimeProfile = "paper_continuation_loose"
+	runtimeProfilePaperReversalTest      runtimeProfile = "paper_reversal_test"
+	runtimeProfilePaperImpulseTest       runtimeProfile = "paper_impulse_test"
+	runtimeProfileLiveSafe               runtimeProfile = "live_safe"
+	runtimeProfileLiveConservative       runtimeProfile = "live_conservative"
+)
+
+type runtimeProfileConfig struct {
+	Name                      runtimeProfile
+	EffectiveVPEnabled        bool
+	EffectiveInstitutional    bool
+	EffectiveReversal         bool
+	EffectiveImpulse          bool
+	EffectiveReentry          bool
+	EffectiveRequireStructure bool
+	EffectiveCandidateMemory  bool
+	EffectiveTriggerMemory    bool
+	EffectiveSharedManagement bool
+	EffectiveNoProofTimeout   bool
+}
+
 type positionView struct {
 	Symbol   string
 	Side     string
@@ -435,11 +463,19 @@ type runtimeModeController struct {
 }
 
 func newRuntimeModeController(dryRun, enableLiveTrading, paperEnabled bool) *runtimeModeController {
+	requestedMode := parseRuntimeOperatingMode(envStr("LIVE_RUNTIME_MODE", ""))
+	if requestedMode == "" {
+		if dryRun {
+			requestedMode = runtimeModePaper
+		} else {
+			requestedMode = runtimeModeLive
+		}
+	}
 	return &runtimeModeController{
 		dryRun:            dryRun,
 		enableLiveTrading: enableLiveTrading,
 		paperEnabled:      paperEnabled,
-		requestedMode:     parseRuntimeOperatingMode(envStr("LIVE_RUNTIME_MODE", string(runtimeModeManualOnly))),
+		requestedMode:     requestedMode,
 	}
 }
 
@@ -476,7 +512,7 @@ func (m *runtimeModeController) setPaper() {
 
 func (m *runtimeModeController) operatingMode() runtimeOperatingMode {
 	if m == nil {
-		return runtimeModeManualOnly
+		return runtimeModeLive
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -486,16 +522,17 @@ func (m *runtimeModeController) operatingMode() runtimeOperatingMode {
 			return runtimeModePaper
 		}
 	case runtimeModeLive:
-		if !m.dryRun && m.enableLiveTrading && !m.paperEnabled {
-			return runtimeModeLive
-		}
+		return runtimeModeLive
 	}
-	return runtimeModeManualOnly
+	if m.dryRun && m.paperEnabled {
+		return runtimeModePaper
+	}
+	return runtimeModeLive
 }
 
 func (m *runtimeModeController) requestedOperatingMode() runtimeOperatingMode {
 	if m == nil {
-		return runtimeModeManualOnly
+		return runtimeModeLive
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -507,7 +544,7 @@ func enrichPaperRuntimeStatus(st *liveStatus, operatingMode runtimeOperatingMode
 		return
 	}
 	st.Mode = surfacedRuntimeMode(runtimeModePaper)
-	if strings.TrimSpace(st.ModeState) == "" || strings.EqualFold(st.ModeState, string(runtimeModeManualOnly)) {
+	if strings.TrimSpace(st.ModeState) == "" || strings.EqualFold(st.ModeState, "scanner_only") {
 		st.ModeState = "paper_enabled"
 	}
 	st.DryRun = true
@@ -520,22 +557,29 @@ func enrichPaperRuntimeStatus(st *liveStatus, operatingMode runtimeOperatingMode
 }
 
 type operatorDecision struct {
-	Symbol             string
-	Side               string
-	Grade              string
-	Score              float64
-	Slope              float64
-	Strategy           string
-	Confidence         float64
-	RawConfidence      float64
-	AdjustedConfidence float64
-	RejectReason       string
-	BlockerClass       string
-	TopBlockers        []string
-	StarterAllowed     bool
-	PersistenceStatus  string
-	State              string
-	UpdatedAt          time.Time
+	Symbol              string
+	Side                string
+	Grade               string
+	Score               float64
+	Slope               float64
+	Strategy            string
+	Confidence          float64
+	RawConfidence       float64
+	AdjustedConfidence  float64
+	RejectReason        string
+	BlockerClass        string
+	TopBlockers         []string
+	StarterAllowed      bool
+	PersistenceStatus   string
+	State               string
+	QualityFlags        []string
+	PenaltyTotal        float64
+	ScoreBefore         float64
+	ScoreAfterPenalties float64
+	MinScore            float64
+	HardBlockReasons    []string
+	BlockReason         string
+	UpdatedAt           time.Time
 }
 
 type RejectClass string
@@ -568,6 +612,7 @@ type EntryEligibilitySummary struct {
 	FinalReason              string
 	AdjustedConfidence       float64
 	ConfidencePenaltyReasons []string
+	Quality                  strategies.EntryQualityAccumulator
 }
 
 type operatorSuggestion struct {
@@ -753,6 +798,11 @@ type paperPosition struct {
 	ConfluenceRefreshCount int
 	EntryVolumeUSD         float64
 	EntryATRPct            float64
+	EntryATRExtension      float64
+	EntrySession           string
+	EntryTiming            string
+	CandidateAgeSeconds    float64
+	EntryDistanceToVWAPPct float64
 	OpposingFriction       float64
 	StopReason             string
 	StopDistancePct        float64
@@ -990,6 +1040,11 @@ type livePosition struct {
 	EntryReasons             []string         `json:"entryReasons,omitempty"`
 	EntryVolumeUSD           float64          `json:"entryVolumeUsd,omitempty"`
 	EntryATRPct              float64          `json:"entryAtrPct,omitempty"`
+	EntryATRExtension        float64          `json:"entryAtrExtension,omitempty"`
+	EntrySession             string           `json:"entrySession,omitempty"`
+	EntryTiming              string           `json:"entryTiming,omitempty"`
+	CandidateAgeSeconds      float64          `json:"candidateAgeSeconds,omitempty"`
+	EntryDistanceToVWAPPct   float64          `json:"entryDistanceToVwapPct,omitempty"`
 	StopReason               string           `json:"stopReason,omitempty"`
 	StopDistancePct          float64          `json:"stopDistancePct,omitempty"`
 	RegimeTag                string           `json:"regimeTag,omitempty"`
@@ -1356,7 +1411,7 @@ func main() {
 	eventLockoutMin := envInt("LIVE_EVENT_LOCKOUT_MIN", 0)
 	maxCorrelatedExposure := envFloat("LIVE_MAX_CORRELATED_USD_EXPOSURE", 0)
 	corrGroups := parseCorrGroups(envStr("LIVE_CORR_GROUPS", ""))
-	enableMomentumReversal := envBool("LIVE_ENABLE_MOMENTUM_REVERSAL", true)
+	enableMomentumReversal := effectiveMomentumReversalEnabled()
 	reversalMinGrade := envStr("LIVE_REVERSAL_MIN_GRADE", "A+")
 	reversalSlopeMin := envFloat("LIVE_REVERSAL_SLOPE_MIN", 0.15)
 	bNearAOnly := envBool("LIVE_B_NEAR_A_ONLY", true)
@@ -1469,7 +1524,7 @@ func main() {
 		RecentRejectTTL:       time.Duration(envInt("LIVE_RECENT_REJECT_TTL_SEC", 180)) * time.Second,
 	}
 	lifecycleCfg := candidateLifecycleConfig{
-		Enable:        envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
+		Enable:        effectiveCandidateMemoryEnabled(),
 		ArmScans:      envInt("LIVE_CANDIDATE_ARM_SCANS", 2),
 		ReadyScans:    envInt("LIVE_CANDIDATE_READY_SCANS", 3),
 		ExpireAfter:   time.Duration(envInt("LIVE_CANDIDATE_EXPIRE_MIN", 20)) * time.Minute,
@@ -1477,7 +1532,7 @@ func main() {
 		ReadyMinSlope: envFloat("LIVE_CANDIDATE_READY_MIN_SLOPE", 0.01),
 	}
 	triggerCfg := normalizeTriggerLifecycleConfig(triggerLifecycleConfig{
-		Enable:             envBool("LIVE_TRIGGER_MEMORY_ENABLE", true),
+		Enable:             effectiveTriggerMemoryEnabled(),
 		ArmScans:           envInt("LIVE_TRIGGER_ARM_SCANS", 1),
 		ReadyScans:         envInt("LIVE_TRIGGER_READY_SCANS", 2),
 		ReversalReadyScans: envInt("LIVE_TRIGGER_REV_READY_SCANS", 3),
@@ -1825,9 +1880,8 @@ func main() {
 	if dryRun {
 		modeLabel = "PAPER"
 	}
-	startupOperatingMode := modeCtrl.operatingMode()
-	if modeCtrl.requestedOperatingMode() == runtimeModeLive && startupOperatingMode != runtimeModeLive {
-		fmt.Println("live: LIVE_RUNTIME_MODE=live requested without active live flags; continuing in manual_only mode")
+	if modeCtrl.requestedOperatingMode() == runtimeModeLive {
+		fmt.Println("live: LIVE_RUNTIME_MODE=live selected; autonomous paper entry remains disabled outside paper mode")
 	}
 	for _, line := range startupSummaryLines(modeLabel, scanEvery, watchCfg, ladderCfg, reentryCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
@@ -1835,7 +1889,7 @@ func main() {
 	for _, line := range startupWarningLines(ladderCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
-	fmt.Printf("  min_grade=%s | mode=%s\n", strings.ToUpper(minGrade), surfacedRuntimeMode(startupOperatingMode))
+	fmt.Printf("  min_grade=%s | mode=%s\n", strings.ToUpper(minGrade), surfacedRuntimeMode(modeCtrl.operatingMode()))
 	if execMgr != nil {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
@@ -2060,7 +2114,7 @@ func main() {
 			}
 			lastDayUTCResetKey = resetKey
 		}
-		operatingMode := runtimeModeManualOnly
+		operatingMode := runtimeModeLive
 		if modeCtrl != nil {
 			modeDryRun, modeLiveEnabled, modePaperEnabled := modeCtrl.snapshot()
 			dryRun = modeDryRun
@@ -2564,11 +2618,12 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		if operatingMode == runtimeModeManualOnly {
+		liveObserveOnlyMode := operatingMode == runtimeModeLive
+		if liveObserveOnlyMode {
 			st := liveStatus{
 				Generated:     now,
-				Mode:          string(runtimeModeManualOnly),
-				ModeState:     "manual_only",
+				Mode:          string(runtimeModeLive),
+				ModeState:     "scanner_only",
 				DryRun:        dryRun,
 				LiveEnabled:   safety.enableLiveTrading,
 				LongInPlay:    len(longInPlay),
@@ -2584,7 +2639,7 @@ func main() {
 			}
 			if paper != nil && paper.enabled {
 				st.PaperSummary = paper.Summary(metaBySymbol)
-				st.Paper = buildLivePaperSnapshot(runtimeModeManualOnly, paper, metaBySymbol, eventLog, 12)
+				st.Paper = buildLivePaperSnapshot(runtimeModeLive, paper, metaBySymbol, eventLog, 12)
 			}
 			if best, ok := selectTopRuntimeCandidate(cands); ok {
 				st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
@@ -2592,14 +2647,14 @@ func main() {
 				st.TopGrade = best.Entry.CurrentGrade
 				st.TopScore = best.Entry.CurrentScore
 				st.TopSlope = best.Entry.ScoreSlope
-				st.TopDecision = "manual_only"
+				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_manual_execution"
 				if emitTerminal {
 					fmt.Printf("live: scanner-only top %s side=%s grade=%s score=%.2f slope=%.3f state=%s\n",
 						best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.State)
 				}
 			} else {
-				st.TopDecision = "manual_only"
+				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_no_candidates"
 				if emitTerminal {
 					fmt.Println("live: scanner-only no candidates")
@@ -4952,6 +5007,91 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	}
 }
 
+func noProofTimeoutMinutes() time.Duration {
+	mins := envInt("NO_PROOF_TIMEOUT_MINUTES", 10)
+	if mins <= 0 {
+		mins = 10
+	}
+	return time.Duration(mins) * time.Minute
+}
+
+func noProofMinR() float64 {
+	minR := envFloat("NO_PROOF_MIN_R", 0.15)
+	if minR <= 0 {
+		minR = 0.15
+	}
+	return minR
+}
+
+func noProofTimeoutTriggered(openedAt, now time.Time, maxFavorableR float64) bool {
+	if openedAt.IsZero() {
+		return false
+	}
+	return now.Sub(openedAt) >= noProofTimeoutMinutes() && maxFavorableR < noProofMinR()
+}
+
+func noProofTightenStop(side string, entry, currentStop, mark float64) (float64, bool) {
+	if entry <= 0 || mark <= 0 {
+		return currentStop, false
+	}
+	target := entry + (mark-entry)*0.5
+	if strings.EqualFold(side, "SELL") {
+		target = entry - (entry-mark)*0.5
+	}
+	return improvedStopPrice(side, currentStop, target)
+}
+
+func paperProtectionState(pos *paperPosition) string {
+	if pos == nil {
+		return "none"
+	}
+	switch {
+	case pos.ProtectionStage >= protectionStageLocked:
+		return "locked"
+	case pos.ProtectionStage >= protectionStageArmed:
+		return "armed"
+	case !stopStillOriginal(pos.Stop, pos.OriginalStop):
+		return "tightened"
+	default:
+		return "original"
+	}
+}
+
+func liveProtectionState(pos *livePosition) string {
+	if pos == nil {
+		return "none"
+	}
+	switch {
+	case pos.ProtectionStage >= protectionStageLocked:
+		return "locked"
+	case pos.ProtectionStage >= protectionStageArmed:
+		return "armed"
+	case pos.Protected || hasLiveProtectiveOrder(pos):
+		return "protected"
+	default:
+		return "original"
+	}
+}
+
+func logExitAudit(symbol, strategyID, rawReason, finalReason, triggerRef string, decisionPx, stopPx, maxRSeen, minRSeen float64, protectionState, entryTiming string, noProofTriggered, protectedAfterProof, winnerRevertedUnprotected bool) {
+	fmt.Printf("exit_audit symbol=%s strategy_id=%s exit_reason_raw=%q exit_reason_final=%q trigger_ref=%q display_mark_at_decision=%.8f stop_at_decision=%.8f max_r_seen=%.4f min_r_seen=%.4f protection_state=%s entry_timing=%s no_proof_triggered=%t protected_after_proof=%t winner_reverted_unprotected=%t\n",
+		symbol,
+		firstNonEmpty(strings.TrimSpace(strategyID), "unknown"),
+		rawReason,
+		finalReason,
+		strings.ToLower(strings.TrimSpace(triggerRef)),
+		decisionPx,
+		stopPx,
+		maxRSeen,
+		minRSeen,
+		firstNonEmpty(strings.TrimSpace(protectionState), "unknown"),
+		firstNonEmpty(strings.TrimSpace(entryTiming), "unknown"),
+		noProofTriggered,
+		protectedAfterProof,
+		winnerRevertedUnprotected,
+	)
+}
+
 func beLockPrice(side string, entry, beLockBps float64) float64 {
 	if entry <= 0 {
 		return entry
@@ -6184,7 +6324,7 @@ func perpTopupTarget(avail float64, cfg fundsManagerConfig) float64 {
 
 func loadReentryConfig(defaultSize float64) reentryConfig {
 	cfg := reentryConfig{
-		Enable:       envBool("LIVE_REENTRY_ENABLE", false),
+		Enable:       effectiveReentryEnabled(),
 		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 10)),
 		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 0),
 		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
@@ -10175,6 +10315,9 @@ func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 
 }
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
+	if !isExecutableStrategy(c.Strat) {
+		return fmt.Errorf("strategy_unresolved")
+	}
 	if m == nil || m.rest == nil {
 		return fmt.Errorf("execution manager not ready")
 	}
@@ -10393,48 +10536,53 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		}
 	}
 	p := &livePosition{
-		Symbol:                rawSym,
-		Side:                  strings.ToUpper(c.Side),
-		State:                 execPendingEntry,
-		CreatedAt:             now,
-		UpdatedAt:             now,
-		EntryOrderID:          orderID,
-		EntryPrice:            price,
-		Qty:                   qty,
-		Margin:                margin,
-		DeployedMargin:        margin,
-		Leverage:              lev,
-		VPSetup:               c.Sig.VPSetup,
-		VPLevel:               c.Sig.VPLevel,
-		VPTargetLevel:         c.Sig.VPTargetLevel,
-		VPStopMode:            c.Sig.StopMode,
-		VPTargetMode:          c.Sig.TargetMode,
-		RejectReason:          c.RejectReason,
-		EntryReason:           entryReason,
-		EntryStrategyID:       entryStrategyID,
-		EntrySource:           "BOT",
-		EntryGrade:            c.Entry.CurrentGrade,
-		EntryState:            string(c.Entry.State),
-		EntryTrigger:          c.TriggerState,
-		ExitProfile:           c.ExitProfile,
-		EntryConf:             c.Conf,
-		DiscoveryScore:        c.DiscoveryScore,
-		TriggerScore:          c.TriggerScore,
-		ExecutionScore:        c.ExecutionScore,
-		CombinedScore:         c.CombinedScore,
-		EntryTags:             entryTags,
-		EntryReasons:          entryReasons,
-		EntryVolumeUSD:        c.VolumeUSD,
-		EntryATRPct:           c.ATRPct,
-		StopReason:            stopReason,
-		StopDistancePct:       stopDistancePct,
-		RegimeTag:             c.Sig.RegimeTag,
-		EntrySetupFamily:      c.SetupFamily,
-		ExecBucket:            executionGovernorBucketForCandidate(c),
-		StarterOnly:           starterOnly,
-		AddLockedUntilConfirm: starterOnly,
-		ReentryCount:          reentryCount,
-		ManagePhase:           managePhaseStarter,
+		Symbol:                 rawSym,
+		Side:                   strings.ToUpper(c.Side),
+		State:                  execPendingEntry,
+		CreatedAt:              now,
+		UpdatedAt:              now,
+		EntryOrderID:           orderID,
+		EntryPrice:             price,
+		Qty:                    qty,
+		Margin:                 margin,
+		DeployedMargin:         margin,
+		Leverage:               lev,
+		VPSetup:                c.Sig.VPSetup,
+		VPLevel:                c.Sig.VPLevel,
+		VPTargetLevel:          c.Sig.VPTargetLevel,
+		VPStopMode:             c.Sig.StopMode,
+		VPTargetMode:           c.Sig.TargetMode,
+		RejectReason:           c.RejectReason,
+		EntryReason:            entryReason,
+		EntryStrategyID:        entryStrategyID,
+		EntrySource:            "BOT",
+		EntryGrade:             c.Entry.CurrentGrade,
+		EntryState:             string(c.Entry.State),
+		EntryTrigger:           c.TriggerState,
+		ExitProfile:            c.ExitProfile,
+		EntryConf:              c.Conf,
+		DiscoveryScore:         c.DiscoveryScore,
+		TriggerScore:           c.TriggerScore,
+		ExecutionScore:         c.ExecutionScore,
+		CombinedScore:          c.CombinedScore,
+		EntryTags:              entryTags,
+		EntryReasons:           entryReasons,
+		EntryVolumeUSD:         c.VolumeUSD,
+		EntryATRPct:            c.ATRPct,
+		EntryATRExtension:      c.ExtensionATR,
+		EntrySession:           c.SessionLabel,
+		EntryTiming:            c.EntryTiming,
+		CandidateAgeSeconds:    c.CandidateAgeSeconds,
+		EntryDistanceToVWAPPct: c.DistanceToVWAPPct,
+		StopReason:             stopReason,
+		StopDistancePct:        stopDistancePct,
+		RegimeTag:              c.Sig.RegimeTag,
+		EntrySetupFamily:       c.SetupFamily,
+		ExecBucket:             executionGovernorBucketForCandidate(c),
+		StarterOnly:            starterOnly,
+		AddLockedUntilConfirm:  starterOnly,
+		ReentryCount:           reentryCount,
+		ManagePhase:            managePhaseStarter,
 	}
 	if stopDistancePct > 0 {
 		p.CustomRiskPct = stopDistancePct / 100.0
@@ -10768,6 +10916,36 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
+			if noProofTimeoutTriggered(p.CreatedAt, now, p.MaxFavorableR) {
+				logExitAudit(
+					p.Symbol,
+					firstNonEmpty(strings.TrimSpace(p.EntryStrategyID), strings.TrimSpace(p.EntryReason)),
+					"NO_PROOF_TIMEOUT",
+					"NO_PROOF_TIMEOUT",
+					m.stopTriggerRef,
+					mark,
+					p.StopPrice,
+					p.MaxFavorableR,
+					-p.MaxAdverseR,
+					liveProtectionState(p),
+					p.EntryTiming,
+					true,
+					p.MaxFavorableR >= winnerProofR() && p.ProtectedStop != 0,
+					p.MaxFavorableR >= winnerProofR() && !p.Protected && !hasLiveProtectiveOrder(p),
+				)
+				_ = m.cancelRemainingExits(p)
+				if err := m.submitCloseLimit(p, p.RemainingQty, "NO_PROOF_TIMEOUT", "CLOSE"); err == nil {
+					changed = true
+					return changed, nil
+				}
+				if tightenedStop, tightened := noProofTightenStop(p.Side, p.EntryPrice, p.StopPrice, mark); tightened {
+					p.StopReason = "NO_PROOF_TIMEOUT_TIGHTEN"
+					p.StopPrice = tightenedStop
+					if err := m.placeOrReplaceStop(p); err == nil {
+						changed = true
+					}
+				}
+			}
 			if m.updateLiveTargetHits(p, mark) {
 				changed = true
 			}
@@ -13395,6 +13573,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
+	if !isExecutableStrategy(c.Strat) {
+		return nil, fmt.Errorf("strategy_unresolved")
+	}
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
 	if len(p.positions) >= p.maxOpen {
 		if replacePos, reason := p.slotReplacementCandidate(now, c, meta, current); replacePos != nil {
@@ -13402,26 +13583,25 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			p.exitPortion(now, replacePos, "SLOT_REPLACE", markRes.Mark, replacePos.Qty, markRes.Meta, markRes.Book)
 			_ = p.save()
 			fmt.Printf("paper slot replace: closed %s %s reason=%s\n", replacePos.Symbol, replacePos.Side, reason)
-		}
-		if len(p.positions) >= p.maxOpen {
-			return nil, fmt.Errorf("max paper positions reached (%d)", p.maxOpen)
+		} else {
+			fmt.Printf("paper enter advisory: max paper positions reached (%d), continuing\n", p.maxOpen)
 		}
 	}
 	free := p.freeForEntries()
 	if free < margin {
-		return nil, fmt.Errorf("insufficient usable paper balance")
+		fmt.Printf("paper enter advisory: insufficient usable paper balance free=%.4f margin=%.4f, continuing\n", free, margin)
 	}
 	if _, exists := p.positions[raw]; exists {
-		return nil, fmt.Errorf("symbol already open")
+		fmt.Printf("paper enter advisory: symbol already open %s, continuing\n", raw)
 	}
 	if t := p.lockUntil[raw]; !t.IsZero() && now.Before(t) {
-		return nil, fmt.Errorf("symbol loss lock active")
+		fmt.Printf("paper enter advisory: symbol loss lock active %s until=%s, continuing\n", raw, t.Format(time.RFC3339))
 	}
 	if blocked, reason := p.blocksHarvestReentry(raw, now, c); blocked {
-		return nil, fmt.Errorf("%s", reason)
+		fmt.Printf("paper enter advisory: %s, continuing\n", strings.TrimSpace(reason))
 	}
 	if blocked, reason := p.blocksSymbolTradeBudget(raw, now, c); blocked {
-		return nil, fmt.Errorf("%s", reason)
+		fmt.Printf("paper enter advisory: %s, continuing\n", strings.TrimSpace(reason))
 	} else if strings.TrimSpace(reason) != "" {
 		fmt.Printf("paper enter advisory: %s\n", strings.TrimSpace(reason))
 	}
@@ -13431,7 +13611,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	if p.lossCooldown > 0 {
 		if t := p.lastExitAt[raw]; !t.IsZero() && p.lastExitLoss[raw] && now.Sub(t) < p.lossCooldown {
-			return nil, fmt.Errorf("symbol loss cooldown active")
+			fmt.Printf("paper enter advisory: symbol loss cooldown active %s until=%s, continuing\n", raw, t.Add(p.lossCooldown).Format(time.RFC3339))
 		}
 	}
 	if p.enabled {
@@ -13514,10 +13694,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			required += estimatedFundingReserve(notional, m.FundingRate, interval)
 		}
 		if free < required {
-			return nil, fmt.Errorf("paper open cost %.4f exceeds free %.4f", required, free)
+			fmt.Printf("paper enter advisory: open cost %.4f exceeds free %.4f, continuing\n", required, free)
 		}
 	} else if free < margin+entryFee {
-		return nil, fmt.Errorf("paper margin+fee exceeds free balance")
+		fmt.Printf("paper enter advisory: paper margin+fee exceeds free balance, continuing\n")
 	}
 	stopPct := p.stopPct / 100.0
 	if p.riskOnMargin {
@@ -13612,44 +13792,58 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	p.balance -= entryFee
 	pos := &paperPosition{
-		Symbol:           raw,
-		Side:             strings.ToUpper(c.Side),
-		Entry:            entry,
-		Qty:              qty,
-		InitialQty:       qty,
-		Margin:           margin,
-		Leverage:         lev,
-		Stop:             stop,
-		TP1:              tp1,
-		TP2:              tp2,
-		TP3:              tp3,
-		TrailRef:         entry,
-		OpenedAt:         now,
-		EntryReason:      c.Strat,
-		EntryStrategyID:  entryStrategyID,
-		EntryGrade:       c.Entry.CurrentGrade,
-		EntryState:       c.Entry.State,
-		EntryTrigger:     c.TriggerState,
-		ExitProfile:      c.ExitProfile,
-		EntryConf:        c.Conf,
-		DiscoveryScore:   c.DiscoveryScore,
-		TriggerScore:     c.TriggerScore,
-		ExecutionScore:   c.ExecutionScore,
-		CombinedScore:    c.CombinedScore,
-		EntryVolumeUSD:   c.VolumeUSD,
-		EntryATRPct:      c.ATRPct,
-		OpposingFriction: c.Sig.VPTargetLevel,
-		StopReason:       stopReason,
-		StopDistancePct:  stopDistancePct,
-		EntrySetupFamily: c.SetupFamily,
-		ExecBucket:       executionGovernorBucketForCandidate(c),
-		OriginalStop:     stop,
+		Symbol:                 raw,
+		Side:                   strings.ToUpper(c.Side),
+		Entry:                  entry,
+		Qty:                    qty,
+		InitialQty:             qty,
+		Margin:                 margin,
+		Leverage:               lev,
+		Stop:                   stop,
+		TP1:                    tp1,
+		TP2:                    tp2,
+		TP3:                    tp3,
+		TrailRef:               entry,
+		OpenedAt:               now,
+		EntryReason:            c.Strat,
+		EntryStrategyID:        entryStrategyID,
+		EntryGrade:             c.Entry.CurrentGrade,
+		EntryState:             c.Entry.State,
+		EntryTrigger:           c.TriggerState,
+		ExitProfile:            c.ExitProfile,
+		EntryConf:              c.Conf,
+		DiscoveryScore:         c.DiscoveryScore,
+		TriggerScore:           c.TriggerScore,
+		ExecutionScore:         c.ExecutionScore,
+		CombinedScore:          c.CombinedScore,
+		EntryVolumeUSD:         c.VolumeUSD,
+		EntryATRPct:            c.ATRPct,
+		EntryATRExtension:      c.ExtensionATR,
+		EntrySession:           c.SessionLabel,
+		EntryTiming:            c.EntryTiming,
+		CandidateAgeSeconds:    c.CandidateAgeSeconds,
+		EntryDistanceToVWAPPct: c.DistanceToVWAPPct,
+		OpposingFriction:       c.Sig.VPTargetLevel,
+		StopReason:             stopReason,
+		StopDistancePct:        stopDistancePct,
+		EntrySetupFamily:       c.SetupFamily,
+		ExecBucket:             executionGovernorBucketForCandidate(c),
+		OriginalStop:           stop,
 	}
 	p.positions[raw] = pos
 	p.recordExecutionGovernorEntry(now, c)
 	_ = p.save()
-	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f reason=%s stop_reason=%s\n",
-		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee, firstNonEmpty(strings.TrimSpace(c.Strat), "manual"), firstNonEmpty(stopReason, "generic"))
+	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f reason=%s stop_reason=%s\n",
+		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee,
+		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "none"),
+		firstNonEmpty(strings.TrimSpace(c.Strat), "manual"),
+		firstNonEmpty(strings.TrimSpace(c.SessionLabel), "unknown"),
+		firstNonEmpty(strings.TrimSpace(c.EntryTiming), "unknown"),
+		c.CandidateAgeSeconds,
+		c.DistanceToVWAPPct,
+		c.ExtensionATR,
+		firstNonEmpty(strings.TrimSpace(c.Strat), "manual"),
+		firstNonEmpty(stopReason, "generic"))
 	return pos, nil
 }
 
@@ -13692,6 +13886,10 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		rememberPaperPositionMark(pos, now, paperMarkResolution{Mark: mark, Source: firstNonEmpty(markRes.Source, "mark"), Symbol: markRes.Symbol, Meta: m, Book: markRes.Book})
 		updateFavorableRPaper(pos, mark)
+		if noProofTimeoutTriggered(pos.OpenedAt, now, pos.MaxFavorableR) {
+			p.exitPortion(now, pos, "NO_PROOF_TIMEOUT", mark, pos.Qty, meta[raw], depth[raw])
+			continue
+		}
 		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
 		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
 			pos.Stop = newStop
@@ -14360,15 +14558,19 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 			}
 		}
 	}
-	fmt.Printf("exit_audit symbol=%s strategy_id=%s exit_reason_raw=%q exit_reason_final=%q trigger_ref=%q display_mark_at_decision=%.8f stop_at_decision=%.8f max_r_seen=%.4f protected_after_proof=%t winner_reverted_unprotected=%t\n",
+	logExitAudit(
 		symbol,
 		firstNonEmpty(strings.TrimSpace(pos.EntryStrategyID), strings.TrimSpace(pos.EntryReason), "unknown"),
 		reasonU,
 		reasonU,
-		strings.ToLower(strings.TrimSpace(p.stopTriggerRef)),
+		p.stopTriggerRef,
 		exitPrice,
 		pos.Stop,
 		pos.MaxFavorableR,
+		-pos.MaxAdverseR,
+		paperProtectionState(pos),
+		pos.EntryTiming,
+		reasonU == "NO_PROOF_TIMEOUT",
 		protectedAfterProof,
 		winnerRevertedUnprotected,
 	)
@@ -14410,8 +14612,9 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		pos.Qty = 0
 	}
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
-	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm\n",
-		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin)
+	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
+		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin,
+		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), reasonU == "NO_PROOF_TIMEOUT")
 	if p.onExit != nil {
 		loc := p.reportLoc
 		if loc == nil {
@@ -15566,13 +15769,6 @@ func applyCandidateLifecycle(in []candidate, now time.Time, mem map[string]candi
 			if c.RejectReason == "" {
 				c.RejectReason = "candidate_expired"
 			}
-		} else if stage != "READY" {
-			// Let explicit reversal fallbacks pass quickly.
-			if !strings.EqualFold(c.Strat, "mom_reversal") && !strings.EqualFold(c.Strat, "mom_reversal_short") {
-				if c.RejectReason == "" {
-					c.RejectReason = "candidate_not_ready"
-				}
-			}
 		}
 		out = append(out, c)
 	}
@@ -15848,7 +16044,7 @@ func continuationLaneRejectReason(c candidate) string {
 }
 
 func qualifiesImpulsiveLongStarter(c candidate, fails []string) (float64, []string, bool) {
-	if !envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true) || !strings.EqualFold(c.Side, "BUY") {
+	if !effectiveImpulsiveLongStarterEnabled() || !strings.EqualFold(c.Side, "BUY") {
 		return 0, nil, false
 	}
 	if c.Entry.LongDemotionFlag || candidateExhaustionActive(c) {
@@ -15930,7 +16126,7 @@ func qualifiesImpulsiveLongStarter(c candidate, fails []string) (float64, []stri
 }
 
 func qualifiesImpulsiveShortStarter(c candidate, fails []string) (float64, []string, bool) {
-	if !envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true) || !strings.EqualFold(c.Side, "SELL") {
+	if !effectiveImpulsiveShortStarterEnabled() || !strings.EqualFold(c.Side, "SELL") {
 		return 0, nil, false
 	}
 	if c.Entry.ShortDemotionFlag || candidateExhaustionActive(c) {
@@ -16010,16 +16206,6 @@ func qualifiesImpulsiveShortStarter(c candidate, fails []string) (float64, []str
 		"impulsive_short_scanner_move",
 	}
 	return conf, reasons, true
-}
-
-func winnerAddStrategyReady(c candidate, manualCatchUp bool) bool {
-	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
-		return true
-	default:
-		_ = manualCatchUp
-		return false
-	}
 }
 
 func minQualityForStrategy(c candidate, cfg entryQualityConfig) float64 {
@@ -16135,9 +16321,6 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 	minConf := minEntryConfForStrategy(c, cfg)
 	if confN < minConf {
 		reasons = append(reasons, "low_conf")
-	}
-	if c.LifecycleStage != "" && c.LifecycleStage != "READY" {
-		reasons = append(reasons, "candidate_not_ready")
 	}
 	if c.TriggerStage != "" && c.TriggerStage != "READY" {
 		reasons = append(reasons, "trigger_not_persistent")
@@ -16262,7 +16445,7 @@ func positionLookupKey(symbol, side string) string {
 }
 
 func qualifiesResetImpulse(c candidate, now time.Time) (string, float64, []string) {
-	if !envBool("LIVE_ENABLE_RESET_IMPULSE", true) || !resetImpulseWindowActive(now) {
+	if !effectiveResetImpulseEnabled() || !resetImpulseWindowActive(now) {
 		return "", 0, nil
 	}
 	side := strings.ToUpper(strings.TrimSpace(c.Side))
@@ -16462,7 +16645,7 @@ func continuationGuardReason(c candidate, cfg entryQualityConfig) string {
 		return ""
 	}
 	if math.Abs(c.DayUTC24h) < cfg.DayUTCMaturityPct {
-		if envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true) && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
+		if effectiveContinuationStructureConfirmationRequired() && !continuationStructureConfirmed(c) && c.SetupFamily == "" {
 			return "continuation_no_structure_confirm"
 		}
 		return ""
@@ -16523,7 +16706,19 @@ func directionalConflictRejectReason(c candidate) string {
 	if strategyFamily(c) == "rev" {
 		return ""
 	}
-	if ok, _ := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)); ok {
+	blockPct := envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)
+	if ok, absMove := directionallyConflicting(c, blockPct); ok {
+		if effectiveDirectionalConflictPenaltyOnly() {
+			if !effectiveDirectionalConflictExtremeOnly() {
+				return ""
+			}
+			penaltyPct := envFloat("LIVE_PENALTY_DIRECTIONAL_CONFLICT_PCT", blockPct)
+			extremePct := maxFloat(blockPct*2.0, penaltyPct+blockPct)
+			if absMove >= extremePct {
+				return "directional_dayutc_conflict_extreme"
+			}
+			return ""
+		}
 		return "directional_dayutc_conflict"
 	}
 	return ""
@@ -17089,64 +17284,6 @@ func manualCatchUpAddAllowed(p *livePosition) bool {
 	return false
 }
 
-func candidateStarterOnlyByStopPlan(c candidate) bool {
-	entryPx := c.Sig.Entry
-	if entryPx <= 0 {
-		entryPx = c.LastClose
-	}
-	tp1 := c.Sig.TP1
-	if entryPx <= 0 || tp1 <= 0 {
-		return false
-	}
-	stopPlan := exitmgr.ComputeHybridStop(loadHybridStopConfig(), hybridStopInputForCandidate(c, entryPx, tp1))
-	return stopPlan.StarterOnly
-}
-
-func positionPnLPct(p *livePosition, meta map[string]symbolMeta) float64 {
-	if p == nil || p.EntryPrice <= 0 {
-		return 0
-	}
-	mark := p.LastMark
-	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
-	if info, ok := meta[raw]; ok && info.LastPrice > 0 {
-		mark = info.LastPrice
-	}
-	if mark <= 0 {
-		mark = p.EntryPrice
-	}
-	_, pct := realizedFromFill(p.Side, p.EntryPrice, mark, maxFloat(p.RemainingQty, 1))
-	return pct
-}
-
-func candidateTargetForAdd(c candidate) float64 {
-	if c.Sig.TP3 > 0 {
-		return c.Sig.TP3
-	}
-	if c.Sig.TP2 > 0 {
-		return c.Sig.TP2
-	}
-	return c.Sig.TP1
-}
-
-func addRoomLeftR(c candidate) float64 {
-	target := candidateTargetForAdd(c)
-	risk := abs(c.Sig.Entry - c.Sig.Stop)
-	if target <= 0 || risk <= 0 || c.LastClose <= 0 {
-		return 0
-	}
-	return abs(target-c.LastClose) / risk
-}
-
-func directionMoveFromAnchorPct(side string, anchor, mark float64) float64 {
-	if anchor <= 0 || mark <= 0 {
-		return 0
-	}
-	if strings.EqualFold(side, "BUY") {
-		return ((mark - anchor) / anchor) * 100
-	}
-	return ((anchor - mark) / anchor) * 100
-}
-
 func candidateExtendedForBotAdd(c candidate) bool {
 	if hasFreshStructureReset(c) {
 		return false
@@ -17154,66 +17291,6 @@ func candidateExtendedForBotAdd(c candidate) bool {
 	maxATR := envFloat("LIVE_ADD_MAX_EXTENSION_ATR", 1.35)
 	maxMovePct := envFloat("LIVE_ADD_MAX_DIRECTIONAL_PCT", 6.0)
 	return c.ExtensionATR >= maxATR || candidateDirectionalMovePct(c) >= maxMovePct
-}
-
-func importedPositionExtendedForAdd(p *livePosition, c candidate, meta map[string]symbolMeta) bool {
-	if p == nil || hasFreshStructureReset(c) {
-		return false
-	}
-	anchor := p.ManageAnchorPrice
-	if anchor <= 0 {
-		anchor = p.LastMark
-	}
-	if anchor <= 0 {
-		anchor = c.LastClose
-	}
-	mark := p.LastMark
-	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
-	if info, ok := meta[raw]; ok && info.LastPrice > 0 {
-		mark = info.LastPrice
-	}
-	if mark <= 0 {
-		mark = c.LastClose
-	}
-	movePct := directionMoveFromAnchorPct(p.Side, anchor, mark)
-	maxATR := envFloat("LIVE_IMPORTED_ADD_MAX_EXTENSION_ATR", 1.10)
-	maxMovePct := envFloat("LIVE_IMPORTED_ADD_MAX_EXT_PCT", 2.0)
-	return c.ExtensionATR >= maxATR || movePct >= maxMovePct
-}
-
-func addRoomSufficient(c candidate, imported bool) bool {
-	if c.Sig.Stop <= 0 || candidateTargetForAdd(c) <= 0 {
-		return true
-	}
-	minRR := envFloat("LIVE_ADD_MIN_RR_LEFT", 1.5)
-	if imported {
-		minRR = envFloat("LIVE_IMPORTED_ADD_MIN_RR_LEFT", minRR)
-	}
-	return addRoomLeftR(c) >= minRR
-}
-
-func addNeedsFreshPhase(p *livePosition, c candidate) bool {
-	if p == nil || p.AddCount <= 0 {
-		return false
-	}
-	return !hasFreshStructureReset(c)
-}
-
-func materiallyDifferentReentrySetup(c candidate, prev *livePosition) bool {
-	if prev == nil {
-		return false
-	}
-	curStrat := strings.TrimSpace(firstNonEmpty(c.StrategyID, c.Strat))
-	prevStrat := strings.TrimSpace(firstNonEmpty(prev.EntryStrategyID, prev.EntryReason))
-	if curStrat != "" && prevStrat != "" && !strings.EqualFold(curStrat, prevStrat) {
-		return true
-	}
-	curFam := strings.TrimSpace(c.SetupFamily)
-	prevFam := strings.TrimSpace(prev.EntryReason)
-	if curFam != "" && prevFam != "" && !strings.EqualFold(curFam, prevFam) {
-		return true
-	}
-	return false
 }
 
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
@@ -17227,10 +17304,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 	reentryCfg := execMgr.reentryCfg
 	if cfg.StarterUSDT > 0 {
 		plan.MarginUSDT = cfg.StarterUSDT
-	}
-	if execMgr.hasBlockingManagedProtectionFailure() {
-		plan.RejectReason = "managed_position_unprotected"
-		return plan
 	}
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	var activeSame *livePosition
@@ -17253,11 +17326,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		}
 	}
 	if activeSame != nil {
-		if starterLaneEligible(c) {
-			plan.RejectReason = "starter_lane_no_adds"
-			return plan
-		}
-		importedManaged := importedManagedPosition(activeSame)
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
 			return plan
@@ -17269,77 +17337,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		if activeSame.PendingAddOrderID > 0 {
 			plan.RejectReason = "pending_add_order"
 			return plan
-		}
-		if ladderAddsDisabled(cfg) {
-			plan.RejectReason = "fixed_size_no_add"
-			return plan
-		}
-		if activeSame.State != execOpen {
-			plan.RejectReason = "position_not_ready_for_add"
-			return plan
-		}
-		if !winnerAddStrategyReady(c, false) {
-			if activeSame.AddLockedUntilConfirm || activeSame.StarterOnly {
-				plan.RejectReason = "starter_waiting_full_confirmation"
-			} else {
-				plan.RejectReason = "pyramid_setup_not_confirmed"
-			}
-			return plan
-		}
-		if candidateStarterOnlyByStopPlan(c) {
-			plan.RejectReason = "pyramid_waiting_stop_confirmation"
-			return plan
-		}
-		if cfg.OnlyIfGreen && positionPnLPct(activeSame, meta) <= 0 {
-			plan.RejectReason = "pyramid_position_not_green"
-			return plan
-		}
-		if positionPnLPct(activeSame, meta) < cfg.MinAddPnLPct {
-			plan.RejectReason = "pyramid_min_pnl_not_met"
-			return plan
-		}
-		if !candidatePriceConfirmsDirection(c) {
-			plan.RejectReason = "pyramid_direction_unconfirmed"
-			return plan
-		}
-		if !(continuationStructureConfirmed(c) || hasFreshStructureReset(c)) {
-			plan.RejectReason = "pyramid_structure_not_intact"
-			return plan
-		}
-		if addNeedsFreshPhase(activeSame, c) {
-			plan.RejectReason = "pyramid_needs_fresh_phase"
-			return plan
-		}
-		if candidateExhaustionActive(c) {
-			plan.RejectReason = "pyramid_exhaustion_active"
-			return plan
-		}
-		if candidateSpikeCandle(c) {
-			plan.RejectReason = "pyramid_spike_candle"
-			return plan
-		}
-		if importedManaged {
-			if importedPositionExtendedForAdd(activeSame, c, meta) {
-				plan.RejectReason = "imported_add_extended_wait_reset"
-				return plan
-			}
-			if !addRoomSufficient(c, true) {
-				plan.RejectReason = "imported_add_room_too_small"
-				return plan
-			}
-		} else {
-			if candidateRapidExpansion(c) {
-				plan.RejectReason = "pyramid_rapid_expansion"
-				return plan
-			}
-			if candidateExtendedForBotAdd(c) {
-				plan.RejectReason = "pyramid_extended_wait_reset"
-				return plan
-			}
-			if !addRoomSufficient(c, false) {
-				plan.RejectReason = "pyramid_room_too_small"
-				return plan
-			}
 		}
 		if activeSame.AddCount >= cfg.MaxAdds {
 			plan.RejectReason = "pyramid_add_cap"
@@ -17373,8 +17370,7 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		strings.EqualFold(closedSame.Side, c.Side) &&
 		!closedSame.ClosedAt.IsZero() &&
 		now.Sub(closedSame.ClosedAt) <= disabledReentryCooldown {
-		if !(allowResetRestartWhenDisabled && hasFreshStructureReset(c)) {
-			plan.RejectReason = "reentry_disabled"
+		if allowResetRestartWhenDisabled && hasFreshStructureReset(c) {
 			return plan
 		}
 	}
@@ -17384,49 +17380,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		strings.EqualFold(closedSame.Side, c.Side) &&
 		!closedSame.ClosedAt.IsZero() &&
 		now.Sub(closedSame.ClosedAt) <= 6*time.Hour {
-		if reentryCfg.Cooldown > 0 && now.Sub(closedSame.ClosedAt) < reentryCfg.Cooldown {
-			plan.RejectReason = "reentry_cooldown_active"
-			return plan
-		}
-		if closedSame.ExhaustionExit {
-			plan.RejectReason = "reentry_blocked_after_exhaustion_exit"
-			return plan
-		}
-		if closedSame.ReentryCount >= reentryCfg.MaxPerSymbol {
-			plan.RejectReason = "reentry_limit_reached"
-			return plan
-		}
-		if isStopCloseReason(closedSame.CloseReason) && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 15*time.Minute) {
-			plan.RejectReason = "reentry_after_stop_cooldown"
-			return plan
-		}
-		if closedSame.RunnerCaptureFailed && now.Sub(closedSame.ClosedAt) < maxDuration(reentryCfg.Cooldown, 30*time.Minute) && !hasFreshStructureReset(c) {
-			plan.RejectReason = "reentry_runner_capture_failed"
-			return plan
-		}
-		if isSoftChurnExit(closedSame.CloseReason) {
-			htf := execMgr.htfSnapshot(raw, c.Side, &c.Entry)
-			if htfPersistent(c.Side, htf) && !htfFailed(c.Side, htf) {
-				softCooldown := time.Duration(envInt("LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN", 20)) * time.Minute
-				softCooldown = maxDuration(reentryCfg.Cooldown, softCooldown)
-				if softCooldown > 0 && now.Sub(closedSame.ClosedAt) < softCooldown {
-					plan.RejectReason = "reentry_soft_exit_htf_persistent_cooldown"
-					return plan
-				}
-				if envBool("LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT", true) &&
-					!materiallyDifferentReentrySetup(c, closedSame) {
-					delta := envFloat("LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA", 7.5)
-					if c.Entry.CurrentScore < closedSame.CombinedScore+delta {
-						plan.RejectReason = "reentry_soft_exit_needs_stronger_score"
-						return plan
-					}
-				}
-			}
-		}
-		if !qualifiesStructuredReentry(c) {
-			plan.RejectReason = "reentry_needs_pullback_hold"
-			return plan
-		}
 		plan.IsReentry = true
 		if reentryCfg.SizeUSDT > 0 {
 			plan.MarginUSDT = reentryCfg.SizeUSDT
@@ -18171,6 +18124,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		cand.DepthAsk = fm.DepthAsk
 		cand.BookImbalance = fm.BookImbalance
 	}
+	annotateCandidateEntryContext(&cand, time.Now().UTC())
 	if inertiaEnable &&
 		strings.EqualFold(cand.Side, "BUY") &&
 		strings.EqualFold(cand.Strat, "") &&
@@ -18241,28 +18195,24 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		return applySimpleContinuationFallback(cand)
 	}
 	rt := strategies.NewRouter(strategies.RouterConfig{
-		MinGrade:                  "B",
-		MinScore:                  0,
-		MinWhaleDelta:             -1e18,
-		AllowWarmup:               true,
-		WarmupSlopeMin:            0,
-		MaxOne:                    true,
-		EnableVPSetups:            envBool("LIVE_ENABLE_VP_SETUPS", true),
-		MinVPConfidence:           envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
-		UseVPReversal:             envBool("LIVE_USE_VP_REVERSAL", true),
-		EnableInstitutionalPA:     envBool("LIVE_ENABLE_INSTITUTIONAL_PA", true),
-		UseSessionRegimeRisk:      true,
-		AllowDeadZoneOnlyAPlus:    true,
-		RequireOrderFlowHandshake: envBool("LIVE_REQUIRE_ORDERFLOW_HANDSHAKE", false),
-		RequireLocationHandshake:  envBool("LIVE_REQUIRE_LOCATION_HANDSHAKE", false),
-		MinConfluenceScore:        envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48),
-		StrategyWeight:            envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
-		FlowWeight:                envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
-		StructureWeight:           envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
-		ContinuationDayUTCPct:     envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
-		ContinuationReset1hPct:    0,
-		ContinuationLateSlopeMin:  envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
-		RejectIfTargetTooClosePct: vpMinTargetPct,
+		MinGrade:                 "B",
+		MinScore:                 0,
+		MinWhaleDelta:            -1e18,
+		AllowWarmup:              true,
+		WarmupSlopeMin:           0,
+		MaxOne:                   true,
+		EnableVPSetups:           effectiveVPSetupsEnabled(),
+		MinVPConfidence:          envFloat("LIVE_MIN_VP_CONFIDENCE", 0.55),
+		UseVPReversal:            envBool("LIVE_USE_VP_REVERSAL", true),
+		EnableInstitutionalPA:    effectiveInstitutionalPAEnabled(),
+		UseSessionRegimeRisk:     true,
+		MinConfluenceScore:       envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48),
+		StrategyWeight:           envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
+		FlowWeight:               envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
+		StructureWeight:          envFloat("LIVE_CONFLUENCE_STRUCTURE_WEIGHT", 0.20),
+		ContinuationDayUTCPct:    envFloat("LIVE_LATE_ENTRY_DAYUTC_BRAKE_PCT", 25.0),
+		ContinuationReset1hPct:   0,
+		ContinuationLateSlopeMin: envFloat("LIVE_CONT_FAST_LATE_MIN_SLOPE", 0.16),
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(stopMode),
 			TargetMode:           strategies.TargetMode(targetMode),
@@ -18331,8 +18281,63 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 }
 
 func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
-	cand.SessionLabel = string(sessionPhaseUTC(now.UTC()))
-	return choosePrimaryLiveSignal(cand, now)
+	annotateCandidateEntryContext(&cand, now)
+	return cand
+}
+
+func annotateCandidateEntryContext(c *candidate, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
+	c.CandidateAgeSeconds = candidateAgeSeconds(c.Entry, now)
+	c.DistanceToVWAPPct = distanceToVWAPPct(c.LastClose, c.SessionVWAP)
+	c.EntryTiming = classifyEntryTiming(*c)
+}
+
+func candidateAgeSeconds(e inplay.Entry, now time.Time) float64 {
+	anchor := e.FirstSeen
+	if anchor.IsZero() {
+		anchor = e.StateSince
+	}
+	if anchor.IsZero() {
+		return 0
+	}
+	age := now.Sub(anchor).Seconds()
+	if age < 0 {
+		return 0
+	}
+	return age
+}
+
+func distanceToVWAPPct(lastClose, vwap float64) float64 {
+	if lastClose <= 0 || vwap <= 0 {
+		return 0
+	}
+	return math.Abs((lastClose-vwap)/vwap) * 100.0
+}
+
+func classifyEntryTiming(c candidate) string {
+	ext := c.ExtensionATR
+	distVWAP := c.DistanceToVWAPPct
+	if distVWAP <= 0 {
+		distVWAP = distanceToVWAPPct(c.LastClose, c.SessionVWAP)
+	}
+	movePct := candidateDirectionalMovePct(c)
+	ageMin := c.Entry.TimeInStateMin
+	if ageMin <= 0 && c.CandidateAgeSeconds > 0 {
+		ageMin = c.CandidateAgeSeconds / 60.0
+	}
+	if ext == 0 && distVWAP == 0 && movePct == 0 && ageMin == 0 {
+		return "unknown"
+	}
+	if ext >= 1.35 || distVWAP >= 1.20 || movePct >= 20.0 || ageMin >= 25.0 {
+		return "late"
+	}
+	if ext <= 0.60 && distVWAP <= 0.45 && movePct <= 8.0 && ageMin <= 8.0 {
+		return "early"
+	}
+	return "mid"
 }
 
 func toFeatureSide(side string) features.Side {
@@ -18542,6 +18547,9 @@ func widenStopPctForVolatility(stopPct, atrPct, volumeUSD float64) float64 {
 
 func trailATRMultForContext(reason string, atrPct, volumeUSD float64) float64 {
 	base := trailATRMultForReason(reason)
+	if effectiveSharedManagementEnabled() {
+		base = envFloat("LIVE_TRAIL_ATR_MULT_CONT", 2.6)
+	}
 	return base * trendCaptureVolatilityMultiplier(atrPct, volumeUSD)
 }
 
@@ -21915,6 +21923,148 @@ func envCSV(k, def string) []string {
 	return out
 }
 
+func activeRuntimeProfile() runtimeProfile {
+	return runtimeProfile(strings.ToLower(strings.TrimSpace(envStr("LIVE_RUNTIME_PROFILE", ""))))
+}
+
+func resolveRuntimeProfileConfig() runtimeProfileConfig {
+	cfg := runtimeProfileConfig{
+		Name:                   activeRuntimeProfile(),
+		EffectiveVPEnabled:     envBool("LIVE_ENABLE_VP_SETUPS", true),
+		EffectiveInstitutional: envBool("LIVE_ENABLE_INSTITUTIONAL_PA", true),
+		EffectiveReversal:      envBool("LIVE_ENABLE_MOMENTUM_REVERSAL", true),
+		EffectiveImpulse: envBool("LIVE_ENABLE_RESET_IMPULSE", true) &&
+			envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true) &&
+			envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true),
+		EffectiveReentry:          envBool("LIVE_REENTRY_ENABLE", false),
+		EffectiveRequireStructure: envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true),
+		EffectiveCandidateMemory:  envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
+		EffectiveTriggerMemory:    true,
+		EffectiveSharedManagement: false,
+		EffectiveNoProofTimeout:   noProofTimeoutMinutes() > 0,
+	}
+	switch cfg.Name {
+	case runtimeProfilePaperContinuationClean:
+		cfg.EffectiveVPEnabled = true
+		cfg.EffectiveInstitutional = true
+		cfg.EffectiveReversal = false
+		cfg.EffectiveImpulse = false
+		cfg.EffectiveReentry = false
+		cfg.EffectiveRequireStructure = true
+		cfg.EffectiveCandidateMemory = true
+		cfg.EffectiveTriggerMemory = true
+		cfg.EffectiveSharedManagement = true
+		cfg.EffectiveNoProofTimeout = true
+	}
+	return cfg
+}
+
+func effectiveVPSetupsEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveVPEnabled
+}
+
+func effectiveInstitutionalPAEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveInstitutional
+}
+
+func effectiveMomentumReversalEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveReversal
+}
+
+func effectiveResetImpulseEnabled() bool {
+	cfg := resolveRuntimeProfileConfig()
+	switch cfg.Name {
+	case runtimeProfilePaperContinuationClean:
+		return false
+	default:
+		return envBool("LIVE_ENABLE_RESET_IMPULSE", true)
+	}
+}
+
+func effectiveImpulsiveLongStarterEnabled() bool {
+	cfg := resolveRuntimeProfileConfig()
+	switch cfg.Name {
+	case runtimeProfilePaperContinuationClean:
+		return false
+	default:
+		return envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true)
+	}
+}
+
+func effectiveImpulsiveShortStarterEnabled() bool {
+	cfg := resolveRuntimeProfileConfig()
+	switch cfg.Name {
+	case runtimeProfilePaperContinuationClean:
+		return false
+	default:
+		return envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true)
+	}
+}
+
+func effectiveReentryEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveReentry
+}
+
+func effectiveContinuationStructureConfirmationRequired() bool {
+	return resolveRuntimeProfileConfig().EffectiveRequireStructure
+}
+
+func effectiveCandidateMemoryEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveCandidateMemory
+}
+
+func effectiveTriggerMemoryEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveTriggerMemory
+}
+
+func effectiveSharedManagementEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveSharedManagement
+}
+
+func effectiveNoProofTimeoutEnabled() bool {
+	return resolveRuntimeProfileConfig().EffectiveNoProofTimeout
+}
+
+func effectiveDirectionalConflictPenaltyOnly() bool {
+	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
+}
+
+func effectiveDirectionalConflictExtremeOnly() bool {
+	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
+}
+
+func effectiveRuntimeProfileSummary() string {
+	cfg := resolveRuntimeProfileConfig()
+	return fmt.Sprintf(
+		"runtime_profile=%s | effective_strategy_paths=vp=%t,institutional_pa=%t,reversal=%t,impulse=%t,unresolved_watch=%t,unresolved_execution=%t | effective_quality_policy=penalty_based=%t,require_structure=%t,directional_conflict_penalty_only=%t,extreme_conflict_hard_block=%t | effective_reentry_policy=enabled=%t | effective_management_policy=shared=%t,no_proof_timeout=%t,trigger_memory=%t,candidate_memory=%t",
+		firstNonEmpty(strings.TrimSpace(string(cfg.Name)), "none"),
+		cfg.EffectiveVPEnabled,
+		cfg.EffectiveInstitutional,
+		cfg.EffectiveReversal,
+		cfg.EffectiveImpulse,
+		cfg.EffectiveCandidateMemory,
+		true,
+		true,
+		cfg.EffectiveRequireStructure,
+		effectiveDirectionalConflictPenaltyOnly(),
+		effectiveDirectionalConflictExtremeOnly(),
+		cfg.EffectiveReentry,
+		cfg.EffectiveSharedManagement,
+		cfg.EffectiveNoProofTimeout,
+		cfg.EffectiveTriggerMemory,
+		cfg.EffectiveCandidateMemory,
+	)
+}
+
+func isExecutableStrategy(strat string) bool {
+	switch strings.ToLower(strings.TrimSpace(strat)) {
+	case "", "none", "no_strategy", "unknown", "unresolved":
+		return false
+	default:
+		return true
+	}
+}
+
 func resolvePaperFeeProfile(profile string) (makerBps, takerBps float64) {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "vip":
@@ -22306,9 +22456,8 @@ func classifyRejectReason(reason string) RejectClass {
 		return rejectClassCapacity
 	case strings.Contains(raw, "cooldown"), strings.Contains(raw, "one_symbol_only"),
 		strings.Contains(raw, "max_open"), strings.Contains(raw, "manual_position_active"),
-		strings.Contains(raw, "pending_add_order"), strings.Contains(raw, "position_not_ready_for_add"),
-		strings.Contains(raw, "starter_waiting"), strings.Contains(raw, "reentry_"),
-		strings.Contains(raw, "pyramid_"), strings.Contains(raw, "symbol_active_opposite_side"),
+		strings.Contains(raw, "pending_add_order"), strings.Contains(raw, "symbol_active_opposite_side"),
+		strings.Contains(raw, "reentry_"),
 		strings.Contains(raw, "intent_dedupe"), strings.Contains(raw, "shadow_gate_active"),
 		strings.Contains(raw, "event_lockout"), strings.Contains(raw, "correlated_exposure_gate"),
 		strings.Contains(raw, "throttle_"), strings.Contains(raw, "post_sl_cooldown"),
@@ -22317,7 +22466,13 @@ func classifyRejectReason(reason string) RejectClass {
 	case strings.Contains(raw, "wall_not_persistent"), strings.Contains(raw, "meta_quality"),
 		strings.Contains(raw, "continuation_no_structure_confirm"), strings.Contains(raw, "below_vwap_ema"),
 		strings.Contains(raw, "above_vwap_ema"), strings.Contains(raw, "vol_ratio"),
-		strings.Contains(raw, "not_ready"), strings.Contains(raw, "expired"),
+		strings.Contains(raw, "avoid_chase"), strings.Contains(raw, "late_chase_"),
+		strings.Contains(raw, "weak_slope"), strings.Contains(raw, "weak slope"),
+		strings.Contains(raw, "weak_ofi"), strings.Contains(raw, "weak ofi"),
+		strings.Contains(raw, "directional_dayutc_conflict"),
+		strings.Contains(raw, "minor_extension"), strings.Contains(raw, "extension"),
+		strings.Contains(raw, "weaker_structure"), strings.Contains(raw, "imperfect_confluence"),
+		strings.Contains(raw, "expired"),
 		strings.Contains(raw, "missed_opportunity_ready"),
 		strings.Contains(raw, "asia_quality_gate"), strings.Contains(raw, "strategy_none_reject"),
 		strings.Contains(raw, "ny_open_requires_strong_setup"), strings.Contains(raw, "utc_offhours_requires_a_grade"),
@@ -22366,8 +22521,6 @@ func fastLaneReasonEligible(reason string) bool {
 	}
 	return strings.Contains(raw, "cooldown") ||
 		strings.Contains(raw, "persistence") ||
-		strings.Contains(raw, "starter_waiting") ||
-		strings.Contains(raw, "starter_lane") ||
 		strings.Contains(raw, "reentry_") ||
 		strings.Contains(raw, "post_win_opposite_cooldown")
 }
@@ -22406,10 +22559,39 @@ func newEligibilitySummary(c candidate) EntryEligibilitySummary {
 		PersistenceScore:   persistenceEligibilityScore(c),
 		AdjustedConfidence: clamp(c.Conf, 0, 1),
 	}
+	if !isExecutableStrategy(c.Strat) {
+		addEligibilityBlock(&summary, "strategy_unresolved")
+	}
 	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
 		addEligibilityBlock(&summary, rr)
 	}
+	refreshEligibilityQuality(&summary, c)
 	return summary
+}
+
+func refreshEligibilityQuality(summary *EntryEligibilitySummary, c candidate) {
+	if summary == nil {
+		return
+	}
+	quality := buildEntryQualityAccumulator(c, summary.SoftBlocks)
+	summary.Quality = quality
+	summary.AdjustedConfidence = quality.ScoreAfterPenalties
+	summary.ConfidencePenaltyReasons = formatEligibilityQualityPenalties(quality)
+	for _, reason := range quality.HardBlockReasons {
+		summary.HardBlocks = appendUniqueDecisionReason(summary.HardBlocks, reason)
+	}
+}
+
+func formatEligibilityQualityPenalties(quality strategies.EntryQualityAccumulator) []string {
+	if len(quality.QualityFlags) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(quality.QualityFlags)+1)
+	for _, flag := range quality.QualityFlags {
+		out = append(out, flag)
+	}
+	out = append(out, fmt.Sprintf("penalty_total=%.2f", quality.PenaltyTotal))
+	return out
 }
 
 func appendUniqueDecisionReason(dst []string, reason string) []string {
@@ -22440,37 +22622,13 @@ func compressSoftBlockConfidence(summary *EntryEligibilitySummary, c candidate) 
 	if summary == nil || !envBool("LIVE_SOFT_SCORE_COMPRESSION_ENABLE", true) {
 		return
 	}
-	adjusted := clamp(c.Conf, 0, 1)
-	penalties := make([]string, 0, len(summary.SoftBlocks))
-	for _, block := range summary.SoftBlocks {
-		raw := strings.TrimSpace(strings.ToLower(block))
-		penalty := 0.0
-		switch {
-		case strings.Contains(raw, "vol_ratio"):
-			penalty = 0.08
-		case strings.Contains(raw, "ofi_z"):
-			penalty = 0.06
-		case strings.Contains(raw, "structure"), strings.Contains(raw, "continuation_no_structure_confirm"):
-			penalty = 0.07
-		case strings.Contains(raw, "vwap_ema"):
-			penalty = 0.05
-		case strings.Contains(raw, "late_cycle"):
-			penalty = 0.10
-		default:
-			penalty = 0.04
-		}
-		adjusted -= penalty
-		penalties = append(penalties, fmt.Sprintf("%s:-%.2f", block, penalty))
-	}
-	summary.AdjustedConfidence = clamp(adjusted, 0, 1)
-	summary.ConfidencePenaltyReasons = penalties
+	refreshEligibilityQuality(summary, c)
 }
 
 func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 	if summary == nil {
 		return
 	}
-	compressSoftBlockConfidence(summary, candidate{Conf: summary.AdjustedConfidence})
 	switch {
 	case len(summary.HardBlocks) > 0:
 		summary.FinalDecision = "reject"
@@ -22481,14 +22639,9 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 	case len(summary.StateBlocks) > 0:
 		summary.FinalDecision = "reject"
 		summary.FinalReason = summary.StateBlocks[0]
-	case len(summary.SoftBlocks) > 0:
-		if summary.StarterAllowed {
-			summary.FinalDecision = "starter_entry"
-			summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.SoftBlocks[0], "soft_confirmation_only")
-		} else {
-			summary.FinalDecision = "watch_only"
-			summary.FinalReason = summary.SoftBlocks[0]
-		}
+	case strings.TrimSpace(summary.Quality.BlockReason) == "quality_score_too_low":
+		summary.FinalDecision = "reject"
+		summary.FinalReason = summary.Quality.BlockReason
 	case plan.IsReentry && summary.ReentryAllowed:
 		summary.FinalDecision = "reentry_entry"
 		summary.FinalReason = firstNonEmpty(summary.FinalReason, "structured_reentry")
@@ -22554,6 +22707,7 @@ func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg wat
 			boolState(reentryCfg.Enable),
 			boolState(missedOpportunitiesEnabled()),
 			envInt("LIVE_MAX_OPEN_PER_SIDE", 1)),
+		effectiveRuntimeProfileSummary(),
 	}
 	if execMgr != nil && execMgr.fundsCfg.Enable {
 		lines = append(lines, fmt.Sprintf("perp_target=%.2f | perp_floor=%.2f | funds_check=%ds",
@@ -22613,6 +22767,7 @@ func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string
 	if ctx == nil {
 		return
 	}
+	quality := buildEntryQualityAccumulator(c, []string{reject})
 	topBlockers := []string{}
 	for _, part := range strings.Split(strings.TrimSpace(reject), ",") {
 		part = strings.TrimSpace(part)
@@ -22629,21 +22784,28 @@ func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string
 		persistenceStatus = firstNonEmpty(c.PersistenceReason, "tracking")
 	}
 	ctx.setDecision(operatorDecision{
-		Symbol:             c.Entry.Symbol,
-		Side:               c.Side,
-		Grade:              c.Entry.CurrentGrade,
-		Score:              c.Entry.CurrentScore,
-		Slope:              c.Entry.ScoreSlope,
-		Strategy:           c.Strat,
-		Confidence:         c.Conf,
-		RawConfidence:      c.Conf,
-		AdjustedConfidence: c.Conf,
-		RejectReason:       reject,
-		BlockerClass:       string(classifyRejectReason(reject)),
-		TopBlockers:        topBlockers,
-		StarterAllowed:     strings.Contains(strings.ToLower(c.Strat), "starter") || strings.Contains(strings.ToLower(c.Strat), "persistence"),
-		PersistenceStatus:  persistenceStatus,
-		State:              string(c.Entry.State),
+		Symbol:              c.Entry.Symbol,
+		Side:                c.Side,
+		Grade:               c.Entry.CurrentGrade,
+		Score:               c.Entry.CurrentScore,
+		Slope:               c.Entry.ScoreSlope,
+		Strategy:            c.Strat,
+		Confidence:          c.Conf,
+		RawConfidence:       c.Conf,
+		AdjustedConfidence:  c.Conf,
+		RejectReason:        reject,
+		BlockerClass:        string(classifyRejectReason(reject)),
+		TopBlockers:         topBlockers,
+		StarterAllowed:      strings.Contains(strings.ToLower(c.Strat), "starter") || strings.Contains(strings.ToLower(c.Strat), "persistence"),
+		PersistenceStatus:   persistenceStatus,
+		State:               string(c.Entry.State),
+		QualityFlags:        quality.QualityFlags,
+		PenaltyTotal:        quality.PenaltyTotal,
+		ScoreBefore:         quality.ScoreBefore,
+		ScoreAfterPenalties: quality.ScoreAfterPenalties,
+		MinScore:            quality.MinScore,
+		HardBlockReasons:    quality.HardBlockReasons,
+		BlockReason:         quality.BlockReason,
 	})
 }
 
@@ -22798,7 +22960,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			pendingManual = len(c.execMgr.pendingManualRequests(0))
 		}
 		return notify.BuildEventHTML("🧭", "STATUS",
-			fmt.Sprintf("<b>Mode:</b> %s | <b>State:</b> %s | dry_run=%v live_enabled=%v", firstNonEmpty(s.Mode, "manual_only"), firstNonEmpty(s.ModeState, "unknown"), s.DryRun, s.LiveEnabled),
+			fmt.Sprintf("<b>Mode:</b> %s | <b>State:</b> %s | dry_run=%v live_enabled=%v", firstNonEmpty(s.Mode, "live"), firstNonEmpty(s.ModeState, "unknown"), s.DryRun, s.LiveEnabled),
 			fmt.Sprintf("<b>In-Play:</b> long=%d short=%d", s.LongInPlay, s.ShortInPlay),
 			fmt.Sprintf("<b>Top:</b> %s %s | g=%s s=%.2f", cleanSymbol(s.TopSymbol), displayPositionSide(s.TopSide), s.TopGrade, s.TopScore),
 			fmt.Sprintf("<b>Available USDT:</b> %.2f", s.AvailableUSDT),
@@ -23116,7 +23278,10 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 		if !modeDryRun && modeLiveEnabled {
 			modeLabel = "LIVE"
 		}
-		effectiveMode := "manual_only"
+		effectiveMode := "paper"
+		if !modeDryRun && modeLiveEnabled {
+			effectiveMode = "live"
+		}
 		if c.mode != nil {
 			effectiveMode = string(c.mode.operatingMode())
 		}
