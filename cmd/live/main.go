@@ -387,6 +387,7 @@ const (
 
 	manualEntryReasonPassive = "MANUAL_IMPORT"
 	manualEntryReasonManaged = "manual_managed_live"
+	operatorEntryReason      = "OPERATOR_EXECUTION"
 
 	manualEntrySourcePassive = "MANUAL_PASSIVE"
 	manualEntrySourceManaged = "MANUAL_MANAGED"
@@ -7386,6 +7387,202 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 		p.StopPrice = entry * (1 + stopPct)
 	}
 	return p
+}
+
+func (m *liveExecManager) upsertPassiveOperatorPosition(symbol, side string, qty, entry, margin float64, lev int, now time.Time) *livePosition {
+	if m == nil {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if sym == "" {
+		return nil
+	}
+	if existing := m.positions[sym]; m.isActive(existing) && samePositionSide(existing.Side, side) {
+		syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
+		existing.EntrySource = manualEntrySourcePassive
+		existing.EntryReason = operatorEntryReason
+		existing.ManualManageState = manualManageStatePassive
+		existing.Managed = false
+		return existing
+	}
+	p := m.newImportedRemotePosition(sym, side, qty, entry, margin, lev, now, manualEntrySourcePassive)
+	if p == nil {
+		return nil
+	}
+	p.EntryReason = operatorEntryReason
+	m.positions[sym] = p
+	return p
+}
+
+func (m *liveExecManager) attachOperatorBracket(p *livePosition, qty float64, tpPrice, slPrice float64) (string, error) {
+	if m == nil || m.rest == nil || p == nil {
+		return "", fmt.Errorf("execution manager not ready")
+	}
+	meta, err := m.rest.SymbolMeta(p.Symbol, true)
+	if err != nil {
+		return "", err
+	}
+	trader := &aster.Trader{
+		Symbol:   p.Symbol,
+		SymbolLC: strings.ToLower(p.Symbol),
+		Rest:     m.rest,
+		Meta:     meta,
+	}
+	var tpPtr, slPtr *float64
+	if tpPrice > 0 {
+		tpPtr = &tpPrice
+	}
+	if slPrice > 0 {
+		slPtr = &slPrice
+	}
+	out, err := trader.Bracket(isLongSide(p.Side), qty, tpPtr, slPtr)
+	if err != nil {
+		return "", err
+	}
+	parts := []string{}
+	if tpRaw := out["tp"]; tpRaw != nil {
+		p.TP1Price = tpPrice
+		p.TP1Qty = qty
+		p.TP1OrderID = mapInt64(tpRaw["orderId"])
+		parts = append(parts, "tp_submitted")
+	}
+	if slRaw := out["sl"]; slRaw != nil {
+		p.StopPrice = slPrice
+		p.StopOrderID = mapInt64(slRaw["orderId"])
+		p.Protected = true
+		parts = append(parts, "sl_submitted")
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+func (m *liveExecManager) submitOperatorOrder(req operatorOrderRequest, metaBySymbol map[string]symbolMeta) (operatorOrderResult, error) {
+	var result operatorOrderResult
+	if m == nil || m.rest == nil {
+		return result, fmt.Errorf("execution manager not ready")
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(req.Symbol)))
+	if sym == "" {
+		return result, fmt.Errorf("symbol required")
+	}
+	result.Symbol = sym
+	result.Side = normalizePositionSide(req.Side)
+	result.USD = req.USD
+	result.LimitPrice = req.LimitPrice
+	result.StopLoss = req.StopLoss
+	result.TakeProfit = req.TakeProfit
+
+	if err := signedUserDataBackoffCheck(time.Now().UTC()); err != nil {
+		return result, err
+	}
+
+	meta, err := m.rest.SymbolMeta(sym, true)
+	if err != nil {
+		return result, err
+	}
+	if snap, ok := metaBySymbol[sym]; ok {
+		ref := snap.LastPrice
+		if ref <= 0 {
+			ref = snap.OpenPrice
+		}
+		if req.HasLimit && ref > 0 {
+			if _, sanitized := sanitizeSnapshotPrice(ref, req.LimitPrice); sanitized {
+				return result, fmt.Errorf("limit price %.8f is too far from snapshot %.8f", req.LimitPrice, ref)
+			}
+		}
+	}
+	var levPtr *int
+	if req.Leverage > 0 {
+		lev := req.Leverage
+		levPtr = &lev
+	}
+	trader := &aster.Trader{
+		Symbol:   sym,
+		SymbolLC: strings.ToLower(sym),
+		Rest:     m.rest,
+		Meta:     meta,
+		State:    m.marketStates[sym],
+	}
+	var submit map[string]any
+	if req.HasLimit {
+		submit, err = trader.EnterLimitUSD(req.Side, req.USD, req.LimitPrice, levPtr)
+	} else {
+		var refPrice *float64
+		if snap, ok := metaBySymbol[sym]; ok && snap.LastPrice > 0 {
+			rp := snap.LastPrice
+			refPrice = &rp
+		}
+		submit, err = trader.EnterMarketUSD(req.Side, req.USD, refPrice, levPtr)
+	}
+	if err != nil {
+		signedUserDataBackoffObserve(time.Now().UTC(), err)
+		return result, err
+	}
+	result.OrderID = mapInt64(submit["orderId"])
+	if result.OrderID <= 0 {
+		return result, fmt.Errorf("missing order id from venue response")
+	}
+	progressOrder, err := trader.WaitForFill(result.OrderID, operatorFillTimeout(), operatorFillPoll())
+	if err != nil {
+		return result, err
+	}
+	progress := parseOrderProgress(progressOrder)
+	result.Status = firstNonEmpty(progress.Status, fmt.Sprint(submit["status"]))
+	result.Working = progress.Working
+	result.Filled = progress.Filled
+	result.Rejected = progress.Rejected
+	result.Qty = progress.ExecQty
+	result.AvgPrice = progress.AvgPx
+
+	if !result.Filled {
+		return result, nil
+	}
+
+	now := time.Now().UTC()
+	rows, err := m.rest.PositionRisk(sym)
+	if err != nil {
+		return result, err
+	}
+	view := remotePositionForSide(rows, req.Side)
+	if view.QtyAbs <= 0 {
+		return result, fmt.Errorf("order filled but live position not yet visible on venue")
+	}
+	lev := maxInt(1, req.Leverage)
+	for _, row := range rows {
+		amt := mapFloat(row["positionAmt"])
+		if mathAbs(amt) <= 1e-10 {
+			continue
+		}
+		rowSide := "BUY"
+		if amt < 0 {
+			rowSide = "SELL"
+		}
+		if !samePositionSide(rowSide, req.Side) {
+			continue
+		}
+		lev = maxInt(1, int(maxFloat(1, mapFloat(row["leverage"]))))
+		break
+	}
+	p := m.upsertPassiveOperatorPosition(sym, req.Side, view.QtyAbs, view.EntryPrice, view.Margin, lev, now)
+	if p == nil {
+		return result, fmt.Errorf("filled position could not be tracked locally")
+	}
+	if req.HasTakeProfit || req.HasStopLoss {
+		bracketStatus, err := m.attachOperatorBracket(p, view.QtyAbs, req.TakeProfit, req.StopLoss)
+		if err != nil {
+			result.BracketStatus = "submit_failed: " + err.Error()
+		} else {
+			result.BracketStatus = bracketStatus
+		}
+	}
+	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+		p.LastMark = mark
+		result.PositionPnL, result.PositionPnLPct = realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+	}
+	_ = m.save()
+	return result, nil
 }
 
 func manageAnchorPrice(p *livePosition) float64 {
@@ -19165,6 +19362,8 @@ func displayEntryReason(reason string) string {
 		return "none"
 	case manualEntryReasonManaged:
 		return "MANUAL_MANAGED"
+	case operatorEntryReason:
+		return "OPERATOR_EXECUTION"
 	default:
 		return strings.TrimSpace(reason)
 	}
@@ -21036,6 +21235,174 @@ func allowedOperatorLeverage(raw string) (int, bool) {
 	}
 }
 
+type operatorOrderRequest struct {
+	Symbol        string
+	Side          string
+	USD           float64
+	LimitPrice    float64
+	StopLoss      float64
+	TakeProfit    float64
+	Leverage      int
+	HasLimit      bool
+	HasStopLoss   bool
+	HasTakeProfit bool
+}
+
+type operatorOrderResult struct {
+	Symbol         string
+	Side           string
+	USD            float64
+	OrderID        int64
+	Status         string
+	Working        bool
+	Filled         bool
+	Rejected       bool
+	Qty            float64
+	AvgPrice       float64
+	LimitPrice     float64
+	StopLoss       float64
+	TakeProfit     float64
+	BracketStatus  string
+	PositionPnL    float64
+	PositionPnLPct float64
+}
+
+func operatorExecutionEnabled() bool {
+	return envBool("LIVE_OPERATOR_EXECUTION_ENABLE", false)
+}
+
+func operatorFillTimeout() time.Duration {
+	sec := envInt("LIVE_OPERATOR_FILL_TIMEOUT_SEC", 15)
+	if sec < 1 {
+		sec = 15
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func operatorFillPoll() time.Duration {
+	ms := envInt("LIVE_OPERATOR_FILL_POLL_MS", 350)
+	if ms < 100 {
+		ms = 350
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func operatorDefaultLeverage() int {
+	if lev, ok := allowedOperatorLeverage(envStr("LIVE_OPERATOR_DEFAULT_LEVERAGE", "")); ok {
+		return lev
+	}
+	return 0
+}
+
+func parseOperatorOrderCommand(rawMsg string) (operatorOrderRequest, error) {
+	fields := strings.Fields(strings.TrimSpace(rawMsg))
+	if len(fields) < 3 {
+		return operatorOrderRequest{}, fmt.Errorf("usage: /long SYMBOL usd=10 [limit=123] [sl=120] [tp=129] [lev=5]")
+	}
+	var req operatorOrderRequest
+	switch strings.ToLower(strings.TrimSpace(fields[0])) {
+	case "/long":
+		req.Side = "BUY"
+	case "/short":
+		req.Side = "SELL"
+	default:
+		return operatorOrderRequest{}, fmt.Errorf("unsupported operator command")
+	}
+	req.Symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+	if req.Symbol == "" {
+		return operatorOrderRequest{}, fmt.Errorf("symbol required")
+	}
+	req.Leverage = operatorDefaultLeverage()
+	for _, field := range fields[2:] {
+		part := strings.TrimSpace(field)
+		if part == "" {
+			continue
+		}
+		if strings.EqualFold(part, "market") {
+			req.HasLimit = false
+			req.LimitPrice = 0
+			continue
+		}
+		key, val, ok := strings.Cut(part, "=")
+		if !ok {
+			return operatorOrderRequest{}, fmt.Errorf("invalid token %q", part)
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return operatorOrderRequest{}, fmt.Errorf("missing value for %s", key)
+		}
+		switch key {
+		case "usd", "usdt", "size", "notional":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid usd value")
+			}
+			req.USD = f
+		case "limit", "price":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid limit price")
+			}
+			req.LimitPrice = f
+			req.HasLimit = true
+		case "sl", "stop", "stoploss":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid stop-loss price")
+			}
+			req.StopLoss = f
+			req.HasStopLoss = true
+		case "tp", "takeprofit":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid take-profit price")
+			}
+			req.TakeProfit = f
+			req.HasTakeProfit = true
+		case "lev", "leverage":
+			lev, ok := allowedOperatorLeverage(val)
+			if !ok {
+				return operatorOrderRequest{}, fmt.Errorf("invalid leverage %q (allowed: 3,5,10,20)", val)
+			}
+			req.Leverage = lev
+		default:
+			return operatorOrderRequest{}, fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if req.USD <= 0 {
+		return operatorOrderRequest{}, fmt.Errorf("usd=... is required")
+	}
+	return req, nil
+}
+
+func operatorOrderHTML(res operatorOrderResult) string {
+	lines := []string{
+		fmt.Sprintf("<b>%s %s</b>", cleanSymbol(res.Symbol), displayPositionSide(res.Side)),
+		fmt.Sprintf("<b>Notional:</b> $%.2f", res.USD),
+		fmt.Sprintf("<b>Order ID:</b> %d", res.OrderID),
+		fmt.Sprintf("<b>Status:</b> %s", firstNonEmpty(strings.ToUpper(strings.TrimSpace(res.Status)), "UNKNOWN")),
+	}
+	if res.LimitPrice > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Limit:</b> %s", fmtPrice(res.LimitPrice)))
+	} else {
+		lines = append(lines, "<b>Execution:</b> MARKET")
+	}
+	if res.Qty > 0 || res.AvgPrice > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Filled Qty:</b> %.6f | <b>Avg:</b> %s", res.Qty, fmtPrice(res.AvgPrice)))
+	}
+	if res.StopLoss > 0 || res.TakeProfit > 0 {
+		lines = append(lines, fmt.Sprintf("<b>TP/SL:</b> tp=%s sl=%s", fmtPrice(res.TakeProfit), fmtPrice(res.StopLoss)))
+	}
+	if strings.TrimSpace(res.BracketStatus) != "" {
+		lines = append(lines, fmt.Sprintf("<b>Bracket:</b> %s", res.BracketStatus))
+	}
+	if res.Filled {
+		lines = append(lines, fmt.Sprintf("<b>Position PnL:</b> %+.2f (%+.2f%%)", res.PositionPnL, res.PositionPnLPct))
+	}
+	return notify.BuildEventHTML("🧾", "OPERATOR ORDER", lines...)
+}
+
 func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string) {
 	if ctx == nil {
 		return
@@ -21205,17 +21572,60 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	fields := strings.Fields(rawMsg)
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
-		return notify.BuildEventHTML("📘", "COMMANDS",
+		lines := []string{
 			"<b>Scanner</b> <code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
 			"<b>Account</b> <code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
-			"<b>Trading:</b> disabled (ground-zero mode)",
-			"<b>More</b> <code>/hotkeys</code>",
-		)
+		}
+		if operatorExecutionEnabled() {
+			lines = append(lines, "<b>Trading</b> <code>/long SYMBOL usd=10 [limit=123] [sl=120] [tp=129]</code> <code>/short SYMBOL usd=10 ...</code>")
+		} else {
+			lines = append(lines, "<b>Trading:</b> disabled (ground-zero mode)")
+		}
+		lines = append(lines, "<b>More</b> <code>/hotkeys</code>")
+		return notify.BuildEventHTML("📘", "COMMANDS", lines...)
 	case strings.HasPrefix(cmd, "/hotkeys"):
+		if operatorExecutionEnabled() {
+			return notify.BuildEventHTML("⌨️", "HOTKEYS",
+				"<code>/long OUSDT usd=10 limit=0.123 sl=0.118 tp=0.129</code>",
+				"<code>/short OUSDT usd=10 limit=0.123 sl=0.126 tp=0.118</code>",
+			)
+		}
 		return notify.BuildEventHTML("⌨️", "HOTKEYS",
 			"Trading hotkeys are disabled in ground-zero mode.",
 			"Use scanner/status commands only.",
 		)
+	case strings.HasPrefix(cmd, "/long "), strings.HasPrefix(cmd, "/short "):
+		if !operatorExecutionEnabled() {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED",
+				"Operator execution is disabled.",
+				"Set LIVE_OPERATOR_EXECUTION_ENABLE=1 to allow /long and /short commands.",
+			)
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED", "Execution manager unavailable")
+		}
+		dryRun, liveEnabled, _ := true, false, false
+		if c.mode != nil {
+			dryRun, liveEnabled, _ = c.mode.snapshot()
+		}
+		if dryRun || !liveEnabled {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED",
+				"Live order entry is not armed.",
+				"Start the bot with LIVE_ENABLE_LIVE_TRADING=1 and LIVE_DRY_RUN=0.",
+			)
+		}
+		req, err := parseOperatorOrderCommand(rawMsg)
+		if err != nil {
+			return notify.BuildEventHTML("❓", "USAGE", err.Error())
+		}
+		res, err := c.execMgr.submitOperatorOrder(req, c.getMeta())
+		if err != nil {
+			return notify.BuildEventHTML("❌", "ORDER FAILED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+				fmt.Sprintf("<b>Reason:</b> %s", err.Error()),
+			)
+		}
+		return operatorOrderHTML(res)
 	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "), strings.HasPrefix(cmd, "/execute "), strings.HasPrefix(cmd, "/trade "), strings.HasPrefix(cmd, "/protect "), strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "), strings.HasPrefix(cmd, "/closeall"), cmd == "/mode live" || cmd == "/live" || cmd == "/mode paper" || cmd == "/paper":
 		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
 			"Ground-zero mode is active.",
