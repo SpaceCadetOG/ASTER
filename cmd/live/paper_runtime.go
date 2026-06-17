@@ -502,13 +502,19 @@ func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candid
 		appendQualityPenalty(acc, "weaker_structure", 0.07)
 	}
 	if isContinuationStrategy(c) && candidateExtendedForBotAdd(c) && !hasFreshStructureReset(c) {
-		appendQualityPenalty(acc, "minor_extension", 0.06)
+		penalty := envFloat("LIVE_MINOR_EXTENSION_PENALTY", 0.03)
+		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
+			c.Entry.CurrentScore >= envFloat("LIVE_MINOR_EXTENSION_ELITE_SCORE_MIN", 96.0) &&
+			(c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || c.Entry.Momentum) {
+			penalty *= envFloat("LIVE_MINOR_EXTENSION_ELITE_PENALTY_FRAC", 0.5)
+		}
+		appendQualityPenalty(acc, "minor_extension", penalty)
 	}
 	if weakOFIForCandidate(c) {
 		appendQualityPenalty(acc, "weak_ofi", 0.06)
 	}
 	if weakSlopeForCandidate(c) {
-		appendQualityPenalty(acc, "weak_slope", 0.06)
+		appendQualityPenalty(acc, "weak_slope", envFloat("LIVE_WEAK_SLOPE_PENALTY", 0.03))
 	}
 	if c.Sig.ConfluenceScore.TotalScore > 0 && c.Sig.ConfluenceScore.TotalScore < envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48) {
 		appendQualityPenalty(acc, "imperfect_confluence", 0.08)
@@ -527,7 +533,13 @@ func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, 
 	case strings.Contains(raw, "late_chase_rapid_expansion"):
 		return "late_chase_rapid_expansion", 0.12, true
 	case strings.Contains(raw, "late_chase_extended_no_reset"), strings.Contains(raw, "late_extension_no_reset"):
-		return "minor_extension", 0.08, true
+		penalty := envFloat("LIVE_MINOR_EXTENSION_REJECT_PENALTY", 0.05)
+		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
+			c.Entry.CurrentScore >= envFloat("LIVE_MINOR_EXTENSION_ELITE_SCORE_MIN", 96.0) &&
+			(c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || c.Entry.Momentum) {
+			penalty *= envFloat("LIVE_MINOR_EXTENSION_ELITE_PENALTY_FRAC", 0.5)
+		}
+		return "minor_extension", penalty, true
 	case strings.Contains(raw, "directional_dayutc_conflict"):
 		if conflicting, magnitude := directionallyConflicting(c, envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)); conflicting {
 			extremePct := maxFloat(envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0)*2.0, envFloat("LIVE_DIRECTIONAL_CONFLICT_PENALTY_PCT", 2.0)+envFloat("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", 3.0))
@@ -546,9 +558,9 @@ func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, 
 	case strings.Contains(raw, "ofi"):
 		return "weak_ofi", 0.06, true
 	case strings.Contains(raw, "weak_slope"), strings.Contains(raw, "late_cycle_short_weak_slope"):
-		return "weak_slope", 0.06, true
+		return "weak_slope", envFloat("LIVE_WEAK_SLOPE_PENALTY", 0.03), true
 	case strings.Contains(raw, "extension"):
-		return "minor_extension", 0.06, true
+		return "minor_extension", envFloat("LIVE_MINOR_EXTENSION_PENALTY", 0.03), true
 	default:
 		return "", 0, false
 	}
@@ -611,12 +623,22 @@ func weakSlopeForCandidate(c candidate) bool {
 	switch strategyFamily(c) {
 	case "ignite":
 		threshold := envFloat("LIVE_IGNITE_MIN_SLOPE", 0.08)
+		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
+			c.Entry.CurrentScore >= envFloat("LIVE_WEAK_SLOPE_ELITE_SCORE_MIN", 95.0) &&
+			(c.Entry.Momentum || c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay) {
+			threshold *= envFloat("LIVE_WEAK_SLOPE_ELITE_THRESHOLD_FRAC", 0.5)
+		}
 		if strings.EqualFold(c.Side, "BUY") {
 			return c.Entry.ScoreSlope < threshold
 		}
 		return c.Entry.ScoreSlope > -threshold
 	case "cont":
 		threshold := envFloat("LIVE_CONT_FAST_MIN_SLOPE", 0.02)
+		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
+			c.Entry.CurrentScore >= envFloat("LIVE_WEAK_SLOPE_ELITE_SCORE_MIN", 95.0) &&
+			(c.Entry.Momentum || c.Entry.State == inplay.StateHeating || c.Entry.State == inplay.StateInPlay) {
+			threshold *= envFloat("LIVE_WEAK_SLOPE_ELITE_THRESHOLD_FRAC", 0.5)
+		}
 		if strings.EqualFold(c.Side, "BUY") {
 			return c.Entry.ScoreSlope < threshold
 		}

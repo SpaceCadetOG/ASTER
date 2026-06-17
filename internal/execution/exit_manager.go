@@ -220,25 +220,6 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.TightenToPrice = breakEvenPlus(in.Side, in.Entry, in.Stop, 0.00)
 		dec.Reason = strongerExitReason(dec.Reason, "instant_be_lock")
 	}
-	if envBoolExit("LIVE_EXIT_WINNER_REVERSION_BLOCK", true) &&
-		in.MFER >= beLockR && in.UnrealizedPct < 0 {
-		dec.ImmediateExit = true
-		dec.ExitNowReason = "winner_reversion_block"
-		dec.Reason = "winner_reversion_block"
-		dec.WinnerLifecycle = string(ResolveWinnerLifecycle(
-			NormalizeWinnerLifecycle(dec.WinnerLifecycle),
-			WinnerLifecycleInput{
-				MaxR:             in.MFER,
-				CurrentR:         currentR,
-				ProofObserved:    winnerProofObserved(in.MFER, currentR, in.AdvancedReady, in.HitTP1, in.HitTP2, in.HitTP3),
-				MatureTrend:      in.MatureTrend,
-				TrailingActive:   in.TrailingActive,
-				WinnerReversion:  true,
-				RealInvalidation: in.RealInvalidation,
-			},
-		))
-		return dec
-	}
 	earlyTrailR := envFloatExit("LIVE_EXIT_EARLY_TRAIL_R", 1.0)
 	if in.MFER >= earlyTrailR {
 		frac := envFloatExit("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", 0.30)
@@ -368,50 +349,6 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		}
 		dec.FullExit = true
 		dec.Reason = "PROFIT_GIVEBACK"
-		return dec
-	}
-	if in.BarsHeld >= m.cfg.NoFollowThroughBars &&
-		in.MFER < m.cfg.NoFollowThroughMinMFER &&
-		in.MAER >= m.cfg.NoFollowThroughMinMAER &&
-		!(in.Sponsored && in.BarsHeld <= m.cfg.SponsorshipGraceMin) {
-		if in.HTFTrendPersistent && !in.HTFTrendFailed {
-			dec.MoveStopToBE = true
-			dec.TightenStop = true
-			tightR := envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.08)
-			if in.HTFCaution {
-				tightR = envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_CAUTION", 0.06)
-			}
-			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
-			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
-			return dec
-		}
-		if earlyContinuationProtect(in) {
-			dec.MoveStopToBE = true
-			dec.TightenStop = true
-			tightR := envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", 0.10)
-			if in.MFER < 0.5 {
-				tightR = envFloatXM("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_WEAK", 0.05)
-			}
-			dec.TightenToPrice = tightenToR(in.Side, in.Entry, in.Stop, tightR)
-			dec.Reason = "NO_FOLLOW_THROUGH_TIGHTEN"
-			return dec
-		}
-		if isStarterOrProof(currentLifecycle) {
-			if in.MFER > 0 {
-				dec.MoveStopToBE = true
-				dec.Reason = firstNonEmptyExit(dec.Reason, "NO_FOLLOW_THROUGH_BE")
-			} else {
-				dec.Reason = firstNonEmptyExit(dec.Reason, "NO_FOLLOW_THROUGH_MONITOR")
-			}
-			return dec
-		}
-		if in.MFER <= 0 && (in.HTFTrendFailed || !softExitManageOnly) {
-			dec.FullExit = true
-			dec.Reason = "NO_FOLLOW_THROUGH"
-			return dec
-		}
-		dec.MoveStopToBE = true
-		dec.Reason = "NO_FOLLOW_THROUGH_BE"
 		return dec
 	}
 	if in.WeakFlow && in.MFER >= m.cfg.WeakFlowArmBER {
@@ -546,12 +483,10 @@ func exitReasonPriority(reason string) int {
 		return 0
 	case "INSTANT_BE_LOCK", "PROTECT_BE_FALLBACK":
 		return 10
-	case "NO_FOLLOW_THROUGH_TIGHTEN", "MOMENTUM_FADE_TIGHTEN", "PROFIT_GIVEBACK_TIGHTEN":
+	case "MOMENTUM_FADE_TIGHTEN", "PROFIT_GIVEBACK_TIGHTEN":
 		return 20
 	case "EARLY_PROFIT_TRAIL":
 		return 30
-	case "WINNER_REVERSION_BLOCK":
-		return 100
 	default:
 		return 15
 	}

@@ -895,18 +895,6 @@ func (t *missedTracker) Update(now time.Time, meta map[string]symbolMeta, longCu
 			continue
 		}
 		opp.Expired = true
-		fmt.Printf("MISSED_OPP_EXPIRE symbol=%s side=%s why=%s seen=%d topn=%d\n",
-			opp.Symbol, opp.Side, expireReason, opp.SeenCount, opp.TopNCount)
-		if log != nil {
-			log.Emit(stats.Event{
-				Timestamp: now,
-				Type:      "MISSED_OPP_EXPIRE",
-				Symbol:    opp.Symbol,
-				Side:      opp.Side,
-				Reason:    expireReason,
-				Combined:  opp.BestRank,
-			})
-		}
 		delete(t.opp, key)
 	}
 }
@@ -1270,9 +1258,6 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 				return reason
 			}
 		}
-		if execMgr.ladderCfg.OneSymbolOnly && !execMgr.HasActiveSymbol(c.Entry.Symbol) && execMgr.ActiveCount() > 0 {
-			return "one_symbol_only_active"
-		}
 	}
 	if !pureMode {
 		if reason := safetyReject(safety, c, localMaintNow, lastOrderAt, lastOrderBySymbol, lastOrderBySymbolSide, orderCountByDay, orderCountByHour, symbolStopoutLockUntil); reason != "" {
@@ -1287,33 +1272,11 @@ func quickCandidateSelectionReject(c candidate, now time.Time, pureMode, allowDe
 	return ""
 }
 
-func oneSymbolOnlyEarlyReject(c candidate, execMgr *liveExecManager) string {
-	if execMgr == nil || !execMgr.ladderCfg.OneSymbolOnly {
-		return ""
-	}
-	if execMgr.ActiveCount() <= 0 || execMgr.HasActiveSymbol(c.Entry.Symbol) {
-		return ""
-	}
-	return "one_symbol_only_active"
-}
-
 func prefilterCandidatesBeforeExpensiveWork(cands []candidate, execMgr *liveExecManager) ([]candidate, map[string]string) {
-	if len(cands) == 0 {
+	if len(cands) == 0 || execMgr == nil {
 		return cands, nil
 	}
-	filtered := make([]candidate, 0, len(cands))
-	rejected := map[string]string{}
-	for _, c := range cands {
-		if reason := oneSymbolOnlyEarlyReject(c, execMgr); reason != "" {
-			rejected[strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))] = reason
-			continue
-		}
-		filtered = append(filtered, c)
-	}
-	if len(rejected) == 0 {
-		return cands, nil
-	}
-	return filtered, rejected
+	return cands, nil
 }
 
 func paperMarkLastPrices(m symbolMeta, ob aster.OrderBook, model string, divBps float64) (float64, float64) {
@@ -1402,7 +1365,7 @@ func categorizeMissReason(reason string) string {
 	switch {
 	case r == "":
 		return "uncategorized"
-	case strings.Contains(r, "not_selected"), strings.Contains(r, "candidate_not_ready"), strings.Contains(r, "candidate_expired"):
+	case strings.Contains(r, "not_selected"), strings.Contains(r, "candidate_expired"):
 		return "architecture_miss"
 	case strings.Contains(r, "spread"), strings.Contains(r, "execution"), strings.Contains(r, "insufficient"), strings.Contains(r, "active"):
 		return "execution_miss"
@@ -1589,9 +1552,6 @@ func deepQueuePreflight(c candidate, ctx queueDeepPreflightCtx) queueDeepPreflig
 	}
 	if !ctx.PureMode && inEventLockout(ctx.Now, ctx.EventLockoutMin) {
 		return queueDeepPreflightResult{RejectReason: "event_lockout", SpreadBps: spreadBps, BookImb: bookImb}
-	}
-	if !ctx.PureMode && isCorrelatedExposureTooHigh(c, ctx.Acct, ctx.CorrGroups, ctx.MaxCorrelatedExposure) {
-		return queueDeepPreflightResult{RejectReason: "correlated_exposure_gate", SpreadBps: spreadBps, BookImb: bookImb}
 	}
 	if !ctx.PureMode && ctx.RequireShadowDays > 0 && !shadowReady(ctx.RequireShadowDays, ctx.ShadowEquityFile, ctx.Now) {
 		return queueDeepPreflightResult{RejectReason: "shadow_gate_active", SpreadBps: spreadBps, BookImb: bookImb}

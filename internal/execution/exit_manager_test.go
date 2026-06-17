@@ -1,9 +1,6 @@
 package execution
 
-import (
-	"math"
-	"testing"
-)
+import "testing"
 
 func TestFrontRunTarget(t *testing.T) {
 	m := NewManager(Config{FrontRunPct: 0.001})
@@ -34,101 +31,6 @@ func TestEvaluateProtectLiqSpikePartial(t *testing.T) {
 	})
 	if dec.PartialExitPct <= 0 {
 		t.Fatalf("expected partial exit on liquidation spike")
-	}
-}
-
-func TestEvaluateProtectNoFollowThrough(t *testing.T) {
-	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "0")
-	m := NewManager(Config{NoFollowThroughBars: 6, NoFollowThroughMinMFER: 0.3, NoFollowThroughMinMAER: 0.8})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.6, BarsHeld: 8, MFER: 0.0, MAER: 1.0, WinnerLifecycle: "failed",
-	})
-	if !dec.FullExit || dec.Reason != "NO_FOLLOW_THROUGH" {
-		t.Fatalf("expected full pre-stop invalidation exit, got %+v", dec)
-	}
-}
-
-func TestEvaluateProtectNoFollowThroughTightensAfterEarlyProof(t *testing.T) {
-	t.Setenv("LIVE_EARLY_CONTINUATION_MIN_R", "0.35")
-	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", "0.10")
-	m := NewManager(Config{
-		NoFollowThroughBars:    6,
-		NoFollowThroughMinMFER: 0.3,
-		NoFollowThroughMinMAER: 0.8,
-	})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side:          "BUY",
-		Entry:         100,
-		Stop:          98,
-		Mark:          99.6,
-		BarsHeld:      8,
-		MFER:          0.20,
-		MAER:          1.0,
-		AdvancedReady: true,
-	})
-	if dec.FullExit {
-		t.Fatalf("expected tighten, not full exit: %+v", dec)
-	}
-	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "NO_FOLLOW_THROUGH_TIGHTEN" {
-		t.Fatalf("expected no-follow-through tighten decision, got %+v", dec)
-	}
-}
-
-func TestEvaluateProtectNoFollowThroughUsesHTFCautionTighten(t *testing.T) {
-	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R", "0.08")
-	t.Setenv("LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R_CAUTION", "0.06")
-	m := NewManager(Config{
-		NoFollowThroughBars:    6,
-		NoFollowThroughMinMFER: 0.3,
-		NoFollowThroughMinMAER: 0.8,
-	})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side:               "BUY",
-		Entry:              100,
-		Stop:               98,
-		Mark:               99.6,
-		BarsHeld:           8,
-		MFER:               0.20,
-		MAER:               1.0,
-		HTFTrendPersistent: true,
-		HTFTrendFailed:     false,
-		HTFCaution:         true,
-	})
-	if dec.FullExit {
-		t.Fatalf("expected tighten with HTF caution, not full exit: %+v", dec)
-	}
-	if !dec.TightenStop || !dec.MoveStopToBE || dec.Reason != "NO_FOLLOW_THROUGH_TIGHTEN" {
-		t.Fatalf("expected no-follow-through tighten decision with HTF caution, got %+v", dec)
-	}
-	expected := 99.88 // tightenToR(BUY,100,98,0.06)
-	if math.Abs(dec.TightenToPrice-expected) > 1e-9 {
-		t.Fatalf("expected caution tighten price %.8f, got %.8f", expected, dec.TightenToPrice)
-	}
-}
-
-func TestEvaluateProtectNoFollowThroughManageOnlyNoFullExitWhenHTFNotFailed(t *testing.T) {
-	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "1")
-	m := NewManager(Config{
-		NoFollowThroughBars:    6,
-		NoFollowThroughMinMFER: 0.3,
-		NoFollowThroughMinMAER: 0.8,
-	})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side:               "BUY",
-		Entry:              100,
-		Stop:               98,
-		Mark:               99.2,
-		BarsHeld:           8,
-		MFER:               0.0,
-		MAER:               1.0,
-		HTFTrendPersistent: false,
-		HTFTrendFailed:     false,
-	})
-	if dec.FullExit {
-		t.Fatalf("expected manage-only soft signal to avoid full exit when HTF not failed: %+v", dec)
-	}
-	if dec.MoveStopToBE {
-		t.Fatalf("expected starter immunity to monitor instead of forcing BE with no proof, got %+v", dec)
 	}
 }
 
@@ -309,21 +211,6 @@ func TestEvaluateProtect_InstantBELockAtHalfR(t *testing.T) {
 	}
 }
 
-func TestEvaluateProtect_WinnerReversionBlock(t *testing.T) {
-	t.Setenv("LIVE_EXIT_WINNER_REVERSION_BLOCK", "true")
-	t.Setenv("LIVE_EXIT_BE_LOCK_R", "0.5")
-	m := NewManager(Config{})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side: "BUY", Entry: 100, Stop: 98, Mark: 99.5, MFER: 0.7, UnrealizedPct: -0.2,
-	})
-	if !dec.ImmediateExit {
-		t.Fatalf("expected immediate exit on winner reversion, got %+v", dec)
-	}
-	if dec.ExitNowReason != "winner_reversion_block" {
-		t.Fatalf("expected winner_reversion_block reason, got %+v", dec)
-	}
-}
-
 func TestEvaluateProtect_EarlyTrailMonotonic(t *testing.T) {
 	t.Setenv("LIVE_EXIT_EARLY_TRAIL_R", "1.0")
 	t.Setenv("LIVE_EXIT_EARLY_TRAIL_LOCK_FRAC", "0.30")
@@ -367,41 +254,10 @@ func TestStrongerExitReason_PrefersTrailOverBE(t *testing.T) {
 	}
 }
 
-func TestStrongerExitReason_WinnerReversionBlockDominates(t *testing.T) {
-	got := strongerExitReason("early_profit_trail", "winner_reversion_block")
-	if got != "winner_reversion_block" {
-		t.Fatalf("expected winner_reversion_block, got %q", got)
-	}
-}
-
 func TestStrongerExitReason_DoesNotDowngradeTrailToFallback(t *testing.T) {
 	got := strongerExitReason("early_profit_trail", "PROTECT_BE_FALLBACK")
 	if got != "early_profit_trail" {
 		t.Fatalf("expected early_profit_trail, got %q", got)
-	}
-}
-
-func TestEvaluateProtect_StarterAndProofSoftSignalsDoNotHardClose(t *testing.T) {
-	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "0")
-	m := NewManager(Config{
-		NoFollowThroughBars:    6,
-		NoFollowThroughMinMFER: 0.3,
-		NoFollowThroughMinMAER: 0.8,
-	})
-	for _, stage := range []string{"starter", "proof_armed"} {
-		dec := m.EvaluateProtect(ProtectInput{
-			Side:            "BUY",
-			Entry:           100,
-			Stop:            98,
-			Mark:            99.2,
-			BarsHeld:        8,
-			MFER:            0.10,
-			MAER:            1.0,
-			WinnerLifecycle: stage,
-		})
-		if dec.FullExit {
-			t.Fatalf("expected %s to avoid hard close on soft signal, got %+v", stage, dec)
-		}
 	}
 }
 
@@ -425,27 +281,5 @@ func TestEvaluateProtect_WinnerLockedSoftExitConvertsToTighten(t *testing.T) {
 	}
 	if !dec.TightenStop {
 		t.Fatalf("expected winner_locked soft exit to tighten, got %+v", dec)
-	}
-}
-
-func TestEvaluateProtect_RunnerSoftSignalsDoNotHardClose(t *testing.T) {
-	t.Setenv("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", "0")
-	m := NewManager(Config{
-		NoFollowThroughBars:    6,
-		NoFollowThroughMinMFER: 0.3,
-		NoFollowThroughMinMAER: 0.8,
-	})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side:            "BUY",
-		Entry:           100,
-		Stop:            98,
-		Mark:            100.2,
-		BarsHeld:        8,
-		MFER:            1.4,
-		MAER:            1.0,
-		WinnerLifecycle: "runner",
-	})
-	if dec.FullExit {
-		t.Fatalf("expected runner soft signal to avoid hard close, got %+v", dec)
 	}
 }

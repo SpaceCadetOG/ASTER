@@ -60,23 +60,3 @@ func TestResolveWinnerLifecycleFailsOnlyFromWinnerStates(t *testing.T) {
 		t.Fatalf("expected runner invalidation to fail, got %s", stage)
 	}
 }
-
-func TestEvaluateProtectMarksWinnerReversionAsFailed(t *testing.T) {
-	t.Setenv("LIVE_EXIT_BE_LOCK_R", "0.5")
-	m := NewManager(Config{})
-	dec := m.EvaluateProtect(ProtectInput{
-		Side:            "BUY",
-		Entry:           100,
-		Stop:            98,
-		Mark:            99.5,
-		MFER:            0.8,
-		UnrealizedPct:   -0.5,
-		WinnerLifecycle: string(WinnerLifecycleWinnerLocked),
-	})
-	if !dec.ImmediateExit || dec.ExitNowReason != "winner_reversion_block" {
-		t.Fatalf("expected winner_reversion_block immediate exit, got %+v", dec)
-	}
-	if dec.WinnerLifecycle != string(WinnerLifecycleFailed) {
-		t.Fatalf("expected failed lifecycle, got %s", dec.WinnerLifecycle)
-	}
-}
