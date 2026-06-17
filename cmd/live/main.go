@@ -295,7 +295,6 @@ type runtimeProfileConfig struct {
 	EffectiveCandidateMemory  bool
 	EffectiveTriggerMemory    bool
 	EffectiveSharedManagement bool
-	EffectiveNoProofTimeout   bool
 }
 
 type positionView struct {
@@ -951,7 +950,6 @@ const (
 
 const (
 	blockedMaintenanceWindowReason        = "BLOCKED_MAINTENANCE_WINDOW"
-	blockedForceFlatWindowReason          = "BLOCKED_FORCE_FLAT_WINDOW"
 	degradedAccountHealthPartialReason    = "DEGRADED_ACCOUNT_HEALTH_PARTIAL"
 	degradedUserDataStaleReason           = "DEGRADED_USERDATA_STALE"
 	degradedReconcileStaleReason          = "DEGRADED_RECONCILE_STALE"
@@ -2649,16 +2647,11 @@ func main() {
 				st.TopSlope = best.Entry.ScoreSlope
 				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_manual_execution"
-				if emitTerminal {
-					fmt.Printf("live: scanner-only top %s side=%s grade=%s score=%.2f slope=%.3f state=%s\n",
-						best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.State)
-				}
+				st.TopRejectReason = ""
 			} else {
 				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_no_candidates"
-				if emitTerminal {
-					fmt.Println("live: scanner-only no candidates")
-				}
+				st.TopRejectReason = ""
 			}
 			publishStatus(st)
 			waitAndReport()
@@ -4838,7 +4831,7 @@ func colorReasonTag(reason string) string {
 		return r
 	case "BOS_PB", "LSR", "OB_R", "FVG_C":
 		return r
-	case "MOMENTUM_FADE", "PRE_EOD_MOMENTUM_FADE":
+	case "MOMENTUM_FADE":
 		return r
 	case "SL", "STOP", "TRAIL_STOP", "EOD_FORCE_FLAT", "TG_FORCE_FLAT":
 		return r
@@ -5005,40 +4998,6 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	if adv > p.MaxAdverseR {
 		p.MaxAdverseR = adv
 	}
-}
-
-func noProofTimeoutMinutes() time.Duration {
-	mins := envInt("NO_PROOF_TIMEOUT_MINUTES", 10)
-	if mins <= 0 {
-		mins = 10
-	}
-	return time.Duration(mins) * time.Minute
-}
-
-func noProofMinR() float64 {
-	minR := envFloat("NO_PROOF_MIN_R", 0.15)
-	if minR <= 0 {
-		minR = 0.15
-	}
-	return minR
-}
-
-func noProofTimeoutTriggered(openedAt, now time.Time, maxFavorableR float64) bool {
-	if openedAt.IsZero() {
-		return false
-	}
-	return now.Sub(openedAt) >= noProofTimeoutMinutes() && maxFavorableR < noProofMinR()
-}
-
-func noProofTightenStop(side string, entry, currentStop, mark float64) (float64, bool) {
-	if entry <= 0 || mark <= 0 {
-		return currentStop, false
-	}
-	target := entry + (mark-entry)*0.5
-	if strings.EqualFold(side, "SELL") {
-		target = entry - (entry-mark)*0.5
-	}
-	return improvedStopPrice(side, currentStop, target)
 }
 
 func paperProtectionState(pos *paperPosition) string {
@@ -6367,9 +6326,6 @@ func runtimeMaintenanceWindows() []maintenanceWindow {
 }
 
 func blockedWindowReason(w maintenanceWindow) string {
-	if w.ForceFlat {
-		return blockedForceFlatWindowReason
-	}
 	return blockedMaintenanceWindowReason
 }
 
@@ -10916,36 +10872,6 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
-			if noProofTimeoutTriggered(p.CreatedAt, now, p.MaxFavorableR) {
-				logExitAudit(
-					p.Symbol,
-					firstNonEmpty(strings.TrimSpace(p.EntryStrategyID), strings.TrimSpace(p.EntryReason)),
-					"NO_PROOF_TIMEOUT",
-					"NO_PROOF_TIMEOUT",
-					m.stopTriggerRef,
-					mark,
-					p.StopPrice,
-					p.MaxFavorableR,
-					-p.MaxAdverseR,
-					liveProtectionState(p),
-					p.EntryTiming,
-					true,
-					p.MaxFavorableR >= winnerProofR() && p.ProtectedStop != 0,
-					p.MaxFavorableR >= winnerProofR() && !p.Protected && !hasLiveProtectiveOrder(p),
-				)
-				_ = m.cancelRemainingExits(p)
-				if err := m.submitCloseLimit(p, p.RemainingQty, "NO_PROOF_TIMEOUT", "CLOSE"); err == nil {
-					changed = true
-					return changed, nil
-				}
-				if tightenedStop, tightened := noProofTightenStop(p.Side, p.EntryPrice, p.StopPrice, mark); tightened {
-					p.StopReason = "NO_PROOF_TIMEOUT_TIGHTEN"
-					p.StopPrice = tightenedStop
-					if err := m.placeOrReplaceStop(p); err == nil {
-						changed = true
-					}
-				}
-			}
 			if m.updateLiveTargetHits(p, mark) {
 				changed = true
 			}
@@ -11080,8 +11006,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					changed = true
 				}
 				if mv.ImmediateExit {
-					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
-					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block")
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
+					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT")
 					_ = m.cancelRemainingExits(p)
 					if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
 						changed = true
@@ -12565,8 +12491,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				changed = true
 			}
 			if dec.ImmediateExit {
-				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
-				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
+				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT")
 				_ = m.cancelRemainingExits(p)
 				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
 					changed = true
@@ -13254,7 +13180,7 @@ func paperDegradedHoldExitReason(now time.Time, pos *paperPosition, mark float64
 	if pos.HitTP1 || pos.MaxFavorableR >= 0.75 || upnlPct > 0 {
 		return "MOMENTUM_FADE"
 	}
-	return "NO_FOLLOW_THROUGH"
+	return ""
 }
 
 func paperAdvancedReady(pos *paperPosition) bool {
@@ -13312,7 +13238,7 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		}
 	}
 	if dec.ImmediateExit {
-		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT")
 		dec.Reason = reason
 		logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
@@ -13886,10 +13812,6 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		rememberPaperPositionMark(pos, now, paperMarkResolution{Mark: mark, Source: firstNonEmpty(markRes.Source, "mark"), Symbol: markRes.Symbol, Meta: m, Book: markRes.Book})
 		updateFavorableRPaper(pos, mark)
-		if noProofTimeoutTriggered(pos.OpenedAt, now, pos.MaxFavorableR) {
-			p.exitPortion(now, pos, "NO_PROOF_TIMEOUT", mark, pos.Qty, meta[raw], depth[raw])
-			continue
-		}
 		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
 		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
 			pos.Stop = newStop
@@ -13996,7 +13918,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			}
 			if dec.ImmediateExit {
 				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
 				continue
 			}
 			if dec.FullExit {
@@ -14324,7 +14246,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			}
 			if dec.ImmediateExit {
 				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, markRes.Book)
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), mark, pos.Qty, m, markRes.Book)
 				changed = true
 				continue
 			}
@@ -14570,7 +14492,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		-pos.MaxAdverseR,
 		paperProtectionState(pos),
 		pos.EntryTiming,
-		reasonU == "NO_PROOF_TIMEOUT",
+		false,
 		protectedAfterProof,
 		winnerRevertedUnprotected,
 	)
@@ -14614,7 +14536,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
 	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
 		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin,
-		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), reasonU == "NO_PROOF_TIMEOUT")
+		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), false)
 	if p.onExit != nil {
 		loc := p.reportLoc
 		if loc == nil {
@@ -17313,10 +17235,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			continue
 		}
 		pRaw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
-		if cfg.OneSymbolOnly && execMgr.isActive(p) && p.RemainingQty > 0 && pRaw != raw {
-			plan.RejectReason = "one_symbol_only_active"
-			return plan
-		}
 		if pRaw == raw {
 			if execMgr.isActive(p) && p.RemainingQty > 0 {
 				activeSame = p
@@ -17328,10 +17246,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 	if activeSame != nil {
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
-			return plan
-		}
-		if !botManagedPosition(activeSame) {
-			plan.RejectReason = "manual_position_active"
 			return plan
 		}
 		if activeSame.PendingAddOrderID > 0 {
@@ -19356,9 +19270,6 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 }
 
 func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64) string {
-	if shouldExitOnMomentumFade(side, mv, 0.0) {
-		return "PRE_EOD_MOMENTUM_FADE"
-	}
 	if upnlPct <= upnlPctMax {
 		return "PRE_EOD_WEAK_PNL"
 	}
@@ -21941,7 +21852,6 @@ func resolveRuntimeProfileConfig() runtimeProfileConfig {
 		EffectiveCandidateMemory:  envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
 		EffectiveTriggerMemory:    true,
 		EffectiveSharedManagement: false,
-		EffectiveNoProofTimeout:   noProofTimeoutMinutes() > 0,
 	}
 	switch cfg.Name {
 	case runtimeProfilePaperContinuationClean:
@@ -21954,7 +21864,6 @@ func resolveRuntimeProfileConfig() runtimeProfileConfig {
 		cfg.EffectiveCandidateMemory = true
 		cfg.EffectiveTriggerMemory = true
 		cfg.EffectiveSharedManagement = true
-		cfg.EffectiveNoProofTimeout = true
 	}
 	return cfg
 }
@@ -22021,10 +21930,6 @@ func effectiveSharedManagementEnabled() bool {
 	return resolveRuntimeProfileConfig().EffectiveSharedManagement
 }
 
-func effectiveNoProofTimeoutEnabled() bool {
-	return resolveRuntimeProfileConfig().EffectiveNoProofTimeout
-}
-
 func effectiveDirectionalConflictPenaltyOnly() bool {
 	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
 }
@@ -22036,7 +21941,7 @@ func effectiveDirectionalConflictExtremeOnly() bool {
 func effectiveRuntimeProfileSummary() string {
 	cfg := resolveRuntimeProfileConfig()
 	return fmt.Sprintf(
-		"runtime_profile=%s | effective_strategy_paths=vp=%t,institutional_pa=%t,reversal=%t,impulse=%t,unresolved_watch=%t,unresolved_execution=%t | effective_quality_policy=penalty_based=%t,require_structure=%t,directional_conflict_penalty_only=%t,extreme_conflict_hard_block=%t | effective_reentry_policy=enabled=%t | effective_management_policy=shared=%t,no_proof_timeout=%t,trigger_memory=%t,candidate_memory=%t",
+		"runtime_profile=%s | effective_strategy_paths=vp=%t,institutional_pa=%t,reversal=%t,impulse=%t,unresolved_watch=%t,unresolved_execution=%t | effective_quality_policy=penalty_based=%t,require_structure=%t,directional_conflict_penalty_only=%t,extreme_conflict_hard_block=%t | effective_reentry_policy=enabled=%t | effective_management_policy=shared=%t,trigger_memory=%t,candidate_memory=%t",
 		firstNonEmpty(strings.TrimSpace(string(cfg.Name)), "none"),
 		cfg.EffectiveVPEnabled,
 		cfg.EffectiveInstitutional,
@@ -22050,7 +21955,6 @@ func effectiveRuntimeProfileSummary() string {
 		effectiveDirectionalConflictExtremeOnly(),
 		cfg.EffectiveReentry,
 		cfg.EffectiveSharedManagement,
-		cfg.EffectiveNoProofTimeout,
 		cfg.EffectiveTriggerMemory,
 		cfg.EffectiveCandidateMemory,
 	)
@@ -22454,12 +22358,12 @@ func classifyRejectReason(reason string) RejectClass {
 		strings.Contains(raw, "account"), strings.Contains(raw, "balance"), strings.Contains(raw, "transfer"),
 		strings.Contains(raw, "position_check_error"), strings.Contains(raw, "order_error"):
 		return rejectClassCapacity
-	case strings.Contains(raw, "cooldown"), strings.Contains(raw, "one_symbol_only"),
-		strings.Contains(raw, "max_open"), strings.Contains(raw, "manual_position_active"),
+	case strings.Contains(raw, "cooldown"),
+		strings.Contains(raw, "max_open"),
 		strings.Contains(raw, "pending_add_order"), strings.Contains(raw, "symbol_active_opposite_side"),
 		strings.Contains(raw, "reentry_"),
 		strings.Contains(raw, "intent_dedupe"), strings.Contains(raw, "shadow_gate_active"),
-		strings.Contains(raw, "event_lockout"), strings.Contains(raw, "correlated_exposure_gate"),
+		strings.Contains(raw, "event_lockout"),
 		strings.Contains(raw, "throttle_"), strings.Contains(raw, "post_sl_cooldown"),
 		strings.Contains(raw, "max_tracked_entries"):
 		return rejectClassStateCooldown
