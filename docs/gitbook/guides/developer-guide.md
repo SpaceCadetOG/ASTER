@@ -2,27 +2,28 @@
 
 ## What this system is
 
-ASTER is a scanner-driven perp trading system centered on `cmd/live`.
+ASTER is a self-contained perp trading runtime centered on `cmd/live`.
 
 Today the production shape is:
-- scanner-first
+- self-contained `cmd/live` scanner/runtime
 - fixed-size entries
 - no pyramiding by default
 - Telegram-operated
 - host-deployed with manual runtime control during the GCP transition
 
 The bot is designed to:
-- rank markets with `cmd/long` and `cmd/short`
-- trade the best live setups through `cmd/live`
+- rank markets inside `cmd/live`
+- expose standalone scanner products through `cmd/long` and `cmd/short`
+- manage the best runtime-selected setups through `cmd/live`
 - manage manual handoffs through Telegram
 - maintain the perp balance around a target account size
 
 ## Runtime entry points
 
 Main commands:
-- `cmd/live`: production paper/live runtime
-- `cmd/long`: long scanner
-- `cmd/short`: short scanner
+- `cmd/live`: canonical production runtime
+- `cmd/long`: standalone long scanner / dashboard
+- `cmd/short`: standalone short scanner / dashboard
 - `cmd/backtest`: historical simulation
 - `cmd/exec`: direct exchange/auth/account checks
 
@@ -66,19 +67,19 @@ The design goal is:
 - avoid turning a strong winner into a small realized win
 - still keep the bot disciplined on reversals
 
-## How a bot trade flows
+## How the runtime flows
 
-1. `cmd/long` and `cmd/short` produce ranked boards.
-2. `cmd/live` consumes those boards and filters opportunities.
-3. The risk shell rejects unsafe or low-quality candidates.
-4. A starter order is placed.
-5. The stop engine calculates a legal protective stop.
-6. The trade is managed with:
-   - stop updates
-   - runner logic
-   - re-entry logic
-   - reduce-only limit exits
-7. Realized profit can be swept from perp to spot.
+1. `cmd/live` fetches market data directly from Aster.
+2. `cmd/live` runs its own scanner worker and maintains in-memory scanner state.
+3. `cmd/live` builds a watch set, selects candidates, and enriches them.
+4. Shared strategy/risk components are used inside the runtime path.
+5. Execution/protection machinery manages brackets, stops, reconcile, and exits.
+6. Status, Telegram, and persistence remain part of the production runtime.
+
+Current runtime posture:
+- autonomous entry logic exists in the codebase
+- the active production posture is currently manual-only / ground-zero mode
+- autonomous paper/live reactivation is a future staged revalidation task
 
 ## How manual trade management works
 
@@ -114,6 +115,9 @@ Important Telegram controls:
 
 Base symbols are resolved where supported, so commands like `/protect BULLA`
 should resolve against `BULLAUSDT`.
+
+Manual trade management and operator surfaces remain part of the accepted
+production architecture.
 
 ## Funds maintenance
 
@@ -190,6 +194,9 @@ go run ./cmd/long
 go run ./cmd/short
 ```
 
+These local scanners are useful standalone products. They are not required
+upstream runtime dependencies for `cmd/live`.
+
 ### Validate exchange auth
 
 ```bash
@@ -211,7 +218,8 @@ go run ./cmd/exec
 
 ## Current operator assumptions
 
-- the bot is trusted to trade its own setups
+- `cmd/live` is the canonical production runtime
+- the current active posture is manual-only / ground-zero mode
 - manual trades can be handed off and managed like bot trades
 - BTC, ETH, and SOL are tradable unless explicitly placed in
   `LIVE_CONTEXT_ONLY_SYMBOLS`
