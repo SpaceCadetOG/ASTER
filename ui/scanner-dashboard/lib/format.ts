@@ -32,6 +32,17 @@ export function formatUsd(value: number | null | undefined, digits = 2): string 
   }).format(value);
 }
 
+export function formatSignedUsd(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "N/A";
+  }
+  const formatted = formatUsd(Math.abs(value), digits);
+  if (formatted === "N/A") return formatted;
+  if (value > 0) return `+${formatted}`;
+  if (value < 0) return `−${formatted}`;
+  return formatted;
+}
+
 export function formatPercent(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "N/A";

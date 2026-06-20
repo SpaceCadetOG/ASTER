@@ -31,16 +31,89 @@ Total unique env knobs referenced by `live`: **407**
 
 Notes:
 - Defaults shown exactly as the code uses them, with a few expression-based defaults normalized for readability.
-- `LIVE_PAPER_*` knobs only affect the paper simulator that runs inside `live` when `LIVE_DRY_RUN=true` and `LIVE_PAPER_ENABLE=true`.
+- `LIVE_PAPER_*` knobs only affect the paper simulator that runs inside `live` when paper mode is active.
 - Shared exit knobs are read by both the live executor and the paper engine.
+- Phase 9 staging note:
+  - the env baseline is being normalized now so Secret Manager hardening can
+    secure secret-bearing values later without changing runtime semantics.
 
 ## Core Runtime And Sizing
+
+- Minimal official paper-validation starter block:
+  - `ASTER_CONFIG=/etc/aster/.aster.yaml`
+  - `ASTER_LOG_DIR=/opt/aster/logs`
+  - `LIVE_STATE_DIR=/opt/aster/state`
+  - `LIVE_RUNTIME_MODE=paper`
+  - `LIVE_DRY_RUN=1`
+  - `LIVE_ENABLE_LIVE_TRADING=0`
+  - `LIVE_PAPER_ENABLE=1`
+  - `LIVE_EVENTS_ENABLE=1`
+  - `LIVE_EVENTS_LOG=events.jsonl`
+- Recommended official paper-validation additions:
+  - `LIVE_SCAN_SEC=10`
+  - `LIVE_WATCHER_SEC=1`
+  - `LIVE_PRIORITY_WATCH_EVERY_SEC=1`
+  - `LIVE_DECISION_MS=250`
+  - `LIVE_PERF_LOG_ENABLE=1`
+  - `LIVE_SHOW_ACCOUNT=0`
+  - `LIVE_PERSISTENCE_OVERRIDE_ENABLE=0`
+  - `LIVE_PERSISTENCE_ENTRY_ENABLE=0`
+  - `LIVE_MAX_OPEN_POS=3`
+  - `LIVE_MAX_OPEN_PER_SIDE=2`
+  - `LIVE_MAX_ORDERS_PER_DAY=12`
+  - `LIVE_MAX_ORDERS_PER_HOUR=4`
+  - `LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY=3`
+  - `LIVE_ORDER_COOLDOWN_SEC=20`
+  - `LIVE_SYMBOL_COOLDOWN_SEC=90`
+  - `LIVE_SYMBOL_COOLDOWN_SAME_SIDE_SEC=60`
+  - `LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC=60`
+  - `LIVE_MIN_AVAILABLE_USDT=0`
+  - `LIVE_MAX_SPREAD_BPS=25`
+  - `LIVE_OB_MAX_SPREAD_BPS=25`
+  - `LIVE_MAX_DAILY_LOSS_PCT=3.0`
+  - `LIVE_SYMBOL_STOPOUT_COUNT=1`
+  - `LIVE_SYMBOL_STOPOUT_LOCK_MIN=60`
+  - `LIVE_TRADE_MARGIN_USDT=10`
+  - `LIVE_ENTRY_STARTER_USDT=10`
+  - `LIVE_PYRAMID_STEP_USDT=0`
+  - `LIVE_PYRAMID_MAX_TOTAL_USDT=30`
+  - `LIVE_BE_REQUIRE_TP1_OR_MIN_UPNL=1`
+  - `LIVE_BE_MIN_UPNL_PCT=5.0`
+  - `LIVE_EARLY_CONTINUATION_MIN_R=0.35`
+  - `LIVE_EARLY_CONTINUATION_MIN_HOLD_MIN=8`
+  - `LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R=0.10`
+  - `LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN=20`
+  - `LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT=true`
+  - `LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA=7.5`
+  - `LIVE_MAINT1_ENABLE=0`
+  - `LIVE_MAINT_EOD_ENABLE=0`
+- Optional short exploratory discovery diff:
+  - `LIVE_MAX_OPEN_POS=5`
+  - `LIVE_MAX_OPEN_PER_SIDE=3`
+  - `LIVE_MAX_ORDERS_PER_DAY=20`
+  - `LIVE_MAX_ORDERS_PER_HOUR=6`
+  - `LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY=5`
+  - `LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC=30`
+- Secret-bearing values intentionally excluded from the baseline env example:
+  - `EXEC_BASE_URL`
+  - `ASTER_AUTH_MODE`
+  - wallet / signer / private-key values
+  - Telegram token / chat identifiers
+- Parsed or historical Pi flags intentionally excluded because code verification
+  shows they are currently inert or live-only in the restored paper-auto path:
+  - `LIVE_REQUIRE_STRATEGY_MATCH`
+  - `LIVE_META_GATE_ENABLE`
+  - `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH`
+  - `LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH`
+  - `LIVE_A_PLUS_FASTLANE_ENABLE`
+  - `LIVE_PAPER_SYNC_WITH_LIVE`
 
 - `LIVE_ALLOW_SHORTS`: default `true`
 - `LIVE_DRY_RUN`: default `true`
 - `LIVE_ENABLE_LIVE_TRADING`: default `false`
-- For cautious validation, prefer `scripts/run_live_logged.sh` with `LIVE_LAUNCH_MODE=paper`.
-- For live operation, prefer `scripts/run_live_logged.sh` with `LIVE_LAUNCH_MODE=live`.
+- `LIVE_RUNTIME_MODE`: operator-facing modes are `paper` and `live`; default follows the current dry-run/live posture
+- For cautious validation, prefer `LIVE_RUNTIME_MODE=paper`, `LIVE_DRY_RUN=1`, and `LIVE_ENABLE_LIVE_TRADING=0`.
+- `LIVE_LAUNCH_MODE` remains only as a wrapper convenience for `scripts/run_live_logged.sh`; it is not the runtime's autonomous paper-entry switch.
 - `LIVE_ENTRY_OFFSET_BPS`: default `2`
 - `LIVE_GRADE_TOP_N`: default `6`
 - `LIVE_KILL_CLOSE_POSITIONS`: default `false`

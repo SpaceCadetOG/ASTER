@@ -268,6 +268,27 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.account-hero-list {
+  display: grid;
+  gap: 8px;
+}
+
+.account-hero-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.account-hero-row span {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.account-hero-row strong {
+  text-align: right;
+}
+
 .tabs,
 .subtabs,
 .session-pills,
@@ -581,7 +602,7 @@ pre {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   text-align: left;
   vertical-align: top;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
 }
 
 .table th {
@@ -616,11 +637,13 @@ pre {
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
+  width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
+  text-align: left;
 }
 
 .table-link small {
@@ -630,7 +653,49 @@ pre {
 }
 
 .table-link strong {
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+.paper-asset-link small,
+.paper-strategy-cell small {
+  max-width: 16ch;
+}
+
+.paper-asset-link strong {
+  white-space: nowrap;
+}
+
+.paper-strategy-cell strong {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.paper-strategy-cell small,
+.paper-asset-link small,
+.pnl-subvalue {
+  display: inline-block;
   white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tile-value.tone-positive,
+.tile-value.tone-negative,
+.tile-value.tone-muted {
+  color: inherit;
+}
+
+.tile-value.tone-positive {
+  color: var(--green);
+}
+
+.tile-value.tone-negative {
+  color: var(--red);
+}
+
+.tile-value.tone-muted {
+  color: var(--muted);
 }
 
 .table-symbol {

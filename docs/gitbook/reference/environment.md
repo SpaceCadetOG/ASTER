@@ -3,6 +3,89 @@
 Primary reference file:
 - `systemd/env/live.env.example`
 
+Phase 9 staging note:
+- ASTER is normalizing the GCP paper baseline now so Secret Manager hardening
+  can secure secret-bearing values later without changing runtime semantics.
+- The env example intentionally excludes secret values and keeps only the
+  non-secret runtime baseline plus the paper behavior knobs that still
+  materially affect the current code.
+
+## Minimal paper-auto starter
+- `ASTER_CONFIG`
+- `ASTER_LOG_DIR`
+- `LIVE_STATE_DIR`
+- `LIVE_RUNTIME_MODE`
+- `LIVE_DRY_RUN`
+- `LIVE_ENABLE_LIVE_TRADING`
+- `LIVE_PAPER_ENABLE`
+
+## Official paper-validation tuning
+- `LIVE_EVENTS_ENABLE`
+- `LIVE_EVENTS_LOG`
+- `LIVE_SCAN_SEC`
+- `LIVE_WATCHER_SEC`
+- `LIVE_PRIORITY_WATCH_EVERY_SEC`
+- `LIVE_DECISION_MS`
+- `LIVE_PERF_LOG_ENABLE=1`
+- `LIVE_TRADE_MARGIN_USDT`
+- `LIVE_ENTRY_STARTER_USDT`
+- `LIVE_PYRAMID_STEP_USDT`
+- `LIVE_PYRAMID_MAX_TOTAL_USDT`
+- `LIVE_PERSISTENCE_OVERRIDE_ENABLE`
+- `LIVE_PERSISTENCE_ENTRY_ENABLE`
+- `LIVE_MAX_OPEN_POS`
+- `LIVE_MAX_OPEN_PER_SIDE`
+- `LIVE_MAX_ORDERS_PER_DAY`
+- `LIVE_MAX_ORDERS_PER_HOUR`
+- `LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY`
+- `LIVE_ORDER_COOLDOWN_SEC`
+- `LIVE_SYMBOL_COOLDOWN_SEC`
+- `LIVE_SYMBOL_COOLDOWN_SAME_SIDE_SEC`
+- `LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC`
+- `LIVE_MIN_AVAILABLE_USDT`
+- `LIVE_MAX_SPREAD_BPS`
+- `LIVE_OB_MAX_SPREAD_BPS`
+- `LIVE_MAX_DAILY_LOSS_PCT`
+- `LIVE_SYMBOL_STOPOUT_COUNT`
+- `LIVE_SYMBOL_STOPOUT_LOCK_MIN`
+- `LIVE_BE_REQUIRE_TP1_OR_MIN_UPNL`
+- `LIVE_BE_MIN_UPNL_PCT`
+- `LIVE_EARLY_CONTINUATION_MIN_R`
+- `LIVE_EARLY_CONTINUATION_MIN_HOLD_MIN`
+- `LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R`
+- `LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN`
+- `LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT`
+- `LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA`
+- `LIVE_MAINT1_ENABLE`
+- `LIVE_MAINT_EOD_ENABLE`
+
+## Optional exploratory discovery diff
+- `LIVE_MAX_OPEN_POS=5`
+- `LIVE_MAX_OPEN_PER_SIDE=3`
+- `LIVE_MAX_ORDERS_PER_DAY=20`
+- `LIVE_MAX_ORDERS_PER_HOUR=6`
+- `LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY=5`
+- `LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC=30`
+
+## Optional authenticated host/account layer
+- `EXEC_BASE_URL`
+- `ASTER_AUTH_MODE`
+- `ASTER_AUTH_DEBUG`
+- `LIVE_SHOW_ACCOUNT`
+- `LIVE_ACCOUNT_REFRESH_SEC`
+
+## Intentionally excluded from the official paper baseline
+- `LIVE_REQUIRE_STRATEGY_MATCH`
+- `LIVE_META_GATE_ENABLE`
+- `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH`
+- `LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH`
+- `LIVE_A_PLUS_FASTLANE_ENABLE`
+- `LIVE_PAPER_SYNC_WITH_LIVE`
+
+These are intentionally excluded because current code verification shows they do
+not actively shape the restored `paper` decision path, are live-only, or
+have no meaningful current code path.
+
 ## Live core
 - `ASTER_AUTH_MODE`
 - `ASTER_USER`
@@ -11,6 +94,7 @@ Primary reference file:
 - `ASTER_CHAIN_ID`
 - `ASTER_BASE_URL`
 - `ASTER_AUTH_DEBUG`
+- `LIVE_RUNTIME_MODE`
 - `LIVE_DRY_RUN`
 - `LIVE_ENABLE_LIVE_TRADING`
 - `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH`

@@ -83,6 +83,7 @@ export interface LiveView {
   longInPlay?: number;
   shortInPlay?: number;
   availableUsdt?: number;
+  liveAccount?: LiveAccountView;
   paperSummary?: string;
   paper?: PaperView;
   scannerLongs?: LiveScanItem[];
@@ -91,6 +92,19 @@ export interface LiveView {
   endpoint: string;
   connected: boolean;
   health: ConnectivityState;
+}
+
+export interface LiveAccountView {
+  generated?: string;
+  health?: string;
+  healthDetail?: string;
+  availableUsdt: number;
+  equity: number;
+  realizedDay: number;
+  openPnl: number;
+  openCount: number;
+  botCount: number;
+  manualCount: number;
 }
 
 export interface PaperPositionView {

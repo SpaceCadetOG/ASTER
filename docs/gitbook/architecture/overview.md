@@ -4,25 +4,26 @@
 
 ```mermaid
 flowchart LR
-  A["Aster market data"] --> B["Scanners: cmd/long + cmd/short"]
-  B --> C["Ranked in-play board"]
-  C --> D["Live runtime: cmd/live"]
-  D --> E["Risk shell + stop engine"]
-  E --> F["Execution manager"]
-  F --> G["Aster perp exchange"]
-  D --> H["Telegram operator bot"]
-  D --> I["Status API (:8787)"]
-  D --> J["Funds maintenance"]
-  K["Backtest: cmd/backtest"] --> L["Backtest engine"]
-  L --> M["out/backtests/*"]
+  A["Aster market data"] --> B["cmd/live scanner worker"]
+  B --> C["In-memory scanner snapshot / watch set"]
+  C --> D["Candidate selection / enrichment"]
+  D --> E["Strategy router"]
+  E --> F["Risk shell"]
+  F --> G["Paper/live execution machinery"]
+  G --> H["Protection / reconcile / exits"]
+  H --> I["Status / Telegram / persistence"]
+  J["cmd/long"] --> K["Standalone scanner / dashboard / diagnostics"]
+  L["cmd/short"] --> M["Standalone scanner / dashboard / diagnostics"]
+  N["cmd/backtest"] --> O["Backtest engine"]
+  O --> P["out/backtests/*"]
 ```
 
 ## Major modules
 
 - `cmd/live`: the production runtime. It owns scanning intake, candidate
-  selection, paper/live execution, manual trade adoption, Telegram controls,
-  status serving, and perp balance maintenance.
-- `cmd/long`, `cmd/short`: ranking scanners and JSON/HTML surfaces.
+  selection, paper/live execution machinery, manual trade adoption, Telegram
+  controls, status serving, and perp balance maintenance.
+- `cmd/long`, `cmd/short`: standalone ranking scanners and JSON/HTML surfaces.
 - `adapters/aster`: exchange integration, balances, positions, leverage,
   order placement, cancel/replace, and signed account actions.
 - `internal/features`: snapshot generation used by scanners and live.
@@ -35,13 +36,16 @@ flowchart LR
 
 ## How the live system works
 
-### 1. Scanners rank the market
+### 1. `cmd/live` ranks the market
 
-`cmd/long` and `cmd/short` continuously rank symbols by grade, score, slope,
-state, price change, and liquidity context. The `live` runtime consumes the
-ranked board rather than trading raw candles in isolation.
+`cmd/live` fetches markets directly, runs its own scanner worker, computes its
+own long/short rankings, and maintains in-memory scanner state for downstream
+runtime decisions.
 
-### 2. Live chooses a candidate
+`cmd/long` and `cmd/short` remain useful standalone scanner/dashboard products,
+but they are not required upstream runtime dependencies for `cmd/live`.
+
+### 2. `cmd/live` chooses and enriches candidates
 
 `cmd/live` filters candidates through:
 - grade and score thresholds
@@ -50,6 +54,10 @@ ranked board rather than trading raw candles in isolation.
 - risk shell checks
 - available margin, open-position limits, and symbol cooldowns
 
+In the current architecture, scanner state, watch-set construction, candidate
+selection, enrichment, and strategy/risk routing all happen inside the
+canonical `cmd/live` runtime.
+
 The current operating model is fixed-size and no-add by default:
 - starter size: `$50`
 - re-entry size: `$50`
@@ -57,7 +65,7 @@ The current operating model is fixed-size and no-add by default:
 - max concurrent positions: `4`
 - max per side: `4`
 
-### 3. Orders are placed and managed
+### 3. Execution and protection are preserved
 
 Bot-native trades start from configured leverage and can step down if exchange
 or risk constraints reject the requested leverage. Live exits are reduce-only
@@ -68,6 +76,9 @@ Key current behavior:
 - profit protection arms once the trade is clearly working
 - runners now hold through healthier pullbacks
 - exits rely more on real deterioration than on mild cooling
+
+The execution/protection stack is part of the accepted production architecture,
+not a mistake to be rolled back.
 
 ### 4. Manual trades can be adopted
 
@@ -83,7 +94,7 @@ The intended standard is:
 - `/manage SYMBOL y` means the bot owns the trade
 - if the stop is legal, a real stop should appear on exchange immediately
 
-### 5. Telegram is the operator surface
+### 5. Telegram and status are the operator surfaces
 
 Telegram is used for:
 - `/status`, `/balance`, `/positions`
@@ -91,6 +102,9 @@ Telegram is used for:
 - `/protect SYMBOL`
 - `/scanner`, `/longs`, `/shorts`
 - pause/resume and close controls
+
+Some operator commands related to autonomous trading are intentionally
+restricted by the current ground-zero / manual-only posture.
 
 ### 6. Funds are maintained automatically
 
@@ -103,10 +117,19 @@ Behavior:
 - if perp available is above target, sweep the excess to spot
 - if perp available is below floor, top back up toward target
 
+## Runtime posture
+
+- `cmd/live` is the canonical production runtime.
+- `cmd/long` and `cmd/short` are standalone scanner / dashboard / diagnostic
+  products.
+- Autonomous entry logic exists in the codebase, but the current active
+  production posture is manual-only / ground-zero mode.
+- Re-enabling autonomous paper/live entry is a future staged revalidation task,
+  not current production behavior.
+
 ## Runtime invariants
 
 - Timezone baseline: `America/Chicago` for operations and reporting.
-- Paper and live share the same decision path; only execution transport differs.
 - State is persisted under `out/` locally or `LIVE_STATE_DIR` on a dedicated host.
 - The repo no longer ships a prescribed tmux/systemd orchestration layer; run
   commands directly or through your own host/container supervisor.

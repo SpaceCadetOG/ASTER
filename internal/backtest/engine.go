@@ -23,11 +23,33 @@ import (
 type Candle = features.Candle
 
 type ScannerPoint struct {
-	Ts    time.Time
-	Score float64
-	Grade string
-	Slope float64
-	Accel float64
+	Ts                    time.Time
+	Score                 float64
+	Grade                 string
+	Slope                 float64
+	Accel                 float64
+	Strategy              string
+	State                 string
+	LastClose             float64
+	EMA9                  float64
+	SessionVWAP           float64
+	FastSlope             float64
+	SlowSlope             float64
+	OFIZ                  float64
+	OFISamples            int
+	ATRPct                float64
+	FailedReclaimCount    int
+	FailedBounceCount     int
+	FailedBreakdownCount  int
+	FailedBreakLowCount   int
+	BarsSincePeak         int
+	BarsSinceTrough       int
+	DrawdownFromPeakPct   float64
+	DrawupFromTroughPct   float64
+	IntradayReversalScore float64
+	BullReversalScore     float64
+	EntryStyle            string
+	MetaState             string
 }
 
 type WhalePoint struct {
@@ -230,20 +252,18 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 
 	fe := features.NewEngine(features.Config{})
 	router := strategies.NewRouter(strategies.RouterConfig{
-		MinGrade:                  cfg.GradeMin,
-		MinScore:                  cfg.ScoreMin,
-		MinWhaleDelta:             cfg.WhaleDelta,
-		AllowWarmup:               true,
-		WarmupSlopeMin:            0.01,
-		MaxOne:                    true,
-		EnableVPSetups:            true,
-		MinVPConfidence:           0.55,
-		UseVPReversal:             true,
-		EnableInstitutionalPA:     true,
-		UseSessionRegimeRisk:      true,
-		AllowDeadZoneOnlyAPlus:    true,
-		MinConfluenceScore:        0.58,
-		RejectIfTargetTooClosePct: cfg.VPMinTargetPct,
+		MinGrade:              cfg.GradeMin,
+		MinScore:              cfg.ScoreMin,
+		MinWhaleDelta:         cfg.WhaleDelta,
+		AllowWarmup:           true,
+		WarmupSlopeMin:        0.01,
+		MaxOne:                true,
+		EnableVPSetups:        true,
+		MinVPConfidence:       0.55,
+		UseVPReversal:         true,
+		EnableInstitutionalPA: true,
+		UseSessionRegimeRisk:  true,
+		MinConfluenceScore:    0.58,
 		RiskPolicy: strategies.RiskPolicyConfig{
 			StopMode:             strategies.StopMode(strings.ToLower(strings.TrimSpace(cfg.StopMode))),
 			TargetMode:           strategies.TargetMode(strings.ToLower(strings.TrimSpace(cfg.TargetMode))),
@@ -555,6 +575,7 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 					ScanAccel:    scan.Accel,
 					Snapshot:     snap,
 					Candles:      candles[:i+1],
+					Runtime:      buildBacktestRuntimeContext(scan, candles[:i+1]),
 				}
 				cands := evalCandidates(cfg.Strategy, router, ctx)
 				if len(cands) > 0 {
@@ -652,7 +673,16 @@ func Run(cfg Config, candles []Candle, scans []ScannerPoint, whales []WhalePoint
 func evalCandidates(name string, router *strategies.Router, ctx strategies.Context) []strategies.Candidate {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" || name == "router" {
-		return router.Eval(ctx)
+		out := router.Eval(ctx)
+		if len(out) == 0 {
+			return nil
+		}
+		sig := strategies.ApplySharedInvalidations(ctx, out[0].Signal)
+		if strings.TrimSpace(sig.RejectReason) != "" || !sig.Active {
+			return nil
+		}
+		out[0].Signal = sig
+		return out
 	}
 	var strat strategies.Strategy
 	switch name {
@@ -684,6 +714,23 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 		strat = strategies.FailedAuctionMagnetStrategy{}
 	case "vwap_confluence":
 		strat = strategies.VWAPConfluenceStrategy{}
+	case "exhaustion_flip_short", "exhaustion_flip_long", "mom_reversal_short", "mom_reversal":
+		if ctx.Runtime == nil {
+			ctx.Runtime = &strategies.RuntimeSignalContext{}
+		}
+		ctx.Runtime.RequestedStrategy = name
+		sig, handled := strategies.EvaluateRuntimeSignal(ctx)
+		if !handled || !sig.Active || strings.TrimSpace(sig.RejectReason) != "" {
+			return nil
+		}
+		scoreNorm := ctx.ScannerScore / 100.0
+		if scoreNorm < 0 {
+			scoreNorm = 0
+		}
+		if scoreNorm > 1.5 {
+			scoreNorm = 1.5
+		}
+		return []strategies.Candidate{{Signal: sig, Score: sig.Confidence * scoreNorm}}
 	default:
 		return nil
 	}
@@ -692,6 +739,10 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 		return nil
 	}
 	sig = strategies.ApplyRiskPolicy(sig, ctx.Snapshot, strategies.DefaultRiskPolicy())
+	sig = strategies.ApplySharedInvalidations(ctx, sig)
+	if strings.TrimSpace(sig.RejectReason) != "" || !sig.Active {
+		return nil
+	}
 	scoreNorm := ctx.ScannerScore / 100.0
 	if scoreNorm < 0 {
 		scoreNorm = 0
@@ -707,6 +758,78 @@ func evalCandidates(name string, router *strategies.Router, ctx strategies.Conte
 		whaleBoost = 1.1
 	}
 	return []strategies.Candidate{{Signal: sig, Score: sig.Confidence * scoreNorm * whaleBoost}}
+}
+
+func buildBacktestRuntimeContext(scan ScannerPoint, candles []Candle) *strategies.RuntimeSignalContext {
+	if strings.TrimSpace(scan.Strategy) == "" &&
+		strings.TrimSpace(scan.State) == "" &&
+		strings.TrimSpace(scan.EntryStyle) == "" &&
+		strings.TrimSpace(scan.MetaState) == "" &&
+		scan.LastClose == 0 &&
+		scan.EMA9 == 0 &&
+		scan.SessionVWAP == 0 &&
+		scan.OFIZ == 0 &&
+		scan.OFISamples == 0 &&
+		scan.ATRPct == 0 &&
+		scan.FailedReclaimCount == 0 &&
+		scan.FailedBounceCount == 0 &&
+		scan.FailedBreakdownCount == 0 &&
+		scan.FailedBreakLowCount == 0 &&
+		scan.BarsSincePeak == 0 &&
+		scan.BarsSinceTrough == 0 &&
+		scan.DrawdownFromPeakPct == 0 &&
+		scan.DrawupFromTroughPct == 0 &&
+		scan.IntradayReversalScore == 0 &&
+		scan.BullReversalScore == 0 {
+		return nil
+	}
+	lastClose := scan.LastClose
+	ema9 := scan.EMA9
+	sessionVWAP := scan.SessionVWAP
+	atrPct := scan.ATRPct
+	if len(candles) > 0 && (lastClose == 0 || ema9 == 0 || sessionVWAP == 0 || atrPct == 0) {
+		snap := ta.SnapshotFromFeatureCandles(candles, 14, 3, 15, 20)
+		if lastClose == 0 {
+			lastClose = snap.LastClose
+		}
+		if ema9 == 0 {
+			ema9 = snap.EMA9
+		}
+		if sessionVWAP == 0 {
+			sessionVWAP = snap.SessionVWAP
+		}
+		if atrPct == 0 {
+			atrPct = snap.ATRPct
+		}
+	}
+	side := features.SideLong
+	strat := strings.ToLower(strings.TrimSpace(scan.Strategy))
+	if strings.Contains(strat, "short") || strings.Contains(strat, "sell") {
+		side = features.SideShort
+	}
+	return &strategies.RuntimeSignalContext{
+		RequestedStrategy:     scan.Strategy,
+		Side:                  side,
+		CandidateState:        scan.State,
+		LastClose:             lastClose,
+		EMA9:                  ema9,
+		SessionVWAP:           sessionVWAP,
+		FastSlope:             scan.FastSlope,
+		SlowSlope:             scan.SlowSlope,
+		OFIZ:                  scan.OFIZ,
+		OFISamples:            scan.OFISamples,
+		ATRPct:                atrPct,
+		FailedReclaimCount:    scan.FailedReclaimCount,
+		FailedBounceCount:     scan.FailedBounceCount,
+		FailedBreakdownCount:  scan.FailedBreakdownCount,
+		FailedBreakLowCount:   scan.FailedBreakLowCount,
+		BarsSincePeak:         scan.BarsSincePeak,
+		BarsSinceTrough:       scan.BarsSinceTrough,
+		DrawdownFromPeakPct:   scan.DrawdownFromPeakPct,
+		DrawupFromTroughPct:   scan.DrawupFromTroughPct,
+		IntradayReversalScore: scan.IntradayReversalScore,
+		BullReversalScore:     scan.BullReversalScore,
+	}
 }
 
 func updateBacktestExcursions(pos *btPosition, c Candle) {

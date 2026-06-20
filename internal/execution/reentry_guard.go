@@ -71,7 +71,7 @@ func ShouldBlockReentry(
 
 func isSoftChurnExit(reason string) bool {
 	switch strings.ToUpper(strings.TrimSpace(reason)) {
-	case "NO_FOLLOW_THROUGH", "NO_FOLLOW_THROUGH_TIGHTEN", "MOMENTUM_FADE", "PROFIT_GIVEBACK", "WINNER_REVERSION_BLOCK":
+	case "MOMENTUM_FADE", "PROFIT_GIVEBACK":
 		return true
 	default:
 		return false

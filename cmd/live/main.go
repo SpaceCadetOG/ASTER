@@ -295,7 +295,6 @@ type runtimeProfileConfig struct {
 	EffectiveCandidateMemory  bool
 	EffectiveTriggerMemory    bool
 	EffectiveSharedManagement bool
-	EffectiveNoProofTimeout   bool
 }
 
 type positionView struct {
@@ -388,6 +387,7 @@ const (
 
 	manualEntryReasonPassive = "MANUAL_IMPORT"
 	manualEntryReasonManaged = "manual_managed_live"
+	operatorEntryReason      = "OPERATOR_EXECUTION"
 
 	manualEntrySourcePassive = "MANUAL_PASSIVE"
 	manualEntrySourceManaged = "MANUAL_MANAGED"
@@ -930,7 +930,6 @@ const (
 
 const (
 	blockedMaintenanceWindowReason        = "BLOCKED_MAINTENANCE_WINDOW"
-	blockedForceFlatWindowReason          = "BLOCKED_FORCE_FLAT_WINDOW"
 	degradedAccountHealthPartialReason    = "DEGRADED_ACCOUNT_HEALTH_PARTIAL"
 	degradedUserDataStaleReason           = "DEGRADED_USERDATA_STALE"
 	degradedReconcileStaleReason          = "DEGRADED_RECONCILE_STALE"
@@ -2639,17 +2638,10 @@ func main() {
 				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_manual_execution"
 				st.TopRejectReason = ""
-				if emitTerminal {
-					fmt.Printf("live: scanner-only top %s side=%s grade=%s score=%.2f slope=%.3f state=%s\n",
-						best.Entry.Symbol, best.Side, best.Entry.CurrentGrade, best.Entry.CurrentScore, best.Entry.ScoreSlope, best.Entry.State)
-				}
 			} else {
 				st.TopDecision = "live"
 				st.TopDecisionWhy = "scanner_only_no_candidates"
 				st.TopRejectReason = ""
-				if emitTerminal {
-					fmt.Println("live: scanner-only no candidates")
-				}
 			}
 			statusStore.Set(st)
 			waitAndReport()
@@ -3379,7 +3371,7 @@ func colorReasonTag(reason string) string {
 		return r
 	case "BOS_PB", "LSR", "OB_R", "FVG_C":
 		return r
-	case "MOMENTUM_FADE", "PRE_EOD_MOMENTUM_FADE":
+	case "MOMENTUM_FADE":
 		return r
 	case "SL", "STOP", "TRAIL_STOP", "EOD_FORCE_FLAT", "TG_FORCE_FLAT":
 		return r
@@ -3546,40 +3538,6 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	if adv > p.MaxAdverseR {
 		p.MaxAdverseR = adv
 	}
-}
-
-func noProofTimeoutMinutes() time.Duration {
-	mins := envInt("NO_PROOF_TIMEOUT_MINUTES", 10)
-	if mins <= 0 {
-		mins = 10
-	}
-	return time.Duration(mins) * time.Minute
-}
-
-func noProofMinR() float64 {
-	minR := envFloat("NO_PROOF_MIN_R", 0.15)
-	if minR <= 0 {
-		minR = 0.15
-	}
-	return minR
-}
-
-func noProofTimeoutTriggered(openedAt, now time.Time, maxFavorableR float64) bool {
-	if openedAt.IsZero() {
-		return false
-	}
-	return now.Sub(openedAt) >= noProofTimeoutMinutes() && maxFavorableR < noProofMinR()
-}
-
-func noProofTightenStop(side string, entry, currentStop, mark float64) (float64, bool) {
-	if entry <= 0 || mark <= 0 {
-		return currentStop, false
-	}
-	target := entry + (mark-entry)*0.5
-	if strings.EqualFold(side, "SELL") {
-		target = entry - (entry-mark)*0.5
-	}
-	return improvedStopPrice(side, currentStop, target)
 }
 
 func paperProtectionState(pos *paperPosition) string {
@@ -4908,9 +4866,6 @@ func runtimeMaintenanceWindows() []maintenanceWindow {
 }
 
 func blockedWindowReason(w maintenanceWindow) string {
-	if w.ForceFlat {
-		return blockedForceFlatWindowReason
-	}
 	return blockedMaintenanceWindowReason
 }
 
@@ -7434,6 +7389,202 @@ func (m *liveExecManager) newImportedRemotePosition(symbol, side string, qty, en
 	return p
 }
 
+func (m *liveExecManager) upsertPassiveOperatorPosition(symbol, side string, qty, entry, margin float64, lev int, now time.Time) *livePosition {
+	if m == nil {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	if sym == "" {
+		return nil
+	}
+	if existing := m.positions[sym]; m.isActive(existing) && samePositionSide(existing.Side, side) {
+		syncImportedRemotePosition(existing, qty, entry, margin, lev, now)
+		existing.EntrySource = manualEntrySourcePassive
+		existing.EntryReason = operatorEntryReason
+		existing.ManualManageState = manualManageStatePassive
+		existing.Managed = false
+		return existing
+	}
+	p := m.newImportedRemotePosition(sym, side, qty, entry, margin, lev, now, manualEntrySourcePassive)
+	if p == nil {
+		return nil
+	}
+	p.EntryReason = operatorEntryReason
+	m.positions[sym] = p
+	return p
+}
+
+func (m *liveExecManager) attachOperatorBracket(p *livePosition, qty float64, tpPrice, slPrice float64) (string, error) {
+	if m == nil || m.rest == nil || p == nil {
+		return "", fmt.Errorf("execution manager not ready")
+	}
+	meta, err := m.rest.SymbolMeta(p.Symbol, true)
+	if err != nil {
+		return "", err
+	}
+	trader := &aster.Trader{
+		Symbol:   p.Symbol,
+		SymbolLC: strings.ToLower(p.Symbol),
+		Rest:     m.rest,
+		Meta:     meta,
+	}
+	var tpPtr, slPtr *float64
+	if tpPrice > 0 {
+		tpPtr = &tpPrice
+	}
+	if slPrice > 0 {
+		slPtr = &slPrice
+	}
+	out, err := trader.Bracket(isLongSide(p.Side), qty, tpPtr, slPtr)
+	if err != nil {
+		return "", err
+	}
+	parts := []string{}
+	if tpRaw := out["tp"]; tpRaw != nil {
+		p.TP1Price = tpPrice
+		p.TP1Qty = qty
+		p.TP1OrderID = mapInt64(tpRaw["orderId"])
+		parts = append(parts, "tp_submitted")
+	}
+	if slRaw := out["sl"]; slRaw != nil {
+		p.StopPrice = slPrice
+		p.StopOrderID = mapInt64(slRaw["orderId"])
+		p.Protected = true
+		parts = append(parts, "sl_submitted")
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+func (m *liveExecManager) submitOperatorOrder(req operatorOrderRequest, metaBySymbol map[string]symbolMeta) (operatorOrderResult, error) {
+	var result operatorOrderResult
+	if m == nil || m.rest == nil {
+		return result, fmt.Errorf("execution manager not ready")
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(req.Symbol)))
+	if sym == "" {
+		return result, fmt.Errorf("symbol required")
+	}
+	result.Symbol = sym
+	result.Side = normalizePositionSide(req.Side)
+	result.USD = req.USD
+	result.LimitPrice = req.LimitPrice
+	result.StopLoss = req.StopLoss
+	result.TakeProfit = req.TakeProfit
+
+	if err := signedUserDataBackoffCheck(time.Now().UTC()); err != nil {
+		return result, err
+	}
+
+	meta, err := m.rest.SymbolMeta(sym, true)
+	if err != nil {
+		return result, err
+	}
+	if snap, ok := metaBySymbol[sym]; ok {
+		ref := snap.LastPrice
+		if ref <= 0 {
+			ref = snap.OpenPrice
+		}
+		if req.HasLimit && ref > 0 {
+			if _, sanitized := sanitizeSnapshotPrice(ref, req.LimitPrice); sanitized {
+				return result, fmt.Errorf("limit price %.8f is too far from snapshot %.8f", req.LimitPrice, ref)
+			}
+		}
+	}
+	var levPtr *int
+	if req.Leverage > 0 {
+		lev := req.Leverage
+		levPtr = &lev
+	}
+	trader := &aster.Trader{
+		Symbol:   sym,
+		SymbolLC: strings.ToLower(sym),
+		Rest:     m.rest,
+		Meta:     meta,
+		State:    m.marketStates[sym],
+	}
+	var submit map[string]any
+	if req.HasLimit {
+		submit, err = trader.EnterLimitUSD(req.Side, req.USD, req.LimitPrice, levPtr)
+	} else {
+		var refPrice *float64
+		if snap, ok := metaBySymbol[sym]; ok && snap.LastPrice > 0 {
+			rp := snap.LastPrice
+			refPrice = &rp
+		}
+		submit, err = trader.EnterMarketUSD(req.Side, req.USD, refPrice, levPtr)
+	}
+	if err != nil {
+		signedUserDataBackoffObserve(time.Now().UTC(), err)
+		return result, err
+	}
+	result.OrderID = mapInt64(submit["orderId"])
+	if result.OrderID <= 0 {
+		return result, fmt.Errorf("missing order id from venue response")
+	}
+	progressOrder, err := trader.WaitForFill(result.OrderID, operatorFillTimeout(), operatorFillPoll())
+	if err != nil {
+		return result, err
+	}
+	progress := parseOrderProgress(progressOrder)
+	result.Status = firstNonEmpty(progress.Status, fmt.Sprint(submit["status"]))
+	result.Working = progress.Working
+	result.Filled = progress.Filled
+	result.Rejected = progress.Rejected
+	result.Qty = progress.ExecQty
+	result.AvgPrice = progress.AvgPx
+
+	if !result.Filled {
+		return result, nil
+	}
+
+	now := time.Now().UTC()
+	rows, err := m.rest.PositionRisk(sym)
+	if err != nil {
+		return result, err
+	}
+	view := remotePositionForSide(rows, req.Side)
+	if view.QtyAbs <= 0 {
+		return result, fmt.Errorf("order filled but live position not yet visible on venue")
+	}
+	lev := maxInt(1, req.Leverage)
+	for _, row := range rows {
+		amt := mapFloat(row["positionAmt"])
+		if mathAbs(amt) <= 1e-10 {
+			continue
+		}
+		rowSide := "BUY"
+		if amt < 0 {
+			rowSide = "SELL"
+		}
+		if !samePositionSide(rowSide, req.Side) {
+			continue
+		}
+		lev = maxInt(1, int(maxFloat(1, mapFloat(row["leverage"]))))
+		break
+	}
+	p := m.upsertPassiveOperatorPosition(sym, req.Side, view.QtyAbs, view.EntryPrice, view.Margin, lev, now)
+	if p == nil {
+		return result, fmt.Errorf("filled position could not be tracked locally")
+	}
+	if req.HasTakeProfit || req.HasStopLoss {
+		bracketStatus, err := m.attachOperatorBracket(p, view.QtyAbs, req.TakeProfit, req.StopLoss)
+		if err != nil {
+			result.BracketStatus = "submit_failed: " + err.Error()
+		} else {
+			result.BracketStatus = bracketStatus
+		}
+	}
+	if mark, err := m.currentMark(sym); err == nil && mark > 0 {
+		p.LastMark = mark
+		result.PositionPnL, result.PositionPnLPct = realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
+	}
+	_ = m.save()
+	return result, nil
+}
+
 func manageAnchorPrice(p *livePosition) float64 {
 	if p == nil {
 		return 0
@@ -9457,36 +9608,6 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
-			if noProofTimeoutTriggered(p.CreatedAt, now, p.MaxFavorableR) {
-				logExitAudit(
-					p.Symbol,
-					firstNonEmpty(strings.TrimSpace(p.EntryStrategyID), strings.TrimSpace(p.EntryReason)),
-					"NO_PROOF_TIMEOUT",
-					"NO_PROOF_TIMEOUT",
-					m.stopTriggerRef,
-					mark,
-					p.StopPrice,
-					p.MaxFavorableR,
-					-p.MaxAdverseR,
-					liveProtectionState(p),
-					p.EntryTiming,
-					true,
-					p.MaxFavorableR >= winnerProofR() && p.ProtectedStop != 0,
-					p.MaxFavorableR >= winnerProofR() && !p.Protected && !hasLiveProtectiveOrder(p),
-				)
-				_ = m.cancelRemainingExits(p)
-				if err := m.submitCloseLimit(p, p.RemainingQty, "NO_PROOF_TIMEOUT", "CLOSE"); err == nil {
-					changed = true
-					return changed, nil
-				}
-				if tightenedStop, tightened := noProofTightenStop(p.Side, p.EntryPrice, p.StopPrice, mark); tightened {
-					p.StopReason = "NO_PROOF_TIMEOUT_TIGHTEN"
-					p.StopPrice = tightenedStop
-					if err := m.placeOrReplaceStop(p); err == nil {
-						changed = true
-					}
-				}
-			}
 			if m.updateLiveTargetHits(p, mark) {
 				changed = true
 			}
@@ -9621,8 +9742,8 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					changed = true
 				}
 				if mv.ImmediateExit {
-					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
-					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "winner_reversion_block")
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
+					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT")
 					_ = m.cancelRemainingExits(p)
 					if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
 						changed = true
@@ -11106,8 +11227,8 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				changed = true
 			}
 			if dec.ImmediateExit {
-				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
-				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
+				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT")
 				_ = m.cancelRemainingExits(p)
 				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
 					changed = true
@@ -11821,7 +11942,7 @@ func paperDegradedHoldExitReason(now time.Time, pos *paperPosition, mark float64
 	if pos.HitTP1 || pos.MaxFavorableR >= 0.75 || upnlPct > 0 {
 		return "MOMENTUM_FADE"
 	}
-	return "NO_FOLLOW_THROUGH"
+	return ""
 }
 
 func paperAdvancedReady(pos *paperPosition) bool {
@@ -11879,7 +12000,7 @@ func (p *paperTrader) applyPaperProtectDecision(now time.Time, raw string, pos *
 		}
 	}
 	if dec.ImmediateExit {
-		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block")
+		reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT")
 		dec.Reason = reason
 		logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
 		p.exitPortion(now, pos, reason, mark, pos.Qty, meta[raw], depth[raw])
@@ -12430,10 +12551,6 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 		pos.LastMark = mark
 		updateFavorableRPaper(pos, mark)
-		if noProofTimeoutTriggered(pos.OpenedAt, now, pos.MaxFavorableR) {
-			p.exitPortion(now, pos, "NO_PROOF_TIMEOUT", mark, pos.Qty, meta[raw], depth[raw])
-			continue
-		}
 		_, upctMark := realizedFromFill(pos.Side, pos.Entry, mark, maxFloat(pos.Qty, 1))
 		if newStop, tightened := applyLiveProtectionState(now, pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR, &pos.ProtectionStage, &pos.FirstProtectAt, &pos.ProtectedStop, p.beLockBps, allowMoveToBreakEven(pos.HitTP1, upctMark)); tightened {
 			pos.Stop = newStop
@@ -12540,7 +12657,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 			}
 			if dec.ImmediateExit {
 				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
 				continue
 			}
 			if dec.FullExit {
@@ -12867,7 +12984,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 			}
 			if dec.ImmediateExit {
 				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "winner_reversion_block"), mark, pos.Qty, m, depth[raw])
+				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), mark, pos.Qty, m, depth[raw])
 				changed = true
 				continue
 			}
@@ -13105,7 +13222,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		-pos.MaxAdverseR,
 		paperProtectionState(pos),
 		pos.EntryTiming,
-		reasonU == "NO_PROOF_TIMEOUT",
+		false,
 		protectedAfterProof,
 		winnerRevertedUnprotected,
 	)
@@ -13149,7 +13266,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
 	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
 		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin,
-		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), reasonU == "NO_PROOF_TIMEOUT")
+		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), false)
 	if p.onExit != nil {
 		loc := p.reportLoc
 		if loc == nil {
@@ -15842,10 +15959,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			continue
 		}
 		pRaw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol)))
-		if cfg.OneSymbolOnly && execMgr.isActive(p) && p.RemainingQty > 0 && pRaw != raw {
-			plan.RejectReason = "one_symbol_only_active"
-			return plan
-		}
 		if pRaw == raw {
 			if execMgr.isActive(p) && p.RemainingQty > 0 {
 				activeSame = p
@@ -15857,10 +15970,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 	if activeSame != nil {
 		if !strings.EqualFold(activeSame.Side, c.Side) {
 			plan.RejectReason = "symbol_active_opposite_side"
-			return plan
-		}
-		if !botManagedPosition(activeSame) {
-			plan.RejectReason = "manual_position_active"
 			return plan
 		}
 		if activeSame.PendingAddOrderID > 0 {
@@ -17196,12 +17305,12 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta) {
 	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, 0)
 	fmt.Printf("IN-PLAY (RANKED)\n")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
-	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
+	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | utc4h%  | utc1h%  | open       | mark       | vol($)   |")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 	if len(rows) == 0 {
-		fmt.Println("| (none)                                                                                           |")
-		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+		fmt.Println("| (none)                                                                                                             |")
+		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 		return
 	}
 	for _, row := range rows {
@@ -17219,6 +17328,14 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.DayUTC24h != 0 {
 			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
 		}
+		utc4h := "-"
+		if m.UTC4hPct != 0 {
+			utc4h = fmt.Sprintf("%+6.1f", m.UTC4hPct)
+		}
+		utc1h := "-"
+		if m.UTC1hPct != 0 {
+			utc1h = fmt.Sprintf("%+6.1f", m.UTC1hPct)
+		}
 		openPx := "-"
 		if m.OpenPrice > 0 {
 			openPx = fmtPrice(m.OpenPrice)
@@ -17231,16 +17348,16 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.VolumeUSD > 0 {
 			vol = marketHumanUSD(m.VolumeUSD)
 		}
-		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
+		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %7s | %7s | %10s | %10s | %8s |\n",
 			row.side,
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
-			dayUTC, openPx, markPx, vol,
+			dayUTC, utc4h, utc1h, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {
@@ -17885,9 +18002,6 @@ func evaluateRunnerExitStateWithFlow(side string, mv momentumView, fm flowMetric
 }
 
 func preEODExitReason(side string, mv momentumView, upnlPct, upnlPctMax float64) string {
-	if shouldExitOnMomentumFade(side, mv, 0.0) {
-		return "PRE_EOD_MOMENTUM_FADE"
-	}
 	if upnlPct <= upnlPctMax {
 		return "PRE_EOD_WEAK_PNL"
 	}
@@ -19256,6 +19370,8 @@ func displayEntryReason(reason string) string {
 		return "none"
 	case manualEntryReasonManaged:
 		return "MANUAL_MANAGED"
+	case operatorEntryReason:
+		return "OPERATOR_EXECUTION"
 	default:
 		return strings.TrimSpace(reason)
 	}
@@ -20445,7 +20561,6 @@ func resolveRuntimeProfileConfig() runtimeProfileConfig {
 		EffectiveCandidateMemory:  envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
 		EffectiveTriggerMemory:    true,
 		EffectiveSharedManagement: false,
-		EffectiveNoProofTimeout:   noProofTimeoutMinutes() > 0,
 	}
 	switch cfg.Name {
 	case runtimeProfilePaperContinuationClean:
@@ -20458,7 +20573,6 @@ func resolveRuntimeProfileConfig() runtimeProfileConfig {
 		cfg.EffectiveCandidateMemory = true
 		cfg.EffectiveTriggerMemory = true
 		cfg.EffectiveSharedManagement = true
-		cfg.EffectiveNoProofTimeout = true
 	}
 	return cfg
 }
@@ -20525,10 +20639,6 @@ func effectiveSharedManagementEnabled() bool {
 	return resolveRuntimeProfileConfig().EffectiveSharedManagement
 }
 
-func effectiveNoProofTimeoutEnabled() bool {
-	return resolveRuntimeProfileConfig().EffectiveNoProofTimeout
-}
-
 func effectiveDirectionalConflictPenaltyOnly() bool {
 	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
 }
@@ -20540,7 +20650,7 @@ func effectiveDirectionalConflictExtremeOnly() bool {
 func effectiveRuntimeProfileSummary() string {
 	cfg := resolveRuntimeProfileConfig()
 	return fmt.Sprintf(
-		"runtime_profile=%s | effective_strategy_paths=vp=%t,institutional_pa=%t,reversal=%t,impulse=%t,unresolved_watch=%t,unresolved_execution=%t | effective_quality_policy=penalty_based=%t,require_structure=%t,directional_conflict_penalty_only=%t,extreme_conflict_hard_block=%t | effective_reentry_policy=enabled=%t | effective_management_policy=shared=%t,no_proof_timeout=%t,trigger_memory=%t,candidate_memory=%t",
+		"runtime_profile=%s | effective_strategy_paths=vp=%t,institutional_pa=%t,reversal=%t,impulse=%t,unresolved_watch=%t,unresolved_execution=%t | effective_quality_policy=penalty_based=%t,require_structure=%t,directional_conflict_penalty_only=%t,extreme_conflict_hard_block=%t | effective_reentry_policy=enabled=%t | effective_management_policy=shared=%t,trigger_memory=%t,candidate_memory=%t",
 		firstNonEmpty(strings.TrimSpace(string(cfg.Name)), "none"),
 		cfg.EffectiveVPEnabled,
 		cfg.EffectiveInstitutional,
@@ -20554,7 +20664,6 @@ func effectiveRuntimeProfileSummary() string {
 		effectiveDirectionalConflictExtremeOnly(),
 		cfg.EffectiveReentry,
 		cfg.EffectiveSharedManagement,
-		cfg.EffectiveNoProofTimeout,
 		cfg.EffectiveTriggerMemory,
 		cfg.EffectiveCandidateMemory,
 	)
@@ -20825,12 +20934,12 @@ func classifyRejectReason(reason string) RejectClass {
 		strings.Contains(raw, "account"), strings.Contains(raw, "balance"), strings.Contains(raw, "transfer"),
 		strings.Contains(raw, "position_check_error"), strings.Contains(raw, "order_error"):
 		return rejectClassCapacity
-	case strings.Contains(raw, "cooldown"), strings.Contains(raw, "one_symbol_only"),
-		strings.Contains(raw, "max_open"), strings.Contains(raw, "manual_position_active"),
+	case strings.Contains(raw, "cooldown"),
+		strings.Contains(raw, "max_open"),
 		strings.Contains(raw, "pending_add_order"), strings.Contains(raw, "symbol_active_opposite_side"),
 		strings.Contains(raw, "reentry_"),
 		strings.Contains(raw, "intent_dedupe"), strings.Contains(raw, "shadow_gate_active"),
-		strings.Contains(raw, "event_lockout"), strings.Contains(raw, "correlated_exposure_gate"),
+		strings.Contains(raw, "event_lockout"),
 		strings.Contains(raw, "throttle_"), strings.Contains(raw, "post_sl_cooldown"),
 		strings.Contains(raw, "max_tracked_entries"):
 		return rejectClassStateCooldown
@@ -21134,6 +21243,174 @@ func allowedOperatorLeverage(raw string) (int, bool) {
 	}
 }
 
+type operatorOrderRequest struct {
+	Symbol        string
+	Side          string
+	USD           float64
+	LimitPrice    float64
+	StopLoss      float64
+	TakeProfit    float64
+	Leverage      int
+	HasLimit      bool
+	HasStopLoss   bool
+	HasTakeProfit bool
+}
+
+type operatorOrderResult struct {
+	Symbol         string
+	Side           string
+	USD            float64
+	OrderID        int64
+	Status         string
+	Working        bool
+	Filled         bool
+	Rejected       bool
+	Qty            float64
+	AvgPrice       float64
+	LimitPrice     float64
+	StopLoss       float64
+	TakeProfit     float64
+	BracketStatus  string
+	PositionPnL    float64
+	PositionPnLPct float64
+}
+
+func operatorExecutionEnabled() bool {
+	return envBool("LIVE_OPERATOR_EXECUTION_ENABLE", false)
+}
+
+func operatorFillTimeout() time.Duration {
+	sec := envInt("LIVE_OPERATOR_FILL_TIMEOUT_SEC", 15)
+	if sec < 1 {
+		sec = 15
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func operatorFillPoll() time.Duration {
+	ms := envInt("LIVE_OPERATOR_FILL_POLL_MS", 350)
+	if ms < 100 {
+		ms = 350
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func operatorDefaultLeverage() int {
+	if lev, ok := allowedOperatorLeverage(envStr("LIVE_OPERATOR_DEFAULT_LEVERAGE", "")); ok {
+		return lev
+	}
+	return 0
+}
+
+func parseOperatorOrderCommand(rawMsg string) (operatorOrderRequest, error) {
+	fields := strings.Fields(strings.TrimSpace(rawMsg))
+	if len(fields) < 3 {
+		return operatorOrderRequest{}, fmt.Errorf("usage: /long SYMBOL usd=10 [limit=123] [sl=120] [tp=129] [lev=5]")
+	}
+	var req operatorOrderRequest
+	switch strings.ToLower(strings.TrimSpace(fields[0])) {
+	case "/long":
+		req.Side = "BUY"
+	case "/short":
+		req.Side = "SELL"
+	default:
+		return operatorOrderRequest{}, fmt.Errorf("unsupported operator command")
+	}
+	req.Symbol = strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+	if req.Symbol == "" {
+		return operatorOrderRequest{}, fmt.Errorf("symbol required")
+	}
+	req.Leverage = operatorDefaultLeverage()
+	for _, field := range fields[2:] {
+		part := strings.TrimSpace(field)
+		if part == "" {
+			continue
+		}
+		if strings.EqualFold(part, "market") {
+			req.HasLimit = false
+			req.LimitPrice = 0
+			continue
+		}
+		key, val, ok := strings.Cut(part, "=")
+		if !ok {
+			return operatorOrderRequest{}, fmt.Errorf("invalid token %q", part)
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return operatorOrderRequest{}, fmt.Errorf("missing value for %s", key)
+		}
+		switch key {
+		case "usd", "usdt", "size", "notional":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid usd value")
+			}
+			req.USD = f
+		case "limit", "price":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid limit price")
+			}
+			req.LimitPrice = f
+			req.HasLimit = true
+		case "sl", "stop", "stoploss":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid stop-loss price")
+			}
+			req.StopLoss = f
+			req.HasStopLoss = true
+		case "tp", "takeprofit":
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil || f <= 0 {
+				return operatorOrderRequest{}, fmt.Errorf("invalid take-profit price")
+			}
+			req.TakeProfit = f
+			req.HasTakeProfit = true
+		case "lev", "leverage":
+			lev, ok := allowedOperatorLeverage(val)
+			if !ok {
+				return operatorOrderRequest{}, fmt.Errorf("invalid leverage %q (allowed: 3,5,10,20)", val)
+			}
+			req.Leverage = lev
+		default:
+			return operatorOrderRequest{}, fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if req.USD <= 0 {
+		return operatorOrderRequest{}, fmt.Errorf("usd=... is required")
+	}
+	return req, nil
+}
+
+func operatorOrderHTML(res operatorOrderResult) string {
+	lines := []string{
+		fmt.Sprintf("<b>%s %s</b>", cleanSymbol(res.Symbol), displayPositionSide(res.Side)),
+		fmt.Sprintf("<b>Notional:</b> $%.2f", res.USD),
+		fmt.Sprintf("<b>Order ID:</b> %d", res.OrderID),
+		fmt.Sprintf("<b>Status:</b> %s", firstNonEmpty(strings.ToUpper(strings.TrimSpace(res.Status)), "UNKNOWN")),
+	}
+	if res.LimitPrice > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Limit:</b> %s", fmtPrice(res.LimitPrice)))
+	} else {
+		lines = append(lines, "<b>Execution:</b> MARKET")
+	}
+	if res.Qty > 0 || res.AvgPrice > 0 {
+		lines = append(lines, fmt.Sprintf("<b>Filled Qty:</b> %.6f | <b>Avg:</b> %s", res.Qty, fmtPrice(res.AvgPrice)))
+	}
+	if res.StopLoss > 0 || res.TakeProfit > 0 {
+		lines = append(lines, fmt.Sprintf("<b>TP/SL:</b> tp=%s sl=%s", fmtPrice(res.TakeProfit), fmtPrice(res.StopLoss)))
+	}
+	if strings.TrimSpace(res.BracketStatus) != "" {
+		lines = append(lines, fmt.Sprintf("<b>Bracket:</b> %s", res.BracketStatus))
+	}
+	if res.Filled {
+		lines = append(lines, fmt.Sprintf("<b>Position PnL:</b> %+.2f (%+.2f%%)", res.PositionPnL, res.PositionPnLPct))
+	}
+	return notify.BuildEventHTML("🧾", "OPERATOR ORDER", lines...)
+}
+
 func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string) {
 	if ctx == nil {
 		return
@@ -21303,17 +21580,60 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	fields := strings.Fields(rawMsg)
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
-		return notify.BuildEventHTML("📘", "COMMANDS",
+		lines := []string{
 			"<b>Scanner</b> <code>/status</code> <code>/scanner</code> <code>/longs</code> <code>/shorts</code> <code>/why SYMBOL</code>",
 			"<b>Account</b> <code>/balance</code> <code>/acct</code> <code>/summary</code> <code>/positions</code> <code>/position SYMBOL</code>",
-			"<b>Trading:</b> disabled (ground-zero mode)",
-			"<b>More</b> <code>/hotkeys</code>",
-		)
+		}
+		if operatorExecutionEnabled() {
+			lines = append(lines, "<b>Trading</b> <code>/long SYMBOL usd=10 [limit=123] [sl=120] [tp=129]</code> <code>/short SYMBOL usd=10 ...</code>")
+		} else {
+			lines = append(lines, "<b>Trading:</b> disabled (ground-zero mode)")
+		}
+		lines = append(lines, "<b>More</b> <code>/hotkeys</code>")
+		return notify.BuildEventHTML("📘", "COMMANDS", lines...)
 	case strings.HasPrefix(cmd, "/hotkeys"):
+		if operatorExecutionEnabled() {
+			return notify.BuildEventHTML("⌨️", "HOTKEYS",
+				"<code>/long OUSDT usd=10 limit=0.123 sl=0.118 tp=0.129</code>",
+				"<code>/short OUSDT usd=10 limit=0.123 sl=0.126 tp=0.118</code>",
+			)
+		}
 		return notify.BuildEventHTML("⌨️", "HOTKEYS",
 			"Trading hotkeys are disabled in ground-zero mode.",
 			"Use scanner/status commands only.",
 		)
+	case strings.HasPrefix(cmd, "/long "), strings.HasPrefix(cmd, "/short "):
+		if !operatorExecutionEnabled() {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED",
+				"Operator execution is disabled.",
+				"Set LIVE_OPERATOR_EXECUTION_ENABLE=1 to allow /long and /short commands.",
+			)
+		}
+		if c.execMgr == nil {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED", "Execution manager unavailable")
+		}
+		dryRun, liveEnabled, _ := true, false, false
+		if c.mode != nil {
+			dryRun, liveEnabled, _ = c.mode.snapshot()
+		}
+		if dryRun || !liveEnabled {
+			return notify.BuildEventHTML("🛑", "TRADING DISABLED",
+				"Live order entry is not armed.",
+				"Start the bot with LIVE_ENABLE_LIVE_TRADING=1 and LIVE_DRY_RUN=0.",
+			)
+		}
+		req, err := parseOperatorOrderCommand(rawMsg)
+		if err != nil {
+			return notify.BuildEventHTML("❓", "USAGE", err.Error())
+		}
+		res, err := c.execMgr.submitOperatorOrder(req, c.getMeta())
+		if err != nil {
+			return notify.BuildEventHTML("❌", "ORDER FAILED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(req.Symbol), displayPositionSide(req.Side)),
+				fmt.Sprintf("<b>Reason:</b> %s", err.Error()),
+			)
+		}
+		return operatorOrderHTML(res)
 	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "), strings.HasPrefix(cmd, "/execute "), strings.HasPrefix(cmd, "/trade "), strings.HasPrefix(cmd, "/protect "), strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "), strings.HasPrefix(cmd, "/closeall"), cmd == "/mode live" || cmd == "/live" || cmd == "/mode paper" || cmd == "/paper":
 		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
 			"Ground-zero mode is active.",

@@ -347,9 +347,9 @@ func TestBuildEntryQualityAccumulatorPreservesHardSafetyBlock(t *testing.T) {
 		CombinedScore: 0.90,
 		Conf:          0.90,
 	}
-	quality := buildEntryQualityAccumulator(cand, []string{"manual_position_active"})
-	if len(quality.HardBlockReasons) != 1 || quality.HardBlockReasons[0] != "manual_position_active" {
-		t.Fatalf("expected hard manual_position_active block, got %+v", quality.HardBlockReasons)
+	quality := buildEntryQualityAccumulator(cand, []string{"pending_add_order"})
+	if len(quality.HardBlockReasons) != 1 || quality.HardBlockReasons[0] != "pending_add_order" {
+		t.Fatalf("expected hard pending_add_order block, got %+v", quality.HardBlockReasons)
 	}
 	if quality.BlockReason != "hard_safety_block" {
 		t.Fatalf("expected hard_safety_block, got %q", quality.BlockReason)
@@ -564,4 +564,134 @@ func capturePaperRuntimeStdout(t *testing.T, fn func()) string {
 		t.Fatalf("Read close error: %v", err)
 	}
 	return buf.String()
+}
+
+func TestWeakSlopeEliteContinuationGetsGrace(t *testing.T) {
+	t.Setenv("LIVE_CONT_FAST_MIN_SLOPE", "0.02")
+	t.Setenv("LIVE_WEAK_SLOPE_ELITE_SCORE_MIN", "95")
+	t.Setenv("LIVE_WEAK_SLOPE_ELITE_THRESHOLD_FRAC", "0.5")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 98,
+			ScoreSlope:   0.015,
+			State:        inplay.StateHeating,
+			Momentum:     true,
+		},
+		Side:          "BUY",
+		Strat:         "vp_trend",
+		CombinedScore: 0.64,
+		Conf:          0.64,
+	}
+
+	if weakSlopeForCandidate(cand) {
+		t.Fatalf("expected elite continuation candidate to avoid weak_slope flag")
+	}
+
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if containsString(quality.QualityFlags, "weak_slope") {
+		t.Fatalf("expected no weak_slope penalty for elite continuation, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestWeakSlopePenaltyReducedForNormalCandidate(t *testing.T) {
+	t.Setenv("LIVE_WEAK_SLOPE_PENALTY", "0.03")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 90,
+			ScoreSlope:   0.00,
+			State:        inplay.StateInPlay,
+			Momentum:     true,
+		},
+		Side:          "BUY",
+		Strat:         "vp_trend",
+		CombinedScore: 0.60,
+		Conf:          0.60,
+		LastClose:     100,
+		SessionVWAP:   100,
+		EMA9:          100,
+	}
+
+	base := buildEntryQualityAccumulator(cand, nil)
+	quality := buildEntryQualityAccumulator(cand, []string{"weak_slope"})
+	if !containsString(quality.QualityFlags, "weak_slope") {
+		t.Fatalf("expected weak_slope flag, got %+v", quality.QualityFlags)
+	}
+	if delta := quality.PenaltyTotal - base.PenaltyTotal; delta != 0.03 {
+		t.Fatalf("expected reduced weak_slope penalty increment 0.03, got %.2f (base=%.2f total=%.2f)", delta, base.PenaltyTotal, quality.PenaltyTotal)
+	}
+}
+
+func TestMinorExtensionEliteContinuationGetsLighterPenalty(t *testing.T) {
+	t.Setenv("LIVE_MINOR_EXTENSION_PENALTY", "0.03")
+	t.Setenv("LIVE_MINOR_EXTENSION_ELITE_SCORE_MIN", "96")
+	t.Setenv("LIVE_MINOR_EXTENSION_ELITE_PENALTY_FRAC", "0.5")
+	t.Setenv("LIVE_ADD_MAX_EXTENSION_ATR", "1.35")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 98,
+			ScoreSlope:   0.18,
+			State:        inplay.StateInPlay,
+			Momentum:     true,
+		},
+		Side:            "BUY",
+		Strat:           "continuation_fast",
+		CombinedScore:   0.68,
+		Conf:            0.68,
+		ExtensionATR:    1.50,
+		ClosedBreakHold: true,
+		LastClose:       100,
+		SessionVWAP:     100,
+		EMA9:            100,
+	}
+
+	baseCand := cand
+	baseCand.ExtensionATR = 0.50
+	base := buildEntryQualityAccumulator(baseCand, nil)
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "minor_extension") {
+		t.Fatalf("expected minor_extension flag, got %+v", quality.QualityFlags)
+	}
+	if delta := quality.PenaltyTotal - base.PenaltyTotal; !(delta > 0 && delta < 0.06) {
+		t.Fatalf("expected elite extension penalty increment below legacy 0.06, got %.3f (base=%.3f total=%.3f)", delta, base.PenaltyTotal, quality.PenaltyTotal)
+	}
+}
+
+func TestMinorExtensionPenaltyReducedForNormalCandidate(t *testing.T) {
+	t.Setenv("LIVE_MINOR_EXTENSION_PENALTY", "0.03")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 90,
+			ScoreSlope:   0.10,
+			State:        inplay.StateInPlay,
+		},
+		Side:            "BUY",
+		Strat:           "continuation_fast",
+		CombinedScore:   0.60,
+		Conf:            0.60,
+		ClosedBreakHold: true,
+		LastClose:       100,
+		SessionVWAP:     100,
+		EMA9:            100,
+	}
+
+	base := buildEntryQualityAccumulator(cand, nil)
+	quality := buildEntryQualityAccumulator(cand, []string{"late_extension_no_reset"})
+	if !containsString(quality.QualityFlags, "minor_extension") {
+		t.Fatalf("expected minor_extension flag, got %+v", quality.QualityFlags)
+	}
+	if delta := quality.PenaltyTotal - base.PenaltyTotal; !(delta > 0 && delta < 0.08) {
+		t.Fatalf("expected reduced extension penalty increment below legacy 0.08, got %.2f (base=%.2f total=%.2f)", delta, base.PenaltyTotal, quality.PenaltyTotal)
+	}
 }

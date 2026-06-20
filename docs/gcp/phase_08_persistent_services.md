@@ -225,16 +225,90 @@ mkdir -p /opt/aster/env
 cp /opt/aster/repo/systemd/env/live.env.example /opt/aster/env/live.env
 ```
 
-Current validated paper-mode values:
+GCP Official Paper Validation Baseline v1 is being normalized now so Phase 9 can
+move secret-bearing values into Secret Manager or securely rendered runtime files
+without changing paper-auto semantics.
 
-- `LIVE_LAUNCH_MODE=paper`
-- `LIVE_DRY_RUN=1`
-- `LIVE_ENABLE_LIVE_TRADING=0`
-- `ASTER_LOG_DIR=/opt/aster/logs`
-- `LIVE_STATE_DIR=/opt/aster/state`
-- `LIVE_SHOW_ACCOUNT=0`
-- `LIVE_USERDATA_STREAM_ENABLE=0`
-- Telegram commands/reports disabled for this smoke/runtime phase
+A. Minimal required cloud-safe runtime block:
+
+```bash
+ASTER_CONFIG=/etc/aster/.aster.yaml
+ASTER_LOG_DIR=/opt/aster/logs
+LIVE_STATE_DIR=/opt/aster/state
+LIVE_RUNTIME_MODE=paper
+LIVE_DRY_RUN=1
+LIVE_ENABLE_LIVE_TRADING=0
+LIVE_PAPER_ENABLE=1
+LIVE_EVENTS_ENABLE=1
+LIVE_EVENTS_LOG=events.jsonl
+```
+
+B. Official paper-validation behavior block:
+
+```bash
+LIVE_SCAN_SEC=10
+LIVE_WATCHER_SEC=1
+LIVE_PRIORITY_WATCH_EVERY_SEC=1
+LIVE_DECISION_MS=250
+LIVE_PERF_LOG_ENABLE=1
+LIVE_SHOW_ACCOUNT=0
+LIVE_PERSISTENCE_OVERRIDE_ENABLE=0
+LIVE_PERSISTENCE_ENTRY_ENABLE=0
+LIVE_MAX_OPEN_POS=3
+LIVE_MAX_OPEN_PER_SIDE=2
+LIVE_MAX_ORDERS_PER_DAY=12
+LIVE_MAX_ORDERS_PER_HOUR=4
+LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY=3
+LIVE_ORDER_COOLDOWN_SEC=20
+LIVE_SYMBOL_COOLDOWN_SEC=90
+LIVE_SYMBOL_COOLDOWN_SAME_SIDE_SEC=60
+LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC=60
+LIVE_MIN_AVAILABLE_USDT=0
+LIVE_MAX_SPREAD_BPS=25
+LIVE_OB_MAX_SPREAD_BPS=25
+LIVE_MAX_DAILY_LOSS_PCT=3.0
+LIVE_SYMBOL_STOPOUT_COUNT=1
+LIVE_SYMBOL_STOPOUT_LOCK_MIN=60
+LIVE_TRADE_MARGIN_USDT=10
+LIVE_ENTRY_STARTER_USDT=10
+LIVE_PYRAMID_STEP_USDT=0
+LIVE_PYRAMID_MAX_TOTAL_USDT=30
+LIVE_BE_REQUIRE_TP1_OR_MIN_UPNL=1
+LIVE_BE_MIN_UPNL_PCT=5.0
+LIVE_EARLY_CONTINUATION_MIN_R=0.35
+LIVE_EARLY_CONTINUATION_MIN_HOLD_MIN=8
+LIVE_NO_FOLLOW_THROUGH_TIGHTEN_R=0.10
+LIVE_REENTRY_SOFT_EXIT_COOLDOWN_MIN=20
+LIVE_REENTRY_REQUIRE_STRONGER_SCORE_AFTER_SOFT_EXIT=true
+LIVE_REENTRY_SOFT_EXIT_STRONGER_SCORE_DELTA=7.5
+LIVE_MAINT1_ENABLE=0
+LIVE_MAINT_EOD_ENABLE=0
+```
+
+Optional short exploratory discovery diff:
+
+```bash
+LIVE_MAX_OPEN_POS=5
+LIVE_MAX_OPEN_PER_SIDE=3
+LIVE_MAX_ORDERS_PER_DAY=20
+LIVE_MAX_ORDERS_PER_HOUR=6
+LIVE_PAPER_SYMBOL_MAX_TRADES_PER_DAY=5
+LIVE_SYMBOL_COOLDOWN_FLIP_SIDE_SEC=30
+```
+
+Notes:
+
+- `LIVE_RUNTIME_MODE=paper` is the actual autonomous paper-entry switch.
+- GCP uses a cleaner explicit `systemd` + env + `/etc/aster/.aster.yaml` model than the current Pi manual-launch profile.
+- The official baseline preserves the Pi paper profile where those knobs still materially affect the current code, but tightens capacity and telemetry for the first disciplined validation window.
+- Some exploratory Pi toggles are intentionally excluded from the baseline because current code verification shows they do not actively shape the restored paper-auto decision path:
+  - `LIVE_REQUIRE_STRATEGY_MATCH`
+  - `LIVE_META_GATE_ENABLE`
+  - `LIVE_ALLOW_UNHEALTHY_ACCOUNT_AUTH`
+  - `LIVE_PAPER_BLOCK_ON_PARTIAL_HEALTH`
+  - `LIVE_A_PLUS_FASTLANE_ENABLE`
+  - `LIVE_PAPER_SYNC_WITH_LIVE`
+- Secret-bearing values are intentionally not included in this env example; Phase 9 will classify them into Secret Manager or securely rendered runtime files.
 
 ### 3. Install the live unit
 
@@ -287,6 +361,7 @@ Expected smoke indicators:
 
 - `dry_run=true`
 - `live_enabled=false`
+- `mode=paper`
 - paper summary present
 - scanner fields populated
 

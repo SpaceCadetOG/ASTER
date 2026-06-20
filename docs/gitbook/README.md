@@ -2,9 +2,16 @@
 
 This GitBook documents the current ASTER trading system as it runs today.
 
-The production runtime is `cmd/live`. It consumes scanner output, applies the
-risk shell, manages live and paper execution, handles Telegram operations, and
-maintains the perp account through the current host runtime.
+The production runtime is `cmd/live`. It is self-contained for market fetch,
+scanner-worker passes, in-memory scanner snapshots, candidate enrichment,
+strategy/risk routing, execution/protection orchestration, Telegram
+operations, and perp-account maintenance through the current host runtime.
+
+`cmd/long` and `cmd/short` are standalone scanner/dashboard/diagnostic
+products. They are not required upstream runtime dependencies for `cmd/live`.
+
+Autonomous entry logic exists in the codebase, but the current active runtime
+posture is manual-only / ground-zero mode.
 
 It covers:
 - End-to-end architecture and module boundaries.
