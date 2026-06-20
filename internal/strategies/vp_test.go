@@ -1,6 +1,9 @@
 package strategies
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,40 +86,12 @@ func TestVPTrendRetestSignal(t *testing.T) {
 }
 
 func TestRouterVPTargetTooCloseGate(t *testing.T) {
-	c := make([]features.Candle, 0, 40)
-	for i := 0; i < 40; i++ {
-		c = append(c, mkC(i+1, 100, 101, 99, 100.0+float64(i)*0.02, 100))
+	body, err := os.ReadFile(filepath.Join("router.go"))
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
 	}
-	ctx := Context{
-		Symbol:       "BTCUSDT",
-		TF:           "1m",
-		ScannerScore: 90,
-		ScannerGrade: "A",
-		Snapshot: features.Snapshot{
-			Structure: features.StructureState{Trend: features.TrendBull},
-			VP: features.VolumeProfile{
-				Bins: []features.PriceVolume{
-					{Price: 100.7, Volume: 200},
-					{Price: 100.8, Volume: 300},
-					{Price: 100.9, Volume: 200},
-				},
-				TotalVolume: 700,
-			},
-		},
-		Candles: c,
-	}
-	r := NewRouter(RouterConfig{
-		MinGrade:                  "B",
-		MinScore:                  0,
-		MinWhaleDelta:             -1e9,
-		EnableVPSetups:            true,
-		UseVPReversal:             false,
-		RejectIfTargetTooClosePct: 5.0,
-		RiskPolicy:                DefaultRiskPolicy(),
-	})
-	out := r.Eval(ctx)
-	if len(out) != 0 {
-		t.Fatalf("expected no candidates due to target-too-close gate, got %d", len(out))
+	if strings.Contains(string(body), "target_too_close") {
+		t.Fatalf("expected target_too_close gate to be removed from router")
 	}
 }
 
@@ -149,16 +124,15 @@ func TestRouterSessionRegimeTagSet(t *testing.T) {
 		Candles: c,
 	}
 	r := NewRouter(RouterConfig{
-		MinGrade:               "B",
-		MinScore:               0,
-		MinWhaleDelta:          -1e9,
-		EnableVPSetups:         true,
-		UseVPReversal:          true,
-		UseSessionRegimeRisk:   true,
-		EnableInstitutionalPA:  true,
-		MinConfluenceScore:     0.2,
-		AllowDeadZoneOnlyAPlus: false,
-		RiskPolicy:             DefaultRiskPolicy(),
+		MinGrade:              "B",
+		MinScore:              0,
+		MinWhaleDelta:         -1e9,
+		EnableVPSetups:        true,
+		UseVPReversal:         true,
+		UseSessionRegimeRisk:  true,
+		EnableInstitutionalPA: true,
+		MinConfluenceScore:    0.2,
+		RiskPolicy:            DefaultRiskPolicy(),
 	})
 	out := r.Eval(ctx)
 	if len(out) == 0 {
@@ -245,7 +219,6 @@ func TestRouterRejectsLateShortContinuationWithoutReset(t *testing.T) {
 		MinScore:                 0,
 		MinWhaleDelta:            -1e9,
 		MinConfluenceScore:       0.1,
-		AllowDeadZoneOnlyAPlus:   false,
 		ContinuationDayUTCPct:    25,
 		ContinuationReset1hPct:   0.8,
 		ContinuationLateSlopeMin: 0.16,

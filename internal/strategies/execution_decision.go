@@ -13,6 +13,7 @@ type PreflightVerdict struct {
 	Source   string
 	Reason   string
 	Reasons  []string
+	Quality  EntryQualityAccumulator
 }
 
 type AdmissionSummary struct {
@@ -30,6 +31,7 @@ type ExecutionDecision struct {
 	Signal       Signal
 	RiskDecision risk.Decision
 	Preflight    PreflightVerdict
+	Quality      EntryQualityAccumulator
 	Admission    AdmissionSummary
 	Approved     bool
 	RejectReason string
@@ -40,6 +42,16 @@ type ExecutionDecision struct {
 	Provenance   []string
 }
 
+type EntryQualityAccumulator struct {
+	HardBlockReasons    []string
+	QualityFlags        []string
+	PenaltyTotal        float64
+	ScoreBefore         float64
+	ScoreAfterPenalties float64
+	MinScore            float64
+	BlockReason         string
+}
+
 func NewExecutionDecision(symbol string, sig Signal, riskDec risk.Decision, preflight PreflightVerdict, admission AdmissionSummary, provenance ...string) ExecutionDecision {
 	out := ExecutionDecision{
 		Symbol:       strings.ToUpper(strings.TrimSpace(symbol)),
@@ -47,6 +59,7 @@ func NewExecutionDecision(symbol string, sig Signal, riskDec risk.Decision, pref
 		Signal:       sig,
 		RiskDecision: riskDec,
 		Preflight:    preflight,
+		Quality:      preflight.Quality,
 		Admission:    admission,
 		Entry:        sig.Entry,
 		Stop:         sig.Stop,
@@ -67,8 +80,11 @@ func NewExecutionDecision(symbol string, sig Signal, riskDec risk.Decision, pref
 			rejects = append(rejects, rr)
 		}
 	}
+	if rr := strings.TrimSpace(preflight.Quality.BlockReason); rr != "" && !containsDecisionReject(rejects, rr) {
+		rejects = append(rejects, rr)
+	}
 	out.Rejects = rejects
-	out.RejectReason = firstDecisionReject(sig.RejectReason, riskDec.RejectReason, preflight.Reason)
+	out.RejectReason = firstDecisionReject(sig.RejectReason, riskDec.RejectReason, preflight.Reason, preflight.Quality.BlockReason)
 	out.Approved = sig.Active && strings.TrimSpace(sig.RejectReason) == "" && riskDec.Approved && (!preflight.Checked || preflight.Approved)
 	return out
 }
@@ -95,4 +111,17 @@ func firstDecisionReject(parts ...string) string {
 		}
 	}
 	return ""
+}
+
+func containsDecisionReject(in []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, item := range in {
+		if strings.TrimSpace(item) == target {
+			return true
+		}
+	}
+	return false
 }

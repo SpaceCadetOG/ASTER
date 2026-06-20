@@ -17305,12 +17305,12 @@ func applySignalRiskGeometry(cand candidate, name string) strategies.Signal {
 func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]symbolMeta) {
 	rows := buildUnifiedInPlayRows(longInPlay, shortInPlay, meta, 0)
 	fmt.Printf("IN-PLAY (RANKED)\n")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
-	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | open       | mark       | vol($)   |")
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
+	fmt.Println("| side | sym        | grade | score   | slope   | state     | dayutc% | utc4h%  | utc1h%  | open       | mark       | vol($)   |")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 	if len(rows) == 0 {
-		fmt.Println("| (none)                                                                                           |")
-		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+		fmt.Println("| (none)                                                                                                             |")
+		fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 		return
 	}
 	for _, row := range rows {
@@ -17328,6 +17328,14 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.DayUTC24h != 0 {
 			dayUTC = fmt.Sprintf("%+6.1f", m.DayUTC24h)
 		}
+		utc4h := "-"
+		if m.UTC4hPct != 0 {
+			utc4h = fmt.Sprintf("%+6.1f", m.UTC4hPct)
+		}
+		utc1h := "-"
+		if m.UTC1hPct != 0 {
+			utc1h = fmt.Sprintf("%+6.1f", m.UTC1hPct)
+		}
 		openPx := "-"
 		if m.OpenPrice > 0 {
 			openPx = fmtPrice(m.OpenPrice)
@@ -17340,16 +17348,16 @@ func printUnifiedInPlay(longInPlay, shortInPlay []inplay.Entry, meta map[string]
 		if m.VolumeUSD > 0 {
 			vol = marketHumanUSD(m.VolumeUSD)
 		}
-		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %10s | %10s | %8s |\n",
+		fmt.Printf("| %-4s | %-10s | %s%-5s%s | %7.2f | %7.3f | %s%-9s%s | %7s | %7s | %7s | %10s | %10s | %8s |\n",
 			row.side,
 			sym,
 			gColor, grade, market.ResetColor(),
 			e.CurrentScore, e.ScoreSlope,
 			sColor, strings.ToLower(state), market.ResetColor(),
-			dayUTC, openPx, markPx, vol,
+			dayUTC, utc4h, utc1h, openPx, markPx, vol,
 		)
 	}
-	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+------------+------------+----------+")
+	fmt.Println("+------+------------+-------+---------+---------+-----------+---------+---------+---------+------------+------------+----------+")
 }
 
 func printTradeIntent(c candidate, entryBps, margin float64, lev int) {

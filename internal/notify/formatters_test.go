@@ -69,6 +69,9 @@ func TestBuildScannerSnapshotHTML(t *testing.T) {
 	if !strings.Contains(msg, "TOP SCANS") || !strings.Contains(msg, "s=<b>82</b>") || !strings.Contains(msg, "heating") {
 		t.Fatalf("expected richer scanner details, got %q", msg)
 	}
+	if !strings.Contains(msg, "day=+3.2%") || !strings.Contains(msg, "4h=+1.4%") || !strings.Contains(msg, "1h=+0.5%") {
+		t.Fatalf("expected UTC context in compact scanner snapshot, got %q", msg)
+	}
 }
 
 func TestBuildManagementStatusCard(t *testing.T) {

@@ -89,7 +89,7 @@ export function AssetTable(props: ScannerTableProps | LiveTableProps) {
                     onClick={() => props.onSelect(row.symbol, props.side)}
                   >
                     <strong className="table-symbol">{row.symbol}</strong>
-                    <small>{row.reason || `${props.side} scanner row`}</small>
+                    {row.reason ? <small>{row.reason}</small> : null}
                   </button>
                 </td>
                 <td>

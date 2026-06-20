@@ -270,13 +270,28 @@ func renderScanSectionCompact(label string, items []ScanItem, topN int) string {
 		if it.Price > 0 {
 			price = formatScanPrice(it.Price)
 		}
-		parts = append(parts, fmt.Sprintf("  %d) <b>%s</b> g=<b>%s</b> s=<b>%.0f</b> st=%s px=%s",
+		dayUTC := "n/a"
+		if it.DayUTC != 0 {
+			dayUTC = fmt.Sprintf("%+.1f%%", it.DayUTC)
+		}
+		utc4h := "n/a"
+		if it.UTC4h != 0 {
+			utc4h = fmt.Sprintf("%+.1f%%", it.UTC4h)
+		}
+		utc1h := "n/a"
+		if it.UTC1h != 0 {
+			utc1h = fmt.Sprintf("%+.1f%%", it.UTC1h)
+		}
+		parts = append(parts, fmt.Sprintf("  %d) <b>%s</b> g=<b>%s</b> s=<b>%.0f</b> st=%s px=%s day=%s 4h=%s 1h=%s",
 			i+1,
 			shortSymbol(it.Symbol),
 			strings.TrimSpace(it.Grade),
 			it.Score,
 			strings.ToLower(strings.TrimSpace(it.State)),
 			price,
+			dayUTC,
+			utc4h,
+			utc1h,
 		))
 	}
 	return strings.Join(parts, "\n")
