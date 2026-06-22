@@ -271,22 +271,24 @@ pre {
 .account-hero-list {
   display: grid;
   gap: 8px;
+  width: 100%;
 }
 
 .account-hero-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(90px, 0.75fr) minmax(0, 1.25fr);
   gap: 14px;
+  align-items: baseline;
 }
 
 .account-hero-row span {
   color: var(--muted);
-  font-size: 0.92rem;
+  font-weight: 600;
 }
 
 .account-hero-row strong {
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .tabs,
@@ -300,6 +302,36 @@ pre {
 
 .tabs {
   margin-bottom: 18px;
+}
+
+.scanner-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.asset-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.asset-picker select {
+  min-width: min(280px, 72vw);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(20, 20, 22, 0.92);
+  color: var(--text);
+  padding: 8px 34px 8px 14px;
+  font: inherit;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .tab {
@@ -602,7 +634,7 @@ pre {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   text-align: left;
   vertical-align: top;
-  overflow-wrap: normal;
+  overflow-wrap: anywhere;
 }
 
 .table th {
@@ -637,13 +669,11 @@ pre {
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
-  width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  text-align: left;
 }
 
 .table-link small {
@@ -653,49 +683,7 @@ pre {
 }
 
 .table-link strong {
-  white-space: nowrap;
-  word-break: keep-all;
-  overflow-wrap: normal;
-}
-
-.paper-asset-link small,
-.paper-strategy-cell small {
-  max-width: 16ch;
-}
-
-.paper-asset-link strong {
-  white-space: nowrap;
-}
-
-.paper-strategy-cell strong {
-  display: inline-block;
-  white-space: nowrap;
-}
-
-.paper-strategy-cell small,
-.paper-asset-link small,
-.pnl-subvalue {
-  display: inline-block;
   white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.tile-value.tone-positive,
-.tile-value.tone-negative,
-.tile-value.tone-muted {
-  color: inherit;
-}
-
-.tile-value.tone-positive {
-  color: var(--green);
-}
-
-.tile-value.tone-negative {
-  color: var(--red);
-}
-
-.tile-value.tone-muted {
-  color: var(--muted);
 }
 
 .table-symbol {

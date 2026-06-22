@@ -6,9 +6,7 @@ const tabs: Array<{ key: DashboardTab; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "scanners", label: "Scanners" },
   { key: "hotlist", label: "Live Hotlist / In-Play" },
-  { key: "runtime", label: "Runtime" },
-  { key: "paper", label: "Paper" },
-  { key: "asset", label: "Asset Detail" },
+  { key: "paper", label: "Trade" },
   { key: "health", label: "Health" }
 ];
 

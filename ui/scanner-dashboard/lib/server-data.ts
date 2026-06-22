@@ -25,6 +25,8 @@ type RawScannerSnapshot = {
 
 type RawLiveStatus = {
   generated?: string;
+  mode?: string;
+  mode_state?: string;
   dry_run?: boolean;
   live_enabled?: boolean;
   scanner_bias?: string;
@@ -44,6 +46,9 @@ type RawLiveStatus = {
     generated?: string;
     health?: string;
     health_detail?: string;
+    balance?: number;
+    margin_balance?: number;
+    margin_used?: number;
     available_usdt?: number;
     equity?: number;
     realized_day?: number;
@@ -51,6 +56,7 @@ type RawLiveStatus = {
     open_count?: number;
     bot_count?: number;
     manual_count?: number;
+    positions?: Array<Record<string, unknown>>;
   };
   paper_summary?: string;
   paper?: {
@@ -58,6 +64,8 @@ type RawLiveStatus = {
     summary?: string;
     balance?: number;
     reserve?: number;
+    available_usdt?: number;
+    margin_used?: number;
     equity?: number;
     open_pnl?: number;
     realized_today?: number;
@@ -77,17 +85,65 @@ function normalizeLiveAccount(raw: RawLiveStatus["live"] | undefined) {
   if (!raw) {
     return undefined;
   }
+  const positions = (raw.positions || []).map((row) => ({
+    symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+    side: String(row.side || ""),
+    source: typeof row.source === "string" ? row.source : undefined,
+    manageState: typeof row.manage_state === "string" ? row.manage_state : undefined,
+    protectionState: typeof row.protection_state === "string" ? row.protection_state : undefined,
+    managed: Boolean(row.managed),
+    protected: Boolean(row.protected),
+    qty: Number(row.qty || 0),
+    entryPrice: Number(row.entry_price || 0),
+    markPrice: Number(row.mark_price || 0),
+    lastPrice: Number(row.last_price || 0),
+    spreadBps: Number(row.spread_bps || 0),
+    unrealizedPnl: Number(row.unrealized_pnl || 0),
+    unrealizedPnlPct: Number(row.unrealized_pnl_pct || 0),
+    realizedPnl: Number(row.realized_pnl || 0),
+    exchangeUnreal: Number(row.exchange_unreal || 0),
+    leverage: Number(row.leverage || 0),
+    margin: Number(row.margin || 0),
+    stopPrice: Number(row.stop_price || 0),
+    holdMin: Number(row.hold_min || 0),
+    entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined
+  }));
+  const availableUsdt = Number(raw.available_usdt || 0);
+  const positionMargin = positions.reduce((sum, row) => sum + row.margin, 0);
+  const marginUsed =
+    raw.margin_used === null || raw.margin_used === undefined
+      ? positionMargin
+      : Number(raw.margin_used || 0);
+  const openPnl =
+    raw.open_pnl === null || raw.open_pnl === undefined
+      ? positions.reduce((sum, row) => sum + row.unrealizedPnl, 0)
+      : Number(raw.open_pnl || 0);
+  const positionBackedBalance = availableUsdt + marginUsed;
+  const hasPositionBackedValue = marginUsed > 0 || positions.length > 0;
+  const balance = hasPositionBackedValue
+    ? positionBackedBalance
+    : Number(raw.balance || raw.margin_balance || raw.equity || raw.available_usdt || 0);
+  const marginBalance = hasPositionBackedValue
+    ? positionBackedBalance
+    : Number(raw.margin_balance || raw.balance || raw.equity || raw.available_usdt || 0);
+  const equity = hasPositionBackedValue
+    ? positionBackedBalance + openPnl
+    : Number(raw.equity || balance + openPnl || 0);
   return {
     generated: typeof raw.generated === "string" ? raw.generated : undefined,
     health: typeof raw.health === "string" ? raw.health : undefined,
     healthDetail: typeof raw.health_detail === "string" ? raw.health_detail : undefined,
-    availableUsdt: Number(raw.available_usdt || 0),
-    equity: Number(raw.equity || 0),
+    balance,
+    marginBalance,
+    marginUsed,
+    availableUsdt,
+    equity,
     realizedDay: Number(raw.realized_day || 0),
-    openPnl: Number(raw.open_pnl || 0),
+    openPnl,
     openCount: Number(raw.open_count || 0),
     botCount: Number(raw.bot_count || 0),
-    manualCount: Number(raw.manual_count || 0)
+    manualCount: Number(raw.manual_count || 0),
+    positions
   };
 }
 
@@ -97,48 +153,62 @@ function normalizePaper(raw: RawLiveStatus["paper"] | undefined) {
   }
   const normalizePaperLabel = (value: unknown) =>
     typeof value === "string" ? value : undefined;
+  const openPositions = (raw.open_positions || []).map((row) => ({
+    symbol: normalizeDisplaySymbol(String(row.symbol || "")),
+    side: String(row.side || ""),
+    source: normalizePaperLabel(row.source),
+    mode: normalizePaperLabel(row.mode),
+    strategy: typeof row.strategy === "string" ? row.strategy : undefined,
+    setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
+    grade: typeof row.grade === "string" ? row.grade : undefined,
+    state: typeof row.state === "string" ? row.state : undefined,
+    triggerState: typeof row.trigger_state === "string" ? row.trigger_state : undefined,
+    exitProfile: typeof row.exit_profile === "string" ? row.exit_profile : undefined,
+    entryPrice: Number(row.entry_price || 0),
+    markPrice: Number(row.mark_price || 0),
+    stopPrice: Number(row.stop_price || 0),
+    tp1: Number(row.tp1 || 0),
+    tp2: Number(row.tp2 || 0),
+    tp3: Number(row.tp3 || 0),
+    qty: Number(row.qty || 0),
+    margin: Number(row.margin || 0),
+    leverage: Number(row.leverage || 0),
+    unrealizedPnl: Number(row.unrealized_pnl || 0),
+    unrealizedPct: Number(row.unrealized_pct || 0),
+    realizedPnl: Number(row.realized_pnl || 0),
+    mfeR: Number(row.mfe_r || 0),
+    maeR: Number(row.mae_r || 0),
+    openedAt: typeof row.opened_at === "string" ? row.opened_at : undefined,
+    holdMin: Number(row.hold_min || 0),
+    entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined,
+    entryDecisionReject:
+      typeof row.entry_decision_reject === "string" ? row.entry_decision_reject : undefined
+  }));
+  const balance = Number(raw.balance || 0);
+  const reserve = Number(raw.reserve || 0);
+  const openPnl = Number(raw.open_pnl || 0);
+  const marginUsed =
+    raw.margin_used === null || raw.margin_used === undefined
+      ? openPositions.reduce((sum, row) => sum + row.margin, 0)
+      : Number(raw.margin_used || 0);
+  const availableUsdt =
+    raw.available_usdt === null || raw.available_usdt === undefined
+      ? Math.max(0, balance - reserve - marginUsed)
+      : Number(raw.available_usdt || 0);
   return {
     mode: normalizePaperLabel(raw.mode),
     summary: typeof raw.summary === "string" ? raw.summary : undefined,
-    balance: Number(raw.balance || 0),
-    reserve: Number(raw.reserve || 0),
-    equity: Number(raw.equity || 0),
-    openPnl: Number(raw.open_pnl || 0),
+    balance,
+    reserve,
+    availableUsdt,
+    marginUsed,
+    equity: balance + openPnl,
+    openPnl,
     realizedToday: Number(raw.realized_today || 0),
     openCount: Number(raw.open_count || 0),
     recentClosedCount: Number(raw.recent_closed_count || 0),
     recentDecisionCount: Number(raw.recent_decision_count || 0),
-    openPositions: (raw.open_positions || []).map((row) => ({
-      symbol: normalizeDisplaySymbol(String(row.symbol || "")),
-      side: String(row.side || ""),
-      source: normalizePaperLabel(row.source),
-      mode: normalizePaperLabel(row.mode),
-      strategy: typeof row.strategy === "string" ? row.strategy : undefined,
-      setupFamily: typeof row.setup_family === "string" ? row.setup_family : undefined,
-      grade: typeof row.grade === "string" ? row.grade : undefined,
-      state: typeof row.state === "string" ? row.state : undefined,
-      triggerState: typeof row.trigger_state === "string" ? row.trigger_state : undefined,
-      exitProfile: typeof row.exit_profile === "string" ? row.exit_profile : undefined,
-      entryPrice: Number(row.entry_price || 0),
-      markPrice: Number(row.mark_price || 0),
-      stopPrice: Number(row.stop_price || 0),
-      tp1: Number(row.tp1 || 0),
-      tp2: Number(row.tp2 || 0),
-      tp3: Number(row.tp3 || 0),
-      qty: Number(row.qty || 0),
-      margin: Number(row.margin || 0),
-      leverage: Number(row.leverage || 0),
-      unrealizedPnl: Number(row.unrealized_pnl || 0),
-      unrealizedPct: Number(row.unrealized_pct || 0),
-      realizedPnl: Number(row.realized_pnl || 0),
-      mfeR: Number(row.mfe_r || 0),
-      maeR: Number(row.mae_r || 0),
-      openedAt: typeof row.opened_at === "string" ? row.opened_at : undefined,
-      holdMin: Number(row.hold_min || 0),
-      entryReason: typeof row.entry_reason === "string" ? row.entry_reason : undefined,
-      entryDecisionReject:
-        typeof row.entry_decision_reject === "string" ? row.entry_decision_reject : undefined
-    })),
+    openPositions,
     recentClosed: (raw.recent_closed || []).map((row) => ({
       symbol: normalizeDisplaySymbol(String(row.symbol || "")),
       side: String(row.side || ""),
@@ -381,6 +451,8 @@ function normalizeLive(endpoint: string, raw: RawLiveStatus | null, connected: b
   }
   return {
     generated: raw.generated,
+    mode: raw.mode,
+    modeState: raw.mode_state,
     dryRun: raw.dry_run,
     liveEnabled: raw.live_enabled,
     scannerBias: raw.scanner_bias,

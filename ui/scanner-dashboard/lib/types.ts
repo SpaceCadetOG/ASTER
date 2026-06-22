@@ -4,7 +4,6 @@ export type DashboardTab =
   | "hotlist"
   | "runtime"
   | "paper"
-  | "asset"
   | "health";
 
 export type ScannerSide = "long" | "short";
@@ -68,6 +67,8 @@ export interface LiveScanItem {
 
 export interface LiveView {
   generated?: string;
+  mode?: string;
+  modeState?: string;
   dryRun?: boolean;
   liveEnabled?: boolean;
   scannerBias?: string;
@@ -98,6 +99,9 @@ export interface LiveAccountView {
   generated?: string;
   health?: string;
   healthDetail?: string;
+  balance: number;
+  marginBalance: number;
+  marginUsed: number;
   availableUsdt: number;
   equity: number;
   realizedDay: number;
@@ -105,6 +109,31 @@ export interface LiveAccountView {
   openCount: number;
   botCount: number;
   manualCount: number;
+  positions?: LiveAccountPositionView[];
+}
+
+export interface LiveAccountPositionView {
+  symbol: string;
+  side: string;
+  source?: string;
+  manageState?: string;
+  protectionState?: string;
+  managed: boolean;
+  protected: boolean;
+  qty: number;
+  entryPrice: number;
+  markPrice: number;
+  lastPrice: number;
+  spreadBps: number;
+  unrealizedPnl: number;
+  unrealizedPnlPct: number;
+  realizedPnl: number;
+  exchangeUnreal: number;
+  leverage: number;
+  margin: number;
+  stopPrice: number;
+  holdMin: number;
+  entryReason?: string;
 }
 
 export interface PaperPositionView {
@@ -191,6 +220,8 @@ export interface PaperView {
   summary?: string;
   balance: number;
   reserve: number;
+  availableUsdt: number;
+  marginUsed: number;
   equity: number;
   openPnl: number;
   realizedToday: number;

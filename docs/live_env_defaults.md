@@ -127,6 +127,7 @@ Notes:
 - `LIVE_RESERVE_USDT`: default `5`
 - `LIVE_SCAN_SEC`: default `20`
 - `LIVE_SHOW_ACCOUNT`: default `true`
+- `LIVE_STATUS_ACCOUNT_ENABLE`: default `true`; keeps the dashboard account snapshot fresh even when `LIVE_SHOW_ACCOUNT=0` suppresses console account logging.
 - `LIVE_STRATEGY_TOP_N`: default `3`
 - `LIVE_TRADE_MARGIN_MAX_USDT`: default `200.0`
 - `LIVE_TRADE_MARGIN_MIN_USDT`: default `5.0`
