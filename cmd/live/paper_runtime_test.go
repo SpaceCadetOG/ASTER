@@ -356,6 +356,211 @@ func TestBuildEntryQualityAccumulatorPreservesHardSafetyBlock(t *testing.T) {
 	}
 }
 
+func TestBuildEntryQualityAccumulatorRewardsAlignedLongContinuation(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "BUY",
+		CombinedScore: 0.50,
+		Conf:          0.50,
+		DayUTC24h:     12,
+		UTC4hPct:      4,
+		UTC1hPct:      1.5,
+		Entry: inplay.Entry{
+			ScoreSlope: 0.10,
+		},
+	}
+	if got := runtimeMinQualityForCandidate(cand); got >= 0.52 {
+		t.Fatalf("expected aligned long relief below base quality, got %.2f", got)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorBlocksMaturePullbackLongWithoutReclaim(t *testing.T) {
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "BUY",
+		CombinedScore: 0.82,
+		Conf:          0.82,
+		DayUTC24h:     68,
+		UTC4hPct:      6,
+		UTC1hPct:      -4.5,
+		Entry: inplay.Entry{
+			EntryStyle: "pullback_long",
+			ScoreSlope: 0.08,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.HardBlockReasons, "mature_pullback_long_needs_reclaim") {
+		t.Fatalf("expected mature pullback block, got %+v", quality.HardBlockReasons)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorAllowsMaturePullbackLongAfterReclaim(t *testing.T) {
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "BUY",
+		CombinedScore: 0.82,
+		Conf:          0.82,
+		DayUTC24h:     68,
+		UTC4hPct:      6,
+		UTC1hPct:      -4.5,
+		ReclaimHold:   true,
+		Entry: inplay.Entry{
+			EntryStyle: "pullback_long",
+			ScoreSlope: 0.08,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if containsString(quality.HardBlockReasons, "mature_pullback_long_needs_reclaim") {
+		t.Fatalf("expected reclaim-confirmed pullback to avoid hard block, got %+v", quality.HardBlockReasons)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorBlocksAllRedShortChaseWithoutBounceFailure(t *testing.T) {
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "SELL",
+		CombinedScore: 0.86,
+		Conf:          0.86,
+		DayUTC24h:     -30,
+		UTC4hPct:      -12,
+		UTC1hPct:      -4,
+		Entry: inplay.Entry{
+			State:      inplay.StatePumping,
+			ScoreSlope: 0.07,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.HardBlockReasons, "short_block_late_chase") {
+		t.Fatalf("expected all-red short chase block, got %+v", quality.HardBlockReasons)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorAllowsAllRedShortAfterBounceFailure(t *testing.T) {
+	cand := candidate{
+		Strat:         "continuation_fast",
+		Side:          "SELL",
+		CombinedScore: 0.86,
+		Conf:          0.86,
+		DayUTC24h:     -30,
+		UTC4hPct:      -12,
+		UTC1hPct:      -4,
+		Entry: inplay.Entry{
+			DrawupFromTroughPct: 2.5,
+			FailedBounceCount:   1,
+			State:               inplay.StateCooling,
+			ScoreSlope:          -0.05,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if containsString(quality.HardBlockReasons, "short_block_late_chase") {
+		t.Fatalf("expected bounce-failure short to avoid hard block, got %+v", quality.HardBlockReasons)
+	}
+}
+
+func TestShortPhase2LateChaseShortBlocked(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: -30,
+		UTC4hPct:  -12,
+		UTC1hPct:  -5,
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "late_chase_short" || ctx.DirectShortAllowed {
+		t.Fatalf("expected late chase short blocked, got %+v", ctx)
+	}
+	if ctx.RequireConfirmation != "failed_bounce" {
+		t.Fatalf("expected failed_bounce confirmation, got %+v", ctx)
+	}
+}
+
+func TestShortPhase2FreshBreakdownShortAllowed(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: -8,
+		UTC4hPct:  -3,
+		UTC1hPct:  -1.5,
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "fresh_breakdown_short" || !ctx.DirectShortAllowed {
+		t.Fatalf("expected fresh breakdown short allowed, got %+v", ctx)
+	}
+}
+
+func TestShortPhase2PostPumpBreakdownBlocked(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: 100,
+		UTC4hPct:  -35,
+		UTC1hPct:  -12,
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "post_pump_breakdown" || ctx.DirectShortAllowed {
+		t.Fatalf("expected post-pump breakdown blocked, got %+v", ctx)
+	}
+	if ctx.RequireConfirmation != "failed_bounce" {
+		t.Fatalf("expected failed_bounce requirement, got %+v", ctx)
+	}
+}
+
+func TestShortPhase2PostPumpFreshBreakdownNeedsStructureBreak(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: 100,
+		UTC4hPct:  -8,
+		UTC1hPct:  -4,
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "post_pump_fresh_breakdown" || ctx.DirectShortAllowed {
+		t.Fatalf("expected post-pump fresh breakdown to wait for structure, got %+v", ctx)
+	}
+
+	cand.SessionVWAP = 100
+	cand.LastClose = 98
+	ctx = shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "post_pump_fresh_breakdown" || !ctx.DirectShortAllowed {
+		t.Fatalf("expected post-pump fresh breakdown to allow after structure loss, got %+v", ctx)
+	}
+}
+
+func TestShortPhase2LateChaseBecomesFailedBounceShort(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: -30,
+		UTC4hPct:  -12,
+		UTC1hPct:  -5,
+		Entry: inplay.Entry{
+			DrawupFromTroughPct: 2.5,
+			FailedBounceCount:   1,
+			State:               inplay.StateCooling,
+			ScoreSlope:          -0.05,
+		},
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "failed_bounce_short" || !ctx.DirectShortAllowed || !ctx.FailedBounceConfirmed {
+		t.Fatalf("expected late chase to convert to failed bounce short, got %+v", ctx)
+	}
+}
+
+func TestShortPhase2PostPumpBreakdownBecomesFailedBounceShort(t *testing.T) {
+	cand := candidate{
+		Side:      "SELL",
+		DayUTC24h: 100,
+		UTC4hPct:  -35,
+		UTC1hPct:  -12,
+		Entry: inplay.Entry{
+			DrawupFromTroughPct: 2.8,
+			FailedReclaimCount:  1,
+			State:               inplay.StateDumping,
+			ScoreSlope:          -0.08,
+		},
+	}
+	ctx := shortPhase2ContextForCandidate(cand)
+	if ctx.Bucket != "failed_bounce_short" || !ctx.DirectShortAllowed || !ctx.FailedBounceConfirmed {
+		t.Fatalf("expected post-pump breakdown to convert to failed bounce short, got %+v", ctx)
+	}
+}
+
 func TestPaperPreflightRejectsUnresolvedStrategyLabels(t *testing.T) {
 	for _, strat := range []string{"none", "", "no_strategy", "unknown", "unresolved"} {
 		t.Run(stratLabel(strat), func(t *testing.T) {
@@ -384,6 +589,40 @@ func TestPaperPreflightAllowsExecutableStrategy(t *testing.T) {
 	verdict := paperPreflightVerdict(ctx)
 	if !verdict.Approved {
 		t.Fatalf("expected executable strategy to pass, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
+	}
+}
+
+func TestPaperMaybeEnterAppliesPostPumpFreshShortSizeMultiplier(t *testing.T) {
+	paper := testPaperRuntimePaper()
+	now := time.Now().UTC()
+	cand := candidate{
+		Side:        "SELL",
+		Strat:       "vp_trend",
+		DayUTC24h:   100,
+		UTC4hPct:    -8,
+		UTC1hPct:    -4,
+		SessionVWAP: 100,
+		LastClose:   98,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 95,
+			ScoreSlope:   -0.10,
+			State:        inplay.StateCooling,
+		},
+	}
+	pos, err := paper.MaybeEnter(now, cand, 0, 100, 5, map[string]symbolMeta{"BTCUSDT": {LastPrice: 98}}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
+	if err != nil {
+		t.Fatalf("MaybeEnter error: %v", err)
+	}
+	if pos == nil {
+		t.Fatalf("expected paper position")
+	}
+	if pos.Margin != 75 {
+		t.Fatalf("expected 0.75 size multiplier margin, got %.2f", pos.Margin)
+	}
+	if pos.ShortBucket != "post_pump_fresh_breakdown" || !pos.DirectShortAllowed {
+		t.Fatalf("expected short bucket frozen on position, got %+v", pos)
 	}
 }
 

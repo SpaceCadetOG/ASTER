@@ -94,3 +94,55 @@ func TestSanitizeSnapshotPriceRejectsOutlier(t *testing.T) {
 		t.Fatalf("expected outlier to be guarded back to ref, got %.2f guarded=%v", got, guarded)
 	}
 }
+
+func TestActivateManualManagementAdoptsRecoveredPositionForMonitoring(t *testing.T) {
+	now := time.Now().UTC()
+	mgr := &liveExecManager{
+		positions:    map[string]*livePosition{},
+		stopPct:      2.0,
+		minStopPct:   0.1,
+		maxStopPct:   10.0,
+		tp1R:         1.2,
+		tp2R:         2.0,
+		tp3R:         3.0,
+		tp1Frac:      0.50,
+		tp2Frac:      0.30,
+		tp3Frac:      0.20,
+		reportLoc:    time.UTC,
+		ladderCfg:    ladderConfig{StarterUSDT: 100},
+		entryTimeout: time.Minute,
+	}
+	req := manualManageRequest{
+		Key:         positionLookupKey("BTCUSDT", "BUY"),
+		Fingerprint: manualManageFingerprint("BTCUSDT", "BUY", 1.25, 100),
+		Symbol:      "BTCUSDT",
+		Side:        "BUY",
+		Qty:         1.25,
+		Entry:       100,
+		Margin:      100,
+		Leverage:    5,
+	}
+
+	p, err := mgr.activateManualManagement(req, now, "REMOTE_POSITION_MONITORED")
+	if err != nil {
+		t.Fatalf("expected recovered position to be adopted for monitoring, got %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected managed recovered position")
+	}
+	if !p.Managed {
+		t.Fatal("expected recovered position to be managed")
+	}
+	if !p.ProtectionPending {
+		t.Fatal("expected recovered position protection to be pending")
+	}
+	if strings.TrimSpace(p.EntrySource) != manualEntrySourceManaged {
+		t.Fatalf("expected managed entry source, got %q", p.EntrySource)
+	}
+	if strings.TrimSpace(p.EntryReason) != manualEntryReasonManaged {
+		t.Fatalf("expected managed entry reason, got %q", p.EntryReason)
+	}
+	if got := mgr.positions["BTCUSDT"]; got == nil || !got.Managed {
+		t.Fatal("expected recovered position stored in manager as managed")
+	}
+}

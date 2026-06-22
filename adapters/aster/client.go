@@ -34,6 +34,10 @@ type atomicError struct {
 	err error
 }
 
+var timeNow = func() time.Time {
+	return time.Now().UTC()
+}
+
 func (a *atomicError) Set(err error) {
 	a.mu.Lock()
 	a.err = err
@@ -315,6 +319,7 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 	if len(quoteAssets) == 0 {
 		quoteAssets = []string{"USDT", "USD"}
 	}
+	nowUTC := timeNow()
 
 	rows, err := c.fetchAll24h()
 	if err != nil || len(rows) == 0 {
@@ -353,19 +358,19 @@ func (c *Client) FetchAllMarkets(quoteAssets ...string) []market.Market {
 				if oiUSD, err := c.openInterestUSD(raw, p); err == nil && oiUSD != nil {
 					mkts[i].OIUSD = oiUSD
 				}
-				if dayOpen, err := c.dayOpenUTC(raw, time.Now().UTC()); err == nil && dayOpen > 0 {
+				if dayOpen, err := c.dayOpenUTC(raw, nowUTC); err == nil && dayOpen > 0 {
 					mkts[i].OpenPrice = dayOpen
 					v := (p/dayOpen - 1.0) * 100.0
 					mkts[i].DayUTC24h = &v
 				} else if mkts[i].OpenPrice == 0 {
 					mkts[i].OpenPrice = deriveOpen(p, mkts[i].Change24h)
 				}
-				if open4h, err := c.open4hUTC(raw, time.Now().UTC()); err == nil && open4h > 0 {
+				if open4h, err := c.open4hUTC(raw, nowUTC); err == nil && open4h > 0 {
 					mkts[i].Open4hUTC = open4h
 					v := (p/open4h - 1.0) * 100.0
 					mkts[i].UTC4hPct = &v
 				}
-				if open1h, err := c.open1hUTC(raw, time.Now().UTC()); err == nil && open1h > 0 {
+				if open1h, err := c.open1hUTC(raw, nowUTC); err == nil && open1h > 0 {
 					mkts[i].Open1hUTC = open1h
 					v := (p/open1h - 1.0) * 100.0
 					mkts[i].UTC1hPct = &v

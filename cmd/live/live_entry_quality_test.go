@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	exitmgr "go-machine/internal/execution"
 	"go-machine/internal/inplay"
 )
 
@@ -116,5 +117,46 @@ func TestPlaceEntryRejectsUnresolvedStrategyBeforeSubmit(t *testing.T) {
 	err := (*liveExecManager)(nil).PlaceEntry(candidate{Strat: "none"}, 0, 10, 5, ladderPlan{})
 	if err == nil || err.Error() != "strategy_unresolved" {
 		t.Fatalf("expected strategy_unresolved, got %v", err)
+	}
+}
+
+func TestCanonicalExecutionStrategyNormalizesLegacyStarterLabels(t *testing.T) {
+	tests := []struct {
+		name  string
+		strat string
+		side  string
+		want  string
+	}{
+		{name: "impulsive long", strat: "impulsive_long_starter", side: "BUY", want: "impulse_long"},
+		{name: "impulsive short", strat: "impulsive_short_starter", side: "SELL", want: "impulse_short"},
+		{name: "elite buy", strat: "elite_starter", side: "BUY", want: "impulse_long"},
+		{name: "elite sell", strat: "elite_starter", side: "SELL", want: "impulse_short"},
+		{name: "continuation fast", strat: "continuation_fast_starter", side: "BUY", want: "continuation_fast"},
+	}
+	for _, tt := range tests {
+		if got := canonicalExecutionStrategy(tt.strat, tt.side); got != tt.want {
+			t.Fatalf("%s: expected %q, got %q", tt.name, tt.want, got)
+		}
+	}
+}
+
+func TestCanonicalImpulseStrategiesStayInIgniteFamily(t *testing.T) {
+	for _, strat := range []string{"impulse_long", "impulse_short"} {
+		got := strategyFamily(candidate{
+			Strat: strat,
+			Entry: inplay.Entry{EntryStyle: "none"},
+		})
+		if got != "ignite" {
+			t.Fatalf("expected %s to map to ignite family, got %q", strat, got)
+		}
+	}
+}
+
+func TestStopTemplateUsesContinuationImpulseForCanonicalImpulseLabels(t *testing.T) {
+	for _, strat := range []string{"impulse_long", "impulse_short"} {
+		got := stopTemplateForCandidate(candidate{Strat: strat})
+		if got != exitmgr.StopTemplateContinuationImpulse {
+			t.Fatalf("expected %s to use continuation impulse stop template, got %q", strat, got)
+		}
 	}
 }

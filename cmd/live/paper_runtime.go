@@ -78,6 +78,7 @@ type paperDecisionCtx struct {
 	EntryDepth          map[string]aster.OrderBook
 	Paper               *paperTrader
 	CurrentEntries      map[string]inplay.Entry
+	SessionChurns       map[string]*sessionChurn
 	RiskShell           risk.Config
 	RiskFallbackStopPct float64
 	RiskHoldHours       float64
@@ -190,6 +191,9 @@ func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	if reason := strings.TrimSpace(paperPaperRejectReason(ctx)); reason != "" && !containsString(reasons, reason) {
 		reasons = append(reasons, reason)
 	}
+	if reason := strings.TrimSpace(churnRejectReason(ctx.SessionChurns, ctx.Now, ctx.Candidate)); reason != "" && !containsString(reasons, reason) {
+		reasons = append(reasons, reason)
+	}
 	quality := buildEntryQualityAccumulator(ctx.Candidate, reasons)
 	verdict := strategies.PreflightVerdict{
 		Checked:  true,
@@ -236,6 +240,21 @@ type paperDispatchResult struct {
 	Position     *paperPosition
 }
 
+type shortPhase2Context struct {
+	Bucket                string
+	FilterReason          string
+	RequireConfirmation   string
+	DirectShortAllowed    bool
+	SizeMultiplier        float64
+	Pct24hAtEntry         float64
+	Pct4hAtEntry          float64
+	Pct1hAtEntry          float64
+	BounceFromLocalLowPct float64
+	FailedBounceConfirmed bool
+	PostPumpBreakdown     bool
+	LateChaseBlocked      bool
+}
+
 func dispatchPaperDecision(mode runtimeOperatingMode, now time.Time, decision strategies.ExecutionDecision, c candidate, entryBps, margin float64, leverage int, meta map[string]symbolMeta, depth map[string]aster.OrderBook, current map[string]inplay.Entry, hooks paperDispatchHooks) paperDispatchResult {
 	if mode != runtimeModePaper {
 		return paperDispatchResult{}
@@ -258,6 +277,67 @@ func dispatchPaperDecision(mode runtimeOperatingMode, now time.Time, decision st
 		Entered:   pos != nil,
 		Position:  pos,
 	}
+}
+
+func shortPhase2ContextForCandidate(c candidate) shortPhase2Context {
+	ctx := shortPhase2Context{
+		DirectShortAllowed: true,
+		SizeMultiplier:     1.0,
+		Pct24hAtEntry:      c.DayUTC24h,
+		Pct4hAtEntry:       c.UTC4hPct,
+		Pct1hAtEntry:       c.UTC1hPct,
+	}
+	if !strings.EqualFold(c.Side, "SELL") {
+		return ctx
+	}
+	ctx.BounceFromLocalLowPct = maxFloat(0, c.Entry.DrawupFromTroughPct)
+	postPumpFreshWindow := c.DayUTC24h > 60 && c.UTC4hPct < 0 && c.UTC4hPct > -15 && c.UTC1hPct < -2 && c.UTC1hPct > -6
+	switch {
+	case c.DayUTC24h > 60 && c.UTC4hPct < -15 && c.UTC1hPct < -5:
+		ctx.Bucket = "post_pump_breakdown"
+		ctx.FilterReason = "short_block_post_pump_chase"
+		ctx.RequireConfirmation = "failed_bounce"
+		ctx.DirectShortAllowed = false
+		ctx.SizeMultiplier = 0
+		ctx.PostPumpBreakdown = true
+	case postPumpFreshWindow:
+		ctx.Bucket = "post_pump_fresh_breakdown"
+		ctx.FilterReason = "short_post_pump_structure_wait"
+		ctx.RequireConfirmation = "just_lost_vwap_or_structure"
+		ctx.DirectShortAllowed = false
+		ctx.SizeMultiplier = 0
+		ctx.PostPumpBreakdown = true
+	case c.DayUTC24h < -20 && c.UTC4hPct < -8 && c.UTC1hPct < -3:
+		ctx.Bucket = "late_chase_short"
+		ctx.FilterReason = "short_block_late_chase"
+		ctx.RequireConfirmation = "failed_bounce"
+		ctx.DirectShortAllowed = false
+		ctx.SizeMultiplier = 0
+		ctx.LateChaseBlocked = true
+	case c.DayUTC24h < 0 && c.DayUTC24h > -20 && c.UTC4hPct < 0 && c.UTC1hPct < 0 && c.UTC1hPct > -3:
+		ctx.Bucket = "fresh_breakdown_short"
+		ctx.FilterReason = "short_allowed_fresh_breakdown"
+		ctx.DirectShortAllowed = true
+		ctx.SizeMultiplier = 1.0
+	default:
+		ctx.Bucket = "unclassified_short"
+		ctx.FilterReason = "short_context_unclassified"
+	}
+	if postPumpFreshWindow && shortJustLostVWAPOrStructure(c) {
+		ctx.DirectShortAllowed = true
+		ctx.SizeMultiplier = 0.75
+		ctx.FilterReason = "short_allowed_post_pump_breakdown"
+		ctx.RequireConfirmation = ""
+	}
+	if (ctx.Bucket == "late_chase_short" || ctx.Bucket == "post_pump_breakdown") && shortFailedBounceConfirmed(c, ctx) {
+		ctx.Bucket = "failed_bounce_short"
+		ctx.FilterReason = "short_allowed_failed_bounce"
+		ctx.RequireConfirmation = ""
+		ctx.DirectShortAllowed = true
+		ctx.SizeMultiplier = 1.0
+		ctx.FailedBounceConfirmed = true
+	}
+	return ctx
 }
 
 func annotatePaperPositionFromDecision(pos *paperPosition, c candidate, decision strategies.ExecutionDecision) {
@@ -480,6 +560,14 @@ func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candid
 	if acc == nil {
 		return
 	}
+	shortCtx := shortPhase2ContextForCandidate(c)
+	switch shortCtx.FilterReason {
+	case "short_block_late_chase", "short_block_post_pump_chase", "short_post_pump_structure_wait":
+		appendHardBlock(acc, shortCtx.FilterReason)
+	}
+	if blocksMaturePullbackLong(c) {
+		appendHardBlock(acc, "mature_pullback_long_needs_reclaim")
+	}
 	if strings.EqualFold(strings.TrimSpace(c.Entry.EntryStyle), "avoid_chase") || candidateExhaustionActive(c) {
 		appendQualityPenalty(acc, "avoid_chase", 0.10)
 	}
@@ -519,6 +607,65 @@ func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candid
 	if c.Sig.ConfluenceScore.TotalScore > 0 && c.Sig.ConfluenceScore.TotalScore < envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48) {
 		appendQualityPenalty(acc, "imperfect_confluence", 0.08)
 	}
+}
+
+func timeframeAlignedLong(c candidate) bool {
+	minDay := envFloat("LIVE_ALIGN_LONG_DAYUTC_MIN_PCT", 0.0)
+	min4h := envFloat("LIVE_ALIGN_LONG_4H_MIN_PCT", 0.0)
+	min1h := envFloat("LIVE_ALIGN_LONG_1H_MIN_PCT", 0.0)
+	return strings.EqualFold(c.Side, "BUY") && c.DayUTC24h > minDay && c.UTC4hPct > min4h && c.UTC1hPct > min1h
+}
+
+func timeframePullbackLong(c candidate) bool {
+	return strings.EqualFold(c.Side, "BUY") && c.DayUTC24h > 0 && c.UTC4hPct > 0 && c.UTC1hPct < 0
+}
+
+func continuationReclaimConfirmed(c candidate) bool {
+	return c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || hasFreshStructureReset(c) || continuationStructureConfirmed(c)
+}
+
+func shortJustLostVWAPOrStructure(c candidate) bool {
+	if !strings.EqualFold(c.Side, "SELL") {
+		return false
+	}
+	belowVWAP := c.SessionVWAP > 0 && c.LastClose < c.SessionVWAP
+	belowEMA := c.EMA9 > 0 && c.LastClose < c.EMA9
+	return belowVWAP || belowEMA || c.ClosedBreakHold || c.TriggerState == string(triggerFailReclaim)
+}
+
+func shortLowerTimeframeTurnedDown(c candidate) bool {
+	switch c.Entry.State {
+	case inplay.StateCooling, inplay.StateDumping, inplay.StateExhausted:
+		return true
+	}
+	return c.FastSlope < 0 || c.SlowSlope < 0 || c.Entry.ScoreSlope < 0
+}
+
+func blocksMaturePullbackLong(c candidate) bool {
+	if !timeframePullbackLong(c) {
+		return false
+	}
+	if continuationReclaimConfirmed(c) {
+		return false
+	}
+	extremeDay := envFloat("LIVE_PULLBACK_LONG_24H_EXTREME_PCT", 60.0)
+	flush1h := envFloat("LIVE_PULLBACK_LONG_1H_DROP_PCT", 3.0)
+	return c.DayUTC24h >= extremeDay && c.UTC1hPct <= -flush1h
+}
+
+func shortBounceFailureConfirmed(c candidate) bool {
+	if !strings.EqualFold(c.Side, "SELL") {
+		return false
+	}
+	return c.Entry.FailedBounceCount > 0 || c.Entry.FailedReclaimCount > 0 || c.TriggerState == string(triggerFailReclaim) || c.RetestHold || c.ClosedBreakHold || hasFreshStructureReset(c)
+}
+
+func shortFailedBounceConfirmed(c candidate, ctx shortPhase2Context) bool {
+	return ctx.BounceFromLocalLowPct >= 2.0 && shortBounceFailureConfirmed(c) && shortLowerTimeframeTurnedDown(c)
+}
+
+func blocksAllRedShortChase(c candidate) bool {
+	return shortPhase2ContextForCandidate(c).Bucket == "late_chase_short"
 }
 
 func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, bool) {
@@ -587,6 +734,21 @@ func appendQualityPenalty(acc *strategies.EntryQualityAccumulator, flag string, 
 
 func runtimeMinQualityForCandidate(c candidate) float64 {
 	base := envFloat("LIVE_META_MIN_QUALITY", 0.52)
+	shortCtx := shortPhase2ContextForCandidate(c)
+	switch {
+	case timeframeAlignedLong(c):
+		base -= envFloat("LIVE_ALIGN_LONG_QUALITY_RELIEF", 0.04)
+	case blocksMaturePullbackLong(c):
+		base += envFloat("LIVE_PULLBACK_LONG_QUALITY_PENALTY", 0.08)
+	case timeframePullbackLong(c):
+		base += envFloat("LIVE_PULLBACK_LONG_QUALITY_PENALTY_SOFT", 0.04)
+	case shortCtx.Bucket == "failed_bounce_short":
+		base -= envFloat("LIVE_SHORT_FAILED_BOUNCE_QUALITY_RELIEF", 0.03)
+	case shortCtx.Bucket == "post_pump_fresh_breakdown":
+		base += envFloat("LIVE_POST_PUMP_FRESH_BREAKDOWN_QUALITY_PENALTY", 0.03)
+	case strings.EqualFold(c.Side, "SELL") && c.DayUTC24h < 0 && c.UTC4hPct < 0 && c.UTC1hPct < 0:
+		base += envFloat("LIVE_ALL_RED_SHORT_QUALITY_PENALTY", 0.06)
+	}
 	switch strategyFamily(c) {
 	case "ignite":
 		return clamp(envFloat("LIVE_META_MIN_QUALITY_IGNITE", min(base, 0.50)), 0, 1)
