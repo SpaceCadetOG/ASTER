@@ -247,11 +247,6 @@ func (m *Manager) EvaluateProtect(in ProtectInput) ProtectDecision {
 		dec.Reason = strongerExitReason(dec.Reason, "early_profit_trail")
 	}
 	plan := exitPlanForStrategy(firstNonEmptyExit(in.EntryStrategyID, in.EntryReason))
-	if starterInitialManageOnly(in, m.cfg.StarterStabilizeBars) {
-		// Keep starter trades simple at first attach: let initial stop stand, no early trailing/tightening.
-		dec.Reason = "STARTER_INITIAL_PROTECT_ONLY"
-		return dec
-	}
 	wp := EvaluateWinnerProtection(
 		firstNonEmptyExit(in.EntryStrategyID, in.EntryReason),
 		in.Side,
@@ -440,16 +435,9 @@ func exitPlanForStrategy(strategyID string) string {
 }
 
 func starterInitialManageOnly(in ProtectInput, stabilizeBars int) bool {
-	if stabilizeBars <= 0 {
-		stabilizeBars = 6
-	}
-	if !(in.StarterEntry || IsStarterEntryReason(in.EntryReason)) {
-		return false
-	}
-	if in.AdvancedReady || in.HitTP1 {
-		return false
-	}
-	return in.BarsHeld < stabilizeBars
+	_ = in
+	_ = stabilizeBars
+	return false
 }
 
 func tightenToR(side string, entry, stop, r float64) float64 {

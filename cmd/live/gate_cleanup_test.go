@@ -44,7 +44,7 @@ func TestStarterTradeCanEnterWithoutCandidateReadyBlocking(t *testing.T) {
 	}
 }
 
-func TestRemovedReentryAndPyramidGatesNoLongerBlock(t *testing.T) {
+func TestEntryOnlyPlanBlocksSameSymbolAddOnsAndUsesFreshMargin(t *testing.T) {
 	now := time.Now().UTC()
 	cand := testCleanupCandidate("BTCUSDT", "BUY")
 	cand.Entry.EntryStyle = ""
@@ -83,11 +83,11 @@ func TestRemovedReentryAndPyramidGatesNoLongerBlock(t *testing.T) {
 		},
 	}
 	plan := resolveLadderPlan(now, cand, mgr, map[string]symbolMeta{})
-	if plan.RejectReason != "" {
-		t.Fatalf("expected removed add gate set to allow plan, got %q", plan.RejectReason)
+	if plan.RejectReason != "max_open_same_symbol" {
+		t.Fatalf("expected same-symbol add-ons to be blocked, got %q", plan.RejectReason)
 	}
-	if !plan.IsAdd {
-		t.Fatalf("expected add plan to proceed")
+	if plan.IsAdd || plan.IsReentry {
+		t.Fatalf("expected plain entry-only runtime, got %+v", plan)
 	}
 
 	closed := &livePosition{
@@ -108,13 +108,13 @@ func TestRemovedReentryAndPyramidGatesNoLongerBlock(t *testing.T) {
 	}
 	plan = resolveLadderPlan(now, cand, mgr, map[string]symbolMeta{})
 	if plan.RejectReason != "" {
-		t.Fatalf("expected removed reentry gate set to allow plan, got %q", plan.RejectReason)
+		t.Fatalf("expected fresh post-close entry plan, got %q", plan.RejectReason)
 	}
-	if !plan.IsReentry {
-		t.Fatalf("expected structured reentry to proceed without removed gates")
+	if plan.IsReentry || plan.IsAdd {
+		t.Fatalf("expected no reentry/add flags in entry-only runtime, got %+v", plan)
 	}
-	if plan.MarginUSDT != 7 {
-		t.Fatalf("expected reentry size to be preserved, got %.2f", plan.MarginUSDT)
+	if plan.MarginUSDT != 10 {
+		t.Fatalf("expected fresh entry to use base trade margin, got %.2f", plan.MarginUSDT)
 	}
 }
 
@@ -161,15 +161,15 @@ func TestSafetyGatesStillBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("pending_add_order", func(t *testing.T) {
+	t.Run("same_symbol_active", func(t *testing.T) {
 		mgr := &liveExecManager{
 			positions: map[string]*livePosition{
 				"BTCUSDT": {Symbol: "BTCUSDT", Side: "BUY", State: execOpen, RemainingQty: 1, EntrySource: "BOT", Managed: true, Protected: true, PendingAddOrderID: 99},
 			},
 			ladderCfg: ladderConfig{StarterUSDT: 10},
 		}
-		if got := resolveLadderPlan(now, cand, mgr, nil).RejectReason; got != "pending_add_order" {
-			t.Fatalf("expected pending_add_order, got %q", got)
+		if got := resolveLadderPlan(now, cand, mgr, nil).RejectReason; got != "max_open_same_symbol" {
+			t.Fatalf("expected max_open_same_symbol, got %q", got)
 		}
 	})
 }

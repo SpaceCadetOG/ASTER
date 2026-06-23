@@ -19,6 +19,8 @@ type Event struct {
 	TF                string    `json:"tf,omitempty"`
 	Strategy          string    `json:"strategy,omitempty"`
 	SetupFamily       string    `json:"setup_family,omitempty"`
+	SetupSource       string    `json:"setup_source,omitempty"`
+	TradeHorizon      string    `json:"trade_horizon,omitempty"`
 	Grade             string    `json:"grade,omitempty"`
 	State             string    `json:"state,omitempty"`
 	TriggerState      string    `json:"trigger_state,omitempty"`

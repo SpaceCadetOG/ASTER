@@ -95,21 +95,6 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 	if res.Template == "" {
 		res.Template = StopTemplateReclaimPullback
 	}
-	if starterInitialProtectionMode(in) {
-		stopPrice := starterSimpleInitialStop(side, in.Entry, in.SignalStop, cfg.MinWidthPct/100.0, cfg.MaxWidthPct/100.0)
-		if stopPrice <= 0 {
-			res.Rejected = true
-			res.RejectReason = "hybrid_stop_missing_anchor"
-			return res
-		}
-		dist := math.Abs(in.Entry - stopPrice)
-		res.StopPrice = stopPrice
-		res.StopReason = "starter_simple_initial_stop"
-		res.StopDistanceR = dist
-		res.StopDistancePct = (dist / in.Entry) * 100.0
-		res.StarterOnly = true
-		return res
-	}
 	minWidthPct := cfg.MinWidthPct / 100.0
 	maxWidthPct := cfg.MaxWidthPct / 100.0
 	if minWidthPct < 0 {
@@ -199,22 +184,13 @@ func ComputeHybridStop(cfg HybridStopConfig, in HybridStopInput) HybridStopResul
 }
 
 func IsStarterEntryReason(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "impulsive_long_starter", "impulsive_short_starter":
-		return true
-	default:
-		return false
-	}
+	_ = reason
+	return false
 }
 
 func starterInitialProtectionMode(in HybridStopInput) bool {
-	if !(in.StarterEntry || IsStarterEntryReason(in.EntryReason)) {
-		return false
-	}
-	if in.AdvancedReady || in.HitTP1 {
-		return false
-	}
-	return true
+	_ = in
+	return false
 }
 
 func starterSimpleInitialStop(side string, entry, signalStop, minWidthPct, maxWidthPct float64) float64 {

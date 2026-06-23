@@ -583,6 +583,25 @@ func TestPaperPreflightRejectsUnresolvedStrategyLabels(t *testing.T) {
 	}
 }
 
+func TestPaperPreflightCarriesUnresolvedSourceForFallbackCandidate(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.Candidate = applySimpleContinuationFallbackAt(candidate{
+		Side:  "BUY",
+		Strat: "",
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "none",
+			CurrentScore: 78,
+			ScoreSlope:   0.02,
+			State:        inplay.StateBalanced,
+		},
+	}, time.Now().UTC())
+	verdict := paperPreflightVerdict(ctx)
+	if !containsString(verdict.Quality.HardBlockReasons, "strategy_unresolved_source:continuation_fallback_unmapped") {
+		t.Fatalf("expected unresolved source tag, got %+v", verdict.Quality.HardBlockReasons)
+	}
+}
+
 func TestPaperPreflightAllowsExecutableStrategy(t *testing.T) {
 	ctx := testPaperDecisionCtx()
 	ctx.Candidate.Strat = "vp_trend"
@@ -665,6 +684,7 @@ func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 		paperLogDecision(cand, decision, paperDispatchResult{})
 	})
 	for _, want := range []string{
+		"unresolved_source=n/a",
 		"quality_flags=avoid_chase|weak_slope",
 		"penalty_total=0.16",
 		"score_before=0.58",
@@ -676,6 +696,24 @@ func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected log output to contain %q, got %q", want, output)
 		}
+	}
+}
+
+func TestPaperLogDecisionIncludesUnresolvedSourceForStrategyRejects(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.RejectReason = "strategy_unresolved"
+	decision.Quality = strategies.EntryQualityAccumulator{
+		HardBlockReasons: []string{"strategy_unresolved", "strategy_unresolved_source:feature_bars_insufficient"},
+		BlockReason:      "hard_safety_block",
+	}
+	cand.Strat = ""
+	cand.RejectReason = withUnresolvedSource("", "feature_bars_insufficient")
+	output := capturePaperRuntimeStdout(t, func() {
+		paperLogDecision(cand, decision, paperDispatchResult{})
+	})
+	if !strings.Contains(output, "unresolved_source=feature_bars_insufficient") {
+		t.Fatalf("expected unresolved source in log output, got %q", output)
 	}
 }
 

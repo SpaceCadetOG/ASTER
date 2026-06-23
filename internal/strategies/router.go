@@ -87,7 +87,19 @@ func NewRouter(cfg RouterConfig) *Router {
 		})
 		cfg.RiskShell = defaultShell
 	}
-	base := []Strategy{LSR{}, BOSPB{}, OBR{}, FVGC{}, FailedAuction{}, OpenDrive{}}
+	base := []Strategy{
+		LSR{},
+		BOSPB{},
+		OBR{},
+		FVGC{},
+		FailedAuction{},
+		OpenDrive{},
+		VolumeClusters{},
+		MultipleNodes{},
+		TradesFilter{},
+		StackedImbalances{},
+		UnfinishedBusiness{},
+	}
 	if cfg.EnableVPSetups {
 		base = append(base, VPAccumulation{}, VPTrendRetest{}, VPRejection{})
 		if cfg.UseVPReversal {

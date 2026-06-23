@@ -81,15 +81,23 @@ type OBZone struct {
 }
 
 type FlowState struct {
-	VolumeZ           float64
-	VolumeSpike       bool
-	WhaleDelta1m      float64
-	WhaleDeltaCum     float64
-	WhaleBuyPct       float64
-	WhaleSellPct      float64
-	LargeTradeCount1m int
-	LargeBuyCount1m   int
-	LargeSellCount1m  int
+	VolumeZ              float64
+	VolumeSpike          bool
+	WhaleDelta1m         float64
+	WhaleDeltaCum        float64
+	WhaleBuyPct          float64
+	WhaleSellPct         float64
+	LargeTradeCount1m    int
+	LargeBuyCount1m      int
+	LargeSellCount1m     int
+	DeltaDivBull         bool
+	DeltaDivBear         bool
+	AbsorptionBull       bool
+	AbsorptionBear       bool
+	StackedImbalanceBull bool
+	StackedImbalanceBear bool
+	UnfinishedBusinessUp bool
+	UnfinishedBusinessDn bool
 }
 
 type AnchorLevels struct {

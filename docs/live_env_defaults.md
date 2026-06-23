@@ -15,8 +15,8 @@ Allowed live entry producers:
 - momentum_ignite_long
 - momentum_ignite_short
 - continuation_fast
-- impulsive_long_starter
-- impulsive_short_starter
+- breakout_retest
+- micro_pullback_continuation
 
 Removed from live routing:
 - early_dev_entry

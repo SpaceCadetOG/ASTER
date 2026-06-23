@@ -149,6 +149,117 @@ func TestPaperContinuationCleanAllowsUnresolvedWatchButNotExecution(t *testing.T
 	}
 }
 
+func TestPaperContinuationCleanPromotesContinuationSetupFamilyToExecutableStrategy(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
+
+	got := applySimpleContinuationFallbackAt(candidate{
+		Side:        "BUY",
+		Strat:       "none",
+		ReclaimHold: true,
+		LastClose:   101,
+		SessionVWAP: 100,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "pullback_long",
+			CurrentScore: 84,
+			ScoreSlope:   0.08,
+			State:        inplay.StateInPlay,
+		},
+	}, time.Now().UTC())
+
+	if got.SetupFamily != "micro_pullback_continuation" {
+		t.Fatalf("expected continuation setup family, got %q", got.SetupFamily)
+	}
+	if got.Strat != "micro_pullback_continuation" {
+		t.Fatalf("expected executable strategy promoted from setup family, got %q", got.Strat)
+	}
+}
+
+func TestPaperContinuationCleanSetupFamilyOwnsContinuationExecution(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
+
+	got := applySimpleContinuationFallbackAt(candidate{
+		Side:            "BUY",
+		Strat:           "",
+		ClosedBreakHold: true,
+		LastClose:       101,
+		SessionVWAP:     100,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "breakout_hold_long",
+			CurrentScore: 88,
+			ScoreSlope:   0.10,
+			State:        inplay.StateInPlay,
+		},
+	}, time.Now().UTC())
+
+	if got.SetupFamily != "breakout_retest" {
+		t.Fatalf("expected breakout_retest setup family, got %q", got.SetupFamily)
+	}
+	if got.Strat != "breakout_retest" {
+		t.Fatalf("expected continuation setup family to own execution, got %q", got.Strat)
+	}
+}
+
+func TestPaperContinuationCleanKeepsReversalWatchUnresolved(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
+
+	got := applySimpleContinuationFallbackAt(candidate{
+		Side:  "BUY",
+		Strat: "",
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "reversal_watch_long",
+			CurrentScore: 83,
+			ScoreSlope:   -0.03,
+			State:        inplay.StateCooling,
+		},
+	}, time.Now().UTC())
+
+	if got.SetupFamily != "reversal_exhaustion" {
+		t.Fatalf("expected reversal setup family, got %q", got.SetupFamily)
+	}
+	if got.Strat != "" {
+		t.Fatalf("expected reversal watch to remain unresolved for non-continuation setup, got %q", got.Strat)
+	}
+
+	ctx := testPaperDecisionCtx()
+	ctx.Candidate = got
+	verdict := paperPreflightVerdict(ctx)
+	if verdict.Approved {
+		t.Fatalf("expected reversal-style candidate to stay blocked")
+	}
+	if verdict.Reason != "strategy_unresolved" {
+		t.Fatalf("expected strategy_unresolved for unresolved reversal-style candidate, got %q", verdict.Reason)
+	}
+}
+
+func TestPaperContinuationCleanKeepsResolvedRouterStrategyLabel(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
+
+	got := applySimpleContinuationFallbackAt(candidate{
+		Side:        "BUY",
+		Strat:       "vp_trend",
+		ReclaimHold: true,
+		LastClose:   101,
+		SessionVWAP: 100,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "pullback_long",
+			CurrentScore: 90,
+			ScoreSlope:   0.12,
+			State:        inplay.StateInPlay,
+		},
+	}, time.Now().UTC())
+
+	if got.SetupFamily != "micro_pullback_continuation" {
+		t.Fatalf("expected continuation setup family, got %q", got.SetupFamily)
+	}
+	if got.Strat != "vp_trend" {
+		t.Fatalf("expected resolved router strategy to be preserved, got %q", got.Strat)
+	}
+}
+
 func TestPaperContinuationCleanKeepsSharedManagementActive(t *testing.T) {
 	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
 	if !effectiveSharedManagementEnabled() {

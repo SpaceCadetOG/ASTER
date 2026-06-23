@@ -160,6 +160,9 @@ func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	reasons := make([]string, 0, 3)
 	if !isExecutableStrategy(ctx.Candidate.Strat) {
 		reasons = append(reasons, "strategy_unresolved")
+		if source := unresolvedStrategySource(ctx.Candidate); source != "" {
+			reasons = append(reasons, "strategy_unresolved_source:"+source)
+		}
 	}
 	pre := deepQueuePreflight(ctx.Candidate, queueDeepPreflightCtx{
 		Now:                 ctx.Now,
@@ -492,11 +495,12 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	switch {
 	case !decision.Approved:
 		quality := decision.Quality
-		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
+		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s unresolved_source=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
 			sym,
 			c.Side,
 			c.Strat,
 			firstNonEmpty(decision.RejectReason, "not_approved"),
+			firstNonEmpty(unresolvedStrategySource(c), "n/a"),
 			strings.Join(quality.QualityFlags, "|"),
 			quality.PenaltyTotal,
 			quality.ScoreBefore,

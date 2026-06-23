@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	exitmgr "go-machine/internal/execution"
 	"go-machine/internal/inplay"
@@ -120,23 +121,53 @@ func TestPlaceEntryRejectsUnresolvedStrategyBeforeSubmit(t *testing.T) {
 	}
 }
 
-func TestCanonicalExecutionStrategyNormalizesLegacyStarterLabels(t *testing.T) {
+func TestCanonicalExecutionStrategyPreservesCleanStrategyLabels(t *testing.T) {
 	tests := []struct {
 		name  string
 		strat string
 		side  string
 		want  string
 	}{
-		{name: "impulsive long", strat: "impulsive_long_starter", side: "BUY", want: "impulse_long"},
-		{name: "impulsive short", strat: "impulsive_short_starter", side: "SELL", want: "impulse_short"},
-		{name: "elite buy", strat: "elite_starter", side: "BUY", want: "impulse_long"},
-		{name: "elite sell", strat: "elite_starter", side: "SELL", want: "impulse_short"},
-		{name: "continuation fast", strat: "continuation_fast_starter", side: "BUY", want: "continuation_fast"},
+		{name: "impulse long", strat: "impulse_long", side: "BUY", want: "impulse_long"},
+		{name: "impulse short", strat: "impulse_short", side: "SELL", want: "impulse_short"},
+		{name: "continuation fast", strat: "continuation_fast", side: "BUY", want: "continuation_fast"},
+		{name: "breakout retest", strat: "breakout_retest", side: "BUY", want: "breakout_retest"},
 	}
 	for _, tt := range tests {
 		if got := canonicalExecutionStrategy(tt.strat, tt.side); got != tt.want {
 			t.Fatalf("%s: expected %q, got %q", tt.name, tt.want, got)
 		}
+	}
+}
+
+func TestResolveLadderPlanUsesTradeMarginAndBlocksSameSymbolAddOns(t *testing.T) {
+	t.Setenv("LIVE_TRADE_MARGIN_USDT", "10")
+	now := time.Now().UTC()
+	execMgr := &liveExecManager{
+		ladderCfg: loadLadderConfig(10),
+		positions: map[string]*livePosition{
+			"BTCUSDT": {
+				Symbol:       "BTCUSDT",
+				Side:         "BUY",
+				State:        execOpen,
+				RemainingQty: 1,
+			},
+		},
+	}
+	plan := resolveLadderPlan(now, candidate{
+		Side: "BUY",
+		Entry: inplay.Entry{
+			Symbol: "BTCUSDT",
+		},
+	}, execMgr, nil)
+	if plan.MarginUSDT != 10 {
+		t.Fatalf("expected trade margin 10, got %.2f", plan.MarginUSDT)
+	}
+	if plan.IsAdd || plan.IsReentry {
+		t.Fatalf("expected plain entry-only plan, got %+v", plan)
+	}
+	if plan.RejectReason != "max_open_same_symbol" {
+		t.Fatalf("expected same-symbol addon rejection, got %+v", plan)
 	}
 }
 

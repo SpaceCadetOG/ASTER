@@ -1,6 +1,7 @@
 package features
 
 import (
+	"math"
 	"time"
 
 	"go-machine/internal/flow"
@@ -83,17 +84,71 @@ func (e *FlowEngine) Eval(c []Candle) FlowState {
 	for _, d := range e.deltaCumQ {
 		cum += d
 	}
+	divBull, divBear := detectWhaleDeltaDivergence(c, ws.DeltaUSD)
+	absBull, absBear := detectAbsorptionState(c, ws.DeltaUSD)
+	stackedBull, stackedBear := detectStackedTapeImbalance(ts, vz)
+	ubUp, ubDn := detectUnfinishedBusiness(c)
 	return FlowState{
-		VolumeZ:           vz,
-		VolumeSpike:       vz >= 2.0,
-		WhaleDelta1m:      ws.DeltaUSD,
-		WhaleDeltaCum:     cum,
-		WhaleBuyPct:       ws.BuyPct,
-		WhaleSellPct:      ws.SellPct,
-		LargeTradeCount1m: ts.LargeCount,
-		LargeBuyCount1m:   int(ts.BuyPct / 100.0 * float64(ts.LargeCount)),
-		LargeSellCount1m:  int(ts.SellPct / 100.0 * float64(ts.LargeCount)),
+		VolumeZ:              vz,
+		VolumeSpike:          vz >= 2.0,
+		WhaleDelta1m:         ws.DeltaUSD,
+		WhaleDeltaCum:        cum,
+		WhaleBuyPct:          ws.BuyPct,
+		WhaleSellPct:         ws.SellPct,
+		LargeTradeCount1m:    ts.LargeCount,
+		LargeBuyCount1m:      int(ts.BuyPct / 100.0 * float64(ts.LargeCount)),
+		LargeSellCount1m:     int(ts.SellPct / 100.0 * float64(ts.LargeCount)),
+		DeltaDivBull:         divBull,
+		DeltaDivBear:         divBear,
+		AbsorptionBull:       absBull,
+		AbsorptionBear:       absBear,
+		StackedImbalanceBull: stackedBull,
+		StackedImbalanceBear: stackedBear,
+		UnfinishedBusinessUp: ubUp,
+		UnfinishedBusinessDn: ubDn,
 	}
+}
+
+func detectWhaleDeltaDivergence(c []Candle, delta float64) (bool, bool) {
+	if len(c) < 2 {
+		return false, false
+	}
+	last := c[len(c)-1]
+	prev := c[len(c)-2]
+	divBull := last.L < prev.L && delta > 0 && last.C > last.L
+	divBear := last.H > prev.H && delta < 0 && last.C < last.H
+	return divBull, divBear
+}
+
+func detectAbsorptionState(c []Candle, delta float64) (bool, bool) {
+	if len(c) == 0 {
+		return false, false
+	}
+	last := c[len(c)-1]
+	body := math.Abs(last.C - last.O)
+	rangeSize := math.Abs(last.H - last.L)
+	if rangeSize <= 0 {
+		return false, false
+	}
+	mid := (last.H + last.L) / 2
+	absBull := delta < 0 && body < rangeSize*0.45 && last.C >= mid
+	absBear := delta > 0 && body < rangeSize*0.45 && last.C <= mid
+	return absBull, absBear
+}
+
+func detectStackedTapeImbalance(ts flow.Stats, volumeZ float64) (bool, bool) {
+	bull := ts.LargeCount >= 3 && ts.BuyPct >= 65 && volumeZ >= 1.0
+	bear := ts.LargeCount >= 3 && ts.SellPct >= 65 && volumeZ >= 1.0
+	return bull, bear
+}
+
+func detectUnfinishedBusiness(c []Candle) (bool, bool) {
+	if len(c) < 2 {
+		return false, false
+	}
+	last := c[len(c)-1]
+	prev := c[len(c)-2]
+	return math.Abs(last.H-prev.H) < 1e-9, math.Abs(last.L-prev.L) < 1e-9
 }
 
 func zscore(series []float64, x float64, n int) float64 {

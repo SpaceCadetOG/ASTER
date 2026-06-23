@@ -531,7 +531,6 @@ func (t *missedTracker) ObserveCandidate(now time.Time, c candidate, topN bool) 
 	st.VolumeTrendUp = volumeIncreasing(st.LastVolumeUSD, st.LastVolumeRatio, c, cfg.AllowStableVolume)
 	st.MomentumStableOrUp = momentumStableOrImproving(st.LastSlope, st.LastScore, c, cfg.AllowStableMomentum)
 	st.DirectionStable = directionPersistent(st.Side, c)
-	st.HadStarterSignal = st.HadStarterSignal || isStarterOnlyStrategyName(c.Strat)
 	st.HadEntrySignal = st.HadEntrySignal || (!strings.EqualFold(strings.TrimSpace(c.Strat), "") && !strings.EqualFold(c.Strat, "none"))
 	if strings.TrimSpace(c.RejectReason) != "" {
 		st.LastRejectReason = c.RejectReason
@@ -572,7 +571,7 @@ func (t *missedTracker) persistenceState(now time.Time, c candidate) (*Opportuni
 	if now.Sub(st.LastSeenAt) > cfg.Window {
 		return st, false, nil
 	}
-	if c.Strat != "" && !strings.EqualFold(c.Strat, "none") && !isStarterOnlyStrategyName(c.Strat) {
+	if c.Strat != "" && !strings.EqualFold(c.Strat, "none") {
 		return st, false, nil
 	}
 	if reason := persistenceHardInvalidationReason(c); reason != "" {
@@ -1057,6 +1056,10 @@ func relativePct(px, anchor float64) float64 {
 }
 
 func chooseExitProfile(c candidate) string {
+	switch candidateTradeHorizon(c, time.Now().UTC()) {
+	case "swing":
+		return "SWING"
+	}
 	switch c.SetupFamily {
 	case "reset_impulse_breakout":
 		return "IMPULSE"
@@ -1076,6 +1079,12 @@ func profileTargetRs(c candidate, base1, base2, base3 float64) (string, float64,
 			envFloat("LIVE_IMPULSE_TP1_R", maxFloat(base1, 1.1)),
 			envFloat("LIVE_IMPULSE_TP2_R", maxFloat(base2, 2.6)),
 			envFloat("LIVE_IMPULSE_TP3_R", maxFloat(base3, 4.2))
+	}
+	if profile == "SWING" {
+		return profile,
+			envFloat("LIVE_SWING_TP1_R", maxFloat(base1, 1.25)),
+			envFloat("LIVE_SWING_TP2_R", maxFloat(base2, 3.0)),
+			envFloat("LIVE_SWING_TP3_R", maxFloat(base3, 5.0))
 	}
 	rotationTP1 := minPositive(base1, 0.9)
 	rotationTP2 := minPositive(base2, 1.8)
@@ -1119,6 +1128,8 @@ func computeDynamicTargetLadder(c candidate, entry, stopDist, base1, base2, base
 		atrMults := []float64{1.25, 2.20, 3.40}
 		if profile == "IMPULSE" {
 			atrMults = []float64{1.60, 2.80, 4.20}
+		} else if profile == "SWING" {
+			atrMults = []float64{1.80, 3.20, 5.00}
 		}
 		for _, mult := range atrMults {
 			cands = append(cands, targetPriceAbsolute(sideBuy, entry, c.ATR*mult))
@@ -1128,6 +1139,8 @@ func computeDynamicTargetLadder(c candidate, entry, stopDist, base1, base2, base
 		move := entry * c.ATRPct * expectedMoveMult
 		if profile == "IMPULSE" {
 			move *= 1.25
+		} else if profile == "SWING" {
+			move *= 1.50
 		}
 		cands = append(cands,
 			targetPriceAbsolute(sideBuy, entry, maxFloat(stopDist*tp1R, move)),
@@ -1222,6 +1235,8 @@ func trailProfileMultiplier(profile string) float64 {
 	switch strings.ToUpper(strings.TrimSpace(profile)) {
 	case "IMPULSE":
 		return envFloat("LIVE_TRAIL_IMPULSE_MULT", 1.15)
+	case "SWING":
+		return envFloat("LIVE_TRAIL_SWING_MULT", 1.25)
 	case "ROTATION":
 		return envFloat("LIVE_TRAIL_ROTATION_MULT", 0.90)
 	default:

@@ -47,6 +47,8 @@ type candidate struct {
 	Strat                  string
 	StrategyID             string
 	SetupFamily            string
+	SetupSource            string
+	TradeHorizon           string
 	Conf                   float64
 	FinalRank              float64
 	TriggerState           string
@@ -140,6 +142,8 @@ type candidate struct {
 	EntryPosture           string
 	EntryPostureReason     string
 }
+
+const unresolvedSourceTagPrefix = "unresolved_source:"
 
 type entryQualityConfig struct {
 	EnableMetaGate          bool
@@ -298,6 +302,47 @@ type runtimeProfileConfig struct {
 	EffectiveCandidateMemory  bool
 	EffectiveTriggerMemory    bool
 	EffectiveSharedManagement bool
+}
+
+type setupBlueprint struct {
+	SetupFamily    string
+	SetupSource    string
+	TradeHorizon   string
+	StrategyFamily string
+}
+
+var setupBlueprints = map[string]setupBlueprint{
+	"lsr":                         {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"bos_pb":                      {SetupFamily: "breakout_retest", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"ob_r":                        {SetupFamily: "deep_pullback_reclaim", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"fvg_c":                       {SetupFamily: "micro_pullback_continuation", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"fa":                          {SetupFamily: "reversal_exhaustion", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
+	"failed_auction_magnet":       {SetupFamily: "reversal_exhaustion", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
+	"od":                          {SetupFamily: "reset_impulse_breakout", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"volume_clusters":             {SetupFamily: "deep_pullback_reclaim", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"multiple_nodes":              {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "swing", StrategyFamily: "cont"},
+	"trades_filter":               {SetupFamily: "micro_pullback_continuation", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"stacked_imbalances":          {SetupFamily: "reset_impulse_breakout", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"unfinished_business":         {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"vwap_confluence":             {SetupFamily: "micro_pullback_continuation", SetupSource: "vwap", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"daily_open_sr":               {SetupFamily: "breakout_retest", SetupSource: "vwap", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"pd_levels_retest":            {SetupFamily: "deep_pullback_reclaim", SetupSource: "vwap", TradeHorizon: "swing", StrategyFamily: "cont"},
+	"vp_accumulation":             {SetupFamily: "deep_pullback_reclaim", SetupSource: "volume_profile", TradeHorizon: "swing", StrategyFamily: "cont"},
+	"vp_trend":                    {SetupFamily: "micro_pullback_continuation", SetupSource: "volume_profile", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"vp_rejection":                {SetupFamily: "breakout_retest", SetupSource: "volume_profile", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"vp_reversal":                 {SetupFamily: "reversal_exhaustion", SetupSource: "volume_profile", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
+	"momentum_ignite_long":        {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"momentum_ignite_short":       {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"reset_impulse_long":          {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"reset_impulse_short":         {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"impulse_long":                {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"impulse_short":               {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"continuation_fast":           {SetupFamily: "micro_pullback_continuation", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"micro_pullback_continuation": {SetupFamily: "micro_pullback_continuation", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "cont"},
+	"breakout_retest":             {SetupFamily: "breakout_retest", SetupSource: "technical_analysis", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"deep_pullback_reclaim":       {SetupFamily: "deep_pullback_reclaim", SetupSource: "technical_analysis", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
+	"reset_impulse_breakout":      {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
+	"reversal_exhaustion":         {SetupFamily: "reversal_exhaustion", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "rev"},
 }
 
 type positionView struct {
@@ -804,6 +849,8 @@ type paperPosition struct {
 	StopReason             string
 	StopDistancePct        float64
 	EntrySetupFamily       string
+	EntrySetupSource       string
+	EntryTradeHorizon      string
 	ExecBucket             string
 	StallBars              int
 	ProtectionStage        protectionStage
@@ -826,6 +873,8 @@ type paperClosedTradeIdentity struct {
 	RawStrategy      string  `json:"raw_strategy,omitempty"`
 	StrategyMissing  bool    `json:"strategy_missing,omitempty"`
 	SetupFamily      string  `json:"setup_family,omitempty"`
+	SetupSource      string  `json:"setup_source,omitempty"`
+	TradeHorizon     string  `json:"trade_horizon,omitempty"`
 	ExecBucket       string  `json:"exec_bucket,omitempty"`
 	EntryStyle       string  `json:"entry_style,omitempty"`
 	StrategyFamily   string  `json:"strategy_family,omitempty"`
@@ -1180,6 +1229,8 @@ type livePosition struct {
 	StopDistancePct          float64          `json:"stopDistancePct,omitempty"`
 	RegimeTag                string           `json:"regimeTag,omitempty"`
 	EntrySetupFamily         string           `json:"entrySetupFamily,omitempty"`
+	EntrySetupSource         string           `json:"entrySetupSource,omitempty"`
+	EntryTradeHorizon        string           `json:"entryTradeHorizon,omitempty"`
 	ExecBucket               string           `json:"execBucket,omitempty"`
 	MaxFavorableR            float64          `json:"maxFavorableR,omitempty"`
 	MaxAdverseR              float64          `json:"maxAdverseR,omitempty"`
@@ -4250,19 +4301,7 @@ func updateManagePhase(p *livePosition, exhaustion bool) {
 		p.ManagePhase = managePhaseExhaustion
 		return
 	}
-	if importedManagedPosition(p) {
-		if p.MaxFavorableR >= envFloat("LIVE_IMPORTED_PROTECTION_MIN_R", 0.35) || p.AddCount > 0 || p.HitTP1 || p.HitTP2 || p.HitTP3 {
-			p.ManagePhase = managePhaseContinuation
-		} else {
-			p.ManagePhase = managePhaseStarter
-		}
-		return
-	}
-	if p.AddCount > 0 || p.MaxFavorableR >= envFloat("LIVE_CONTINUATION_PROTECTION_MIN_R", 1.25) || p.HitTP1 || p.HitTP2 || p.HitTP3 || earlyContinuationReady(p) {
-		p.ManagePhase = managePhaseContinuation
-		return
-	}
-	p.ManagePhase = managePhaseStarter
+	p.ManagePhase = managePhaseContinuation
 }
 
 func refreshRunnerReservation(p *livePosition, starterUSDT float64) {
@@ -4949,47 +4988,25 @@ func loadHybridStopConfig() exitmgr.HybridStopConfig {
 }
 
 func loadLadderConfig(defaultStarter float64) ladderConfig {
-	starterFallback := maxFloat(defaultStarter, 10)
-	starterUSDT := envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", starterFallback))
-	stepUSDT := envFloat("LIVE_ADD_USDT", envFloat("LIVE_PYRAMID_STEP_USDT", 10))
-	maxTotalUSDT := envFloat("LIVE_MAX_TOTAL_USDT", envFloat("LIVE_PYRAMID_MAX_TOTAL_USDT", 50))
+	tradeFallback := maxFloat(defaultStarter, 10)
+	tradeUSDT := envFloat("LIVE_TRADE_MARGIN_USDT", envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", tradeFallback)))
 	cfg := ladderConfig{
-		StarterUSDT:   starterUSDT,
-		StepUSDT:      stepUSDT,
-		MaxTotalUSDT:  maxTotalUSDT,
-		OnlyIfGreen:   envBool("LIVE_PYRAMID_ONLY_IF_GREEN", true),
-		MinAddPnLPct:  envFloat("LIVE_PYRAMID_MIN_ADD_PNL_PCT", 0.75),
-		MaxAdds:       envInt("LIVE_PYRAMID_MAX_ADDS", 2),
+		StarterUSDT:   tradeUSDT,
+		StepUSDT:      0,
+		MaxTotalUSDT:  tradeUSDT,
+		OnlyIfGreen:   false,
+		MinAddPnLPct:  0,
+		MaxAdds:       0,
 		OneSymbolOnly: envBool("LIVE_ONE_SYMBOL_ONLY", false),
 	}
 	if cfg.StarterUSDT <= 0 {
-		cfg.StarterUSDT = maxFloat(defaultStarter, 10)
-	}
-	if cfg.StepUSDT <= 0 {
-		cfg.StepUSDT = cfg.StarterUSDT
-	}
-	if cfg.MaxTotalUSDT < cfg.StarterUSDT {
-		cfg.MaxTotalUSDT = cfg.StarterUSDT
-	}
-	if cfg.MaxAdds < 0 {
-		cfg.MaxAdds = 0
-	}
-	if envBool("LIVE_FIXED_SIZE_NO_ADD", false) {
-		cfg.StepUSDT = 0
-		cfg.MaxTotalUSDT = cfg.StarterUSDT
-		cfg.MaxAdds = 0
+		cfg.StarterUSDT = tradeFallback
 	}
 	return cfg
 }
 
 func ladderAddsDisabled(cfg ladderConfig) bool {
-	if envBool("LIVE_FIXED_SIZE_NO_ADD", false) {
-		return true
-	}
-	if cfg.MaxAdds <= 0 {
-		return true
-	}
-	return cfg.MaxTotalUSDT <= cfg.StarterUSDT+1e-9
+	return true
 }
 
 func loadFundsManagerConfig() fundsManagerConfig {
@@ -5055,24 +5072,12 @@ func perpTopupTarget(avail float64, cfg fundsManagerConfig) float64 {
 
 func loadReentryConfig(defaultSize float64) reentryConfig {
 	cfg := reentryConfig{
-		Enable:       effectiveReentryEnabled(),
-		SizeUSDT:     envFloat("LIVE_REENTRY_SIZE_USDT", maxFloat(defaultSize, 10)),
-		MaxPerSymbol: envInt("LIVE_REENTRY_MAX_PER_SYMBOL", 0),
-		Cooldown:     time.Duration(envInt("LIVE_REENTRY_COOLDOWN_SEC", 900)) * time.Second,
+		Enable:       false,
+		SizeUSDT:     0,
+		MaxPerSymbol: 0,
+		Cooldown:     0,
 	}
-	if cfg.SizeUSDT <= 0 {
-		cfg.SizeUSDT = maxFloat(defaultSize, 10)
-	}
-	if cfg.MaxPerSymbol < 0 {
-		cfg.MaxPerSymbol = 0
-	}
-	if cfg.Cooldown < 0 {
-		cfg.Cooldown = 0
-	}
-	if !cfg.Enable {
-		cfg.SizeUSDT = 0
-		cfg.MaxPerSymbol = 0
-	}
+	_ = defaultSize
 	return cfg
 }
 
@@ -9557,11 +9562,13 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		StopDistancePct:        stopDistancePct,
 		RegimeTag:              c.Sig.RegimeTag,
 		EntrySetupFamily:       c.SetupFamily,
+		EntrySetupSource:       c.SetupSource,
+		EntryTradeHorizon:      c.TradeHorizon,
 		ExecBucket:             executionGovernorBucketForCandidate(c),
 		StarterOnly:            false,
 		AddLockedUntilConfirm:  false,
 		ReentryCount:           reentryCount,
-		ManagePhase:            managePhaseStarter,
+		ManagePhase:            managePhaseContinuation,
 	}
 	if stopDistancePct > 0 {
 		p.CustomRiskPct = stopDistancePct / 100.0
@@ -9974,7 +9981,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					WeakSponsorStreak:  p.WeakSponsorStreak,
 					EntryReason:        p.EntryReason,
 					EntryStrategyID:    p.EntryStrategyID,
-					StarterEntry:       p.ManagePhase == managePhaseStarter,
+					StarterEntry:       false,
 					AdvancedReady:      p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
 					HTFTrendState:      string(htf.State),
 					HTFTrendPersistent: htfPersistent(p.Side, htf),
@@ -11451,7 +11458,7 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				WeakSponsorStreak:  p.WeakSponsorStreak,
 				EntryReason:        p.EntryReason,
 				EntryStrategyID:    p.EntryStrategyID,
-				StarterEntry:       p.ManagePhase == managePhaseStarter,
+				StarterEntry:       false,
 				AdvancedReady:      p.ManagePhase == managePhaseContinuation || p.ManagePhase == managePhaseExhaustion || earlyContinuationReady(p),
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(p.Side, htf),
@@ -12920,6 +12927,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		StopReason:             stopReason,
 		StopDistancePct:        stopDistancePct,
 		EntrySetupFamily:       c.SetupFamily,
+		EntrySetupSource:       c.SetupSource,
+		EntryTradeHorizon:      c.TradeHorizon,
 		ExecBucket:             executionGovernorBucketForCandidate(c),
 		OriginalStop:           stop,
 		OriginalTP1:            tp1,
@@ -12928,9 +12937,11 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	p.positions[raw] = pos
 	_ = p.save()
-	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f reason=%s stop_reason=%s\n",
+	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s setup_source=%s trade_horizon=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f reason=%s stop_reason=%s\n",
 		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee,
 		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "none"),
+		firstNonEmpty(strings.TrimSpace(c.SetupSource), "unknown"),
+		firstNonEmpty(strings.TrimSpace(c.TradeHorizon), "unknown"),
 		firstNonEmpty(strings.TrimSpace(c.Strat), "manual"),
 		firstNonEmpty(strings.TrimSpace(c.SessionLabel), "unknown"),
 		firstNonEmpty(strings.TrimSpace(c.EntryTiming), "unknown"),
@@ -13046,7 +13057,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				WeakSponsorStreak:  pos.WeakSponsorStreak,
 				EntryReason:        pos.EntryReason,
 				EntryStrategyID:    pos.EntryStrategyID,
-				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+				StarterEntry:       false,
 				AdvancedReady:      paperAdvancedReady(pos),
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(pos.Side, htf),
@@ -13241,7 +13252,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 					WeakSponsorStreak:  pos.WeakSponsorStreak,
 					EntryReason:        pos.EntryReason,
 					EntryStrategyID:    pos.EntryStrategyID,
-					StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+					StarterEntry:       false,
 					AdvancedReady:      paperAdvancedReady(pos),
 					HTFTrendState:      string(htf.State),
 					HTFTrendPersistent: htfPersistent(pos.Side, htf),
@@ -13365,7 +13376,7 @@ func (p *paperTrader) ApplyMomentumExit(now time.Time, mom map[string]momentumVi
 				WeakSponsorStreak:  pos.WeakSponsorStreak,
 				EntryReason:        pos.EntryReason,
 				EntryStrategyID:    pos.EntryStrategyID,
-				StarterEntry:       exitmgr.IsStarterEntryReason(pos.EntryReason),
+				StarterEntry:       false,
 				AdvancedReady:      paperAdvancedReady(pos),
 				HTFTrendState:      string(htf.State),
 				HTFTrendPersistent: htfPersistent(pos.Side, htf),
@@ -13993,6 +14004,8 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 			RawStrategy:      firstNonEmpty(strings.TrimSpace(pos.RawEntryReason), strings.TrimSpace(pos.EntryReason)),
 			StrategyMissing:  missing,
 			SetupFamily:      firstNonEmpty(strings.TrimSpace(pos.EntrySetupFamily), "unknown"),
+			SetupSource:      firstNonEmpty(strings.TrimSpace(pos.EntrySetupSource), "unknown"),
+			TradeHorizon:     firstNonEmpty(strings.TrimSpace(pos.EntryTradeHorizon), "unknown"),
 			ExecBucket:       firstNonEmpty(strings.TrimSpace(pos.ExecBucket), "unknown"),
 			EntryStyle:       firstNonEmpty(strings.TrimSpace(pos.EntryStyle), "unknown"),
 			StrategyFamily:   firstNonEmpty(strings.TrimSpace(pos.EntryStrategyFamily), "unknown"),
@@ -14614,7 +14627,7 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 	stop := pos.Stop
 	if err := ensureCSVWithHeader(p.tradesCSV, []string{
 		"exit_ts", "symbol", "side", "entry", "exit", "qty", "lev", "margin", "stop", "tp", "reason", "gross_pnl", "fees", "net_pnl", "balance", "hold_min",
-		"trade_id", "strategy", "setup_family", "exec_bucket", "entry_style", "strategy_family",
+		"trade_id", "strategy", "setup_family", "setup_source", "trade_horizon", "exec_bucket", "entry_style", "strategy_family",
 		"original_stop", "original_tp1", "original_tp2", "original_tp3",
 		"realized_exit_price", "raw_exit_reason", "normalized_exit_reason",
 	}); err != nil {
@@ -14646,6 +14659,8 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		firstNonEmpty(strings.TrimSpace(pos.TradeID), newPaperTradeID(pos.OpenedAt, symbol, side)),
 		firstNonEmpty(strings.TrimSpace(pos.EntryReason), "unknown"),
 		firstNonEmpty(strings.TrimSpace(pos.EntrySetupFamily), "unknown"),
+		firstNonEmpty(strings.TrimSpace(pos.EntrySetupSource), "unknown"),
+		firstNonEmpty(strings.TrimSpace(pos.EntryTradeHorizon), "unknown"),
 		firstNonEmpty(strings.TrimSpace(pos.ExecBucket), "unknown"),
 		firstNonEmpty(strings.TrimSpace(pos.EntryStyle), "unknown"),
 		firstNonEmpty(strings.TrimSpace(pos.EntryStrategyFamily), "unknown"),
@@ -14698,6 +14713,8 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 			TF:              "1m",
 			Strategy:        pos.EntryReason,
 			SetupFamily:     pos.EntrySetupFamily,
+			SetupSource:     pos.EntrySetupSource,
+			TradeHorizon:    pos.EntryTradeHorizon,
 			Grade:           pos.EntryGrade,
 			State:           string(pos.EntryState),
 			TriggerState:    pos.EntryTrigger,
@@ -15366,6 +15383,9 @@ func trimRecentTimes(now time.Time, in []time.Time, window time.Duration) []time
 }
 
 func strategyFamily(c candidate) string {
+	if bp, ok := resolveSetupBlueprint(c, time.Now().UTC()); ok && strings.TrimSpace(bp.StrategyFamily) != "" {
+		return bp.StrategyFamily
+	}
 	strat := strings.ToLower(strings.TrimSpace(c.Strat))
 	switch {
 	case strings.HasPrefix(strat, "impulse_"):
@@ -15387,33 +15407,75 @@ func strategyFamily(c candidate) string {
 	}
 }
 
-func canonicalExecutionStrategy(strat, side string) string {
-	strat = strings.ToLower(strings.TrimSpace(strat))
-	side = strings.ToUpper(strings.TrimSpace(side))
-	switch strat {
-	case "impulsive_long_starter", "reclaim_long_starter":
-		return "impulse_long"
-	case "impulsive_short_starter", "failed_bounce_short_starter":
-		return "impulse_short"
-	case "elite_starter":
-		if side == "SELL" {
-			return "impulse_short"
+func setupBlueprintForLabel(label string) (setupBlueprint, bool) {
+	label = strings.ToLower(strings.TrimSpace(label))
+	if label == "" {
+		return setupBlueprint{}, false
+	}
+	bp, ok := setupBlueprints[label]
+	return bp, ok
+}
+
+func resolveSetupBlueprint(c candidate, now time.Time) (setupBlueprint, bool) {
+	_ = now
+	labels := []string{
+		c.Strat,
+		c.SetupFamily,
+		c.Entry.EntryStyle,
+	}
+	for _, label := range labels {
+		if bp, ok := setupBlueprintForLabel(label); ok {
+			return bp, true
 		}
-		return "impulse_long"
-	case "continuation_fast_starter":
-		return "continuation_fast"
-	default:
-		return strat
+	}
+	style := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
+	switch style {
+	case "breakout_hold_long", "breakout_hold_short":
+		return setupBlueprints["breakout_retest"], true
+	case "pullback_long", "pullback_short":
+		return setupBlueprints["micro_pullback_continuation"], true
+	case "reversal_watch_long", "reversal_watch_short", "leader_unwind_short":
+		return setupBlueprints["reversal_exhaustion"], true
+	}
+	return setupBlueprint{}, false
+}
+
+func annotateCandidateSetupBlueprint(c *candidate, now time.Time) {
+	if c == nil {
+		return
+	}
+	if bp, ok := resolveSetupBlueprint(*c, now); ok {
+		if strings.TrimSpace(c.SetupFamily) == "" {
+			c.SetupFamily = bp.SetupFamily
+		}
+		if strings.TrimSpace(c.SetupSource) == "" {
+			c.SetupSource = bp.SetupSource
+		}
+		if strings.TrimSpace(c.TradeHorizon) == "" {
+			c.TradeHorizon = bp.TradeHorizon
+		}
 	}
 }
 
-func isStarterOnlyStrategyName(strat string) bool {
-	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "continuation_fast_starter", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter":
-		return true
-	default:
-		return false
+func candidateTradeHorizon(c candidate, now time.Time) string {
+	if strings.TrimSpace(c.TradeHorizon) != "" {
+		return strings.ToLower(strings.TrimSpace(c.TradeHorizon))
 	}
+	if bp, ok := resolveSetupBlueprint(c, now); ok {
+		return strings.ToLower(strings.TrimSpace(bp.TradeHorizon))
+	}
+	return ""
+}
+
+func canonicalExecutionStrategy(strat, side string) string {
+	strat = strings.ToLower(strings.TrimSpace(strat))
+	_ = side
+	return strat
+}
+
+func isStarterOnlyStrategyName(strat string) bool {
+	_ = strat
+	return false
 }
 
 func postureForcesStarter(c candidate) bool {
@@ -15447,9 +15509,6 @@ func starterLaneQualityReady(c candidate) bool {
 
 func continuationLaneRejectReason(c candidate) string {
 	if strategyFamily(c) != "cont" {
-		return ""
-	}
-	if starterLaneEligible(c) {
 		return ""
 	}
 	if reason := liquidityRiskRejectReason(c); reason != "" {
@@ -15966,6 +16025,9 @@ func qualifiesResetImpulse(c candidate, now time.Time) (string, float64, []strin
 }
 
 func classifySetupFamily(c candidate, now time.Time) string {
+	if bp, ok := resolveSetupBlueprint(c, now); ok && strings.TrimSpace(bp.SetupFamily) != "" {
+		return bp.SetupFamily
+	}
 	strat := strings.ToLower(strings.TrimSpace(c.Strat))
 	style := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
 	if strings.HasPrefix(strat, "reset_impulse_") || (resetImpulseWindowActive(now) && c.TriggerState == string(triggerImpulseCont) && c.ClosedBreakHold) {
@@ -15984,6 +16046,106 @@ func classifySetupFamily(c candidate, now time.Time) string {
 		return "micro_pullback_continuation"
 	}
 	return ""
+}
+
+func ensureCandidateSetupFamily(c *candidate, now time.Time) {
+	if c == nil {
+		return
+	}
+	if strings.TrimSpace(c.SetupFamily) == "" {
+		c.SetupFamily = classifySetupFamily(*c, now)
+	}
+	annotateCandidateSetupBlueprint(c, now)
+}
+
+func withUnresolvedSource(reason, source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" {
+		return strings.TrimSpace(reason)
+	}
+	tag := unresolvedSourceTagPrefix + source
+	reason = strings.TrimSpace(reason)
+	switch {
+	case reason == "":
+		return tag
+	case strings.Contains(reason, tag):
+		return reason
+	default:
+		return reason + "|" + tag
+	}
+}
+
+func unresolvedSourceFromReason(reason string) string {
+	for _, part := range strings.Split(strings.TrimSpace(reason), "|") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(part), unresolvedSourceTagPrefix) {
+			return strings.TrimPrefix(strings.ToLower(part), unresolvedSourceTagPrefix)
+		}
+	}
+	return ""
+}
+
+func unresolvedStrategySource(c candidate) string {
+	if isExecutableStrategy(c.Strat) {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
+	case "none":
+		return "explicit_none"
+	case "no_strategy":
+		return "explicit_no_strategy"
+	case "unknown":
+		return "explicit_unknown"
+	case "unresolved":
+		return "explicit_unresolved"
+	}
+	if source := unresolvedSourceFromReason(c.RejectReason); source != "" {
+		return source
+	}
+	if strings.TrimSpace(c.SetupFamily) != "" {
+		return "setup_family_unmapped"
+	}
+	if strings.TrimSpace(c.Entry.EntryStyle) != "" {
+		return "continuation_fallback_unmapped"
+	}
+	return "blank_strategy"
+}
+
+func resolveExecutableStrategyForProfile(c candidate) string {
+	current := strings.ToLower(strings.TrimSpace(c.Strat))
+	if isExecutableStrategy(current) && !isStarterOnlyStrategyName(current) {
+		return current
+	}
+	setup := strings.ToLower(strings.TrimSpace(c.SetupFamily))
+	if resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean {
+		if !isExecutableStrategy(current) || isStarterOnlyStrategyName(current) {
+			switch setup {
+			case "micro_pullback_continuation", "breakout_retest", "deep_pullback_reclaim":
+				return setup
+			}
+		}
+		if isStarterOnlyStrategyName(current) {
+			return ""
+		}
+	}
+	if isStarterOnlyStrategyName(current) {
+		return current
+	}
+	return ""
+}
+
+func finalizeCandidateExecutionLabels(c *candidate, now time.Time) {
+	if c == nil {
+		return
+	}
+	ensureCandidateSetupFamily(c, now)
+	if resolved := strings.TrimSpace(resolveExecutableStrategyForProfile(*c)); resolved != "" {
+		c.Strat = resolved
+		return
+	}
+	if resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean && isStarterOnlyStrategyName(c.Strat) {
+		c.Strat = ""
+	}
 }
 
 func continuationDeteriorating(c candidate) bool {
@@ -16587,7 +16749,7 @@ func classifyStarterLane(c candidate, side string) string {
 			c.VolumeRatio >= minEliteVol &&
 			starterDirectionalContextOK(c) &&
 			starterStructureContextOK(c) {
-			return "elite_starter"
+			return "continuation_fast"
 		}
 	}
 	if c.Entry.CurrentScore >= 72 &&
@@ -16606,12 +16768,12 @@ func classifyStarterLane(c candidate, side string) string {
 
 func starterSubtypeName(c candidate) string {
 	if strings.EqualFold(c.Side, "BUY") && (c.ReclaimHold || c.Entry.FailedBreakdownCount > 0 || c.Entry.FailedBreakLowCount > 0 || c.SetupFamily == "deep_pullback_reclaim") {
-		return "reclaim_long_starter"
+		return "deep_pullback_reclaim"
 	}
 	if strings.EqualFold(c.Side, "SELL") && (c.Entry.FailedBounceCount > 0 || c.Entry.FailedReclaimCount > 0 || c.Entry.EntryStyle == "pullback_short") {
-		return "failed_bounce_short_starter"
+		return "breakout_retest"
 	}
-	return "elite_starter"
+	return "continuation_fast"
 }
 
 func candidatePriceConfirmsDirection(c candidate) bool {
@@ -16780,19 +16942,17 @@ func candidateExtendedForBotAdd(c candidate) bool {
 
 func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, meta map[string]symbolMeta) ladderPlan {
 	plan := ladderPlan{
-		MarginUSDT: envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10)),
+		MarginUSDT: envFloat("LIVE_TRADE_MARGIN_USDT", envFloat("LIVE_STARTER_USDT", envFloat("LIVE_ENTRY_STARTER_USDT", 10))),
 	}
 	if execMgr == nil {
 		return plan
 	}
 	cfg := execMgr.ladderCfg
-	reentryCfg := execMgr.reentryCfg
 	if cfg.StarterUSDT > 0 {
 		plan.MarginUSDT = cfg.StarterUSDT
 	}
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
 	var activeSame *livePosition
-	var closedSame *livePosition
 	for _, p := range execMgr.positions {
 		if p == nil {
 			continue
@@ -16801,8 +16961,6 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 		if pRaw == raw {
 			if execMgr.isActive(p) && p.RemainingQty > 0 {
 				activeSame = p
-			} else if p.State == execClosed {
-				closedSame = p
 			}
 		}
 	}
@@ -16811,59 +16969,11 @@ func resolveLadderPlan(now time.Time, c candidate, execMgr *liveExecManager, met
 			plan.RejectReason = "symbol_active_opposite_side"
 			return plan
 		}
-		if activeSame.PendingAddOrderID > 0 {
-			plan.RejectReason = "pending_add_order"
-			return plan
-		}
-		if activeSame.AddCount >= cfg.MaxAdds {
-			plan.RejectReason = "pyramid_add_cap"
-			return plan
-		}
-		if activeSame.DeployedMargin >= cfg.MaxTotalUSDT {
-			plan.RejectReason = "pyramid_max_total_reached"
-			return plan
-		}
-		nextMargin := cfg.StepUSDT
-		if nextMargin <= 0 {
-			nextMargin = cfg.StarterUSDT
-		}
-		nextMargin = min(nextMargin, maxFloat(0, cfg.MaxTotalUSDT-activeSame.DeployedMargin))
-		if nextMargin <= 0 {
-			plan.RejectReason = "pyramid_no_margin_left"
-			return plan
-		}
-		plan.IsAdd = true
-		plan.MarginUSDT = nextMargin
-		plan.Active = activeSame
+		plan.RejectReason = "max_open_same_symbol"
 		return plan
 	}
-	disabledReentryCooldown := time.Duration(envInt("LIVE_REENTRY_DISABLED_COOLDOWN_SEC", 6*3600)) * time.Second
-	if disabledReentryCooldown <= 0 {
-		disabledReentryCooldown = 6 * time.Hour
-	}
-	allowResetRestartWhenDisabled := envBool("LIVE_REENTRY_DISABLED_ALLOW_RESET_RESTART", false)
-	if closedSame != nil &&
-		!reentryCfg.Enable &&
-		strings.EqualFold(closedSame.Side, c.Side) &&
-		!closedSame.ClosedAt.IsZero() &&
-		now.Sub(closedSame.ClosedAt) <= disabledReentryCooldown {
-		if allowResetRestartWhenDisabled && hasFreshStructureReset(c) {
-			return plan
-		}
-	}
-	if closedSame != nil &&
-		reentryCfg.Enable &&
-		reentryCfg.MaxPerSymbol > 0 &&
-		strings.EqualFold(closedSame.Side, c.Side) &&
-		!closedSame.ClosedAt.IsZero() &&
-		now.Sub(closedSame.ClosedAt) <= 6*time.Hour {
-		plan.IsReentry = true
-		if reentryCfg.SizeUSDT > 0 {
-			plan.MarginUSDT = reentryCfg.SizeUSDT
-		}
-		plan.Previous = closedSame
-		return plan
-	}
+	_ = now
+	_ = meta
 	return plan
 }
 
@@ -17401,7 +17511,7 @@ func stopTemplateForCandidate(c candidate) exitmgr.StopTemplate {
 		return exitmgr.StopTemplateReversalExhaustion
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Strat)) {
-	case "continuation_fast", "continuation_fast_starter", "impulse_long", "impulse_short", "impulsive_short_starter", "impulsive_long_starter", "elite_starter", "reclaim_long_starter", "failed_bounce_short_starter", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
+	case "continuation_fast", "impulse_long", "impulse_short", "momentum_ignite_long", "momentum_ignite_short", "reset_impulse_long", "reset_impulse_short":
 		return exitmgr.StopTemplateContinuationImpulse
 	case "fa", "failed_auction_magnet", "vwap_confluence", "bos_pb", "open_drive":
 		return exitmgr.StopTemplateReclaimPullback
@@ -17567,12 +17677,12 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	raw := strings.ToUpper(aster.RawSymbol(cand.Entry.Symbol))
 	_ = reversalVolSpike
 	if cache == nil {
-		cand.Strat = "none"
+		cand.RejectReason = withUnresolvedSource(cand.RejectReason, "feature_cache_nil")
 		return cand
 	}
 	snapView, bars, err := cache.microSnapshot(raw, 240, envInt("LIVE_ATR_LEN", 14), inertiaFastN, inertiaSlowN, 20)
 	if err != nil || len(bars) < 30 {
-		cand.Strat = "none"
+		cand.RejectReason = withUnresolvedSource(cand.RejectReason, "feature_bars_insufficient")
 		return cand
 	}
 	fc := make([]features.Candle, 0, len(bars))
@@ -17602,15 +17712,16 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		cand.BookImbalance = fm.BookImbalance
 	}
 	annotateCandidateEntryContext(&cand, time.Now().UTC())
+	ensureCandidateSetupFamily(&cand, time.Now().UTC())
+	finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 	if inertiaEnable &&
 		strings.EqualFold(cand.Side, "BUY") &&
 		strings.EqualFold(cand.Strat, "") &&
 		cand.Entry.CurrentScore >= inertiaScoreMin &&
 		cand.SlowSlope > inertiaSlowMin &&
 		cand.FastSlope < inertiaFastMax {
-		cand.Strat = "none"
 		cand.Conf = 0
-		cand.RejectReason = "STATE_INERTIA_KILL"
+		cand.RejectReason = withUnresolvedSource("STATE_INERTIA_KILL", "inertia_kill")
 		return cand
 	}
 	rtCtx := &strategies.RuntimeSignalContext{
@@ -17656,15 +17767,18 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		})
 		if handled {
 			if !sig.Active || strings.TrimSpace(sig.RejectReason) != "" {
-				cand.Strat = "none"
+				cand.Sig = sig
+				cand.Strat = firstNonEmpty(strings.TrimSpace(sig.Name), strings.TrimSpace(cand.Strat))
 				cand.Conf = 0
-				cand.RejectReason = sig.RejectReason
+				cand.RejectReason = withUnresolvedSource(firstNonEmpty(strings.TrimSpace(sig.RejectReason), "runtime_signal_rejected"), "runtime_signal_rejected")
+				finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 				return cand
 			}
 			cand.Sig = sig
 			cand.Strat = sig.Name
 			cand.Conf = sig.Confidence
 			cand.RejectReason = sig.RejectReason
+			finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 			return cand
 		}
 	}
@@ -17717,15 +17831,18 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 			sig, handled := strategies.EvaluateRuntimeSignal(ctx)
 			if handled {
 				if !sig.Active || strings.TrimSpace(sig.RejectReason) != "" {
-					cand.Strat = "none"
+					cand.Sig = sig
+					cand.Strat = firstNonEmpty(strings.TrimSpace(sig.Name), strings.TrimSpace(cand.Strat))
 					cand.Conf = 0
-					cand.RejectReason = sig.RejectReason
+					cand.RejectReason = withUnresolvedSource(firstNonEmpty(strings.TrimSpace(sig.RejectReason), "mom_reversal_runtime_rejected"), "mom_reversal_runtime_rejected")
+					finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 					return cand
 				}
 				cand.Sig = sig
 				cand.Strat = sig.Name
 				cand.Conf = sig.Confidence
 				cand.RejectReason = sig.RejectReason
+				finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 				return cand
 			}
 		}
@@ -17741,15 +17858,18 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 	}
 	chosen = strategies.ApplySharedInvalidations(ctx, chosen)
 	if strings.TrimSpace(chosen.RejectReason) != "" || !chosen.Active {
-		cand.Strat = "none"
+		cand.Sig = chosen
+		cand.Strat = firstNonEmpty(strings.TrimSpace(chosen.Name), strings.TrimSpace(cand.Strat))
 		cand.Conf = 0
-		cand.RejectReason = chosen.RejectReason
+		cand.RejectReason = withUnresolvedSource(firstNonEmpty(strings.TrimSpace(chosen.RejectReason), "router_rejected"), "router_rejected")
+		finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 		return cand
 	}
 	cand.Sig = chosen
 	cand.Strat = chosen.Name
 	cand.Conf = chosen.Confidence
 	cand.RejectReason = chosen.RejectReason
+	finalizeCandidateExecutionLabels(&cand, time.Now().UTC())
 	return cand
 }
 
@@ -17759,6 +17879,14 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 
 func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
 	annotateCandidateEntryContext(&cand, now)
+	finalizeCandidateExecutionLabels(&cand, now)
+	if !isExecutableStrategy(cand.Strat) {
+		source := "continuation_fallback_unmapped"
+		if strings.TrimSpace(cand.SetupFamily) != "" {
+			source = "setup_family_unmapped"
+		}
+		cand.RejectReason = withUnresolvedSource(cand.RejectReason, source)
+	}
 	return cand
 }
 
@@ -17766,6 +17894,7 @@ func annotateCandidateEntryContext(c *candidate, now time.Time) {
 	if c == nil {
 		return
 	}
+	ensureCandidateSetupFamily(c, now)
 	c.SessionLabel = string(sessionPhaseUTC(now.UTC()))
 	c.CandidateAgeSeconds = candidateAgeSeconds(c.Entry, now)
 	c.DistanceToVWAPPct = distanceToVWAPPct(c.LastClose, c.SessionVWAP)
@@ -21948,6 +22077,7 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 	if summary == nil {
 		return
 	}
+	_ = plan
 	switch {
 	case len(summary.HardBlocks) > 0:
 		summary.FinalDecision = "reject"
@@ -21961,14 +22091,8 @@ func chooseFinalDecision(summary *EntryEligibilitySummary, plan ladderPlan) {
 	case strings.TrimSpace(summary.Quality.BlockReason) == "quality_score_too_low":
 		summary.FinalDecision = "reject"
 		summary.FinalReason = summary.Quality.BlockReason
-	case plan.IsReentry && summary.ReentryAllowed:
-		summary.FinalDecision = "reentry_entry"
-		summary.FinalReason = firstNonEmpty(summary.FinalReason, "structured_reentry")
 	case summary.FullEntryAllowed:
 		summary.FinalDecision = "full_entry"
-		summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.Strat)
-	case summary.StarterAllowed:
-		summary.FinalDecision = "starter_entry"
 		summary.FinalReason = firstNonEmpty(summary.FinalReason, summary.Strat)
 	default:
 		summary.FinalDecision = "reject"
@@ -22020,14 +22144,15 @@ func manageDebugLogging() bool {
 func startupSummaryLines(modeLabel string, scanEvery time.Duration, watchCfg watchConfig, ladderCfg ladderConfig, reentryCfg reentryConfig, safety safetyConfig, execMgr *liveExecManager) []string {
 	lines := []string{
 		fmt.Sprintf("mode=%s | scan=%s | watch=%s | priority=%s", modeLabel, scanEvery, watchCfg.Every, watchCfg.PriorityEvery),
-		fmt.Sprintf("margin=%.2f | reentry=%.2f | min_available=%.2f | max_open=%d", ladderCfg.StarterUSDT, reentryCfg.SizeUSDT, safety.minAvailUSDT, envInt("LIVE_MAX_OPEN_POS", 1)),
+		fmt.Sprintf("margin=%.2f | adds=disabled | min_available=%.2f | max_open=%d", ladderCfg.StarterUSDT, safety.minAvailUSDT, envInt("LIVE_MAX_OPEN_POS", 1)),
 		fmt.Sprintf("sizing=%s | reentry=%s | persistence=%s | max_per_side=%d",
-			map[bool]string{true: "fixed", false: "ladder"}[ladderAddsDisabled(ladderCfg)],
-			boolState(reentryCfg.Enable),
+			"fixed",
+			"off",
 			boolState(missedOpportunitiesEnabled()),
 			envInt("LIVE_MAX_OPEN_PER_SIDE", 1)),
 		effectiveRuntimeProfileSummary(),
 	}
+	_ = reentryCfg
 	if execMgr != nil && execMgr.fundsCfg.Enable {
 		lines = append(lines, fmt.Sprintf("perp_target=%.2f | perp_floor=%.2f | funds_check=%ds",
 			execMgr.fundsCfg.PerpTargetUSDT, execMgr.fundsCfg.PerpFloorUSDT, envInt("LIVE_FUNDS_MAINTENANCE_SEC", 60)))
@@ -22283,7 +22408,7 @@ func recordCandidateDecision(ctx *telegramCommandCtx, c candidate, reject string
 		RejectReason:        reject,
 		BlockerClass:        string(classifyRejectReason(reject)),
 		TopBlockers:         topBlockers,
-		StarterAllowed:      strings.Contains(strings.ToLower(c.Strat), "starter") || strings.Contains(strings.ToLower(c.Strat), "persistence"),
+		StarterAllowed:      false,
 		PersistenceStatus:   persistenceStatus,
 		State:               string(c.Entry.State),
 		QualityFlags:        quality.QualityFlags,
@@ -22324,8 +22449,6 @@ func topBlocker(reason string) string {
 func manualAssistStance(d operatorDecision) string {
 	reason := strings.ToLower(strings.TrimSpace(d.RejectReason))
 	switch {
-	case d.StarterAllowed && d.BlockerClass != string(rejectClassHardSafety):
-		return "enter now small"
 	case strings.Contains(reason, "reclaim"):
 		return "wait for reclaim"
 	case strings.Contains(reason, "bounce"):
@@ -22338,9 +22461,9 @@ func manualAssistStance(d operatorDecision) string {
 }
 
 func manualAssistResponse(sym string, side string, d operatorDecision, meta symbolMeta) string {
-	starterNow := "NO"
-	if d.StarterAllowed || d.AdjustedConfidence >= envFloat("LIVE_SOFT_SCORE_STARTER_MIN", 0.52) {
-		starterNow = "YES"
+	entryNow := "NO"
+	if d.AdjustedConfidence >= envFloat("LIVE_SOFT_SCORE_STARTER_MIN", 0.52) && d.BlockerClass != string(rejectClassHardSafety) {
+		entryNow = "YES"
 	}
 	softs := []string{}
 	hards := []string{}
@@ -22353,7 +22476,7 @@ func manualAssistResponse(sym string, side string, d operatorDecision, meta symb
 	}
 	lines := []string{
 		fmt.Sprintf("<b>MANUAL ENTRY ASSIST — %s %s</b>", cleanSymbol(sym), displayPositionSide(side)),
-		fmt.Sprintf("<b>State:</b> %s | <b>Rank:</b> %.2f | <b>Starter now:</b> %s", firstNonEmpty(strings.ToUpper(strings.TrimSpace(d.State)), "UNKNOWN"), d.Score, starterNow),
+		fmt.Sprintf("<b>State:</b> %s | <b>Rank:</b> %.2f | <b>Entry now:</b> %s", firstNonEmpty(strings.ToUpper(strings.TrimSpace(d.State)), "UNKNOWN"), d.Score, entryNow),
 		fmt.Sprintf("<b>Persistence:</b> %s | <b>Decision:</b> %s", firstNonEmpty(d.PersistenceStatus, "none"), firstNonEmpty(d.Strategy, "watch_only")),
 	}
 	if len(hards) > 0 {
@@ -22403,7 +22526,7 @@ func (c *telegramCommandCtx) blockedStrongLines(limit int) []string {
 	out := make([]string, 0, minInt(limit, len(rows)))
 	for _, r := range rows {
 		d := r.d
-		out = append(out, fmt.Sprintf("%s %s state=%s blocker_class=%s top=%s starter_override=%s",
+		out = append(out, fmt.Sprintf("%s %s state=%s blocker_class=%s top=%s executable_now=%s",
 			cleanSymbol(d.Symbol), displayPositionSide(d.Side), strings.ToUpper(strings.TrimSpace(d.State)),
 			firstNonEmpty(d.BlockerClass, "none"), firstNonEmpty(topBlocker(d.RejectReason), "none"), boolLabel(d.StarterAllowed)))
 		if len(out) >= limit {
@@ -22767,7 +22890,7 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 				fmt.Sprintf("<b>Side:</b> %s | <b>Grade:</b> %s | <b>Score:</b> %.2f", displayPositionSide(d.Side), d.Grade, d.Score),
 				fmt.Sprintf("<b>Slope:</b> %+.3f | <b>Setup:</b> <code>%s</code>", d.Slope, d.Strategy),
 				fmt.Sprintf("<b>Conf:</b> %.2f | <b>Adj:</b> %.2f | <b>State:</b> %s", d.Confidence, d.AdjustedConfidence, d.State),
-				fmt.Sprintf("<b>Blocker class:</b> %s | <b>Starter allowed:</b> %s", firstNonEmpty(d.BlockerClass, "none"), boolLabel(d.StarterAllowed)),
+				fmt.Sprintf("<b>Blocker class:</b> %s | <b>Executable now:</b> %s", firstNonEmpty(d.BlockerClass, "none"), boolLabel(d.StarterAllowed)),
 				fmt.Sprintf("<b>Top blockers:</b> %s", firstNonEmpty(strings.Join(d.TopBlockers, ", "), "none")),
 				fmt.Sprintf("<b>Persistence:</b> %s", firstNonEmpty(d.PersistenceStatus, "none")),
 				fmt.Sprintf("<b>Updated:</b> %s", d.UpdatedAt.In(time.Local).Format("15:04:05 MST")),

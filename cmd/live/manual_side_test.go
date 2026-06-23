@@ -69,22 +69,22 @@ func TestManualProtectionFailureBudgetEscalatesToCriticalAfterRetries(t *testing
 	}
 }
 
-func TestManualAssistResponseIncludesStarterAndBlockers(t *testing.T) {
+func TestManualAssistResponseIncludesEntryNowAndBlockers(t *testing.T) {
 	msg := manualAssistResponse("SIRENUSDT", "LONG", operatorDecision{
 		Symbol:             "SIRENUSDT",
 		Side:               "LONG",
-		Strategy:           "impulsive_long_starter",
+		Strategy:           "micro_pullback_continuation",
 		RejectReason:       "vol_ratio:0.90<1.20,continuation_no_structure_confirm",
 		BlockerClass:       string(rejectClassSoftConfirm),
 		TopBlockers:        []string{"vol_ratio:0.90<1.20", "continuation_no_structure_confirm"},
-		StarterAllowed:     true,
+		StarterAllowed:     false,
 		PersistenceStatus:  "tracking",
 		State:              "HEATING",
 		AdjustedConfidence: 0.58,
 		Score:              91,
 	}, symbolMeta{LastPrice: 0.1234, Move24h: 18, VolumeUSD: 2_000_000})
-	if !strings.Contains(msg, "Starter now:</b> YES") || !strings.Contains(msg, "Soft blockers:") {
-		t.Fatalf("expected starter guidance and soft blockers, got %q", msg)
+	if !strings.Contains(msg, "Entry now:</b> YES") || !strings.Contains(msg, "Soft blockers:") {
+		t.Fatalf("expected entry-now guidance and soft blockers, got %q", msg)
 	}
 }
 

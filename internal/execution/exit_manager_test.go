@@ -122,7 +122,7 @@ func TestEvaluateProtectUnsponsoredTighten(t *testing.T) {
 	}
 }
 
-func TestEvaluateProtectStarterSkipsImmediateAdvancedManagement(t *testing.T) {
+func TestEvaluateProtectLegacyStarterReasonUsesNormalManagement(t *testing.T) {
 	m := NewManager(Config{StarterStabilizeBars: 6})
 	dec := m.EvaluateProtect(ProtectInput{
 		Side:          "BUY",
@@ -130,70 +130,14 @@ func TestEvaluateProtectStarterSkipsImmediateAdvancedManagement(t *testing.T) {
 		Stop:          98,
 		Mark:          101,
 		StarterEntry:  true,
-		EntryReason:   "impulsive_long_starter",
+		EntryReason:   "breakout_retest",
 		BarsHeld:      2,
 		WeakFlow:      true,
 		LiqSpike:      true,
 		UnrealizedPct: 0.4,
 	})
-	if dec.MoveStopToBE || dec.TightenStop || dec.PartialExitPct > 0 || dec.FullExit {
-		t.Fatalf("expected no immediate advanced actions for starter first attach, got %+v", dec)
-	}
-	if dec.Reason != "STARTER_INITIAL_PROTECT_ONLY" {
-		t.Fatalf("expected starter guard reason, got %+v", dec)
-	}
-}
-
-func TestEvaluateProtectStarterAdvancedAfterStabilizationOrTP1(t *testing.T) {
-	m := NewManager(Config{StarterStabilizeBars: 6})
-	decByBars := m.EvaluateProtect(ProtectInput{
-		Side:          "BUY",
-		Entry:         100,
-		Stop:          98,
-		Mark:          101,
-		StarterEntry:  true,
-		EntryReason:   "impulsive_long_starter",
-		BarsHeld:      8,
-		WeakFlow:      true,
-		UnrealizedPct: 0.6,
-		MFER:          0.8,
-	})
-	if decByBars.Reason == "STARTER_INITIAL_PROTECT_ONLY" {
-		t.Fatalf("expected advanced management to unlock after stabilization bars")
-	}
-
-	decByTP1 := m.EvaluateProtect(ProtectInput{
-		Side:          "BUY",
-		Entry:         100,
-		Stop:          98,
-		Mark:          101,
-		StarterEntry:  true,
-		EntryReason:   "impulsive_long_starter",
-		BarsHeld:      2,
-		HitTP1:        true,
-		WeakFlow:      true,
-		UnrealizedPct: 0.6,
-		MFER:          0.8,
-	})
-	if decByTP1.Reason == "STARTER_INITIAL_PROTECT_ONLY" {
-		t.Fatalf("expected advanced management to unlock after TP1")
-	}
-
-	decByFlag := m.EvaluateProtect(ProtectInput{
-		Side:          "BUY",
-		Entry:         100,
-		Stop:          98,
-		Mark:          101,
-		StarterEntry:  true,
-		EntryReason:   "impulsive_long_starter",
-		BarsHeld:      2,
-		AdvancedReady: true,
-		WeakFlow:      true,
-		UnrealizedPct: 0.6,
-		MFER:          0.8,
-	})
-	if decByFlag.Reason == "STARTER_INITIAL_PROTECT_ONLY" {
-		t.Fatalf("expected explicit advanced-ready flag to unlock advanced management")
+	if dec.Reason == "STARTER_INITIAL_PROTECT_ONLY" {
+		t.Fatalf("expected starter-only management guard to be removed, got %+v", dec)
 	}
 }
 

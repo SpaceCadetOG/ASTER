@@ -156,7 +156,7 @@ func TestRRBelowMinimumAllowsEquality(t *testing.T) {
 	}
 }
 
-func TestComputeHybridStopStarterUsesSimpleInitialStop(t *testing.T) {
+func TestComputeHybridStopLegacyStarterReasonNoLongerUsesSpecialStarterPath(t *testing.T) {
 	cfg := DefaultHybridStopConfig()
 	cfg.Enabled = true
 	in := HybridStopInput{
@@ -164,18 +164,18 @@ func TestComputeHybridStopStarterUsesSimpleInitialStop(t *testing.T) {
 		Entry:        100,
 		SignalStop:   99.8, // too tight: simple starter path should widen to exchange-safe min width
 		TargetPrice:  101.2,
-		EntryReason:  "impulsive_long_starter",
+		EntryReason:  "breakout_retest",
 		StarterEntry: true,
 	}
 	res := ComputeHybridStop(cfg, in)
 	if res.Rejected {
-		t.Fatalf("expected starter initial stop, got reject %+v", res)
+		t.Fatalf("expected normal hybrid stop, got reject %+v", res)
 	}
-	if !res.StarterOnly {
-		t.Fatalf("expected starter-only initial protection path")
+	if res.StarterOnly {
+		t.Fatalf("expected starter-only protection path to be removed")
 	}
-	if res.StopReason != "starter_simple_initial_stop" {
-		t.Fatalf("expected starter_simple_initial_stop reason, got %q", res.StopReason)
+	if res.StopReason == "starter_simple_initial_stop" {
+		t.Fatalf("expected legacy starter reason to use normal stop logic, got %q", res.StopReason)
 	}
 	if !(res.StopPrice > 0 && res.StopPrice < in.Entry) {
 		t.Fatalf("expected valid long protective stop below entry, got %.6f", res.StopPrice)
