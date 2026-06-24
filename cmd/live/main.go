@@ -9334,8 +9334,8 @@ func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 
 }
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
-	if !isExecutableStrategy(c.Strat) {
-		return fmt.Errorf("strategy_unresolved")
+	if reason := executionStrategyRejectReason(c); reason != "" {
+		return fmt.Errorf("%s", reason)
 	}
 	c.Strat = canonicalExecutionStrategy(c.Strat, c.Side)
 	if m == nil || m.rest == nil {
@@ -12661,8 +12661,8 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
-	if !isExecutableStrategy(c.Strat) {
-		return nil, fmt.Errorf("strategy_unresolved")
+	if reason := executionStrategyRejectReason(c); reason != "" {
+		return nil, fmt.Errorf("%s", reason)
 	}
 	shortCtx := shortPhase2ContextForCandidate(c)
 	if strings.EqualFold(c.Side, "SELL") {
@@ -12688,7 +12688,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		fmt.Printf("paper enter advisory: insufficient usable paper balance free=%.4f margin=%.4f, continuing\n", free, margin)
 	}
 	if _, exists := p.positions[raw]; exists {
-		fmt.Printf("paper enter advisory: symbol already open %s, continuing\n", raw)
+		return nil, fmt.Errorf("symbol_already_open")
 	}
 	if reason := p.symbolLossBlockReason(raw, now, c); reason != "" {
 		return nil, fmt.Errorf("%s", reason)
@@ -16045,6 +16045,16 @@ func classifySetupFamily(c candidate, now time.Time) string {
 	if c.ReclaimHold || c.ClosedBreakHold || strings.Contains(style, "pullback") || c.TriggerState == string(triggerOFReclaim) {
 		return "micro_pullback_continuation"
 	}
+	if continuationStateTrending(c.Entry.State) && candidatePriceConfirmsDirection(c) {
+		switch {
+		case hasFreshStructureReset(c) || c.ResetRebreak || c.TriggerState == string(triggerImpulseCont):
+			return "breakout_retest"
+		case c.ReclaimHold && c.ExtensionATR >= envFloat("LIVE_DEEP_PULLBACK_EXTENSION_ATR", 1.10):
+			return "deep_pullback_reclaim"
+		case c.Entry.Momentum || c.Entry.ScoreSlope != 0:
+			return "micro_pullback_continuation"
+		}
+	}
 	return ""
 }
 
@@ -16130,6 +16140,35 @@ func resolveExecutableStrategyForProfile(c candidate) string {
 	}
 	if isStarterOnlyStrategyName(current) {
 		return current
+	}
+	return ""
+}
+
+func executionStrategyRejectReason(c candidate) string {
+	if isExecutableStrategy(c.Strat) {
+		return ""
+	}
+	if reason := strings.TrimSpace(runtimeProfileFilteredReason(c)); reason != "" {
+		return reason
+	}
+	return "strategy_unresolved"
+}
+
+func runtimeProfileFilteredReason(c candidate) string {
+	setup := strings.ToLower(strings.TrimSpace(c.SetupFamily))
+	cfg := resolveRuntimeProfileConfig()
+	switch cfg.Name {
+	case runtimeProfilePaperContinuationClean:
+		switch setup {
+		case "reset_impulse_breakout":
+			if !cfg.EffectiveImpulse {
+				return "runtime_profile_blocks_impulse"
+			}
+		case "reversal_exhaustion":
+			if !cfg.EffectiveReversal {
+				return "runtime_profile_blocks_reversal"
+			}
+		}
 	}
 	return ""
 }
@@ -22007,8 +22046,8 @@ func newEligibilitySummary(c candidate) EntryEligibilitySummary {
 		PersistenceScore:   persistenceEligibilityScore(c),
 		AdjustedConfidence: clamp(c.Conf, 0, 1),
 	}
-	if !isExecutableStrategy(c.Strat) {
-		addEligibilityBlock(&summary, "strategy_unresolved")
+	if reason := executionStrategyRejectReason(c); reason != "" {
+		addEligibilityBlock(&summary, reason)
 	}
 	if rr := strings.TrimSpace(c.RejectReason); rr != "" {
 		addEligibilityBlock(&summary, rr)

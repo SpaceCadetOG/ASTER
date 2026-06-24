@@ -668,6 +668,30 @@ func TestDispatchPaperDecisionUnresolvedDoesNotCallMaybeEnter(t *testing.T) {
 	}
 }
 
+func TestSelectTopRuntimeCandidatePrefersExecutableStrategy(t *testing.T) {
+	unresolved := candidate{}
+	unresolved.Entry.Symbol = "ETHUSDT"
+	unresolved.Entry.CurrentScore = 98
+	unresolved.Entry.ScoreSlope = 0.8
+	unresolved.Entry.Rank = 1
+	unresolved.Strat = ""
+
+	executable := candidate{}
+	executable.Entry.Symbol = "BTCUSDT"
+	executable.Entry.CurrentScore = 95
+	executable.Entry.ScoreSlope = 0.4
+	executable.Entry.Rank = 2
+	executable.Strat = "bos_pb"
+
+	got, ok := selectTopRuntimeCandidate([]candidate{unresolved, executable})
+	if !ok {
+		t.Fatalf("expected candidate selection")
+	}
+	if got.Strat != "bos_pb" {
+		t.Fatalf("expected executable candidate to be preferred, got %+v", got)
+	}
+}
+
 func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 	decision, cand := testPaperDecision()
 	decision.Approved = false

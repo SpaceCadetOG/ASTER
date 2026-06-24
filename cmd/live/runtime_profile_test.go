@@ -222,6 +222,12 @@ func TestPaperContinuationCleanKeepsReversalWatchUnresolved(t *testing.T) {
 	if got.Strat != "" {
 		t.Fatalf("expected reversal watch to remain unresolved for non-continuation setup, got %q", got.Strat)
 	}
+	if reason := executionStrategyRejectReason(got); reason != "runtime_profile_blocks_reversal" {
+		t.Fatalf("expected profile reject reason before preflight, got %q", reason)
+	}
+	if quality := buildEntryQualityAccumulator(got, []string{executionStrategyRejectReason(got)}); !containsString(quality.HardBlockReasons, "runtime_profile_blocks_reversal") {
+		t.Fatalf("expected direct quality accumulator to preserve reversal hard block, got %+v", quality)
+	}
 
 	ctx := testPaperDecisionCtx()
 	ctx.Candidate = got
@@ -229,8 +235,50 @@ func TestPaperContinuationCleanKeepsReversalWatchUnresolved(t *testing.T) {
 	if verdict.Approved {
 		t.Fatalf("expected reversal-style candidate to stay blocked")
 	}
-	if verdict.Reason != "strategy_unresolved" {
-		t.Fatalf("expected strategy_unresolved for unresolved reversal-style candidate, got %q", verdict.Reason)
+	if verdict.Reason != "runtime_profile_blocks_reversal" {
+		t.Fatalf("expected runtime_profile_blocks_reversal for filtered reversal setup, got %q", verdict.Reason)
+	}
+}
+
+func TestPaperContinuationCleanRejectsResetImpulseAsProfileFiltered(t *testing.T) {
+	t.Setenv("LIVE_RUNTIME_PROFILE", "paper_continuation_clean")
+
+	got := applySimpleContinuationFallbackAt(candidate{
+		Side:         "BUY",
+		Strat:        "",
+		ResetRebreak: true,
+		LastClose:    101,
+		SessionVWAP:  100,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "momentum_ignite_long",
+			CurrentScore: 88,
+			ScoreSlope:   0.10,
+			State:        inplay.StateInPlay,
+		},
+	}, time.Now().UTC())
+
+	if got.SetupFamily != "reset_impulse_breakout" {
+		t.Fatalf("expected reset_impulse_breakout setup family, got %q", got.SetupFamily)
+	}
+	if got.Strat != "" {
+		t.Fatalf("expected impulse setup to remain non-executable in continuation-clean profile, got %q", got.Strat)
+	}
+	if reason := executionStrategyRejectReason(got); reason != "runtime_profile_blocks_impulse" {
+		t.Fatalf("expected profile reject reason before preflight, got %q", reason)
+	}
+	if quality := buildEntryQualityAccumulator(got, []string{executionStrategyRejectReason(got)}); !containsString(quality.HardBlockReasons, "runtime_profile_blocks_impulse") {
+		t.Fatalf("expected direct quality accumulator to preserve impulse hard block, got %+v", quality)
+	}
+
+	ctx := testPaperDecisionCtx()
+	ctx.Candidate = got
+	verdict := paperPreflightVerdict(ctx)
+	if verdict.Approved {
+		t.Fatalf("expected reset impulse candidate to stay blocked")
+	}
+	if verdict.Reason != "runtime_profile_blocks_impulse" {
+		t.Fatalf("expected runtime_profile_blocks_impulse, got %q", verdict.Reason)
 	}
 }
 

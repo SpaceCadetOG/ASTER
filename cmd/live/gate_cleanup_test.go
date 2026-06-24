@@ -44,6 +44,27 @@ func TestStarterTradeCanEnterWithoutCandidateReadyBlocking(t *testing.T) {
 	}
 }
 
+func TestPaperMaybeEnterRejectsAlreadyOpenSymbol(t *testing.T) {
+	now := time.Now().UTC()
+	cand := testCleanupCandidate("BTCUSDT", "BUY")
+	paper := testCleanupPaperTrader(t)
+	paper.positions["BTCUSDT"] = &paperPosition{
+		Symbol: "BTCUSDT",
+		Side:   "BUY",
+		Qty:    1,
+		Entry:  100,
+	}
+	pos, err := paper.MaybeEnter(now, cand, 0, 50, 2, map[string]symbolMeta{
+		"BTCUSDT": {LastPrice: 100, VolumeUSD: 5_000_000},
+	}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
+	if err == nil || err.Error() != "symbol_already_open" {
+		t.Fatalf("expected symbol_already_open, got pos=%+v err=%v", pos, err)
+	}
+	if pos != nil {
+		t.Fatalf("expected no new paper position, got %+v", pos)
+	}
+}
+
 func TestEntryOnlyPlanBlocksSameSymbolAddOnsAndUsesFreshMargin(t *testing.T) {
 	now := time.Now().UTC()
 	cand := testCleanupCandidate("BTCUSDT", "BUY")

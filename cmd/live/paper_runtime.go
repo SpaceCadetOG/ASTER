@@ -55,11 +55,21 @@ func selectTopRuntimeCandidate(cands []candidate) (candidate, bool) {
 	}
 	ordered := append([]candidate(nil), cands...)
 	sortCandidatesForRuntime(ordered)
+	for _, cand := range ordered {
+		if isExecutableStrategy(cand.Strat) {
+			return cand, true
+		}
+	}
 	return ordered[0], true
 }
 
 func sortCandidatesForRuntime(cands []candidate) {
 	sort.SliceStable(cands, func(i, j int) bool {
+		leftExec := isExecutableStrategy(cands[i].Strat)
+		rightExec := isExecutableStrategy(cands[j].Strat)
+		if leftExec != rightExec {
+			return leftExec
+		}
 		if cands[i].Entry.CurrentScore == cands[j].Entry.CurrentScore {
 			if cands[i].Entry.ScoreSlope == cands[j].Entry.ScoreSlope {
 				return cands[i].Entry.Rank < cands[j].Entry.Rank
@@ -158,10 +168,12 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 
 func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
 	reasons := make([]string, 0, 3)
-	if !isExecutableStrategy(ctx.Candidate.Strat) {
-		reasons = append(reasons, "strategy_unresolved")
-		if source := unresolvedStrategySource(ctx.Candidate); source != "" {
-			reasons = append(reasons, "strategy_unresolved_source:"+source)
+	if reason := strings.TrimSpace(executionStrategyRejectReason(ctx.Candidate)); reason != "" {
+		reasons = append(reasons, reason)
+		if reason == "strategy_unresolved" {
+			if source := unresolvedStrategySource(ctx.Candidate); source != "" {
+				reasons = append(reasons, "strategy_unresolved_source:"+source)
+			}
 		}
 	}
 	pre := deepQueuePreflight(ctx.Candidate, queueDeepPreflightCtx{
@@ -706,7 +718,7 @@ func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, 
 		return "weaker_structure", 0.07, true
 	case strings.Contains(raw, "below_min_confluence"), strings.Contains(raw, "low_conf"), strings.Contains(raw, "conf_"), strings.Contains(raw, "quality"):
 		return "imperfect_confluence", 0.08, true
-	case strings.Contains(raw, "ofi"):
+	case rejectReasonHasToken(raw, "ofi") || strings.Contains(raw, "weak_ofi"):
 		return "weak_ofi", 0.06, true
 	case strings.Contains(raw, "weak_slope"), strings.Contains(raw, "late_cycle_short_weak_slope"):
 		return "weak_slope", envFloat("LIVE_WEAK_SLOPE_PENALTY", 0.03), true
@@ -715,6 +727,21 @@ func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, 
 	default:
 		return "", 0, false
 	}
+}
+
+func rejectReasonHasToken(raw string, token string) bool {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	token = strings.ToLower(strings.TrimSpace(token))
+	if raw == "" || token == "" {
+		return false
+	}
+	normalized := strings.NewReplacer("|", "_", "-", "_", " ", "_", "/", "_", ":", "_").Replace(raw)
+	for _, part := range strings.Split(normalized, "_") {
+		if part == token {
+			return true
+		}
+	}
+	return false
 }
 
 func appendHardBlock(acc *strategies.EntryQualityAccumulator, reason string) {
