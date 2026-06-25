@@ -925,30 +925,46 @@ type paperClosedTradeExit struct {
 	HoldMinutes       float64   `json:"hold_minutes"`
 	MaxRSeen          float64   `json:"max_r_seen"`
 	MinRSeen          float64   `json:"min_r_seen"`
+	StopOutType       string    `json:"stop_out_type,omitempty"`
+	StopPriceAtExit   float64   `json:"stop_price_at_exit,omitempty"`
+	FinalStopPrice    float64   `json:"final_stop_price,omitempty"`
+	HitTP1            bool      `json:"hit_tp1,omitempty"`
+	HitTP2            bool      `json:"hit_tp2,omitempty"`
+	HitTP3            bool      `json:"hit_tp3,omitempty"`
+	TPRatchetOnly     bool      `json:"tp_ratchet_only"`
 	ProtectionState   string    `json:"protection_state,omitempty"`
 	NoProofTriggered  bool      `json:"no_proof_triggered"`
 	CloseType         string    `json:"close_type"`
 }
 
 type paperClosedTradePostExit struct {
-	PeakPrice15m   float64 `json:"peak_price_15m,omitempty"`
-	PeakPrice30m   float64 `json:"peak_price_30m,omitempty"`
-	PeakPrice60m   float64 `json:"peak_price_60m,omitempty"`
-	TroughPrice15m float64 `json:"trough_price_15m,omitempty"`
-	TroughPrice30m float64 `json:"trough_price_30m,omitempty"`
-	TroughPrice60m float64 `json:"trough_price_60m,omitempty"`
-	BestR15m       float64 `json:"best_r_15m,omitempty"`
-	BestR30m       float64 `json:"best_r_30m,omitempty"`
-	BestR60m       float64 `json:"best_r_60m,omitempty"`
-	WorstR15m      float64 `json:"worst_r_15m,omitempty"`
-	WorstR30m      float64 `json:"worst_r_30m,omitempty"`
-	WorstR60m      float64 `json:"worst_r_60m,omitempty"`
-	MissedTP1      bool    `json:"missed_tp1_after_exit,omitempty"`
-	MissedTP2      bool    `json:"missed_tp2_after_exit,omitempty"`
-	MissedTP3      bool    `json:"missed_tp3_after_exit,omitempty"`
-	ExitVsTP1      float64 `json:"exit_vs_tp1_price_diff,omitempty"`
-	ExitVsTP2      float64 `json:"exit_vs_tp2_price_diff,omitempty"`
-	ExitVsTP3      float64 `json:"exit_vs_tp3_price_diff,omitempty"`
+	PeakPrice15m        float64   `json:"peak_price_15m,omitempty"`
+	PeakPrice30m        float64   `json:"peak_price_30m,omitempty"`
+	PeakPrice60m        float64   `json:"peak_price_60m,omitempty"`
+	TroughPrice15m      float64   `json:"trough_price_15m,omitempty"`
+	TroughPrice30m      float64   `json:"trough_price_30m,omitempty"`
+	TroughPrice60m      float64   `json:"trough_price_60m,omitempty"`
+	BestR15m            float64   `json:"best_r_15m,omitempty"`
+	BestR30m            float64   `json:"best_r_30m,omitempty"`
+	BestR60m            float64   `json:"best_r_60m,omitempty"`
+	WorstR15m           float64   `json:"worst_r_15m,omitempty"`
+	WorstR30m           float64   `json:"worst_r_30m,omitempty"`
+	WorstR60m           float64   `json:"worst_r_60m,omitempty"`
+	MissedTP1           bool      `json:"missed_tp1_after_exit,omitempty"`
+	MissedTP2           bool      `json:"missed_tp2_after_exit,omitempty"`
+	MissedTP3           bool      `json:"missed_tp3_after_exit,omitempty"`
+	ExitVsTP1           float64   `json:"exit_vs_tp1_price_diff,omitempty"`
+	ExitVsTP2           float64   `json:"exit_vs_tp2_price_diff,omitempty"`
+	ExitVsTP3           float64   `json:"exit_vs_tp3_price_diff,omitempty"`
+	PostExitPeakPrice   float64   `json:"post_exit_peak_price,omitempty"`
+	PostExitPeakR       float64   `json:"post_exit_peak_r,omitempty"`
+	EODPriceCST185959   float64   `json:"eod_price_cst_185959,omitempty"`
+	EODTimestampCST     time.Time `json:"eod_timestamp_cst,omitempty"`
+	EODTimestampUTC     time.Time `json:"eod_timestamp_utc,omitempty"`
+	EODCapturePriceDiff float64   `json:"eod_vs_exit_price_diff,omitempty"`
+	EODCaptureR         float64   `json:"eod_r,omitempty"`
+	StoppedThenReclaim  bool      `json:"stopped_then_reclaim,omitempty"`
+	ReentryWouldWork    bool      `json:"reentry_would_have_worked,omitempty"`
 }
 
 type paperClosedTradeRecord struct {
@@ -980,7 +996,12 @@ type paperPostExitTracker struct {
 	OriginalTP2       float64                             `json:"original_tp2"`
 	OriginalTP3       float64                             `json:"original_tp3"`
 	RealizedExitPrice float64                             `json:"realized_exit_price"`
+	RawExitReason     string                              `json:"raw_exit_reason"`
 	ExitTs            time.Time                           `json:"exit_ts"`
+	EODTargetLocal    time.Time                           `json:"eod_target_local"`
+	EODTargetUTC      time.Time                           `json:"eod_target_utc"`
+	EODCaptured       bool                                `json:"eod_captured"`
+	EODPrice          float64                             `json:"eod_price,omitempty"`
 	Windows           map[string]paperPostExitWindowState `json:"windows"`
 }
 
@@ -3815,15 +3836,25 @@ func paperProtectionState(pos *paperPosition) string {
 		return "none"
 	}
 	switch {
+	case pos.TrailOn:
+		return "trail"
 	case pos.ProtectionStage >= protectionStageLocked:
 		return "locked"
-	case pos.ProtectionStage >= protectionStageArmed:
-		return "armed"
-	case !stopStillOriginal(pos.Stop, pos.OriginalStop):
-		return "tightened"
+	case paperStopAtOrBeyondEntry(pos.Side, pos.Entry, pos.Stop):
+		return "be"
 	default:
 		return "original"
 	}
+}
+
+func paperStopAtOrBeyondEntry(side string, entry, stop float64) bool {
+	if entry <= 0 || stop <= 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		return stop >= entry
+	}
+	return stop <= entry
 }
 
 func paperFastShortProtectionEnabled(pos *paperPosition) bool {
@@ -4388,6 +4419,10 @@ func winnerProofR() float64 {
 
 func protectAfterProofEnabled() bool {
 	return envBool("LIVE_EXIT_PROTECT_AFTER_PROOF", true)
+}
+
+func paperProtectAfterProofEnabled() bool {
+	return envBool("LIVE_PAPER_EXIT_PROTECT_AFTER_PROOF", envBool("LIVE_EXIT_PROTECT_AFTER_PROOF", false))
 }
 
 func enforceWinnerBEFloor(side string, entry, stop, maxR float64) (float64, bool) {
@@ -5899,9 +5934,9 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if atrLen < 2 {
 		atrLen = 14
 	}
-	tp1R := envFloat("LIVE_PAPER_TP1_R", 1.20)
-	tp2R := envFloat("LIVE_PAPER_TP2_R", 2.50)
-	tp3R := envFloat("LIVE_PAPER_TP3_R", 4.00)
+	tp1R := envFloat("LIVE_PAPER_TP1_R", 1.00)
+	tp2R := envFloat("LIVE_PAPER_TP2_R", 2.00)
+	tp3R := envFloat("LIVE_PAPER_TP3_R", 3.00)
 	if tp1R <= 0 {
 		tp1R = 1.0
 	}
@@ -5914,7 +5949,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	tp1Frac := envFloat("LIVE_PAPER_TP1_FRAC", 0.20)
 	tp2Frac := envFloat("LIVE_PAPER_TP2_FRAC", 0.15)
 	tp3Frac := envFloat("LIVE_PAPER_TP3_FRAC", 0.15)
-	tpRatchetOnly := envBool("LIVE_PAPER_TP_RATCHET_ONLY", envBool("LIVE_TP_RATCHET_ONLY", true))
+	tpRatchetOnly := envBool("LIVE_PAPER_TP_RATCHET_ONLY", false)
 	if tp1Frac < 0 {
 		tp1Frac = 0
 	}
@@ -6014,7 +6049,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if minTP1RR <= 0 {
 		minTP1RR = 0.8
 	}
-	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 5)
+	beLockBps := envFloat("LIVE_BE_LOCK_BPS", 0)
 	lossCooldown := time.Duration(envInt("LIVE_PAPER_LOSS_COOLDOWN_MIN", 0)) * time.Minute
 	maxLossStreak := envInt("LIVE_PAPER_SYMBOL_MAX_LOSS_STREAK", 3)
 	if maxLossStreak < 0 {
@@ -13022,7 +13057,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		_, upctStop := realizedFromFill(pos.Side, pos.Entry, stopCheckPx, maxFloat(pos.Qty, 1))
 		allowBE := allowMoveToBreakEven(pos.HitTP1, upctStop)
 		tp1R := tp1RFromBracket(pos.Entry, pos.Stop, pos.TP1)
-		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.10), tp1R)
+		beArmR := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.50), tp1R)
 		if p.beLockBps > 0 && beArmR > 0 && pos.MaxFavorableR >= beArmR && allowBE {
 			be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
 			if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
@@ -13193,7 +13228,7 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 
 		// 2) Hard stop after TP checks.
 		if (sideBuy && stopCheckPx <= pos.Stop) || (!sideBuy && stopCheckPx >= pos.Stop) {
-			if protectAfterProofEnabled() && pos.MaxFavorableR >= winnerProofR() && stopStillOriginal(pos.Stop, pos.OriginalStop) {
+			if paperProtectAfterProofEnabled() && pos.MaxFavorableR >= winnerProofR() && stopStillOriginal(pos.Stop, pos.OriginalStop) {
 				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, maxFloat(p.beLockBps, 1.0))
 				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
 					pos.Stop = be
@@ -13603,6 +13638,37 @@ func normalizedLedgerExitReason(raw string, net float64, pos *paperPosition) str
 	}
 }
 
+func isStopLikeExitReason(raw string) bool {
+	r := strings.ToUpper(strings.TrimSpace(raw))
+	return r == "SL" || r == "TRAIL_STOP" || strings.Contains(r, "STOP")
+}
+
+func stopOutType(raw, side string, entry, exitPx, stopPx float64) string {
+	if !isStopLikeExitReason(raw) || entry <= 0 || exitPx <= 0 {
+		return ""
+	}
+	risk := plannedRiskPrice(entry, stopPx)
+	if risk <= 0 {
+		risk = entry * 0.001
+	}
+	if risk <= 0 {
+		return ""
+	}
+	tol := math.Max(risk*0.10, entry*0.0005)
+	move := exitPx - entry
+	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
+		move = entry - exitPx
+	}
+	switch {
+	case move < -tol:
+		return "loss"
+	case math.Abs(move) <= tol:
+		return "breakeven"
+	default:
+		return "profit_lock"
+	}
+}
+
 func plannedRiskPrice(entry, stop float64) float64 {
 	if entry <= 0 || stop <= 0 {
 		return 0
@@ -13655,11 +13721,13 @@ func updatePaperPostExitWindow(side string, entry, stop, price float64, w *paper
 
 func buildPaperPostExitSection(side string, entry, stop, exitPx, tp1, tp2, tp3 float64, windows map[string]paperPostExitWindowState) paperClosedTradePostExit {
 	post := paperClosedTradePostExit{}
+	overall := paperPostExitWindowState{}
 	if w, ok := windows["15m"]; ok {
 		post.PeakPrice15m = w.PeakPrice
 		post.TroughPrice15m = w.TroughPrice
 		post.BestR15m = sideAwareBestR(side, entry, stop, w)
 		post.WorstR15m = sideAwareWorstR(side, entry, stop, w)
+		overall = w
 	}
 	if w, ok := windows["30m"]; ok {
 		post.PeakPrice30m = w.PeakPrice
@@ -13679,6 +13747,10 @@ func buildPaperPostExitSection(side string, entry, stop, exitPx, tp1, tp2, tp3 f
 	post.ExitVsTP1 = sideAwareExitVsTarget(side, exitPx, tp1)
 	post.ExitVsTP2 = sideAwareExitVsTarget(side, exitPx, tp2)
 	post.ExitVsTP3 = sideAwareExitVsTarget(side, exitPx, tp3)
+	if overall.PeakPrice > 0 || overall.TroughPrice > 0 {
+		post.PostExitPeakPrice = postExitPeakPrice(side, overall)
+		post.PostExitPeakR = sideAwareBestR(side, entry, stop, overall)
+	}
 	return post
 }
 
@@ -13716,6 +13788,25 @@ func sideAwareExitVsTarget(side string, exitPx, target float64) float64 {
 	return target - exitPx
 }
 
+func postExitPeakPrice(side string, w paperPostExitWindowState) float64 {
+	if strings.EqualFold(strings.TrimSpace(side), "BUY") {
+		return w.PeakPrice
+	}
+	return w.TroughPrice
+}
+
+func nextSessionEOD(after time.Time, loc *time.Location) (time.Time, time.Time) {
+	if loc == nil {
+		loc = time.Local
+	}
+	localAfter := after.In(loc)
+	targetLocal := time.Date(localAfter.Year(), localAfter.Month(), localAfter.Day(), 18, 59, 59, 0, loc)
+	if !localAfter.Before(targetLocal) {
+		targetLocal = targetLocal.Add(24 * time.Hour)
+	}
+	return targetLocal, targetLocal.UTC()
+}
+
 func (p *paperTrader) startPostExitObservation(rec paperClosedTradeRecord) {
 	if p == nil {
 		return
@@ -13723,6 +13814,7 @@ func (p *paperTrader) startPostExitObservation(rec paperClosedTradeRecord) {
 	if p.postExitTrackers == nil {
 		p.postExitTrackers = map[string]*paperPostExitTracker{}
 	}
+	targetLocal, targetUTC := nextSessionEOD(rec.Exit.ExitTs, p.reportLoc)
 	initial := paperPostExitWindowState{
 		PeakPrice:   rec.Exit.RealizedExitPrice,
 		PeakAt:      rec.Exit.ExitTs,
@@ -13739,7 +13831,10 @@ func (p *paperTrader) startPostExitObservation(rec paperClosedTradeRecord) {
 		OriginalTP2:       rec.Plan.OriginalTP2,
 		OriginalTP3:       rec.Plan.OriginalTP3,
 		RealizedExitPrice: rec.Exit.RealizedExitPrice,
+		RawExitReason:     rec.Exit.RawExitReason,
 		ExitTs:            rec.Exit.ExitTs,
+		EODTargetLocal:    targetLocal,
+		EODTargetUTC:      targetUTC,
 		Windows: map[string]paperPostExitWindowState{
 			"15m": initial,
 			"30m": initial,
@@ -13774,12 +13869,43 @@ func (p *paperTrader) updatePostExitTrackers(now time.Time, meta map[string]symb
 				changed = true
 			}
 		}
+		if !tracker.EODCaptured && !tracker.EODTargetUTC.IsZero() && !now.Before(tracker.EODTargetUTC) {
+			tracker.EODPrice = price
+			tracker.EODCaptured = true
+			changed = true
+		}
 		if rec, ok := p.closedTradeLedger[tradeID]; ok {
 			rec.PostExit = buildPaperPostExitSection(tracker.Side, tracker.EntryPrice, tracker.OriginalStop, tracker.RealizedExitPrice, tracker.OriginalTP1, tracker.OriginalTP2, tracker.OriginalTP3, tracker.Windows)
+			if tracker.EODCaptured {
+				rec.PostExit.EODPriceCST185959 = tracker.EODPrice
+				rec.PostExit.EODTimestampCST = tracker.EODTargetLocal
+				rec.PostExit.EODTimestampUTC = tracker.EODTargetUTC
+				rec.PostExit.EODCapturePriceDiff = sideAwareExitVsTarget(tracker.Side, tracker.EODPrice, tracker.RealizedExitPrice)
+				rec.PostExit.EODCaptureR = sideAwareR(tracker.Side, tracker.EntryPrice, tracker.OriginalStop, tracker.EODPrice, true)
+			}
+			if isStopLikeExitReason(tracker.RawExitReason) {
+				bestAfterExit := rec.PostExit.PostExitPeakPrice
+				rec.PostExit.StoppedThenReclaim = false
+				if tracker.EntryPrice > 0 && bestAfterExit > 0 {
+					if strings.EqualFold(strings.TrimSpace(tracker.Side), "BUY") {
+						rec.PostExit.StoppedThenReclaim = bestAfterExit > tracker.EntryPrice
+					} else {
+						rec.PostExit.StoppedThenReclaim = bestAfterExit < tracker.EntryPrice
+					}
+				}
+				rec.PostExit.ReentryWouldWork = rec.PostExit.StoppedThenReclaim || rec.PostExit.MissedTP1
+			}
 			p.closedTradeLedger[tradeID] = rec
 			changed = true
 		}
-		if now.Sub(tracker.ExitTs) > 60*time.Minute {
+		expireAfter := 60 * time.Minute
+		if !tracker.EODTargetUTC.IsZero() {
+			eodHold := tracker.EODTargetUTC.Sub(tracker.ExitTs) + time.Minute
+			if eodHold > expireAfter {
+				expireAfter = eodHold
+			}
+		}
+		if now.Sub(tracker.ExitTs) > expireAfter {
 			delete(p.postExitTrackers, tradeID)
 			changed = true
 		}
@@ -13875,6 +14001,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	ds := p.dayStats[dayKeyForStats]
 	protectedAfterProof := pos.MaxFavorableR >= winnerProofR() && !stopStillOriginal(pos.Stop, pos.OriginalStop)
 	winnerRevertedUnprotected := pos.MaxFavorableR >= winnerProofR() && net < 0 && stopStillOriginal(pos.Stop, pos.OriginalStop)
+	stopType := stopOutType(reasonU, pos.Side, pos.Entry, exitPrice, pos.Stop)
 	if ds != nil && net < 0 {
 		ds.SumMaxROnLosers += pos.MaxFavorableR
 		ds.LosingTradesWithMaxR++
@@ -13946,9 +14073,10 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		pos.Qty = 0
 	}
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
-	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
+	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f original_stop=%.6f final_stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f hit_tp1=%t hit_tp2=%t hit_tp3=%t tp_ratchet_only=%t stop_out_type=%s protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
 		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin,
-		pos.MaxFavorableR, -pos.MaxAdverseR, paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), false)
+		pos.MaxFavorableR, -pos.MaxAdverseR, pos.OriginalStop, pos.Stop, pos.OriginalTP1, pos.OriginalTP2, pos.OriginalTP3,
+		pos.HitTP1, pos.HitTP2, pos.HitTP3, p.tpRatchetOnly, firstNonEmpty(stopType, "none"), paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), false)
 	if p.onExit != nil {
 		loc := p.reportLoc
 		if loc == nil {
@@ -14056,6 +14184,13 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 			HoldMinutes:       holdMin,
 			MaxRSeen:          pos.MaxFavorableR,
 			MinRSeen:          -pos.MaxAdverseR,
+			StopOutType:       stopOutType(rawReason, pos.Side, pos.Entry, exitPrice, pos.Stop),
+			StopPriceAtExit:   pos.Stop,
+			FinalStopPrice:    pos.Stop,
+			HitTP1:            pos.HitTP1,
+			HitTP2:            pos.HitTP2,
+			HitTP3:            pos.HitTP3,
+			TPRatchetOnly:     p.tpRatchetOnly,
 			ProtectionState:   paperProtectionState(pos),
 			NoProofTriggered:  false,
 			CloseType:         "full_close",
@@ -14631,7 +14766,10 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		"exit_ts", "symbol", "side", "entry", "exit", "qty", "lev", "margin", "stop", "tp", "reason", "gross_pnl", "fees", "net_pnl", "balance", "hold_min",
 		"trade_id", "strategy", "setup_family", "setup_source", "trade_horizon", "exec_bucket", "entry_style", "strategy_family",
 		"original_stop", "original_tp1", "original_tp2", "original_tp3",
-		"realized_exit_price", "raw_exit_reason", "normalized_exit_reason",
+		"realized_exit_price", "raw_exit_reason", "normalized_exit_reason", "stop_out_type", "stop_price_at_exit", "protection_state",
+		"hit_tp1", "hit_tp2", "hit_tp3", "tp_ratchet_only",
+		"post_exit_peak_price", "post_exit_peak_r", "stopped_then_reclaim", "reentry_would_have_worked",
+		"eod_price_cst_185959", "eod_timestamp_cst", "eod_timestamp_utc", "eod_vs_exit_price_diff", "eod_r",
 	}); err != nil {
 		return err
 	}
@@ -14673,6 +14811,37 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		fmt.Sprintf("%.8f", exit),
 		strings.ToUpper(strings.TrimSpace(reason)),
 		normalizedLedgerExitReason(reason, net, pos),
+		stopOutType(reason, pos.Side, pos.Entry, exit, pos.Stop),
+		fmt.Sprintf("%.8f", pos.Stop),
+		paperProtectionState(pos),
+		strconv.FormatBool(pos.HitTP1),
+		strconv.FormatBool(pos.HitTP2),
+		strconv.FormatBool(pos.HitTP3),
+		strconv.FormatBool(p.tpRatchetOnly),
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+		"",
+	}
+	if rec, ok := p.closedTradeLedger[firstNonEmpty(strings.TrimSpace(pos.TradeID), newPaperTradeID(pos.OpenedAt, symbol, side))]; ok {
+		row[len(row)-9] = fmt.Sprintf("%.8f", rec.PostExit.PostExitPeakPrice)
+		row[len(row)-8] = fmt.Sprintf("%.4f", rec.PostExit.PostExitPeakR)
+		row[len(row)-7] = strconv.FormatBool(rec.PostExit.StoppedThenReclaim)
+		row[len(row)-6] = strconv.FormatBool(rec.PostExit.ReentryWouldWork)
+		row[len(row)-5] = fmt.Sprintf("%.8f", rec.PostExit.EODPriceCST185959)
+		if !rec.PostExit.EODTimestampCST.IsZero() {
+			row[len(row)-4] = rec.PostExit.EODTimestampCST.Format(time.RFC3339)
+		}
+		if !rec.PostExit.EODTimestampUTC.IsZero() {
+			row[len(row)-3] = rec.PostExit.EODTimestampUTC.Format(time.RFC3339)
+		}
+		row[len(row)-2] = fmt.Sprintf("%.8f", rec.PostExit.EODCapturePriceDiff)
+		row[len(row)-1] = fmt.Sprintf("%.4f", rec.PostExit.EODCaptureR)
 	}
 	if p != nil && p.eventLog != nil {
 		markPx, lastPx := paperMarkLastPrices(m, ob, p.markLastModel, p.markLastDivBps)

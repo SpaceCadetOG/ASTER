@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,6 +189,9 @@ func TestPaperClosedTradeLedgerMarksMissingStrategyAndNormalizesProtectedStop(t 
 	if rec.Exit.ExitReason != "Trailing Stop" && rec.Exit.ExitReason != "Protected Stop" {
 		t.Fatalf("expected profitable SL to normalize to protected/trailing stop, got %+v", rec.Exit)
 	}
+	if rec.Exit.StopOutType != "profit_lock" {
+		t.Fatalf("expected profitable stop to classify as profit_lock, got %+v", rec.Exit)
+	}
 
 	f, err := os.Open(paper.closedTradesJSONL)
 	if err != nil {
@@ -261,5 +265,96 @@ func TestPaperClosedTradeLedgerCarriesShortPhase2Fields(t *testing.T) {
 	}
 	if rec.Plan.Pct24hAtEntry != 100 || rec.Plan.Pct4hAtEntry != -35 || rec.Plan.Pct1hAtEntry != -12 {
 		t.Fatalf("expected timeframe values preserved, got %+v", rec.Plan)
+	}
+}
+
+func TestPaperClosedTradeLedgerCapturesTPHitsAndRatchetMode(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	paper.tpRatchetOnly = false
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	pos := &paperPosition{
+		Symbol:       "LABUSDT",
+		Side:         "BUY",
+		TradeID:      "paper-hits-1",
+		Entry:        10,
+		Qty:          1,
+		InitialQty:   1,
+		Margin:       10,
+		Leverage:     5,
+		Stop:         10.4,
+		OriginalStop: 9.7,
+		TP1:          10.3,
+		TP2:          10.6,
+		TP3:          10.9,
+		OriginalTP1:  10.3,
+		OriginalTP2:  10.6,
+		OriginalTP3:  10.9,
+		HitTP1:       true,
+		HitTP2:       true,
+		OpenedAt:     now.Add(-15 * time.Minute),
+	}
+
+	out := captureStdout(t, func() {
+		paper.positions["LABUSDT"] = pos
+		paper.exitPortion(now, pos, "SL", 10.4, pos.Qty, symbolMeta{LastPrice: 10.4}, aster.OrderBook{})
+	})
+
+	rec := paper.closedTradeLedger["paper-hits-1"]
+	if !rec.Exit.HitTP1 || !rec.Exit.HitTP2 || rec.Exit.HitTP3 {
+		t.Fatalf("expected TP hit state preserved, got %+v", rec.Exit)
+	}
+	if rec.Exit.FinalStopPrice != 10.4 {
+		t.Fatalf("expected final stop price recorded, got %.4f", rec.Exit.FinalStopPrice)
+	}
+	if rec.Exit.TPRatchetOnly {
+		t.Fatalf("expected ratchet mode false in ledger, got %+v", rec.Exit)
+	}
+	for _, want := range []string{"hit_tp1=true", "hit_tp2=true", "hit_tp3=false", "tp_ratchet_only=false"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected paper exit log to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestPaperClosedTradeLedgerCapturesEODAndStopReclaim(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	paper.reportLoc = loc
+	exitTs := time.Date(2026, 6, 22, 20, 0, 0, 0, time.UTC)
+	rec := paperClosedTradeRecord{
+		TradeID: "eod-1",
+		Mode:    "paper",
+		Symbol:  "LABUSDT",
+		Side:    "BUY",
+		Entry:   paperClosedTradeEntry{EntryTs: exitTs.Add(-10 * time.Minute), EntryPrice: 100},
+		Plan:    paperClosedTradePlan{OriginalStop: 98, OriginalTP1: 102, OriginalTP2: 104, OriginalTP3: 106},
+		Exit: paperClosedTradeExit{
+			ExitTs:            exitTs,
+			RealizedExitPrice: 99,
+			RawExitReason:     "SL",
+		},
+	}
+	paper.closedTradeLedger["eod-1"] = rec
+	paper.startPostExitObservation(rec)
+
+	paper.updatePostExitTrackers(exitTs.Add(10*time.Minute), map[string]symbolMeta{"LABUSDT": {LastPrice: 101}})
+	targetUTC := paper.postExitTrackers["eod-1"].EODTargetUTC
+	paper.updatePostExitTrackers(targetUTC.Add(time.Second), map[string]symbolMeta{"LABUSDT": {LastPrice: 105}})
+
+	got := paper.closedTradeLedger["eod-1"].PostExit
+	if got.EODPriceCST185959 != 105 {
+		t.Fatalf("expected EOD price captured, got %+v", got)
+	}
+	if got.EODTimestampUTC != targetUTC {
+		t.Fatalf("expected EOD UTC timestamp preserved, got %+v", got)
+	}
+	if got.PostExitPeakPrice != 101 {
+		t.Fatalf("expected post-exit peak price from first window update, got %+v", got)
+	}
+	if !got.StoppedThenReclaim || !got.ReentryWouldWork {
+		t.Fatalf("expected stop reclaim and reentry flags, got %+v", got)
 	}
 }

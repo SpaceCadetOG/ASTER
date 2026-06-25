@@ -189,6 +189,34 @@ func TestWinnerProofRDefaultsToOneR(t *testing.T) {
 	}
 }
 
+func TestPaperBaselineTPDefaults(t *testing.T) {
+	t.Setenv("LIVE_PAPER_TP1_R", "")
+	t.Setenv("LIVE_PAPER_TP2_R", "")
+	t.Setenv("LIVE_PAPER_TP3_R", "")
+	t.Setenv("LIVE_PAPER_TP_RATCHET_ONLY", "")
+	t.Setenv("LIVE_BE_LOCK_BPS", "")
+	t.Setenv("LIVE_PAPER_BE_ARM_R", "")
+	t.Setenv("LIVE_PAPER_EXIT_PROTECT_AFTER_PROOF", "")
+	t.Setenv("LIVE_EXIT_PROTECT_AFTER_PROOF", "")
+
+	paper := newPaperTrader(true, 0, 5)
+	if paper.tp1R != 1.0 || paper.tp2R != 2.0 || paper.tp3R != 3.0 {
+		t.Fatalf("expected 1/2/3R paper defaults, got %.2f/%.2f/%.2f", paper.tp1R, paper.tp2R, paper.tp3R)
+	}
+	if paper.tpRatchetOnly {
+		t.Fatalf("expected paper ratchet-only disabled by default")
+	}
+	if paper.beLockBps != 0 {
+		t.Fatalf("expected paper BE lock default 0, got %.2f", paper.beLockBps)
+	}
+	if got := beArmThreshold(envFloat("LIVE_PAPER_BE_ARM_R", 1.50), 1.0); got != 1.5 {
+		t.Fatalf("expected paper BE arm threshold 1.50R, got %.2f", got)
+	}
+	if paperProtectAfterProofEnabled() {
+		t.Fatalf("expected paper protect-after-proof disabled by default")
+	}
+}
+
 func TestPaperLossLocksApplyAfterRepeatedDamage(t *testing.T) {
 	paper := testCleanupPaperTrader(t)
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
