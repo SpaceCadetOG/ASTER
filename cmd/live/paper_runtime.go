@@ -201,9 +201,6 @@ func paperBaselineHardRejectReason(ctx paperDecisionCtx) string {
 	if _, exists := ctx.CurrentEntries[raw]; exists {
 		return "symbol_already_open"
 	}
-	if strings.TrimSpace(canonicalExecutionID(ctx.Candidate)) == "" {
-		return "setup_unresolved"
-	}
 	return ""
 }
 

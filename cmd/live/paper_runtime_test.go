@@ -561,23 +561,20 @@ func TestShortPhase2PostPumpBreakdownBecomesFailedBounceShort(t *testing.T) {
 	}
 }
 
-func TestPaperPreflightRejectsUnresolvedStrategyLabelsAsSetupUnresolved(t *testing.T) {
+func TestPaperPreflightAllowsUnresolvedStrategyLabels(t *testing.T) {
 	for _, strat := range []string{"none", "", "no_strategy", "unknown", "unresolved"} {
 		t.Run(stratLabel(strat), func(t *testing.T) {
 			ctx := testPaperDecisionCtx()
 			ctx.Candidate.Strat = strat
 			verdict := paperPreflightVerdict(ctx)
-			if verdict.Approved {
-				t.Fatalf("expected unresolved strategy %q to be rejected", strat)
-			}
-			if verdict.Reason != "setup_unresolved" {
-				t.Fatalf("expected setup_unresolved reason, got %q", verdict.Reason)
+			if !verdict.Approved {
+				t.Fatalf("expected unresolved strategy %q to pass paper preflight, got reason=%q quality=%+v", strat, verdict.Reason, verdict.Quality)
 			}
 		})
 	}
 }
 
-func TestPaperPreflightRejectsFallbackCandidateWithNoCanonicalExecutionID(t *testing.T) {
+func TestPaperPreflightAllowsFallbackCandidateWithNoCanonicalExecutionID(t *testing.T) {
 	ctx := testPaperDecisionCtx()
 	ctx.Candidate = applySimpleContinuationFallbackAt(candidate{
 		Side:  "BUY",
@@ -591,11 +588,8 @@ func TestPaperPreflightRejectsFallbackCandidateWithNoCanonicalExecutionID(t *tes
 		},
 	}, time.Now().UTC())
 	verdict := paperPreflightVerdict(ctx)
-	if verdict.Approved {
-		t.Fatalf("expected fallback candidate to be rejected")
-	}
-	if verdict.Reason != "setup_unresolved" {
-		t.Fatalf("expected setup_unresolved, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
+	if !verdict.Approved {
+		t.Fatalf("expected fallback candidate to pass paper preflight, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
 	}
 }
 

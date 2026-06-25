@@ -95,7 +95,7 @@ func TestPaperPreflightAllowsPreviouslyUnresolvedWatchCandidate(t *testing.T) {
 	ctx.Candidate = cands[0]
 	verdict := paperPreflightVerdict(ctx)
 	if !verdict.Approved {
-		t.Fatalf("expected watch candidate to resolve into executable baseline ID, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
+		t.Fatalf("expected watch candidate to pass paper preflight, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
 	}
 }
 
