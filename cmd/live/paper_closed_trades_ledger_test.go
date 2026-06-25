@@ -42,10 +42,13 @@ func TestPaperClosedTradeLedgerPreservesOriginalTargetsAndMetadata(t *testing.T)
 		EntrySession:         "US",
 		EntryTiming:          "mid",
 		EntryConfluenceScore: 82.5,
+		EntryPct24h:          6.6,
+		EntryPct4h:           2.1,
+		EntryPct1h:           -0.4,
 	}
 
 	paper.positions["REUSDT"] = pos
-	paper.exitPortion(now, pos, "SL", 1.026447, pos.Qty, symbolMeta{LastPrice: 1.026447}, aster.OrderBook{})
+	paper.exitPortion(now, pos, "SL", 1.026447, pos.Qty, symbolMeta{LastPrice: 1.026447, DayUTC24h: 7.1, UTC4hPct: 2.4, UTC1hPct: -0.2}, aster.OrderBook{})
 
 	rec, ok := paper.closedTradeLedger["paper-1"]
 	if !ok {
@@ -53,6 +56,12 @@ func TestPaperClosedTradeLedgerPreservesOriginalTargetsAndMetadata(t *testing.T)
 	}
 	if rec.Plan.OriginalTP1 != 1.034000 || rec.Plan.OriginalTP2 != 1.039000 || rec.Plan.OriginalTP3 != 1.045000 {
 		t.Fatalf("expected original targets preserved, got %+v", rec.Plan)
+	}
+	if rec.Plan.Pct24hAtEntry != 6.6 || rec.Plan.Pct4hAtEntry != 2.1 || rec.Plan.Pct1hAtEntry != -0.4 {
+		t.Fatalf("expected entry scanner values preserved, got %+v", rec.Plan)
+	}
+	if rec.Exit.Pct24hAtExit != 7.1 || rec.Exit.Pct4hAtExit != 2.4 || rec.Exit.Pct1hAtExit != -0.2 {
+		t.Fatalf("expected exit scanner values preserved, got %+v", rec.Exit)
 	}
 	if rec.Exit.RealizedExitPrice == rec.Plan.OriginalTP1 {
 		t.Fatalf("expected realized exit to remain separate from original tp1, got %.6f", rec.Exit.RealizedExitPrice)
@@ -84,6 +93,55 @@ func TestPaperClosedTradeLedgerPreservesOriginalTargetsAndMetadata(t *testing.T)
 	}
 	if got := record[idx["realized_exit_price"]]; got != "1.02567729" {
 		t.Fatalf("expected simulated realized exit price column, got %s", got)
+	}
+	if got := record[idx["pct24h_at_entry"]]; got != "6.6000" {
+		t.Fatalf("expected entry day scanner in csv, got %s", got)
+	}
+	if got := record[idx["pct24h_at_exit"]]; got != "7.1000" {
+		t.Fatalf("expected exit day scanner in csv, got %s", got)
+	}
+}
+
+func TestPaperClosedTradeLedgerPreservesScannerChainForShorts(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	now := time.Date(2026, 6, 20, 18, 15, 0, 0, time.UTC)
+	pos := &paperPosition{
+		Symbol:           "GUAUSDT",
+		Side:             "SELL",
+		TradeID:          "paper-short-scanner-1",
+		Entry:            0.6500,
+		Qty:              100,
+		InitialQty:       100,
+		Margin:           10,
+		Leverage:         5,
+		Stop:             0.6700,
+		OriginalStop:     0.6700,
+		TP1:              0.6300,
+		TP2:              0.6200,
+		TP3:              0.6100,
+		OriginalTP1:      0.6300,
+		OriginalTP2:      0.6200,
+		OriginalTP3:      0.6100,
+		OpenedAt:         now.Add(-12 * time.Minute),
+		EntryReason:      "vp_trend",
+		RawEntryReason:   "vp_trend",
+		EntrySetupFamily: "breakout_retest",
+		ExecBucket:       "continuation",
+		EntryStyle:       "pullback_short",
+		EntryPct24h:      -8.5,
+		EntryPct4h:       -3.4,
+		EntryPct1h:       -1.2,
+	}
+
+	paper.positions["GUAUSDT"] = pos
+	paper.exitPortion(now, pos, "TP1", 0.6300, pos.Qty, symbolMeta{LastPrice: 0.6300, DayUTC24h: -9.1, UTC4hPct: -4.0, UTC1hPct: -1.8}, aster.OrderBook{})
+
+	rec := paper.closedTradeLedger["paper-short-scanner-1"]
+	if rec.Plan.Pct24hAtEntry != -8.5 || rec.Plan.Pct4hAtEntry != -3.4 || rec.Plan.Pct1hAtEntry != -1.2 {
+		t.Fatalf("expected short entry scanner values preserved, got %+v", rec.Plan)
+	}
+	if rec.Exit.Pct24hAtExit != -9.1 || rec.Exit.Pct4hAtExit != -4.0 || rec.Exit.Pct1hAtExit != -1.8 {
+		t.Fatalf("expected short exit scanner values preserved, got %+v", rec.Exit)
 	}
 }
 
@@ -342,11 +400,14 @@ func TestPaperClosedTradeLedgerCapturesEODAndStopReclaim(t *testing.T) {
 
 	paper.updatePostExitTrackers(exitTs.Add(10*time.Minute), map[string]symbolMeta{"LABUSDT": {LastPrice: 101}})
 	targetUTC := paper.postExitTrackers["eod-1"].EODTargetUTC
-	paper.updatePostExitTrackers(targetUTC.Add(time.Second), map[string]symbolMeta{"LABUSDT": {LastPrice: 105}})
+	paper.updatePostExitTrackers(targetUTC.Add(time.Second), map[string]symbolMeta{"LABUSDT": {LastPrice: 105, DayUTC24h: 12, UTC4hPct: 4, UTC1hPct: 1}})
 
 	got := paper.closedTradeLedger["eod-1"].PostExit
 	if got.EODPriceCST185959 != 105 {
 		t.Fatalf("expected EOD price captured, got %+v", got)
+	}
+	if got.EODPct24h != 12 || got.EODPct4h != 4 || got.EODPct1h != 1 {
+		t.Fatalf("expected EOD scanner values captured, got %+v", got)
 	}
 	if got.EODTimestampUTC != targetUTC {
 		t.Fatalf("expected EOD UTC timestamp preserved, got %+v", got)

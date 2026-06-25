@@ -917,6 +917,9 @@ type paperClosedTradePlan struct {
 type paperClosedTradeExit struct {
 	ExitTs            time.Time `json:"exit_ts"`
 	RealizedExitPrice float64   `json:"realized_exit_price"`
+	Pct24hAtExit      float64   `json:"pct24h_at_exit,omitempty"`
+	Pct4hAtExit       float64   `json:"pct4h_at_exit,omitempty"`
+	Pct1hAtExit       float64   `json:"pct1h_at_exit,omitempty"`
 	ExitReason        string    `json:"exit_reason"`
 	RawExitReason     string    `json:"raw_exit_reason"`
 	GrossPnL          float64   `json:"gross_pnl"`
@@ -959,6 +962,9 @@ type paperClosedTradePostExit struct {
 	PostExitPeakPrice   float64   `json:"post_exit_peak_price,omitempty"`
 	PostExitPeakR       float64   `json:"post_exit_peak_r,omitempty"`
 	EODPriceCST185959   float64   `json:"eod_price_cst_185959,omitempty"`
+	EODPct24h           float64   `json:"eod_pct24h,omitempty"`
+	EODPct4h            float64   `json:"eod_pct4h,omitempty"`
+	EODPct1h            float64   `json:"eod_pct1h,omitempty"`
 	EODTimestampCST     time.Time `json:"eod_timestamp_cst,omitempty"`
 	EODTimestampUTC     time.Time `json:"eod_timestamp_utc,omitempty"`
 	EODCapturePriceDiff float64   `json:"eod_vs_exit_price_diff,omitempty"`
@@ -998,10 +1004,16 @@ type paperPostExitTracker struct {
 	RealizedExitPrice float64                             `json:"realized_exit_price"`
 	RawExitReason     string                              `json:"raw_exit_reason"`
 	ExitTs            time.Time                           `json:"exit_ts"`
+	ExitPct24h        float64                             `json:"exit_pct24h,omitempty"`
+	ExitPct4h         float64                             `json:"exit_pct4h,omitempty"`
+	ExitPct1h         float64                             `json:"exit_pct1h,omitempty"`
 	EODTargetLocal    time.Time                           `json:"eod_target_local"`
 	EODTargetUTC      time.Time                           `json:"eod_target_utc"`
 	EODCaptured       bool                                `json:"eod_captured"`
 	EODPrice          float64                             `json:"eod_price,omitempty"`
+	EODPct24h         float64                             `json:"eod_pct24h,omitempty"`
+	EODPct4h          float64                             `json:"eod_pct4h,omitempty"`
+	EODPct1h          float64                             `json:"eod_pct1h,omitempty"`
 	Windows           map[string]paperPostExitWindowState `json:"windows"`
 }
 
@@ -12949,9 +12961,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		EntryTiming:            c.EntryTiming,
 		CandidateAgeSeconds:    c.CandidateAgeSeconds,
 		EntryDistanceToVWAPPct: c.DistanceToVWAPPct,
-		EntryPct24h:            shortCtx.Pct24hAtEntry,
-		EntryPct4h:             shortCtx.Pct4hAtEntry,
-		EntryPct1h:             shortCtx.Pct1hAtEntry,
+		EntryPct24h:            c.DayUTC24h,
+		EntryPct4h:             c.UTC4hPct,
+		EntryPct1h:             c.UTC1hPct,
 		ShortBucket:            shortCtx.Bucket,
 		ShortFilterReason:      shortCtx.FilterReason,
 		ShortRequireConfirm:    shortCtx.RequireConfirmation,
@@ -13833,6 +13845,9 @@ func (p *paperTrader) startPostExitObservation(rec paperClosedTradeRecord) {
 		RealizedExitPrice: rec.Exit.RealizedExitPrice,
 		RawExitReason:     rec.Exit.RawExitReason,
 		ExitTs:            rec.Exit.ExitTs,
+		ExitPct24h:        rec.Exit.Pct24hAtExit,
+		ExitPct4h:         rec.Exit.Pct4hAtExit,
+		ExitPct1h:         rec.Exit.Pct1hAtExit,
 		EODTargetLocal:    targetLocal,
 		EODTargetUTC:      targetUTC,
 		Windows: map[string]paperPostExitWindowState{
@@ -13871,6 +13886,9 @@ func (p *paperTrader) updatePostExitTrackers(now time.Time, meta map[string]symb
 		}
 		if !tracker.EODCaptured && !tracker.EODTargetUTC.IsZero() && !now.Before(tracker.EODTargetUTC) {
 			tracker.EODPrice = price
+			tracker.EODPct24h = m.DayUTC24h
+			tracker.EODPct4h = m.UTC4hPct
+			tracker.EODPct1h = m.UTC1hPct
 			tracker.EODCaptured = true
 			changed = true
 		}
@@ -13878,6 +13896,9 @@ func (p *paperTrader) updatePostExitTrackers(now time.Time, meta map[string]symb
 			rec.PostExit = buildPaperPostExitSection(tracker.Side, tracker.EntryPrice, tracker.OriginalStop, tracker.RealizedExitPrice, tracker.OriginalTP1, tracker.OriginalTP2, tracker.OriginalTP3, tracker.Windows)
 			if tracker.EODCaptured {
 				rec.PostExit.EODPriceCST185959 = tracker.EODPrice
+				rec.PostExit.EODPct24h = tracker.EODPct24h
+				rec.PostExit.EODPct4h = tracker.EODPct4h
+				rec.PostExit.EODPct1h = tracker.EODPct1h
 				rec.PostExit.EODTimestampCST = tracker.EODTargetLocal
 				rec.PostExit.EODTimestampUTC = tracker.EODTargetUTC
 				rec.PostExit.EODCapturePriceDiff = sideAwareExitVsTarget(tracker.Side, tracker.EODPrice, tracker.RealizedExitPrice)
@@ -14095,7 +14116,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	}
 	_ = p.logTrade(now, pos, exitPrice, qty, reason, gross, fee, net, holdMin, m, ob)
 	if pos.Qty <= 1e-10 {
-		p.recordClosedTrade(now, pos, exitPrice, reason, holdMin)
+		p.recordClosedTrade(now, pos, exitPrice, reason, holdMin, m)
 		loc := p.reportLoc
 		if loc == nil {
 			loc = time.Local
@@ -14113,7 +14134,7 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	_ = p.save()
 }
 
-func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitPrice float64, rawReason string, holdMin float64) {
+func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitPrice float64, rawReason string, holdMin float64, m symbolMeta) {
 	if p == nil || pos == nil {
 		return
 	}
@@ -14176,6 +14197,9 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 		Exit: paperClosedTradeExit{
 			ExitTs:            now.UTC(),
 			RealizedExitPrice: exitPrice,
+			Pct24hAtExit:      m.DayUTC24h,
+			Pct4hAtExit:       m.UTC4hPct,
+			Pct1hAtExit:       m.UTC1hPct,
 			ExitReason:        normalizedLedgerExitReason(rawReason, pos.Realized, pos),
 			RawExitReason:     strings.ToUpper(strings.TrimSpace(rawReason)),
 			GrossPnL:          pos.GrossRealized,
@@ -14766,10 +14790,11 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		"exit_ts", "symbol", "side", "entry", "exit", "qty", "lev", "margin", "stop", "tp", "reason", "gross_pnl", "fees", "net_pnl", "balance", "hold_min",
 		"trade_id", "strategy", "setup_family", "setup_source", "trade_horizon", "exec_bucket", "entry_style", "strategy_family",
 		"original_stop", "original_tp1", "original_tp2", "original_tp3",
-		"realized_exit_price", "raw_exit_reason", "normalized_exit_reason", "stop_out_type", "stop_price_at_exit", "protection_state",
+		"pct24h_at_entry", "pct4h_at_entry", "pct1h_at_entry",
+		"realized_exit_price", "pct24h_at_exit", "pct4h_at_exit", "pct1h_at_exit", "raw_exit_reason", "normalized_exit_reason", "stop_out_type", "stop_price_at_exit", "protection_state",
 		"hit_tp1", "hit_tp2", "hit_tp3", "tp_ratchet_only",
 		"post_exit_peak_price", "post_exit_peak_r", "stopped_then_reclaim", "reentry_would_have_worked",
-		"eod_price_cst_185959", "eod_timestamp_cst", "eod_timestamp_utc", "eod_vs_exit_price_diff", "eod_r",
+		"eod_price_cst_185959", "eod_pct24h", "eod_pct4h", "eod_pct1h", "eod_timestamp_cst", "eod_timestamp_utc", "eod_vs_exit_price_diff", "eod_r",
 	}); err != nil {
 		return err
 	}
@@ -14808,7 +14833,13 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		fmt.Sprintf("%.8f", pos.OriginalTP1),
 		fmt.Sprintf("%.8f", pos.OriginalTP2),
 		fmt.Sprintf("%.8f", pos.OriginalTP3),
+		fmt.Sprintf("%.4f", pos.EntryPct24h),
+		fmt.Sprintf("%.4f", pos.EntryPct4h),
+		fmt.Sprintf("%.4f", pos.EntryPct1h),
 		fmt.Sprintf("%.8f", exit),
+		fmt.Sprintf("%.4f", m.DayUTC24h),
+		fmt.Sprintf("%.4f", m.UTC4hPct),
+		fmt.Sprintf("%.4f", m.UTC1hPct),
 		strings.ToUpper(strings.TrimSpace(reason)),
 		normalizedLedgerExitReason(reason, net, pos),
 		stopOutType(reason, pos.Side, pos.Entry, exit, pos.Stop),
@@ -14827,13 +14858,19 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		"",
 		"",
 		"",
+		"",
+		"",
+		"",
 	}
 	if rec, ok := p.closedTradeLedger[firstNonEmpty(strings.TrimSpace(pos.TradeID), newPaperTradeID(pos.OpenedAt, symbol, side))]; ok {
-		row[len(row)-9] = fmt.Sprintf("%.8f", rec.PostExit.PostExitPeakPrice)
-		row[len(row)-8] = fmt.Sprintf("%.4f", rec.PostExit.PostExitPeakR)
-		row[len(row)-7] = strconv.FormatBool(rec.PostExit.StoppedThenReclaim)
-		row[len(row)-6] = strconv.FormatBool(rec.PostExit.ReentryWouldWork)
-		row[len(row)-5] = fmt.Sprintf("%.8f", rec.PostExit.EODPriceCST185959)
+		row[len(row)-12] = fmt.Sprintf("%.8f", rec.PostExit.PostExitPeakPrice)
+		row[len(row)-11] = fmt.Sprintf("%.4f", rec.PostExit.PostExitPeakR)
+		row[len(row)-10] = strconv.FormatBool(rec.PostExit.StoppedThenReclaim)
+		row[len(row)-9] = strconv.FormatBool(rec.PostExit.ReentryWouldWork)
+		row[len(row)-8] = fmt.Sprintf("%.8f", rec.PostExit.EODPriceCST185959)
+		row[len(row)-7] = fmt.Sprintf("%.4f", rec.PostExit.EODPct24h)
+		row[len(row)-6] = fmt.Sprintf("%.4f", rec.PostExit.EODPct4h)
+		row[len(row)-5] = fmt.Sprintf("%.4f", rec.PostExit.EODPct1h)
 		if !rec.PostExit.EODTimestampCST.IsZero() {
 			row[len(row)-4] = rec.PostExit.EODTimestampCST.Format(time.RFC3339)
 		}
