@@ -148,7 +148,7 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 	}
 	lev := computeLeverage(ctx.Candidate, ctx.LeverageMode, ctx.LeverageFixed, ctx.LeverageMin, ctx.MaxLeverage)
 	topBookUSD := maxFloat(ctx.Candidate.DepthBid, ctx.Candidate.DepthAsk)
-	return risk.Approve(ctx.RiskShell, risk.Input{
+	dec := risk.Approve(ctx.RiskShell, risk.Input{
 		Symbol:            raw,
 		Session:           strings.ToUpper(strings.TrimSpace(ctx.Candidate.SessionLabel)),
 		Side:              strings.ToUpper(strings.TrimSpace(ctx.Candidate.Side)),
@@ -164,6 +164,16 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 		RecentSlippageBps: 0,
 		VenueHealthy:      meta.LastPrice > 0,
 	})
+	return softenPaperRiskDecision(dec)
+}
+
+func softenPaperRiskDecision(dec risk.Decision) risk.Decision {
+	switch strings.TrimSpace(dec.RejectReason) {
+	case "spread_too_wide", "depth_too_thin", "depth_imbalance_thin":
+		dec.Approved = true
+		dec.RejectReason = ""
+	}
+	return dec
 }
 
 func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {

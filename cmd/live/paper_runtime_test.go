@@ -602,6 +602,51 @@ func TestPaperPreflightAllowsExecutableStrategy(t *testing.T) {
 	}
 }
 
+func TestPaperRiskDecisionSoftensSpreadAndDepthRejects(t *testing.T) {
+	tests := []struct {
+		name       string
+		spreadBps  float64
+		depthBid   float64
+		depthAsk   float64
+		bookImb    float64
+	}{
+		{name: "spread", spreadBps: 99, depthBid: 100000, depthAsk: 100000, bookImb: 2},
+		{name: "depth", spreadBps: 1, depthBid: 10, depthAsk: 10, bookImb: 2},
+		{name: "imbalance", spreadBps: 1, depthBid: 100000, depthAsk: 100000, bookImb: 1.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := testPaperDecisionCtx()
+			ctx.Candidate.SpreadBps = tt.spreadBps
+			ctx.Candidate.DepthBid = tt.depthBid
+			ctx.Candidate.DepthAsk = tt.depthAsk
+			ctx.Candidate.BookImbalance = tt.bookImb
+			dec := paperRiskDecision(ctx)
+			if !dec.Approved {
+				t.Fatalf("expected paper risk decision approved, got %+v", dec)
+			}
+			if dec.RejectReason != "" {
+				t.Fatalf("expected softened reject reason cleared, got %+v", dec)
+			}
+		})
+	}
+}
+
+func TestBuildPaperExecutionDecisionIgnoresThinBookRejects(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.Candidate.SpreadBps = 99
+	ctx.Candidate.DepthBid = 5
+	ctx.Candidate.DepthAsk = 5
+	ctx.Candidate.BookImbalance = 1.0
+	dec := buildPaperExecutionDecision(ctx)
+	if !dec.Approved {
+		t.Fatalf("expected paper execution decision approved despite thin book, got %+v", dec)
+	}
+	if dec.RejectReason != "" {
+		t.Fatalf("expected no reject reason after paper risk softening, got %+v", dec)
+	}
+}
+
 func TestPaperMaybeEnterAppliesPostPumpFreshShortSizeMultiplier(t *testing.T) {
 	paper := testPaperRuntimePaper()
 	now := time.Now().UTC()
