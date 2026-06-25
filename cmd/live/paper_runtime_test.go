@@ -561,7 +561,7 @@ func TestShortPhase2PostPumpBreakdownBecomesFailedBounceShort(t *testing.T) {
 	}
 }
 
-func TestPaperPreflightRejectsUnresolvedStrategyLabels(t *testing.T) {
+func TestPaperPreflightRejectsUnresolvedStrategyLabelsAsSetupUnresolved(t *testing.T) {
 	for _, strat := range []string{"none", "", "no_strategy", "unknown", "unresolved"} {
 		t.Run(stratLabel(strat), func(t *testing.T) {
 			ctx := testPaperDecisionCtx()
@@ -570,20 +570,14 @@ func TestPaperPreflightRejectsUnresolvedStrategyLabels(t *testing.T) {
 			if verdict.Approved {
 				t.Fatalf("expected unresolved strategy %q to be rejected", strat)
 			}
-			if verdict.Reason != "strategy_unresolved" {
-				t.Fatalf("expected strategy_unresolved reason, got %q", verdict.Reason)
-			}
-			if verdict.Quality.BlockReason != "hard_safety_block" {
-				t.Fatalf("expected hard_safety_block, got %q", verdict.Quality.BlockReason)
-			}
-			if !containsString(verdict.Quality.HardBlockReasons, "strategy_unresolved") {
-				t.Fatalf("expected hard block reasons to include strategy_unresolved, got %+v", verdict.Quality.HardBlockReasons)
+			if verdict.Reason != "setup_unresolved" {
+				t.Fatalf("expected setup_unresolved reason, got %q", verdict.Reason)
 			}
 		})
 	}
 }
 
-func TestPaperPreflightCarriesUnresolvedSourceForFallbackCandidate(t *testing.T) {
+func TestPaperPreflightRejectsFallbackCandidateWithNoCanonicalExecutionID(t *testing.T) {
 	ctx := testPaperDecisionCtx()
 	ctx.Candidate = applySimpleContinuationFallbackAt(candidate{
 		Side:  "BUY",
@@ -597,8 +591,11 @@ func TestPaperPreflightCarriesUnresolvedSourceForFallbackCandidate(t *testing.T)
 		},
 	}, time.Now().UTC())
 	verdict := paperPreflightVerdict(ctx)
-	if !containsString(verdict.Quality.HardBlockReasons, "strategy_unresolved_source:continuation_fallback_unmapped") {
-		t.Fatalf("expected unresolved source tag, got %+v", verdict.Quality.HardBlockReasons)
+	if verdict.Approved {
+		t.Fatalf("expected fallback candidate to be rejected")
+	}
+	if verdict.Reason != "setup_unresolved" {
+		t.Fatalf("expected setup_unresolved, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
 	}
 }
 
@@ -616,7 +613,7 @@ func TestPaperMaybeEnterAppliesPostPumpFreshShortSizeMultiplier(t *testing.T) {
 	now := time.Now().UTC()
 	cand := candidate{
 		Side:        "SELL",
-		Strat:       "vp_trend",
+		Strat:       "pullback_reclaim",
 		DayUTC24h:   100,
 		UTC4hPct:    -8,
 		UTC1hPct:    -4,
@@ -681,13 +678,13 @@ func TestSelectTopRuntimeCandidatePrefersExecutableStrategy(t *testing.T) {
 	executable.Entry.CurrentScore = 95
 	executable.Entry.ScoreSlope = 0.4
 	executable.Entry.Rank = 2
-	executable.Strat = "bos_pb"
+	executable.Strat = "pullback_reclaim"
 
 	got, ok := selectTopRuntimeCandidate([]candidate{unresolved, executable})
 	if !ok {
 		t.Fatalf("expected candidate selection")
 	}
-	if got.Strat != "bos_pb" {
+	if got.Strat != "pullback_reclaim" {
 		t.Fatalf("expected executable candidate to be preferred, got %+v", got)
 	}
 }
@@ -761,7 +758,7 @@ func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 			ScoreSlope:   0.6,
 		},
 		Side:           "BUY",
-		Strat:          "exhaustion_flip_long",
+		Strat:          "exhaustion_reversal",
 		Conf:           0.7,
 		FinalRank:      12,
 		LifecycleStage: "READY",

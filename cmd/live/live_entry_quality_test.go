@@ -116,8 +116,8 @@ func TestLiveEligibilityHardStateBlockStillWins(t *testing.T) {
 
 func TestPlaceEntryRejectsUnresolvedStrategyBeforeSubmit(t *testing.T) {
 	err := (*liveExecManager)(nil).PlaceEntry(candidate{Strat: "none"}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "strategy_unresolved" {
-		t.Fatalf("expected strategy_unresolved, got %v", err)
+	if err == nil || err.Error() != "setup_unresolved" {
+		t.Fatalf("expected setup_unresolved, got %v", err)
 	}
 }
 

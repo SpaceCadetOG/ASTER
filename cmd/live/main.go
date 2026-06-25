@@ -283,7 +283,6 @@ type recentRejectMemory struct {
 type runtimeProfile string
 
 const (
-	runtimeProfilePaperContinuationClean runtimeProfile = "paper_continuation_clean"
 	runtimeProfilePaperContinuationLoose runtimeProfile = "paper_continuation_loose"
 	runtimeProfilePaperReversalTest      runtimeProfile = "paper_reversal_test"
 	runtimeProfilePaperImpulseTest       runtimeProfile = "paper_impulse_test"
@@ -12662,18 +12661,21 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, nil
 	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
-		return nil, fmt.Errorf("%s", reason)
+		fmt.Printf("paper enter advisory: %s, continuing\n", reason)
 	}
 	shortCtx := shortPhase2ContextForCandidate(c)
 	if strings.EqualFold(c.Side, "SELL") {
 		if !shortCtx.DirectShortAllowed {
-			return nil, fmt.Errorf("%s", firstNonEmpty(shortCtx.FilterReason, "short_blocked"))
+			fmt.Printf("paper enter advisory: %s, continuing\n", firstNonEmpty(shortCtx.FilterReason, "short_blocked"))
 		}
 		if shortCtx.SizeMultiplier > 0 && shortCtx.SizeMultiplier < 1.0 {
 			margin *= shortCtx.SizeMultiplier
 		}
 	}
 	raw := strings.ToUpper(aster.RawSymbol(c.Entry.Symbol))
+	if raw == "" {
+		return nil, fmt.Errorf("empty_symbol")
+	}
 	if len(p.positions) >= p.maxOpen {
 		if replacePos, reason := p.slotReplacementCandidate(now, c, meta, current); replacePos != nil {
 			p.exitPortion(now, replacePos, "SLOT_REPLACE", meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))].LastPrice, replacePos.Qty, meta[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))], depth[strings.ToUpper(aster.RawSymbol(replacePos.Symbol))])
@@ -12691,7 +12693,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, fmt.Errorf("symbol_already_open")
 	}
 	if reason := p.symbolLossBlockReason(raw, now, c); reason != "" {
-		return nil, fmt.Errorf("%s", reason)
+		fmt.Printf("paper enter advisory: %s, continuing\n", reason)
 	}
 	if blocked, reason := p.blocksHarvestReentry(raw, now, c); blocked {
 		fmt.Printf("paper enter advisory: %s, continuing\n", strings.TrimSpace(reason))
@@ -12715,7 +12717,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		return nil, fmt.Errorf("no price for %s", raw)
 	}
 	if paperFundingEntryBlocked(now, raw, c.Side, m, p) {
-		return nil, fmt.Errorf("paper funding hazard")
+		fmt.Printf("paper enter advisory: paper funding hazard, continuing\n")
 	}
 	entry := m.LastPrice
 	if strings.EqualFold(c.Side, "BUY") {
@@ -12836,7 +12838,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if envBool("LIVE_REJECT_FRAGILE_STOPS", true) {
 		stopReasonL := strings.ToLower(strings.TrimSpace(stopReason))
 		if strings.Contains(stopReasonL, "rr_low") || strings.Contains(stopReasonL, "max_width") {
-			return nil, fmt.Errorf("fragile stop rejected: %s", firstNonEmpty(stopReason, "unknown"))
+			fmt.Printf("paper enter advisory: fragile stop rejected: %s, continuing\n", firstNonEmpty(stopReason, "unknown"))
 		}
 	}
 	tp1Pct := stopPct * tp1R
@@ -16121,54 +16123,47 @@ func unresolvedStrategySource(c candidate) string {
 	return "blank_strategy"
 }
 
-func resolveExecutableStrategyForProfile(c candidate) string {
-	current := strings.ToLower(strings.TrimSpace(c.Strat))
-	if isExecutableStrategy(current) && !isStarterOnlyStrategyName(current) {
-		return current
-	}
+func canonicalExecutionID(c candidate) string {
+	ensureCandidateSetupFamily(&c, time.Now().UTC())
 	setup := strings.ToLower(strings.TrimSpace(c.SetupFamily))
-	if resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean {
-		if !isExecutableStrategy(current) || isStarterOnlyStrategyName(current) {
-			switch setup {
-			case "micro_pullback_continuation", "breakout_retest", "deep_pullback_reclaim":
-				return setup
-			}
-		}
-		if isStarterOnlyStrategyName(current) {
-			return ""
-		}
+	switch setup {
+	case "reset_impulse_breakout":
+		return "impulse_breakout"
+	case "breakout_retest":
+		return "breakout_retest"
+	case "deep_pullback_reclaim", "micro_pullback_continuation":
+		return "pullback_reclaim"
+	case "reversal_exhaustion":
+		return "exhaustion_reversal"
 	}
-	if isStarterOnlyStrategyName(current) {
-		return current
+	style := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
+	switch style {
+	case "breakout_hold_long", "breakout_hold_short":
+		return "breakout_retest"
+	case "pullback_long", "pullback_short":
+		return "pullback_reclaim"
+	case "momentum_ignite_long", "momentum_ignite_short":
+		return "impulse_breakout"
+	case "reversal_watch_long", "reversal_watch_short", "leader_unwind_short":
+		return "exhaustion_reversal"
+	}
+	strat := strings.ToLower(strings.TrimSpace(c.Strat))
+	switch {
+	case strings.Contains(strat, "reset_impulse"), strings.Contains(strat, "ignite"), strings.Contains(strat, "impulse"):
+		return "impulse_breakout"
+	case strings.Contains(strat, "reversal"), strings.Contains(strat, "flip"):
+		return "exhaustion_reversal"
+	case strings.Contains(strat, "retest"), strings.Contains(strat, "breakout"):
+		return "breakout_retest"
+	case strings.Contains(strat, "pullback"), strings.Contains(strat, "reclaim"), strings.Contains(strat, "continuation"), strings.Contains(strat, "vp_"), strings.Contains(strat, "vwap"), strings.Contains(strat, "bos"), strings.Contains(strat, "ob_"), strings.Contains(strat, "fvg"), strings.Contains(strat, "lsr"), strings.Contains(strat, "od"):
+		return "pullback_reclaim"
 	}
 	return ""
 }
 
 func executionStrategyRejectReason(c candidate) string {
-	if isExecutableStrategy(c.Strat) {
-		return ""
-	}
-	if reason := strings.TrimSpace(runtimeProfileFilteredReason(c)); reason != "" {
-		return reason
-	}
-	return "strategy_unresolved"
-}
-
-func runtimeProfileFilteredReason(c candidate) string {
-	setup := strings.ToLower(strings.TrimSpace(c.SetupFamily))
-	cfg := resolveRuntimeProfileConfig()
-	switch cfg.Name {
-	case runtimeProfilePaperContinuationClean:
-		switch setup {
-		case "reset_impulse_breakout":
-			if !cfg.EffectiveImpulse {
-				return "runtime_profile_blocks_impulse"
-			}
-		case "reversal_exhaustion":
-			if !cfg.EffectiveReversal {
-				return "runtime_profile_blocks_reversal"
-			}
-		}
+	if strings.TrimSpace(canonicalExecutionID(c)) == "" {
+		return "setup_unresolved"
 	}
 	return ""
 }
@@ -16178,13 +16173,16 @@ func finalizeCandidateExecutionLabels(c *candidate, now time.Time) {
 		return
 	}
 	ensureCandidateSetupFamily(c, now)
-	if resolved := strings.TrimSpace(resolveExecutableStrategyForProfile(*c)); resolved != "" {
-		c.Strat = resolved
+	rawStrat := strings.TrimSpace(c.Strat)
+	if rawStrat != "" && c.SetupSource == "" {
+		c.SetupSource = "legacy_strategy:" + rawStrat
+	}
+	if execID := canonicalExecutionID(*c); execID != "" {
+		c.StrategyID = execID
+		c.Strat = execID
 		return
 	}
-	if resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean && isStarterOnlyStrategyName(c.Strat) {
-		c.Strat = ""
-	}
+	c.StrategyID = ""
 }
 
 func continuationDeteriorating(c candidate) bool {
@@ -21551,7 +21549,12 @@ func envCSV(k, def string) []string {
 }
 
 func activeRuntimeProfile() runtimeProfile {
-	return runtimeProfile(strings.ToLower(strings.TrimSpace(envStr("LIVE_RUNTIME_PROFILE", ""))))
+	switch strings.ToLower(strings.TrimSpace(envStr("LIVE_RUNTIME_PROFILE", ""))) {
+	case "paper_continuation_clean":
+		return ""
+	default:
+		return runtimeProfile(strings.ToLower(strings.TrimSpace(envStr("LIVE_RUNTIME_PROFILE", ""))))
+	}
 }
 
 func resolveRuntimeProfileConfig() runtimeProfileConfig {
@@ -21567,19 +21570,7 @@ func resolveRuntimeProfileConfig() runtimeProfileConfig {
 		EffectiveRequireStructure: envBool("LIVE_CONT_REQUIRE_STRUCTURE_CONFIRM", true),
 		EffectiveCandidateMemory:  envBool("LIVE_CANDIDATE_MEMORY_ENABLE", true),
 		EffectiveTriggerMemory:    true,
-		EffectiveSharedManagement: false,
-	}
-	switch cfg.Name {
-	case runtimeProfilePaperContinuationClean:
-		cfg.EffectiveVPEnabled = true
-		cfg.EffectiveInstitutional = true
-		cfg.EffectiveReversal = false
-		cfg.EffectiveImpulse = false
-		cfg.EffectiveReentry = false
-		cfg.EffectiveRequireStructure = true
-		cfg.EffectiveCandidateMemory = true
-		cfg.EffectiveTriggerMemory = true
-		cfg.EffectiveSharedManagement = true
+		EffectiveSharedManagement: envBool("LIVE_SHARED_MANAGEMENT_ENABLE", false),
 	}
 	return cfg
 }
@@ -21597,33 +21588,15 @@ func effectiveMomentumReversalEnabled() bool {
 }
 
 func effectiveResetImpulseEnabled() bool {
-	cfg := resolveRuntimeProfileConfig()
-	switch cfg.Name {
-	case runtimeProfilePaperContinuationClean:
-		return false
-	default:
-		return envBool("LIVE_ENABLE_RESET_IMPULSE", true)
-	}
+	return envBool("LIVE_ENABLE_RESET_IMPULSE", true)
 }
 
 func effectiveImpulsiveLongStarterEnabled() bool {
-	cfg := resolveRuntimeProfileConfig()
-	switch cfg.Name {
-	case runtimeProfilePaperContinuationClean:
-		return false
-	default:
-		return envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true)
-	}
+	return envBool("LIVE_ENABLE_IMPULSIVE_LONG_STARTER", true)
 }
 
 func effectiveImpulsiveShortStarterEnabled() bool {
-	cfg := resolveRuntimeProfileConfig()
-	switch cfg.Name {
-	case runtimeProfilePaperContinuationClean:
-		return false
-	default:
-		return envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true)
-	}
+	return envBool("LIVE_ENABLE_IMPULSIVE_SHORT_STARTER", true)
 }
 
 func effectiveReentryEnabled() bool {
@@ -21647,11 +21620,11 @@ func effectiveSharedManagementEnabled() bool {
 }
 
 func effectiveDirectionalConflictPenaltyOnly() bool {
-	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
+	return envBool("LIVE_DIRECTIONAL_CONFLICT_PENALTY_ONLY", false)
 }
 
 func effectiveDirectionalConflictExtremeOnly() bool {
-	return resolveRuntimeProfileConfig().Name == runtimeProfilePaperContinuationClean
+	return envBool("LIVE_DIRECTIONAL_CONFLICT_EXTREME_ONLY", false)
 }
 
 func effectiveRuntimeProfileSummary() string {
@@ -21678,10 +21651,10 @@ func effectiveRuntimeProfileSummary() string {
 
 func isExecutableStrategy(strat string) bool {
 	switch strings.ToLower(strings.TrimSpace(strat)) {
-	case "", "none", "no_strategy", "unknown", "unresolved":
-		return false
-	default:
+	case "impulse_breakout", "breakout_retest", "pullback_reclaim", "exhaustion_reversal":
 		return true
+	default:
+		return false
 	}
 }
 

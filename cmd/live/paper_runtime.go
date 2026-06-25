@@ -167,66 +167,26 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 }
 
 func paperPreflightVerdict(ctx paperDecisionCtx) strategies.PreflightVerdict {
-	reasons := make([]string, 0, 3)
-	if reason := strings.TrimSpace(executionStrategyRejectReason(ctx.Candidate)); reason != "" {
-		reasons = append(reasons, reason)
-		if reason == "strategy_unresolved" {
-			if source := unresolvedStrategySource(ctx.Candidate); source != "" {
-				reasons = append(reasons, "strategy_unresolved_source:"+source)
-			}
-		}
-	}
-	pre := deepQueuePreflight(ctx.Candidate, queueDeepPreflightCtx{
-		Now:                 ctx.Now,
-		LocalMaintNow:       ctx.LocalMaintNow,
-		PureMode:            true,
-		OBFilterEnable:      ctx.OBFilterEnable,
-		EntryDepth:          ctx.EntryDepth,
-		OBLevels:            ctx.OBLevels,
-		OBImbMin:            ctx.OBImbMin,
-		OBMaxSpreadBps:      ctx.OBMaxSpreadBps,
-		RiskShell:           ctx.RiskShell,
-		RiskFallbackStopPct: ctx.RiskFallbackStopPct,
-		RiskHoldHours:       ctx.RiskHoldHours,
-		LeverageMode:        ctx.LeverageMode,
-		LeverageFixed:       ctx.LeverageFixed,
-		LeverageMin:         ctx.LeverageMin,
-		MaxLeverage:         ctx.MaxLeverage,
-		EffectiveReserve:    ctx.EffectiveReserve,
-		EffectiveMargin:     ctx.EffectiveMargin,
-		AvailableUSDT:       ctx.AvailableUSDT,
-		MetaBySymbol:        ctx.MetaBySymbol,
-		Paper:               ctx.Paper,
-		MaxOpenPos:          ctx.MaxOpenPos,
-		MaxOpenPerSide:      ctx.MaxOpenPerSide,
-	})
-	if reason := strings.TrimSpace(pre.RejectReason); reason != "" {
+	reasons := []string{}
+	if reason := paperBaselineHardRejectReason(ctx); reason != "" {
 		reasons = append(reasons, reason)
 	}
-	if reason := strings.TrimSpace(paperPaperRejectReason(ctx)); reason != "" && !containsString(reasons, reason) {
-		reasons = append(reasons, reason)
-	}
-	if reason := strings.TrimSpace(churnRejectReason(ctx.SessionChurns, ctx.Now, ctx.Candidate)); reason != "" && !containsString(reasons, reason) {
-		reasons = append(reasons, reason)
-	}
-	quality := buildEntryQualityAccumulator(ctx.Candidate, reasons)
+	quality := buildPaperQualityLogOnly(ctx.Candidate)
+	approved := len(reasons) == 0
 	verdict := strategies.PreflightVerdict{
 		Checked:  true,
-		Approved: len(quality.HardBlockReasons) == 0 && strings.TrimSpace(quality.BlockReason) == "",
+		Approved: approved,
 		Source:   "paper",
-		Reasons:  append([]string(nil), quality.HardBlockReasons...),
+		Reasons:  reasons,
 		Quality:  quality,
 	}
-	switch {
-	case len(quality.HardBlockReasons) > 0:
-		verdict.Reason = quality.HardBlockReasons[0]
-	case strings.TrimSpace(quality.BlockReason) != "":
-		verdict.Reason = quality.BlockReason
+	if !approved {
+		verdict.Reason = reasons[0]
 	}
 	return verdict
 }
 
-func paperPaperRejectReason(ctx paperDecisionCtx) string {
+func paperBaselineHardRejectReason(ctx paperDecisionCtx) string {
 	p := ctx.Paper
 	if p == nil || !p.enabled {
 		return "paper_disabled"
@@ -238,7 +198,20 @@ func paperPaperRejectReason(ctx paperDecisionCtx) string {
 	if meta := ctx.MetaBySymbol[raw]; meta.LastPrice <= 0 {
 		return "paper_price_unavailable"
 	}
+	if _, exists := ctx.CurrentEntries[raw]; exists {
+		return "symbol_already_open"
+	}
+	if strings.TrimSpace(canonicalExecutionID(ctx.Candidate)) == "" {
+		return "setup_unresolved"
+	}
 	return ""
+}
+
+func buildPaperQualityLogOnly(c candidate) strategies.EntryQualityAccumulator {
+	acc := buildEntryQualityAccumulator(c, nil)
+	acc.BlockReason = ""
+	acc.HardBlockReasons = nil
+	return acc
 }
 
 type paperEnterFunc func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error)

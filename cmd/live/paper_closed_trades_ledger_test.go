@@ -56,7 +56,7 @@ func TestPaperClosedTradeLedgerPreservesOriginalTargetsAndMetadata(t *testing.T)
 	if rec.Exit.RealizedExitPrice == rec.Plan.OriginalTP1 {
 		t.Fatalf("expected realized exit to remain separate from original tp1, got %.6f", rec.Exit.RealizedExitPrice)
 	}
-	if rec.Identity.Strategy != "vp_trend" || rec.Identity.SetupFamily != "breakout_retest" || rec.Identity.ExecBucket != "continuation" {
+	if rec.Identity.RawStrategy != "vp_trend" || !rec.Identity.StrategyMissing || rec.Identity.SetupFamily != "breakout_retest" || rec.Identity.ExecBucket != "continuation" {
 		t.Fatalf("expected strategy/setup/bucket preserved, got %+v", rec.Identity)
 	}
 
