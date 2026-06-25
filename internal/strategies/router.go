@@ -26,6 +26,7 @@ type RouterConfig struct {
 	MinConfluenceScore       float64
 	UseSessionRegimeRisk     bool
 	RiskShell                *risk.RiskShell
+	RiskShellEnabled         bool
 	StrategyWeight           float64
 	FlowWeight               float64
 	StructureWeight          float64
@@ -81,7 +82,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.RiskPolicy.StopMode == "" {
 		cfg.RiskPolicy = DefaultRiskPolicy()
 	}
-	if cfg.RiskShell == nil {
+	if !cfg.RiskShellEnabled {
+		cfg.RiskShell = nil
+	} else if cfg.RiskShell == nil {
 		defaultShellOnce.Do(func() {
 			defaultShell = risk.NewRiskShell(risk.DefaultConfig())
 		})
@@ -144,7 +147,7 @@ func (r *Router) Eval(ctx Context) []Candidate {
 			continue
 		}
 		sig = ApplyRiskPolicy(sig, ctx.Snapshot, r.cfg.RiskPolicy)
-		if r.cfg.RiskShell != nil {
+		if r.cfg.RiskShellEnabled && r.cfg.RiskShell != nil {
 			side := "BUY"
 			if sig.Side == features.SideShort {
 				side = "SELL"

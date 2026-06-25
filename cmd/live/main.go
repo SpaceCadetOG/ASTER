@@ -17834,6 +17834,7 @@ func enrichCandidate(cache *featureRuntimeCache, cand candidate, stopMode, targe
 		UseVPReversal:            envBool("LIVE_USE_VP_REVERSAL", true),
 		EnableInstitutionalPA:    effectiveInstitutionalPAEnabled(),
 		UseSessionRegimeRisk:     true,
+		RiskShellEnabled:         parseRuntimeOperatingMode(envStr("LIVE_RUNTIME_MODE", "")) != runtimeModePaper,
 		MinConfluenceScore:       envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48),
 		StrategyWeight:           envFloat("LIVE_CONFLUENCE_STRATEGY_WEIGHT", 0.50),
 		FlowWeight:               envFloat("LIVE_CONFLUENCE_FLOW_WEIGHT", 0.30),
