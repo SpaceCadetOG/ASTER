@@ -169,7 +169,15 @@ func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
 
 func softenPaperRiskDecision(dec risk.Decision) risk.Decision {
 	switch strings.TrimSpace(dec.RejectReason) {
-	case "spread_too_wide", "depth_too_thin", "depth_imbalance_thin":
+	case "spread_too_wide",
+		"depth_too_thin",
+		"depth_imbalance_thin",
+		"venue_unhealthy",
+		"slippage_anomaly",
+		"liq_buffer_violation",
+		"funding_too_expensive",
+		"hourly_entry_cap",
+		"symbol_lockout":
 		dec.Approved = true
 		dec.RejectReason = ""
 	}
@@ -469,27 +477,27 @@ func applyPaperDecisionStatus(st *liveStatus, decision strategies.ExecutionDecis
 	case dispatch.Entered:
 		st.ModeState = "paper_entered"
 		st.TopDecision = "paper_entered"
-		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry")
+		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry") + " | stage=opened"
 		st.TopRejectReason = ""
 	case dispatch.Attempted && dispatch.RejectReason != "":
 		st.ModeState = "paper_candidate_rejected"
 		st.TopDecision = "paper_candidate_rejected"
-		st.TopDecisionWhy = dispatch.RejectReason
+		st.TopDecisionWhy = "stage=maybe_enter_failed reason=" + dispatch.RejectReason
 		st.TopRejectReason = dispatch.RejectReason
 	case !decision.Approved:
 		st.ModeState = "paper_candidate_rejected"
 		st.TopDecision = "paper_candidate_rejected"
-		st.TopDecisionWhy = firstNonEmpty(decision.RejectReason, "not_approved")
+		st.TopDecisionWhy = "stage=decision_rejected reason=" + firstNonEmpty(decision.RejectReason, "not_approved")
 		st.TopRejectReason = firstNonEmpty(decision.RejectReason, "not_approved")
 	case dispatch.Attempted:
 		st.ModeState = "paper_entry_attempted"
 		st.TopDecision = "paper_entry_attempted"
-		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry")
+		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "paper_entry") + " | stage=maybe_enter_called"
 		st.TopRejectReason = ""
 	default:
 		st.ModeState = "paper_enabled"
 		st.TopDecision = "paper_enabled"
-		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "ready")
+		st.TopDecisionWhy = firstNonEmpty(decision.Signal.Name, "ready") + " | stage=decision_approved_dispatch_pending"
 		st.TopRejectReason = ""
 	}
 }
@@ -499,7 +507,7 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	switch {
 	case !decision.Approved:
 		quality := decision.Quality
-		fmt.Printf("live: paper reject %s side=%s strat=%s reason=%s unresolved_source=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
+		fmt.Printf("live: paper reject %s side=%s strat=%s stage=decision_rejected reason=%s unresolved_source=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
 			sym,
 			c.Side,
 			c.Strat,
@@ -514,13 +522,13 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 			firstNonEmpty(quality.BlockReason, decision.RejectReason, "not_approved"),
 		)
 	case dispatch.Attempted && dispatch.Entered:
-		fmt.Printf("live: paper entered %s side=%s strat=%s conf=%.2f\n",
+		fmt.Printf("live: paper entered %s side=%s strat=%s stage=opened conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
 	case dispatch.Attempted && dispatch.RejectReason != "":
-		fmt.Printf("live: paper attempt_failed %s side=%s strat=%s reason=%s\n",
+		fmt.Printf("live: paper attempt_failed %s side=%s strat=%s stage=maybe_enter_failed reason=%s\n",
 			sym, c.Side, c.Strat, dispatch.RejectReason)
 	default:
-		fmt.Printf("live: paper entry_attempted %s side=%s strat=%s conf=%.2f\n",
+		fmt.Printf("live: paper entry_attempted %s side=%s strat=%s stage=maybe_enter_called conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
 	}
 }

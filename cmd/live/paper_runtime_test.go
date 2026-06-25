@@ -625,23 +625,60 @@ func TestPaperPreflightBlocksActualPaperOpenSymbol(t *testing.T) {
 
 func TestPaperRiskDecisionSoftensSpreadAndDepthRejects(t *testing.T) {
 	tests := []struct {
-		name       string
-		spreadBps  float64
-		depthBid   float64
-		depthAsk   float64
-		bookImb    float64
+		name      string
+		configure func(*paperDecisionCtx)
 	}{
-		{name: "spread", spreadBps: 99, depthBid: 100000, depthAsk: 100000, bookImb: 2},
-		{name: "depth", spreadBps: 1, depthBid: 10, depthAsk: 10, bookImb: 2},
-		{name: "imbalance", spreadBps: 1, depthBid: 100000, depthAsk: 100000, bookImb: 1.0},
+		{name: "spread", configure: func(ctx *paperDecisionCtx) {
+			ctx.Candidate.SpreadBps = 99
+			ctx.Candidate.DepthBid = 100000
+			ctx.Candidate.DepthAsk = 100000
+			ctx.Candidate.BookImbalance = 2
+		}},
+		{name: "depth", configure: func(ctx *paperDecisionCtx) {
+			ctx.Candidate.SpreadBps = 1
+			ctx.Candidate.DepthBid = 10
+			ctx.Candidate.DepthAsk = 10
+			ctx.Candidate.BookImbalance = 2
+		}},
+		{name: "imbalance", configure: func(ctx *paperDecisionCtx) {
+			ctx.Candidate.SpreadBps = 1
+			ctx.Candidate.DepthBid = 100000
+			ctx.Candidate.DepthAsk = 100000
+			ctx.Candidate.BookImbalance = 1.0
+		}},
+		{name: "venue unhealthy", configure: func(ctx *paperDecisionCtx) {
+			ctx.MetaBySymbol["BTCUSDT"] = symbolMeta{}
+		}},
+		{name: "liq buffer", configure: func(ctx *paperDecisionCtx) {
+			ctx.Candidate.SpreadBps = 1
+			ctx.Candidate.DepthBid = 100000
+			ctx.Candidate.DepthAsk = 100000
+			ctx.Candidate.BookImbalance = 2
+			ctx.RiskShell = risk.Config{
+				Enabled:          true,
+				MinLiqBufferMult: 999,
+				LiqLeverage:      1,
+			}
+		}},
+		{name: "funding expensive", configure: func(ctx *paperDecisionCtx) {
+			ctx.Candidate.SpreadBps = 1
+			ctx.Candidate.DepthBid = 100000
+			ctx.Candidate.DepthAsk = 100000
+			ctx.Candidate.BookImbalance = 2
+			ctx.MetaBySymbol["BTCUSDT"] = symbolMeta{LastPrice: 100, FundingRate: 1}
+			ctx.RiskShell = risk.Config{
+				Enabled:          true,
+				MaxFundingCostR:  0.01,
+				FundingHoldHours: 10,
+			}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := testPaperDecisionCtx()
-			ctx.Candidate.SpreadBps = tt.spreadBps
-			ctx.Candidate.DepthBid = tt.depthBid
-			ctx.Candidate.DepthAsk = tt.depthAsk
-			ctx.Candidate.BookImbalance = tt.bookImb
+			if tt.configure != nil {
+				tt.configure(&ctx)
+			}
 			dec := paperRiskDecision(ctx)
 			if !dec.Approved {
 				t.Fatalf("expected paper risk decision approved, got %+v", dec)
@@ -650,6 +687,22 @@ func TestPaperRiskDecisionSoftensSpreadAndDepthRejects(t *testing.T) {
 				t.Fatalf("expected softened reject reason cleared, got %+v", dec)
 			}
 		})
+	}
+}
+
+func TestPaperRiskDecisionStillRejectsInvalidRiskGeometry(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.MetaBySymbol["BTCUSDT"] = symbolMeta{LastPrice: 100}
+	ctx.Candidate.Sig.Entry = 0
+	ctx.Candidate.Sig.Stop = 0
+	ctx.RiskFallbackStopPct = 0
+	ctx.RiskShell = risk.Config{Enabled: true}
+	dec := paperRiskDecision(ctx)
+	if dec.Approved {
+		t.Fatalf("expected invalid risk geometry to remain rejected, got %+v", dec)
+	}
+	if dec.RejectReason != "invalid_risk_input" && dec.RejectReason != "invalid_stop_distance" {
+		t.Fatalf("expected invalid risk reject, got %+v", dec)
 	}
 }
 
@@ -765,6 +818,7 @@ func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 		paperLogDecision(cand, decision, paperDispatchResult{})
 	})
 	for _, want := range []string{
+		"stage=decision_rejected",
 		"unresolved_source=n/a",
 		"quality_flags=avoid_chase|weak_slope",
 		"penalty_total=0.16",
@@ -795,6 +849,15 @@ func TestPaperLogDecisionIncludesUnresolvedSourceForStrategyRejects(t *testing.T
 	})
 	if !strings.Contains(output, "unresolved_source=feature_bars_insufficient") {
 		t.Fatalf("expected unresolved source in log output, got %q", output)
+	}
+}
+
+func TestApplyPaperDecisionStatusIncludesStageReason(t *testing.T) {
+	decision, _ := testPaperDecision()
+	st := liveStatus{}
+	applyPaperDecisionStatus(&st, decision, paperDispatchResult{})
+	if !strings.Contains(st.TopDecisionWhy, "stage=") {
+		t.Fatalf("expected stage hint in status, got %+v", st)
 	}
 }
 
