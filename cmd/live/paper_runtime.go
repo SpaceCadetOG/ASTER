@@ -487,8 +487,9 @@ func applyPaperDecisionStatus(st *liveStatus, decision strategies.ExecutionDecis
 	case !decision.Approved:
 		st.ModeState = "paper_candidate_rejected"
 		st.TopDecision = "paper_candidate_rejected"
-		st.TopDecisionWhy = "stage=decision_rejected reason=" + firstNonEmpty(decision.RejectReason, "not_approved")
-		st.TopRejectReason = firstNonEmpty(decision.RejectReason, "not_approved")
+		reason := paperDecisionRejectReason(decision)
+		st.TopDecisionWhy = "stage=decision_rejected reason=" + reason
+		st.TopRejectReason = reason
 	case dispatch.Attempted:
 		st.ModeState = "paper_entry_attempted"
 		st.TopDecision = "paper_entry_attempted"
@@ -507,11 +508,12 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	switch {
 	case !decision.Approved:
 		quality := decision.Quality
+		reason := paperDecisionRejectReason(decision)
 		fmt.Printf("live: paper reject %s side=%s strat=%s stage=decision_rejected reason=%s unresolved_source=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
 			sym,
 			c.Side,
 			c.Strat,
-			firstNonEmpty(decision.RejectReason, "not_approved"),
+			reason,
 			firstNonEmpty(unresolvedStrategySource(c), "n/a"),
 			strings.Join(quality.QualityFlags, "|"),
 			quality.PenaltyTotal,
@@ -519,7 +521,7 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 			quality.ScoreAfterPenalties,
 			quality.MinScore,
 			strings.Join(quality.HardBlockReasons, "|"),
-			firstNonEmpty(quality.BlockReason, decision.RejectReason, "not_approved"),
+			firstNonEmpty(quality.BlockReason, reason, "not_approved"),
 		)
 	case dispatch.Attempted && dispatch.Entered:
 		fmt.Printf("live: paper entered %s side=%s strat=%s stage=opened conf=%.2f\n",
@@ -531,6 +533,28 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 		fmt.Printf("live: paper entry_attempted %s side=%s strat=%s stage=maybe_enter_called conf=%.2f\n",
 			sym, c.Side, c.Strat, c.Conf)
 	}
+}
+
+func paperDecisionRejectReason(decision strategies.ExecutionDecision) string {
+	if !decision.Signal.Active {
+		return "signal_inactive"
+	}
+	if rr := strings.TrimSpace(decision.Signal.RejectReason); rr != "" {
+		if strings.EqualFold(rr, "below_min_confluence") {
+			return "confluence_reject:" + rr
+		}
+		return "signal_reject:" + rr
+	}
+	if !decision.RiskDecision.Approved {
+		return "risk_reject:" + firstNonEmpty(strings.TrimSpace(decision.RiskDecision.RejectReason), "unknown")
+	}
+	if decision.Preflight.Checked && !decision.Preflight.Approved {
+		return "preflight_reject:" + firstNonEmpty(strings.TrimSpace(decision.Preflight.Reason), "unknown")
+	}
+	if rr := strings.TrimSpace(decision.RejectReason); rr != "" {
+		return "decision_reject:" + rr
+	}
+	return "not_approved"
 }
 
 func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.EntryQualityAccumulator {

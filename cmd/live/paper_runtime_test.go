@@ -806,6 +806,7 @@ func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.RejectReason = "quality_score_too_low"
+	decision.Signal.RejectReason = "below_min_confluence"
 	decision.Quality = strategies.EntryQualityAccumulator{
 		QualityFlags:        []string{"avoid_chase", "weak_slope"},
 		PenaltyTotal:        0.16,
@@ -819,6 +820,7 @@ func TestPaperLogDecisionIncludesQualityTelemetryForRejects(t *testing.T) {
 	})
 	for _, want := range []string{
 		"stage=decision_rejected",
+		"reason=confluence_reject:below_min_confluence",
 		"unresolved_source=n/a",
 		"quality_flags=avoid_chase|weak_slope",
 		"penalty_total=0.16",
@@ -858,6 +860,51 @@ func TestApplyPaperDecisionStatusIncludesStageReason(t *testing.T) {
 	applyPaperDecisionStatus(&st, decision, paperDispatchResult{})
 	if !strings.Contains(st.TopDecisionWhy, "stage=") {
 		t.Fatalf("expected stage hint in status, got %+v", st)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesSignalInactive(t *testing.T) {
+	decision, _ := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.Active = false
+	if got := paperDecisionRejectReason(decision); got != "signal_inactive" {
+		t.Fatalf("expected signal_inactive, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesSignalReject(t *testing.T) {
+	decision, _ := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.RejectReason = "setup_unresolved"
+	if got := paperDecisionRejectReason(decision); got != "signal_reject:setup_unresolved" {
+		t.Fatalf("expected signal reject classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesConfluenceReject(t *testing.T) {
+	decision, _ := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.RejectReason = "below_min_confluence"
+	if got := paperDecisionRejectReason(decision); got != "confluence_reject:below_min_confluence" {
+		t.Fatalf("expected confluence reject classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesRiskReject(t *testing.T) {
+	decision, _ := testPaperDecision()
+	decision.Approved = false
+	decision.RiskDecision = risk.Decision{Approved: false, RejectReason: "liq_buffer_violation"}
+	if got := paperDecisionRejectReason(decision); got != "risk_reject:liq_buffer_violation" {
+		t.Fatalf("expected risk reject classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesPreflightReject(t *testing.T) {
+	decision, _ := testPaperDecision()
+	decision.Approved = false
+	decision.Preflight = strategies.PreflightVerdict{Checked: true, Approved: false, Reason: "symbol_already_open"}
+	if got := paperDecisionRejectReason(decision); got != "preflight_reject:symbol_already_open" {
+		t.Fatalf("expected preflight reject classification, got %q", got)
 	}
 }
 
