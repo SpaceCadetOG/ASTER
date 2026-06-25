@@ -208,10 +208,22 @@ func paperBaselineHardRejectReason(ctx paperDecisionCtx) string {
 	if meta := ctx.MetaBySymbol[raw]; meta.LastPrice <= 0 {
 		return "paper_price_unavailable"
 	}
-	if _, exists := ctx.CurrentEntries[raw]; exists {
+	if paperHasOpenSymbol(p, raw) {
 		return "symbol_already_open"
 	}
 	return ""
+}
+
+func paperHasOpenSymbol(p *paperTrader, raw string) bool {
+	if p == nil {
+		return false
+	}
+	raw = strings.ToUpper(strings.TrimSpace(raw))
+	if raw == "" {
+		return false
+	}
+	_, exists := p.positions[raw]
+	return exists
 }
 
 func buildPaperQualityLogOnly(c candidate) strategies.EntryQualityAccumulator {

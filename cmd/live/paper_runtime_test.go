@@ -602,6 +602,27 @@ func TestPaperPreflightAllowsExecutableStrategy(t *testing.T) {
 	}
 }
 
+func TestPaperPreflightIgnoresScannerCurrentEntries(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.CurrentEntries["BTCUSDT"] = inplay.Entry{Symbol: "BTCUSDT"}
+	verdict := paperPreflightVerdict(ctx)
+	if !verdict.Approved {
+		t.Fatalf("expected scanner current entries not to block paper preflight, got reason=%q quality=%+v", verdict.Reason, verdict.Quality)
+	}
+}
+
+func TestPaperPreflightBlocksActualPaperOpenSymbol(t *testing.T) {
+	ctx := testPaperDecisionCtx()
+	ctx.Paper.positions["BTCUSDT"] = &paperPosition{Symbol: "BTCUSDT"}
+	verdict := paperPreflightVerdict(ctx)
+	if verdict.Approved {
+		t.Fatalf("expected actual paper position to block preflight")
+	}
+	if verdict.Reason != "symbol_already_open" {
+		t.Fatalf("expected symbol_already_open, got %+v", verdict)
+	}
+}
+
 func TestPaperRiskDecisionSoftensSpreadAndDepthRejects(t *testing.T) {
 	tests := []struct {
 		name       string
