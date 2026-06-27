@@ -864,47 +864,109 @@ func TestApplyPaperDecisionStatusIncludesStageReason(t *testing.T) {
 }
 
 func TestPaperDecisionRejectReasonClassifiesSignalInactive(t *testing.T) {
-	decision, _ := testPaperDecision()
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.Signal.Active = false
-	if got := paperDecisionRejectReason(decision); got != "signal_inactive" {
-		t.Fatalf("expected signal_inactive, got %q", got)
+	if got := paperDecisionRejectReason(cand, decision); got != "inactive_no_signal" {
+		t.Fatalf("expected inactive_no_signal, got %q", got)
 	}
 }
 
 func TestPaperDecisionRejectReasonClassifiesSignalReject(t *testing.T) {
-	decision, _ := testPaperDecision()
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.Signal.RejectReason = "setup_unresolved"
-	if got := paperDecisionRejectReason(decision); got != "signal_reject:setup_unresolved" {
+	if got := paperDecisionRejectReason(cand, decision); got != "signal_reject:setup_unresolved" {
 		t.Fatalf("expected signal reject classification, got %q", got)
 	}
 }
 
 func TestPaperDecisionRejectReasonClassifiesConfluenceReject(t *testing.T) {
-	decision, _ := testPaperDecision()
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.Signal.RejectReason = "below_min_confluence"
-	if got := paperDecisionRejectReason(decision); got != "confluence_reject:below_min_confluence" {
+	if got := paperDecisionRejectReason(cand, decision); got != "confluence_reject:below_min_confluence" {
 		t.Fatalf("expected confluence reject classification, got %q", got)
 	}
 }
 
 func TestPaperDecisionRejectReasonClassifiesRiskReject(t *testing.T) {
-	decision, _ := testPaperDecision()
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.RiskDecision = risk.Decision{Approved: false, RejectReason: "liq_buffer_violation"}
-	if got := paperDecisionRejectReason(decision); got != "risk_reject:liq_buffer_violation" {
+	if got := paperDecisionRejectReason(cand, decision); got != "risk_reject:liq_buffer_violation" {
 		t.Fatalf("expected risk reject classification, got %q", got)
 	}
 }
 
 func TestPaperDecisionRejectReasonClassifiesPreflightReject(t *testing.T) {
-	decision, _ := testPaperDecision()
+	decision, cand := testPaperDecision()
 	decision.Approved = false
 	decision.Preflight = strategies.PreflightVerdict{Checked: true, Approved: false, Reason: "symbol_already_open"}
-	if got := paperDecisionRejectReason(decision); got != "preflight_reject:symbol_already_open" {
+	if got := paperDecisionRejectReason(cand, decision); got != "preflight_reject:symbol_already_open" {
 		t.Fatalf("expected preflight reject classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesInactiveFeatureGap(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.Active = false
+	cand.RejectReason = withUnresolvedSource("", "feature_bars_insufficient")
+	if got := paperDecisionRejectReason(cand, decision); got != "inactive_features_unavailable:feature_bars_insufficient" {
+		t.Fatalf("expected feature-gap inactive classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesInactiveRouterReject(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.Active = false
+	cand.RejectReason = withUnresolvedSource("late_extension_no_reset", "router_rejected")
+	if got := paperDecisionRejectReason(cand, decision); got != "inactive_router_rejected" {
+		t.Fatalf("expected router inactive classification, got %q", got)
+	}
+}
+
+func TestPaperDecisionRejectReasonClassifiesInactiveFallbackExecutionGap(t *testing.T) {
+	decision, cand := testPaperDecision()
+	decision.Approved = false
+	decision.Signal.Active = false
+	cand.Strat = ""
+	cand.SetupFamily = "micro_pullback_continuation"
+	cand.Entry.EntryStyle = "pullback_long"
+	cand.RejectReason = withUnresolvedSource("", "continuation_fallback_unmapped")
+	if got := paperDecisionRejectReason(cand, decision); got != "inactive_unresolved_execution:continuation_fallback_unmapped" {
+		t.Fatalf("expected unresolved execution classification, got %q", got)
+	}
+}
+
+func TestFallbackExecutableCandidateBuildsApprovedPaperDecision(t *testing.T) {
+	now := time.Now().UTC()
+	cand := applySimpleContinuationFallbackAt(candidate{
+		Side:        "BUY",
+		LastClose:   101,
+		SessionVWAP: 100,
+		ATR:         0.8,
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			EntryStyle:   "pullback_long",
+			CurrentGrade: "A",
+			CurrentScore: 91,
+			ScoreSlope:   0.12,
+			State:        inplay.StateInPlay,
+		},
+	}, now)
+	if !cand.Sig.Active {
+		t.Fatalf("expected fallback candidate signal active, got %+v", cand.Sig)
+	}
+
+	ctx := testPaperDecisionCtx()
+	ctx.Now = now
+	ctx.Candidate = cand
+	decision := buildPaperExecutionDecision(ctx)
+	if !decision.Approved {
+		t.Fatalf("expected fallback executable candidate to build approved decision, got %+v", decision)
 	}
 }
 

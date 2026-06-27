@@ -38,6 +38,12 @@ func TestSetupFamilyOwnsExecutionWithoutProfileGuardrails(t *testing.T) {
 	if got.Strat != "impulse_breakout" {
 		t.Fatalf("expected canonical execution ID, got %q", got.Strat)
 	}
+	if !got.Sig.Active {
+		t.Fatalf("expected fallback candidate to synthesize an active signal")
+	}
+	if got.Sig.Entry <= 0 || got.Sig.Stop <= 0 || got.Sig.TP1 <= 0 {
+		t.Fatalf("expected fallback candidate to synthesize signal geometry, got %+v", got.Sig)
+	}
 	if reason := executionStrategyRejectReason(got); reason != "" {
 		t.Fatalf("expected no execution reject reason, got %q", reason)
 	}

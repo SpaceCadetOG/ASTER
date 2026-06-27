@@ -70,6 +70,9 @@ func sortCandidatesForRuntime(cands []candidate) {
 		if leftExec != rightExec {
 			return leftExec
 		}
+		if cands[i].FinalRank != cands[j].FinalRank {
+			return cands[i].FinalRank > cands[j].FinalRank
+		}
 		if cands[i].Entry.CurrentScore == cands[j].Entry.CurrentScore {
 			if cands[i].Entry.ScoreSlope == cands[j].Entry.ScoreSlope {
 				return cands[i].Entry.Rank < cands[j].Entry.Rank
@@ -487,7 +490,7 @@ func applyPaperDecisionStatus(st *liveStatus, decision strategies.ExecutionDecis
 	case !decision.Approved:
 		st.ModeState = "paper_candidate_rejected"
 		st.TopDecision = "paper_candidate_rejected"
-		reason := paperDecisionRejectReason(decision)
+		reason := paperDecisionRejectReason(candidate{}, decision)
 		st.TopDecisionWhy = "stage=decision_rejected reason=" + reason
 		st.TopRejectReason = reason
 	case dispatch.Attempted:
@@ -508,7 +511,7 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	switch {
 	case !decision.Approved:
 		quality := decision.Quality
-		reason := paperDecisionRejectReason(decision)
+		reason := paperDecisionRejectReason(c, decision)
 		fmt.Printf("live: paper reject %s side=%s strat=%s stage=decision_rejected reason=%s unresolved_source=%s quality_flags=%s penalty_total=%.2f score_before=%.2f score_after_penalties=%.2f min_score=%.2f hard_block_reasons=%s block_reason=%s\n",
 			sym,
 			c.Side,
@@ -535,9 +538,9 @@ func paperLogDecision(c candidate, decision strategies.ExecutionDecision, dispat
 	}
 }
 
-func paperDecisionRejectReason(decision strategies.ExecutionDecision) string {
+func paperDecisionRejectReason(c candidate, decision strategies.ExecutionDecision) string {
 	if !decision.Signal.Active {
-		return "signal_inactive"
+		return paperInactiveSignalReason(c, decision)
 	}
 	if rr := strings.TrimSpace(decision.Signal.RejectReason); rr != "" {
 		if strings.EqualFold(rr, "below_min_confluence") {
@@ -555,6 +558,39 @@ func paperDecisionRejectReason(decision strategies.ExecutionDecision) string {
 		return "decision_reject:" + rr
 	}
 	return "not_approved"
+}
+
+func paperInactiveSignalReason(c candidate, decision strategies.ExecutionDecision) string {
+	if rr := strings.TrimSpace(decision.Signal.RejectReason); rr != "" {
+		return "inactive_signal_reject:" + rr
+	}
+	source := unresolvedSourceFromReason(c.RejectReason)
+	switch source {
+	case "feature_cache_nil", "feature_bars_insufficient":
+		return "inactive_features_unavailable:" + source
+	case "runtime_signal_rejected", "mom_reversal_runtime_rejected":
+		return "inactive_runtime_not_ready:" + source
+	case "router_rejected":
+		return "inactive_router_rejected"
+	case "inertia_kill":
+		return "inactive_state_inertia_kill"
+	case "setup_family_unmapped", "continuation_fallback_unmapped", "blank_strategy",
+		"explicit_none", "explicit_no_strategy", "explicit_unknown", "explicit_unresolved":
+		return "inactive_unresolved_execution:" + source
+	}
+	if !isExecutableStrategy(c.Strat) {
+		if source = unresolvedStrategySource(c); source != "" {
+			return "inactive_unresolved_execution:" + source
+		}
+		return "inactive_unresolved_execution"
+	}
+	if strings.TrimSpace(c.RejectReason) != "" {
+		return "inactive_candidate_reject:" + strings.TrimSpace(strings.Split(c.RejectReason, "|")[0])
+	}
+	if rr := strings.TrimSpace(decision.RejectReason); rr != "" {
+		return "inactive_decision_reject:" + rr
+	}
+	return "inactive_no_signal"
 }
 
 func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.EntryQualityAccumulator {

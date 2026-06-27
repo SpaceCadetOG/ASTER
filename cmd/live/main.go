@@ -87,6 +87,15 @@ type candidate struct {
 	SessionLabel           string
 	EntryTiming            string
 	CandidateAgeSeconds    float64
+	MLModelVersion         string
+	MLEnabled              bool
+	MLTakeTradeProbability float64
+	MLExpectedR            float64
+	MLExpectedMaxR         float64
+	MLStopReclaimProb      float64
+	MLReentryProb          float64
+	MLSuggestedStopProfile string
+	MLSuggestedExitProfile string
 	DistanceToVWAPPct      float64
 	QualityReasons         []string
 	LifecycleStage         string
@@ -2201,6 +2210,12 @@ func main() {
 		envBool("LIVE_EVENTS_STDOUT", false),
 		dryRun,
 	)
+	mlCfg := loadMLRuntimeConfig()
+	mlScorer, err := loadMLRuntimeScorer(mlCfg)
+	if err != nil {
+		fmt.Printf("live: ml scorer disabled load_error=%v\n", err)
+		mlScorer = nil
+	}
 	if pureMode {
 		discoveryCfg.Enabled = false
 	}
@@ -2839,6 +2854,7 @@ func main() {
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(featureCache, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore, flowMetricsBySymbol)
 		cands = applyCandidateLifecycle(cands, now, candidateMem, lifecycleCfg)
+		cands = applyMLRuntimeScoring(cands, mlCfg, mlScorer, eventLog, now)
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
@@ -18124,12 +18140,53 @@ func applySimpleContinuationFallback(cand candidate) candidate {
 func applySimpleContinuationFallbackAt(cand candidate, now time.Time) candidate {
 	annotateCandidateEntryContext(&cand, now)
 	finalizeCandidateExecutionLabels(&cand, now)
+	if isExecutableStrategy(cand.Strat) {
+		cand = synthesizeFallbackExecutionSignal(cand)
+		return cand
+	}
 	if !isExecutableStrategy(cand.Strat) {
 		source := "continuation_fallback_unmapped"
 		if strings.TrimSpace(cand.SetupFamily) != "" {
 			source = "setup_family_unmapped"
 		}
 		cand.RejectReason = withUnresolvedSource(cand.RejectReason, source)
+	}
+	return cand
+}
+
+func synthesizeFallbackExecutionSignal(cand candidate) candidate {
+	name := strings.TrimSpace(cand.Strat)
+	if !isExecutableStrategy(name) {
+		return cand
+	}
+	conf := firstPositive(
+		cand.Conf,
+		cand.Sig.Confidence,
+		clamp(cand.CombinedScore, 0, 1),
+		clamp(cand.TradeQuality, 0, 1),
+		clamp(cand.Entry.CurrentScore/100.0, 0, 1),
+	)
+	if conf <= 0 {
+		conf = estimateConfluenceFromReason(name)
+	}
+	cand.Conf = clamp(conf, 0, 1)
+	if cand.Sig.ConfluenceScore.TotalScore <= 0 {
+		cand.Sig.ConfluenceScore.TotalScore = firstPositive(
+			clamp(cand.CombinedScore, 0, 1),
+			clamp(cand.TradeQuality, 0, 1),
+			cand.Conf,
+			estimateConfluenceFromReason(name),
+		)
+		cand.Sig.ConfluenceScore.Approved = cand.Sig.ConfluenceScore.TotalScore >= envFloat("LIVE_MIN_CONFLUENCE_SCORE", 0.48)
+	}
+	cand.Sig.Confidence = cand.Conf
+	cand.Sig = applySignalRiskGeometry(cand, name)
+	cand.Sig.SignalSource = append(cand.Sig.SignalSource, "fallback_execution_signal")
+	cand.Sig.Reasons = append(cand.Sig.Reasons, "fallback_setup_family:"+firstNonEmpty(strings.TrimSpace(cand.SetupFamily), "unknown"))
+	if unresolvedSourceFromReason(cand.RejectReason) == "continuation_fallback_unmapped" ||
+		unresolvedSourceFromReason(cand.RejectReason) == "setup_family_unmapped" ||
+		unresolvedSourceFromReason(cand.RejectReason) == "blank_strategy" {
+		cand.RejectReason = ""
 	}
 	return cand
 }
