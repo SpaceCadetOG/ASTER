@@ -2210,12 +2210,6 @@ func main() {
 		envBool("LIVE_EVENTS_STDOUT", false),
 		dryRun,
 	)
-	mlCfg := loadMLRuntimeConfig()
-	mlScorer, err := loadMLRuntimeScorer(mlCfg)
-	if err != nil {
-		fmt.Printf("live: ml scorer disabled load_error=%v\n", err)
-		mlScorer = nil
-	}
 	if pureMode {
 		discoveryCfg.Enabled = false
 	}
@@ -2854,7 +2848,6 @@ func main() {
 		cands := chooseCandidates(longInPlay, shortInPlay, minGrade, enableMomentumReversal, reversalMinGrade, reversalSlopeMin, bNearAOnly, bNearAScoreMin, reversalTopLongN, candCfg)
 		cands = rankWithStrategy(featureCache, cands, strategyTopN, stopMode, targetMode, vpMinTargetPct, inertiaEnable, inertiaScoreMin, inertiaSlowMin, inertiaFastMax, inertiaSlowN, inertiaFastN, reversalVolSpike, rankSortCfg, reliabilityStore, flowMetricsBySymbol)
 		cands = applyCandidateLifecycle(cands, now, candidateMem, lifecycleCfg)
-		cands = applyMLRuntimeScoring(cands, mlCfg, mlScorer, eventLog, now)
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
