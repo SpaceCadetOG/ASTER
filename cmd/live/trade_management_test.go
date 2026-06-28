@@ -10,6 +10,7 @@ import (
 
 	"go-machine/adapters/aster"
 	"go-machine/internal/inplay"
+	"go-machine/internal/strategies"
 )
 
 func TestNoProofTimeoutDoesNotExitTradeThatReachedProof(t *testing.T) {
@@ -232,11 +233,11 @@ func TestPaperLossLocksApplyAfterRepeatedDamage(t *testing.T) {
 	}
 
 	paper.registerPaperLoss(now.Add(45*time.Minute), pos)
-	if reason := paper.symbolLossBlockReason("BTCUSDT", now.Add(46*time.Minute), candidate{Strat: "continuation_fast"}); reason != "symbol_loss_cooldown" {
-		t.Fatalf("expected symbol_loss_cooldown, got %q", reason)
+	if reason := paper.symbolLossBlockReason("BTCUSDT", now.Add(46*time.Minute), candidate{Strat: "continuation_fast"}); reason != "" {
+		t.Fatalf("expected advisory-only loss tracking after repeated losses, got %q", reason)
 	}
-	if reason := paper.symbolLossBlockReason("BTCUSDT", now.Add(170*time.Minute), candidate{Strat: "continuation_fast"}); reason != "symbol_setup_loss_lock" {
-		t.Fatalf("expected symbol_setup_loss_lock after symbol cooldown expires, got %q", reason)
+	if reason := paper.symbolLossBlockReason("BTCUSDT", now.Add(170*time.Minute), candidate{Strat: "continuation_fast"}); reason != "" {
+		t.Fatalf("expected no setup loss lock after cooldown window, got %q", reason)
 	}
 }
 
@@ -251,8 +252,8 @@ func TestPaperDayLossLockActivatesAfterThreeLosses(t *testing.T) {
 	paper.registerPaperLoss(base.Add(2*time.Hour), pos)
 	paper.registerPaperLoss(base.Add(4*time.Hour), pos)
 
-	if reason := paper.symbolLossBlockReason("BTCUSDT", base.Add(4*time.Hour+time.Minute), candidate{Strat: "continuation_fast"}); reason != "symbol_day_loss_lock" {
-		t.Fatalf("expected symbol_day_loss_lock, got %q", reason)
+	if reason := paper.symbolLossBlockReason("BTCUSDT", base.Add(4*time.Hour+time.Minute), candidate{Strat: "continuation_fast"}); reason != "" {
+		t.Fatalf("expected no day loss lock, got %q", reason)
 	}
 }
 
@@ -287,6 +288,133 @@ func TestPhase2ShortFastProtectionTightensAfterPoint75R(t *testing.T) {
 	}
 	if !(pos.Stop < 102) {
 		t.Fatalf("expected fast short protection to tighten stop, got %.4f", pos.Stop)
+	}
+}
+
+func TestClassifyEntryOutcome(t *testing.T) {
+	cases := []struct {
+		r    float64
+		want EntryOutcome
+	}{
+		{0.10, EntryOutcomeNoProof},
+		{0.30, EntryOutcomeWeakProof},
+		{1.00, EntryOutcomeGoodProof},
+		{1.80, EntryOutcomeStrongProof},
+	}
+	for _, tc := range cases {
+		if got := classifyEntryOutcome(tc.r); got != tc.want {
+			t.Fatalf("classifyEntryOutcome(%.2f) = %s, want %s", tc.r, got, tc.want)
+		}
+	}
+}
+
+func TestScoreEntryBreakdownPrefersAlignedStructuredEntry(t *testing.T) {
+	good := candidate{
+		Side:              "BUY",
+		DayUTC24h:         12,
+		UTC4hPct:          4,
+		UTC1hPct:          1.5,
+		LastClose:         101,
+		SessionVWAP:       100.9,
+		EMA9:              100.7,
+		ExtensionATR:      0.45,
+		DistanceToVWAPPct: 0.10,
+		VolumeRatio:       1.8,
+		OFIZ:              0.45,
+		ReclaimHold:       true,
+		TriggerState:      string(triggerOFReclaim),
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.5,
+			TP1:   104.5,
+		},
+		Entry: inplay.Entry{
+			EntryStyle: "pullback_long",
+			State:      inplay.StateInPlay,
+			ScoreSlope: 0.22,
+		},
+	}
+	good.EntryTiming = classifyEntryTiming(good)
+	goodScore := scoreEntryBreakdown(good)
+
+	bad := candidate{
+		Side:              "SELL",
+		DayUTC24h:         18,
+		UTC4hPct:          5,
+		UTC1hPct:          -0.5,
+		LastClose:         100,
+		SessionVWAP:       98.5,
+		EMA9:              99.2,
+		ExtensionATR:      1.7,
+		DistanceToVWAPPct: 1.5,
+		VolumeRatio:       0.9,
+		OFIZ:              0.25,
+		TriggerState:      "",
+		Sig: strategies.Signal{
+			Entry: 100,
+			Stop:  103,
+			TP1:   101,
+		},
+		Entry: inplay.Entry{
+			EntryStyle: "avoid_chase",
+			State:      inplay.StateCooling,
+			ScoreSlope: -0.02,
+		},
+	}
+	bad.EntryTiming = classifyEntryTiming(bad)
+	badScore := scoreEntryBreakdown(bad)
+
+	if goodScore.FinalScore <= badScore.FinalScore {
+		t.Fatalf("expected structured aligned entry to outscore chase entry, got good=%.2f bad=%.2f", goodScore.FinalScore, badScore.FinalScore)
+	}
+	if goodScore.TrendLabel == "direct_conflict" {
+		t.Fatalf("expected good setup to avoid direct conflict label")
+	}
+	if badScore.FinalScore >= 70 {
+		t.Fatalf("expected chase/conflict setup to stay below enter threshold, got %.2f", badScore.FinalScore)
+	}
+}
+
+func TestRecordClosedTradeUsesAggregateStopOutcome(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	now := time.Now().UTC()
+	pos := &paperPosition{
+		TradeID:          "paper-test-aggregate-stop",
+		Symbol:           "SYNUSDT",
+		Side:             "BUY",
+		OpenedAt:         now.Add(-10 * time.Minute),
+		Entry:            100,
+		InitialQty:       10,
+		Qty:              0,
+		Margin:           10,
+		Leverage:         5,
+		Stop:             100,
+		OriginalStop:     95,
+		OriginalTP1:      105,
+		OriginalTP2:      110,
+		OriginalTP3:      115,
+		Realized:         0.50,
+		GrossRealized:    0.52,
+		FeesRealized:     0.02,
+		MaxFavorableR:    1.10,
+		MaxAdverseR:      0.20,
+		HitTP1:           true,
+		EntryReason:      "pullback_reclaim",
+		EntrySetupFamily: "micro_pullback_continuation",
+		EntryStyle:       "pullback_long",
+		EntryTiming:      "mid",
+	}
+
+	paper.recordClosedTrade(now, pos, 99.5, "SL", 10, symbolMeta{})
+	rec, ok := paper.closedTradeLedger[pos.TradeID]
+	if !ok {
+		t.Fatalf("expected closed trade record")
+	}
+	if rec.Exit.StopOutType != "profit_lock" {
+		t.Fatalf("expected aggregate stop_out_type=profit_lock, got %q", rec.Exit.StopOutType)
+	}
+	if rec.Exit.ExitReason != "Protected Stop" {
+		t.Fatalf("expected normalized exit reason Protected Stop, got %q", rec.Exit.ExitReason)
 	}
 }
 

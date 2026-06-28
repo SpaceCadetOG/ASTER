@@ -97,6 +97,7 @@ type candidate struct {
 	MLSuggestedStopProfile string
 	MLSuggestedExitProfile string
 	DistanceToVWAPPct      float64
+	EntryScoreBreakdown    EntryScoreBreakdown
 	QualityReasons         []string
 	LifecycleStage         string
 	LifecycleScans         int
@@ -150,6 +151,31 @@ type candidate struct {
 	PriorDayLeaderReasons  []string
 	EntryPosture           string
 	EntryPostureReason     string
+}
+
+type EntryOutcome string
+
+const (
+	EntryOutcomeNoProof     EntryOutcome = "NO_PROOF"
+	EntryOutcomeWeakProof   EntryOutcome = "WEAK_PROOF"
+	EntryOutcomeGoodProof   EntryOutcome = "GOOD_PROOF"
+	EntryOutcomeStrongProof EntryOutcome = "STRONG_PROOF"
+)
+
+type EntryScoreBreakdown struct {
+	TrendScore      float64  `json:"trend_score,omitempty"`
+	LocationScore   float64  `json:"location_score,omitempty"`
+	TriggerScore    float64  `json:"trigger_score,omitempty"`
+	FlowScore       float64  `json:"flow_score,omitempty"`
+	RiskRewardScore float64  `json:"risk_reward_score,omitempty"`
+	PenaltyScore    float64  `json:"penalty_score,omitempty"`
+	FinalScore      float64  `json:"final_score,omitempty"`
+	TrendLabel      string   `json:"trend_label,omitempty"`
+	LocationLabel   string   `json:"location_label,omitempty"`
+	TriggerLabel    string   `json:"trigger_label,omitempty"`
+	FlowLabel       string   `json:"flow_label,omitempty"`
+	RiskRewardLabel string   `json:"risk_reward_label,omitempty"`
+	PenaltyReasons  []string `json:"penalty_reasons,omitempty"`
 }
 
 const unresolvedSourceTagPrefix = "unresolved_source:"
@@ -842,6 +868,7 @@ type paperPosition struct {
 	EntryTiming            string
 	CandidateAgeSeconds    float64
 	EntryDistanceToVWAPPct float64
+	EntryScoreBreakdown    EntryScoreBreakdown
 	EntryPct24h            float64
 	EntryPct4h             float64
 	EntryPct1h             float64
@@ -877,22 +904,23 @@ type paperPosition struct {
 }
 
 type paperClosedTradeIdentity struct {
-	Strategy         string  `json:"strategy"`
-	RawStrategy      string  `json:"raw_strategy,omitempty"`
-	StrategyMissing  bool    `json:"strategy_missing,omitempty"`
-	SetupFamily      string  `json:"setup_family,omitempty"`
-	SetupSource      string  `json:"setup_source,omitempty"`
-	TradeHorizon     string  `json:"trade_horizon,omitempty"`
-	ExecBucket       string  `json:"exec_bucket,omitempty"`
-	EntryStyle       string  `json:"entry_style,omitempty"`
-	StrategyFamily   string  `json:"strategy_family,omitempty"`
-	Session          string  `json:"session,omitempty"`
-	Grade            string  `json:"grade,omitempty"`
-	ConfluenceScore  float64 `json:"confluence_score,omitempty"`
-	EntryTiming      string  `json:"entry_timing,omitempty"`
-	CandidateAgeSecs float64 `json:"candidate_age_seconds,omitempty"`
-	DistanceToVWAP   float64 `json:"distance_to_vwap_pct,omitempty"`
-	ATRExension      float64 `json:"atr_extension,omitempty"`
+	Strategy         string              `json:"strategy"`
+	RawStrategy      string              `json:"raw_strategy,omitempty"`
+	StrategyMissing  bool                `json:"strategy_missing,omitempty"`
+	SetupFamily      string              `json:"setup_family,omitempty"`
+	SetupSource      string              `json:"setup_source,omitempty"`
+	TradeHorizon     string              `json:"trade_horizon,omitempty"`
+	ExecBucket       string              `json:"exec_bucket,omitempty"`
+	EntryStyle       string              `json:"entry_style,omitempty"`
+	StrategyFamily   string              `json:"strategy_family,omitempty"`
+	Session          string              `json:"session,omitempty"`
+	Grade            string              `json:"grade,omitempty"`
+	ConfluenceScore  float64             `json:"confluence_score,omitempty"`
+	EntryTiming      string              `json:"entry_timing,omitempty"`
+	CandidateAgeSecs float64             `json:"candidate_age_seconds,omitempty"`
+	DistanceToVWAP   float64             `json:"distance_to_vwap_pct,omitempty"`
+	ATRExension      float64             `json:"atr_extension,omitempty"`
+	EntryScore       EntryScoreBreakdown `json:"entry_score,omitempty"`
 }
 
 type paperClosedTradeEntry struct {
@@ -924,29 +952,30 @@ type paperClosedTradePlan struct {
 }
 
 type paperClosedTradeExit struct {
-	ExitTs            time.Time `json:"exit_ts"`
-	RealizedExitPrice float64   `json:"realized_exit_price"`
-	Pct24hAtExit      float64   `json:"pct24h_at_exit,omitempty"`
-	Pct4hAtExit       float64   `json:"pct4h_at_exit,omitempty"`
-	Pct1hAtExit       float64   `json:"pct1h_at_exit,omitempty"`
-	ExitReason        string    `json:"exit_reason"`
-	RawExitReason     string    `json:"raw_exit_reason"`
-	GrossPnL          float64   `json:"gross_pnl"`
-	Fees              float64   `json:"fees"`
-	NetPnL            float64   `json:"net_pnl"`
-	HoldMinutes       float64   `json:"hold_minutes"`
-	MaxRSeen          float64   `json:"max_r_seen"`
-	MinRSeen          float64   `json:"min_r_seen"`
-	StopOutType       string    `json:"stop_out_type,omitempty"`
-	StopPriceAtExit   float64   `json:"stop_price_at_exit,omitempty"`
-	FinalStopPrice    float64   `json:"final_stop_price,omitempty"`
-	HitTP1            bool      `json:"hit_tp1,omitempty"`
-	HitTP2            bool      `json:"hit_tp2,omitempty"`
-	HitTP3            bool      `json:"hit_tp3,omitempty"`
-	TPRatchetOnly     bool      `json:"tp_ratchet_only"`
-	ProtectionState   string    `json:"protection_state,omitempty"`
-	NoProofTriggered  bool      `json:"no_proof_triggered"`
-	CloseType         string    `json:"close_type"`
+	ExitTs            time.Time    `json:"exit_ts"`
+	RealizedExitPrice float64      `json:"realized_exit_price"`
+	Pct24hAtExit      float64      `json:"pct24h_at_exit,omitempty"`
+	Pct4hAtExit       float64      `json:"pct4h_at_exit,omitempty"`
+	Pct1hAtExit       float64      `json:"pct1h_at_exit,omitempty"`
+	ExitReason        string       `json:"exit_reason"`
+	RawExitReason     string       `json:"raw_exit_reason"`
+	GrossPnL          float64      `json:"gross_pnl"`
+	Fees              float64      `json:"fees"`
+	NetPnL            float64      `json:"net_pnl"`
+	HoldMinutes       float64      `json:"hold_minutes"`
+	MaxRSeen          float64      `json:"max_r_seen"`
+	MinRSeen          float64      `json:"min_r_seen"`
+	StopOutType       string       `json:"stop_out_type,omitempty"`
+	StopPriceAtExit   float64      `json:"stop_price_at_exit,omitempty"`
+	FinalStopPrice    float64      `json:"final_stop_price,omitempty"`
+	HitTP1            bool         `json:"hit_tp1,omitempty"`
+	HitTP2            bool         `json:"hit_tp2,omitempty"`
+	HitTP3            bool         `json:"hit_tp3,omitempty"`
+	TPRatchetOnly     bool         `json:"tp_ratchet_only"`
+	ProtectionState   string       `json:"protection_state,omitempty"`
+	NoProofTriggered  bool         `json:"no_proof_triggered"`
+	CloseType         string       `json:"close_type"`
+	EntryOutcomeLabel EntryOutcome `json:"entry_outcome_label,omitempty"`
 }
 
 type paperClosedTradePostExit struct {
@@ -1755,10 +1784,10 @@ func main() {
 		MaxAttemptsPerCycle:   envInt("LIVE_MAX_ENTRY_ATTEMPTS_PER_CYCLE", 3),
 		MaxNewPositionsWindow: envInt("LIVE_MAX_NEW_POSITIONS_PER_WINDOW", 1),
 		EntryWindow:           time.Duration(envInt("LIVE_ENTRY_WINDOW_SEC", 60)) * time.Second,
-		RecentRejectTTL:       time.Duration(envInt("LIVE_RECENT_REJECT_TTL_SEC", 180)) * time.Second,
+		RecentRejectTTL:       0,
 	}
 	lifecycleCfg := candidateLifecycleConfig{
-		Enable:        effectiveCandidateMemoryEnabled(),
+		Enable:        false,
 		ArmScans:      envInt("LIVE_CANDIDATE_ARM_SCANS", 2),
 		ReadyScans:    envInt("LIVE_CANDIDATE_READY_SCANS", 3),
 		ExpireAfter:   time.Duration(envInt("LIVE_CANDIDATE_EXPIRE_MIN", 20)) * time.Minute,
@@ -3828,7 +3857,11 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	if p == nil || mark <= 0 || p.Entry <= 0 {
 		return
 	}
-	risk := abs(p.Entry - p.Stop)
+	riskStop := p.OriginalStop
+	if riskStop <= 0 {
+		riskStop = p.Stop
+	}
+	risk := abs(p.Entry - riskStop)
 	if risk <= 0 {
 		return
 	}
@@ -3850,6 +3883,43 @@ func updateFavorableRPaper(p *paperPosition, mark float64) {
 	if adv > p.MaxAdverseR {
 		p.MaxAdverseR = adv
 	}
+}
+
+func paperMaxFavorablePct(pos *paperPosition) float64 {
+	if pos == nil || pos.Entry <= 0 || pos.MaxFavorableR <= 0 {
+		return 0
+	}
+	riskStop := pos.OriginalStop
+	if riskStop <= 0 {
+		riskStop = pos.Stop
+	}
+	riskPct := plannedRiskPct(pos.Entry, riskStop)
+	if riskPct <= 0 {
+		return 0
+	}
+	return pos.MaxFavorableR * riskPct
+}
+
+func protectPaperWinnerStop(pos *paperPosition, beLockBps float64) bool {
+	if pos == nil || pos.Entry <= 0 || pos.Stop <= 0 {
+		return false
+	}
+	if paperStopAtOrBeyondEntry(pos.Side, pos.Entry, pos.Stop) {
+		return false
+	}
+	const protectAtR = 0.75
+	const protectAtRawPct = 5.0
+	if !pos.HitTP1 && pos.MaxFavorableR < protectAtR && paperMaxFavorablePct(pos) < protectAtRawPct {
+		return false
+	}
+	lockBps := maxFloat(beLockBps, 1.0)
+	be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, lockBps)
+	if stop, ok := improvedStopPrice(pos.Side, pos.Stop, be); ok {
+		pos.Stop = stop
+		pos.StopReason = "paper_winner_protect"
+		return true
+	}
+	return false
 }
 
 func paperProtectionState(pos *paperPosition) string {
@@ -6099,7 +6169,7 @@ func newPaperTrader(dryRun bool, reserveUSDT float64, maxOpen int) *paperTrader 
 	if maxTradesPerDay < 0 {
 		maxTradesPerDay = 0
 	}
-	slotReplaceEnable := envBool("LIVE_PAPER_SLOT_REPLACE_ENABLE", true)
+	slotReplaceEnable := envBool("LIVE_PAPER_SLOT_REPLACE_ENABLE", false)
 	slotReplaceMinAge := time.Duration(envInt("LIVE_PAPER_SLOT_REPLACE_MIN_AGE_MIN", 90)) * time.Minute
 	if slotReplaceMinAge < 0 {
 		slotReplaceMinAge = 0
@@ -10089,38 +10159,10 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 					changed = true
 				}
 				if mv.ImmediateExit {
-					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
-					reason := firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT")
-					_ = m.cancelRemainingExits(p)
-					if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
-						changed = true
-					}
-					return changed, nil
-				}
-				if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
-					if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
-						changed = true
-					}
-					if m.tightenRunnerStop(p, runnerState.TightenReason) {
-						changed = true
-					}
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "IMMEDIATE_EXIT_ADVISORY_ONLY", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(mv.ExitNowReason, mv.Reason, "IMMEDIATE_EXIT_ADVISORY_ONLY"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
 				}
 				if mv.FullExit {
-					if !lifecycleSoftExitsCanHardClose(p.WinnerLifecycle) {
-					} else {
-						logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "FULL_EXIT", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, mv.Reason), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
-						if !runnerState.StructureBroken {
-							if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
-								changed = true
-							}
-						} else {
-							reason := firstNonEmpty(runnerState.FullExitReason, mv.Reason)
-							_ = m.cancelRemainingExits(p)
-							if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
-								changed = true
-							}
-						}
-					}
+					logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(p.Symbol, p.Side, "FULL_EXIT_ADVISORY_ONLY", mv.CurrentWinnerLifecycle, mv.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, mv.Reason, "FULL_EXIT_ADVISORY_ONLY"), mv.ComputedStop, mv.SubmittedStop, mv.AcceptedStop, mv.TriggerRef, mv.LegalityAdjusted, p.MaxFavorableR, mv.HTFTrendState, mv.HTFPersistent, mv.HTFFailed, mv.HTFCaution))
 				}
 			}
 		}
@@ -10805,58 +10847,9 @@ func sameSideMomentumEntry(side string, mv momentumView) *inplay.Entry {
 }
 
 func evaluateSwingHold(side string, mv momentumView, sponsored bool, refreshed bool, maxFavorableR float64, hitTP1, hitTP2, hitTP3 bool) (float64, string, bool) {
-	e := sameSideMomentumEntry(side, mv)
-	if e == nil {
-		return 0, "scanner_missing", false
-	}
-	if e.LongDemotionFlag || e.ShortDemotionFlag {
-		return 0, "scanner_demoted", false
-	}
-	score := 0.0
-	switch e.State {
-	case inplay.StateHeating:
-		score += 0.22
-	case inplay.StateInPlay:
-		score += 0.30
-	case inplay.StatePumping:
-		score += 0.34
-	default:
-		return score, "state_not_persistent", false
-	}
-	if abs(e.ScoreSlope) >= envFloat("LIVE_SWING_HOLD_MIN_SLOPE", 0.02) {
-		score += 0.18
-	} else if e.Momentum {
-		score += 0.12
-	}
-	if e.TimeInStateMin >= envFloat("LIVE_SWING_HOLD_MIN_STATE_MIN", 20.0) {
-		score += 0.14
-	}
-	if e.CurrentScore >= envFloat("LIVE_SWING_HOLD_MIN_SCORE", 88.0) {
-		score += 0.16
-	}
-	if abs(e.DayUTCPct) >= envFloat("LIVE_SWING_HOLD_MIN_DAYUTC_PCT", 5.0) {
-		score += 0.08
-	}
-	if e.ScoreOffPeakPct <= envFloat("LIVE_SWING_HOLD_MAX_SCORE_OFF_PEAK_PCT", 18.0) {
-		score += 0.08
-	}
-	if sponsored {
-		score += 0.12
-	}
-	if refreshed {
-		score += 0.10
-	}
-	if maxFavorableR >= envFloat("LIVE_SWING_HOLD_MIN_MFE_R", 0.80) {
-		score += 0.06
-	}
-	if hitTP1 || hitTP2 || hitTP3 {
-		score += 0.06
-	}
-	minScore := envFloat("LIVE_SWING_HOLD_MIN_SCORE_TOTAL", 0.58)
-	if score >= minScore {
-		return score, "persistent_same_thesis", true
-	}
-	return score, "hold_score_too_low", false
+	_, _, _, _, _, _ = side, mv, sponsored, refreshed, maxFavorableR, hitTP1
+	_, _ = hitTP2, hitTP3
+	return 0, "disabled", false
 }
 
 func (m *liveExecManager) tightenRunnerStop(p *livePosition, reason string) bool {
@@ -11574,68 +11567,11 @@ func (m *liveExecManager) ApplyMomentumExit(now time.Time, mom map[string]moment
 				changed = true
 			}
 			if dec.ImmediateExit {
-				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
-				reason := firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT")
-				_ = m.cancelRemainingExits(p)
-				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err == nil {
-					changed = true
-				}
-				continue
-			}
-			if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
-				if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
-					changed = true
-				}
-				if m.tightenRunnerStop(p, runnerState.TightenReason) {
-					changed = true
-				}
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "IMMEDIATE_EXIT_ADVISORY_ONLY", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT_ADVISORY_ONLY"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 			}
 			if dec.FullExit {
-				if !lifecycleSoftExitsCanHardClose(p.WinnerLifecycle) {
-					continue
-				}
-				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "FULL_EXIT", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, dec.Reason), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
-				if !runnerState.StructureBroken {
-					if runnerState.ExhaustionConfirmed && m.tightenRunnerStop(p, runnerState.TightenReason) {
-						changed = true
-					}
-					continue
-				}
-				reason := firstNonEmpty(runnerState.FullExitReason, dec.Reason)
-				pnl, pct := realizedFromFill(p.Side, p.EntryPrice, mark, p.RemainingQty)
-				dayRealized := m.dayRealizedAt(now)
-				_ = m.cancelRemainingExits(p)
-				if err := m.submitCloseLimit(p, p.RemainingQty, reason, "CLOSE"); err != nil {
-					continue
-				}
-				m.emitNotify(notify.Event{
-					Key:      "MOMENTUM_EXIT_SUBMITTED",
-					Title:    "MOMENTUM EXIT SUBMITTED",
-					Class:    notify.ClassLifecycle,
-					Severity: notify.SeverityInfo,
-					Route:    notify.RouteNormal,
-					Symbol:   sym,
-					Message:  "momentum exit submitted",
-					Metadata: map[string]string{
-						"qty":  fmt.Sprintf("%.6f", p.PendingExitQty),
-						"px":   fmtPrice(p.PendingExitPrice),
-						"pnl":  fmt.Sprintf("%+.2f", pnl),
-						"upnl": fmt.Sprintf("%+.2f%%", pct),
-						"day":  fmt.Sprintf("%+.2f", dayRealized),
-					},
-				})
-				changed = true
-				continue
+				logProtectDecisionOnce(&p.lastProtectDecisionKey, protectDecisionLogLine(sym, p.Side, "FULL_EXIT_ADVISORY_ONLY", dec.CurrentWinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(runnerState.FullExitReason, dec.Reason, "FULL_EXIT_ADVISORY_ONLY"), dec.ComputedStop, dec.SubmittedStop, dec.AcceptedStop, dec.TriggerRef, dec.LegalityAdjusted, p.MaxFavorableR, dec.HTFTrendState, dec.HTFPersistent, dec.HTFFailed, dec.HTFCaution))
 			}
-		}
-		if runnerState.ExhaustionConfirmed && !runnerState.StructureBroken {
-			if m.trimToRunner(now, p, "RUNNER_EXHAUST_TRIM") {
-				changed = true
-			}
-			if m.tightenRunnerStop(p, runnerState.TightenReason) {
-				changed = true
-			}
-			continue
 		}
 		if envBool("LIVE_MOMENTUM_FADE_TIGHTEN_AFTER_CONFIRM", true) &&
 			(p.HitTP1 || p.HitTP2 || p.HitTP3 || p.ProtectionStage >= protectionStageArmed || earlyContinuationReady(p)) {
@@ -12567,50 +12503,12 @@ func (p *paperTrader) registerPaperLoss(now time.Time, pos *paperPosition) {
 		p.lossDayCount[raw] = 0
 	}
 	p.lossDayCount[raw]++
-	p.blockSymbolForLosses(raw, now)
-	if p.lossDayCount[raw] >= maxInt(1, envInt("LIVE_SYMBOL_DAY_LOSS_DISABLE_COUNT", 3)) {
-		if p.lockUntil == nil {
-			p.lockUntil = map[string]time.Time{}
-		}
-		endOfDay := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
-		p.lockUntil[raw] = endOfDay
-	}
-	setupKey := p.setupLockKey(raw, candidate{Strat: pos.EntryStrategyID, Entry: inplay.Entry{EntryStyle: pos.EntryStyle}})
-	if strings.HasSuffix(setupKey, "|") {
-		return
-	}
-	if p.setupLosses == nil {
-		p.setupLosses = map[string][]time.Time{}
-	}
-	times := append(trimTimesWithin(p.setupLosses[setupKey], now.Add(-4*time.Hour)), now)
-	p.setupLosses[setupKey] = times
-	if len(times) >= maxInt(2, envInt("LIVE_SYMBOL_SETUP_LOSS_COUNT", 2)) {
-		last := times[len(times)-1]
-		prev := times[len(times)-2]
-		if !prev.IsZero() {
-			if p.setupLockUntil == nil {
-				p.setupLockUntil = map[string]time.Time{}
-			}
-			p.setupLockUntil[setupKey] = last.Add(time.Duration(envInt("LIVE_SYMBOL_SETUP_LOSS_LOCK_MIN", 240)) * time.Minute)
-		}
-	}
+	_ = now
 }
 
 func (p *paperTrader) symbolLossBlockReason(raw string, now time.Time, c candidate) string {
-	if p == nil {
-		return ""
-	}
-	if t := p.lockUntil[raw]; !t.IsZero() && now.Before(t) {
-		dayKey := currentSessionDayKey(now)
-		if p.lossDay != nil && p.lossDay[raw] == dayKey && p.lossDayCount[raw] >= maxInt(1, envInt("LIVE_SYMBOL_DAY_LOSS_DISABLE_COUNT", 3)) {
-			return "symbol_day_loss_lock"
-		}
-		return "symbol_loss_cooldown"
-	}
-	setupKey := p.setupLockKey(raw, c)
-	if t := p.setupLockUntil[setupKey]; !t.IsZero() && now.Before(t) {
-		return "symbol_setup_loss_lock"
-	}
+	_, _, _ = p, raw, now
+	_ = c
 	return ""
 }
 
@@ -12970,6 +12868,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		EntryTiming:            c.EntryTiming,
 		CandidateAgeSeconds:    c.CandidateAgeSeconds,
 		EntryDistanceToVWAPPct: c.DistanceToVWAPPct,
+		EntryScoreBreakdown:    c.EntryScoreBreakdown,
 		EntryPct24h:            c.DayUTC24h,
 		EntryPct4h:             c.UTC4hPct,
 		EntryPct1h:             c.UTC1hPct,
@@ -12995,7 +12894,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	p.positions[raw] = pos
 	_ = p.save()
-	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s setup_source=%s trade_horizon=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f reason=%s stop_reason=%s\n",
+	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s setup_source=%s trade_horizon=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f final_score=%.1f trend=%.1f location=%.1f trigger=%.1f flow=%.1f rr=%.1f penalty=%.1f reason=%s stop_reason=%s\n",
 		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee,
 		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "none"),
 		firstNonEmpty(strings.TrimSpace(c.SetupSource), "unknown"),
@@ -13006,6 +12905,13 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		c.CandidateAgeSeconds,
 		c.DistanceToVWAPPct,
 		c.ExtensionATR,
+		c.EntryScoreBreakdown.FinalScore,
+		c.EntryScoreBreakdown.TrendScore,
+		c.EntryScoreBreakdown.LocationScore,
+		c.EntryScoreBreakdown.TriggerScore,
+		c.EntryScoreBreakdown.FlowScore,
+		c.EntryScoreBreakdown.RiskRewardScore,
+		c.EntryScoreBreakdown.PenaltyScore,
 		firstNonEmpty(strings.TrimSpace(c.Strat), "manual"),
 		firstNonEmpty(stopReason, "generic"))
 	return pos, nil
@@ -13085,95 +12991,10 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 				pos.Stop = be
 			}
 		}
+		protectPaperWinnerStop(pos, p.beLockBps)
 		frTP1 := pos.TP1
 		frTP2 := pos.TP2
 		frTP3 := pos.TP3
-		if p.exitManager != nil {
-			frTP1 = p.exitManager.FrontRunTarget(pos.Side, pos.TP1, pos.OpposingFriction)
-			frTP2 = p.exitManager.FrontRunTarget(pos.Side, pos.TP2, pos.OpposingFriction)
-			frTP3 = p.exitManager.FrontRunTarget(pos.Side, pos.TP3, pos.OpposingFriction)
-			cur, _ := paperCurrentEntryForSide(pos.Side, raw, longCurrent, shortCurrent)
-			htf := p.htfSnapshot(raw, pos.Side, &cur)
-			prevLifecycle := pos.WinnerLifecycle
-			syncPaperWinnerLifecycle(pos, htfPersistent(pos.Side, htf))
-			logWinnerLifecycleTransition(raw, pos.Side, prevLifecycle, pos.WinnerLifecycle, lifecycleTransitionReason(prevLifecycle, pos.WinnerLifecycle, "", pos.TrailOn))
-			dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-				Side:               pos.Side,
-				Entry:              pos.Entry,
-				Stop:               pos.Stop,
-				Mark:               stopCheckPx,
-				MFER:               pos.MaxFavorableR,
-				MAER:               pos.MaxAdverseR,
-				BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
-				StallBars:          pos.StallBars,
-				NearFriction:       p.hitPrice(sideBuy, tpCheckPx, pos.OpposingFriction),
-				UnrealizedPct:      upctStop,
-				Sponsored:          pos.Sponsored,
-				HitTP1:             pos.HitTP1,
-				HitTP2:             pos.HitTP2,
-				HitTP3:             pos.HitTP3,
-				WeakSponsorStreak:  pos.WeakSponsorStreak,
-				EntryReason:        pos.EntryReason,
-				EntryStrategyID:    pos.EntryStrategyID,
-				StarterEntry:       false,
-				AdvancedReady:      paperAdvancedReady(pos),
-				HTFTrendState:      string(htf.State),
-				HTFTrendPersistent: htfPersistent(pos.Side, htf),
-				HTFTrendFailed:     htfFailed(pos.Side, htf),
-				HTFCaution:         htfCaution(pos.Side, htf),
-				TriggerRef:         p.stopTriggerRef,
-				ComputedStop:       pos.Stop,
-				SubmittedStop:      pos.Stop,
-				AcceptedStop:       pos.Stop,
-				LegalityAdjusted:   false,
-				WinnerLifecycle:    pos.WinnerLifecycle,
-				TrailingActive:     pos.TrailOn,
-				MatureTrend:        matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent(pos.Side, htf), pos.HitTP1, pos.HitTP2, pos.HitTP3),
-				RealInvalidation:   htfFailed(pos.Side, htf),
-			})
-			logWinnerLifecycleTransition(raw, pos.Side, pos.WinnerLifecycle, dec.WinnerLifecycle, lifecycleTransitionReason(pos.WinnerLifecycle, dec.WinnerLifecycle, firstNonEmpty(dec.ExitNowReason, dec.Reason), pos.TrailOn))
-			pos.WinnerLifecycle = dec.WinnerLifecycle
-			if dec.MoveStopToBE && allowBE {
-				be := beLockPriceBuffered(pos.Side, pos.Entry, pos.Stop, p.beLockBps)
-				if (sideBuy && be > pos.Stop) || (!sideBuy && be < pos.Stop) {
-					pos.Stop = be
-					logPaperProtectDecision(raw, pos, "BE", dec, pos.Stop, pos.Stop, false)
-				}
-			}
-			if dec.TightenStop {
-				if (sideBuy && dec.TightenToPrice > pos.Stop) || (!sideBuy && dec.TightenToPrice < pos.Stop) {
-					pos.Stop = dec.TightenToPrice
-					logPaperProtectDecision(raw, pos, "TIGHTEN", dec, pos.Stop, pos.Stop, false)
-				}
-			}
-			if correctedStop, corrected := enforceWinnerBEFloor(pos.Side, pos.Entry, pos.Stop, pos.MaxFavorableR); corrected {
-				pos.StopReason = "forced_be_correction"
-				pos.Stop = correctedStop
-				logPaperProtectDecision(raw, pos, "TIGHTEN", exitmgr.ProtectDecision{
-					CurrentWinnerLifecycle: pos.WinnerLifecycle,
-					WinnerLifecycle:        pos.WinnerLifecycle,
-					Reason:                 "forced_be_correction",
-					TriggerRef:             p.stopTriggerRef,
-					HTFTrendState:          string(htf.State),
-					HTFPersistent:          htfPersistent(pos.Side, htf),
-					HTFFailed:              htfFailed(pos.Side, htf),
-					HTFCaution:             htfCaution(pos.Side, htf),
-				}, pos.Stop, pos.Stop, false)
-			}
-			if dec.ImmediateExit {
-				logPaperProtectDecision(raw, pos, "IMMEDIATE_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, firstNonEmpty(dec.ExitNowReason, dec.Reason, "IMMEDIATE_EXIT"), stopCheckPx, pos.Qty, meta[raw], depth[raw])
-				continue
-			}
-			if dec.FullExit {
-				if !lifecycleSoftExitsCanHardClose(pos.WinnerLifecycle) {
-					continue
-				}
-				logPaperProtectDecision(raw, pos, "FULL_EXIT", dec, dec.SubmittedStop, dec.AcceptedStop, dec.LegalityAdjusted)
-				p.exitPortion(now, pos, dec.Reason, stopCheckPx, pos.Qty, meta[raw], depth[raw])
-				continue
-			}
-		}
 
 		// 1) Scale-out targets first so TP wins when TP/SL are both touched in one cycle.
 		if !pos.HitTP1 && p.hitPrice(sideBuy, tpCheckPx, frTP1) {
@@ -13275,62 +13096,6 @@ func (p *paperTrader) CheckExit(now time.Time, meta map[string]symbolMeta, depth
 		}
 
 		if reason := paperDegradedHoldExitReason(now, pos, stopCheckPx, longCurrent, shortCurrent); reason != "" {
-			if p.exitManager != nil {
-				upnlPct := 0.0
-				if pos.Qty > 0 && stopCheckPx > 0 {
-					_, upnlPct = realizedFromFill(pos.Side, pos.Entry, stopCheckPx, pos.Qty)
-				}
-				weakFlow := strings.EqualFold(reason, "MOMENTUM_FADE")
-				if !weakFlow {
-					if cur, ok := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent); ok {
-						slopeMax := envFloat("LIVE_PAPER_DEGRADED_EXIT_SLOPE_MAX", 0.05)
-						weakFlow = paperTrendLikeState(cur.State) && cur.ScoreSlope <= slopeMax && !cur.Momentum
-					}
-				}
-				cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
-				htf := p.htfSnapshot(raw, pos.Side, &cur)
-				syncPaperWinnerLifecycle(pos, htfPersistent(pos.Side, htf))
-				dec := p.exitManager.EvaluateProtect(exitmgr.ProtectInput{
-					Side:               pos.Side,
-					Entry:              pos.Entry,
-					Stop:               pos.Stop,
-					Mark:               stopCheckPx,
-					MFER:               pos.MaxFavorableR,
-					MAER:               pos.MaxAdverseR,
-					BarsHeld:           int(now.Sub(pos.OpenedAt) / time.Minute),
-					StallBars:          pos.StallBars,
-					WeakFlow:           weakFlow,
-					NearFriction:       false,
-					LiqSpike:           false,
-					UnrealizedPct:      upnlPct,
-					Sponsored:          pos.Sponsored,
-					HitTP1:             pos.HitTP1,
-					HitTP2:             pos.HitTP2,
-					HitTP3:             pos.HitTP3,
-					WeakSponsorStreak:  pos.WeakSponsorStreak,
-					EntryReason:        pos.EntryReason,
-					EntryStrategyID:    pos.EntryStrategyID,
-					StarterEntry:       false,
-					AdvancedReady:      paperAdvancedReady(pos),
-					HTFTrendState:      string(htf.State),
-					HTFTrendPersistent: htfPersistent(pos.Side, htf),
-					HTFTrendFailed:     htfFailed(pos.Side, htf),
-					HTFCaution:         htfCaution(pos.Side, htf),
-					TriggerRef:         p.stopTriggerRef,
-					ComputedStop:       pos.Stop,
-					SubmittedStop:      pos.Stop,
-					AcceptedStop:       pos.Stop,
-					LegalityAdjusted:   false,
-					WinnerLifecycle:    pos.WinnerLifecycle,
-					TrailingActive:     pos.TrailOn,
-					MatureTrend:        matureTrendForWinnerLifecycle(pos.MaxFavorableR, htfPersistent(pos.Side, htf), pos.HitTP1, pos.HitTP2, pos.HitTP3),
-					RealInvalidation:   htfFailed(pos.Side, htf),
-				})
-				pos.WinnerLifecycle = dec.WinnerLifecycle
-				if p.applyPaperProtectDecision(now, raw, pos, stopCheckPx, dec, meta, depth) {
-					continue
-				}
-			}
 			cur, _ := paperCurrentEntryForSide(pos.Side, pos.Symbol, longCurrent, shortCurrent)
 			htf := p.htfSnapshot(raw, pos.Side, &cur)
 			if envBool("LIVE_EXIT_SOFT_SIGNALS_MANAGE_ONLY", true) &&
@@ -13687,6 +13452,20 @@ func stopOutType(raw, side string, entry, exitPx, stopPx float64) string {
 		return "breakeven"
 	default:
 		return "profit_lock"
+	}
+}
+
+func aggregateStopOutType(raw string, net float64) string {
+	if !isStopLikeExitReason(raw) {
+		return ""
+	}
+	switch {
+	case net > 0.0000001:
+		return "profit_lock"
+	case net < -0.0000001:
+		return "loss"
+	default:
+		return "breakeven"
 	}
 }
 
@@ -14103,10 +13882,10 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		pos.Qty = 0
 	}
 	holdMin := now.Sub(pos.OpenedAt).Minutes()
-	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f pnl=%+.4f realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f original_stop=%.6f final_stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f hit_tp1=%t hit_tp2=%t hit_tp3=%t tp_ratchet_only=%t stop_out_type=%s protection_state=%s entry_timing=%s no_proof_triggered=%t\n",
+	fmt.Printf("paper exit %s %s reason=%s qty=%.6f entry=%.6f exit=%.6f leg_pnl=%+.4f trade_realized=%+.4f rem=%.6f balance=%.2f hold=%.1fm max_r_seen=%.4f min_r_seen=%.4f original_stop=%.6f final_stop=%.6f tp1=%.6f tp2=%.6f tp3=%.6f hit_tp1=%t hit_tp2=%t hit_tp3=%t tp_ratchet_only=%t stop_out_type=%s protection_state=%s entry_timing=%s entry_outcome=%s entry_score=%.1f no_proof_triggered=%t\n",
 		symbol, pos.Side, reason, qty, pos.Entry, exitPrice, net, pos.Realized, pos.Qty, p.balance, holdMin,
 		pos.MaxFavorableR, -pos.MaxAdverseR, pos.OriginalStop, pos.Stop, pos.OriginalTP1, pos.OriginalTP2, pos.OriginalTP3,
-		pos.HitTP1, pos.HitTP2, pos.HitTP3, p.tpRatchetOnly, firstNonEmpty(stopType, "none"), paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), false)
+		pos.HitTP1, pos.HitTP2, pos.HitTP3, p.tpRatchetOnly, firstNonEmpty(stopType, "none"), paperProtectionState(pos), firstNonEmpty(strings.TrimSpace(pos.EntryTiming), "unknown"), classifyEntryOutcome(pos.MaxFavorableR), pos.EntryScoreBreakdown.FinalScore, false)
 	if p.onExit != nil {
 		loc := p.reportLoc
 		if loc == nil {
@@ -14176,6 +13955,7 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 			CandidateAgeSecs: pos.CandidateAgeSeconds,
 			DistanceToVWAP:   pos.EntryDistanceToVWAPPct,
 			ATRExension:      pos.EntryATRExtension,
+			EntryScore:       pos.EntryScoreBreakdown,
 		},
 		Entry: paperClosedTradeEntry{
 			EntryTs:    pos.OpenedAt.UTC(),
@@ -14217,7 +13997,7 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 			HoldMinutes:       holdMin,
 			MaxRSeen:          pos.MaxFavorableR,
 			MinRSeen:          -pos.MaxAdverseR,
-			StopOutType:       stopOutType(rawReason, pos.Side, pos.Entry, exitPrice, pos.Stop),
+			StopOutType:       aggregateStopOutType(rawReason, pos.Realized),
 			StopPriceAtExit:   pos.Stop,
 			FinalStopPrice:    pos.Stop,
 			HitTP1:            pos.HitTP1,
@@ -14227,6 +14007,7 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 			ProtectionState:   paperProtectionState(pos),
 			NoProofTriggered:  false,
 			CloseType:         "full_close",
+			EntryOutcomeLabel: classifyEntryOutcome(pos.MaxFavorableR),
 		},
 	}
 	rec.PostExit = buildPaperPostExitSection(rec.Side, rec.Entry.EntryPrice, rec.Plan.OriginalStop, rec.Exit.RealizedExitPrice, rec.Plan.OriginalTP1, rec.Plan.OriginalTP2, rec.Plan.OriginalTP3, map[string]paperPostExitWindowState{
@@ -14800,8 +14581,9 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		"trade_id", "strategy", "setup_family", "setup_source", "trade_horizon", "exec_bucket", "entry_style", "strategy_family",
 		"original_stop", "original_tp1", "original_tp2", "original_tp3",
 		"pct24h_at_entry", "pct4h_at_entry", "pct1h_at_entry",
+		"entry_final_score", "entry_trend_score", "entry_location_score", "entry_trigger_score", "entry_flow_score", "entry_rr_score", "entry_penalty_score",
 		"realized_exit_price", "pct24h_at_exit", "pct4h_at_exit", "pct1h_at_exit", "raw_exit_reason", "normalized_exit_reason", "stop_out_type", "stop_price_at_exit", "protection_state",
-		"hit_tp1", "hit_tp2", "hit_tp3", "tp_ratchet_only",
+		"hit_tp1", "hit_tp2", "hit_tp3", "tp_ratchet_only", "entry_outcome_label",
 		"post_exit_peak_price", "post_exit_peak_r", "stopped_then_reclaim", "reentry_would_have_worked",
 		"eod_price_cst_185959", "eod_pct24h", "eod_pct4h", "eod_pct1h", "eod_timestamp_cst", "eod_timestamp_utc", "eod_vs_exit_price_diff", "eod_r",
 	}); err != nil {
@@ -14845,6 +14627,13 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		fmt.Sprintf("%.4f", pos.EntryPct24h),
 		fmt.Sprintf("%.4f", pos.EntryPct4h),
 		fmt.Sprintf("%.4f", pos.EntryPct1h),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.FinalScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.TrendScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.LocationScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.TriggerScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.FlowScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.RiskRewardScore),
+		fmt.Sprintf("%.2f", pos.EntryScoreBreakdown.PenaltyScore),
 		fmt.Sprintf("%.8f", exit),
 		fmt.Sprintf("%.4f", m.DayUTC24h),
 		fmt.Sprintf("%.4f", m.UTC4hPct),
@@ -14858,6 +14647,7 @@ func (p *paperTrader) logTrade(now time.Time, pos *paperPosition, exit, qty floa
 		strconv.FormatBool(pos.HitTP2),
 		strconv.FormatBool(pos.HitTP3),
 		strconv.FormatBool(p.tpRatchetOnly),
+		string(classifyEntryOutcome(pos.MaxFavorableR)),
 		"",
 		"",
 		"",
@@ -15714,11 +15504,6 @@ func starterLaneQualityReady(c candidate) bool {
 	if hasFreshStructureReset(c) || continuationStructureConfirmed(c) {
 		return true
 	}
-	if c.PriorDayLeaderBoost >= envFloat("LIVE_PRIOR_DAY_STARTER_READY_MIN_BOOST", 0.45) &&
-		!candidateExhaustionActive(c) &&
-		!continuationDeteriorating(c) {
-		return true
-	}
 	minSeen := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_SEEN", 2))
 	minTopN := maxInt(1, envInt("LIVE_STARTER_PERSIST_MIN_TOPN", 1))
 	return c.PersistenceSeenCount >= minSeen && c.PersistenceTopNCount >= minTopN
@@ -16049,9 +15834,6 @@ func computeEntryScoreBreakdown(c candidate, cfg entryQualityConfig) (float64, f
 	minConf := minEntryConfForStrategy(c, cfg)
 	if confN < minConf {
 		reasons = append(reasons, "low_conf")
-	}
-	if c.TriggerStage != "" && c.TriggerStage != "READY" {
-		reasons = append(reasons, "trigger_not_persistent")
 	}
 	if c.TriggerState != "" && c.TriggerState != string(triggerNone) {
 		reasons = append(reasons, "trigger_"+strings.ToLower(c.TriggerState))
@@ -16719,14 +16501,13 @@ func churnRejectReason(mem map[string]*sessionChurn, now time.Time, c candidate)
 }
 
 func candidateSelectionRank(c candidate) float64 {
-	boost := clamp(c.PriorDayLeaderBoost, 0, 1) * envFloat("LIVE_PRIOR_DAY_RANK_BOOST_POINTS", 4.0)
 	if c.FinalRank > 0 {
-		return c.FinalRank + boost
+		return c.FinalRank
 	}
 	if c.CombinedScore > 0 {
-		return c.CombinedScore*100.0 + boost
+		return c.CombinedScore * 100.0
 	}
-	return c.Entry.Rank + boost
+	return c.Entry.Rank
 }
 
 func sideDominanceRejectReason(c candidate, ranked []candidate) string {
@@ -18193,6 +17974,13 @@ func annotateCandidateEntryContext(c *candidate, now time.Time) {
 	c.CandidateAgeSeconds = candidateAgeSeconds(c.Entry, now)
 	c.DistanceToVWAPPct = distanceToVWAPPct(c.LastClose, c.SessionVWAP)
 	c.EntryTiming = classifyEntryTiming(*c)
+	c.EntryScoreBreakdown = scoreEntryBreakdown(*c)
+	c.DiscoveryScore = clamp((c.EntryScoreBreakdown.TrendScore+c.EntryScoreBreakdown.LocationScore)/50.0, 0, 1)
+	c.TriggerScore = clamp((c.EntryScoreBreakdown.TriggerScore+c.EntryScoreBreakdown.FlowScore)/35.0, 0, 1)
+	c.ExecutionScore = clamp((c.EntryScoreBreakdown.RiskRewardScore+c.EntryScoreBreakdown.PenaltyScore+15.0)/30.0, 0, 1)
+	c.CombinedScore = clamp(c.EntryScoreBreakdown.FinalScore/100.0, 0, 1)
+	c.TradeQuality = c.CombinedScore
+	c.QualityReasons = append([]string(nil), c.EntryScoreBreakdown.PenaltyReasons...)
 }
 
 func candidateAgeSeconds(e inplay.Entry, now time.Time) float64 {
@@ -18238,6 +18026,217 @@ func classifyEntryTiming(c candidate) string {
 		return "early"
 	}
 	return "mid"
+}
+
+func classifyEntryOutcome(maxFavorableR float64) EntryOutcome {
+	switch {
+	case maxFavorableR < 0.25:
+		return EntryOutcomeNoProof
+	case maxFavorableR < 0.75:
+		return EntryOutcomeWeakProof
+	case maxFavorableR < 1.50:
+		return EntryOutcomeGoodProof
+	default:
+		return EntryOutcomeStrongProof
+	}
+}
+
+func trendAlignment(side string, move float64) int {
+	switch {
+	case strings.EqualFold(side, "BUY") && move > 0:
+		return 1
+	case strings.EqualFold(side, "SELL") && move < 0:
+		return 1
+	case math.Abs(move) < 0.25:
+		return 0
+	default:
+		return -1
+	}
+}
+
+func scoreEntryBreakdown(c candidate) EntryScoreBreakdown {
+	b := EntryScoreBreakdown{}
+	align24 := trendAlignment(c.Side, c.DayUTC24h)
+	align4 := trendAlignment(c.Side, c.UTC4hPct)
+	align1 := trendAlignment(c.Side, c.UTC1hPct)
+	aligned := 0
+	conflicted := 0
+	for _, v := range []int{align24, align4, align1} {
+		if v > 0 {
+			aligned++
+		}
+		if v < 0 {
+			conflicted++
+		}
+	}
+	switch {
+	case aligned == 3:
+		b.TrendScore = 25
+		b.TrendLabel = "all_aligned"
+	case align4 > 0 && align1 > 0 && align24 >= 0:
+		b.TrendScore = 20
+		b.TrendLabel = "4h_1h_aligned"
+	case align1 > 0 && align4 >= 0:
+		b.TrendScore = 15
+		b.TrendLabel = "near_term_aligned"
+	case conflicted == 0:
+		b.TrendScore = 8
+		b.TrendLabel = "mixed_neutral"
+	default:
+		b.TrendScore = 0
+		b.TrendLabel = "direct_conflict"
+	}
+
+	distVWAP := c.DistanceToVWAPPct
+	if distVWAP <= 0 {
+		distVWAP = distanceToVWAPPct(c.LastClose, c.SessionVWAP)
+	}
+	location := 8.0
+	locationLabel := "mid_range"
+	switch {
+	case c.ReclaimHold || c.RetestHold || c.ResetRebreak || c.ClosedBreakHold:
+		location = 21
+		locationLabel = "structure_retest"
+	case c.SessionVWAP > 0 && ((strings.EqualFold(c.Side, "BUY") && c.LastClose >= c.SessionVWAP) || (!strings.EqualFold(c.Side, "BUY") && c.LastClose <= c.SessionVWAP)):
+		location = 17
+		locationLabel = "vwap_aligned"
+	case c.EMA9 > 0 && ((strings.EqualFold(c.Side, "BUY") && c.LastClose >= c.EMA9) || (!strings.EqualFold(c.Side, "BUY") && c.LastClose <= c.EMA9)):
+		location = 14
+		locationLabel = "ema_aligned"
+	}
+	if distVWAP > 0 && distVWAP <= 0.35 {
+		location += 3
+	}
+	if c.ExtensionATR >= 1.25 || distVWAP >= 1.20 {
+		location = min(location, 8)
+		locationLabel = "extended"
+	}
+	b.LocationScore = clamp(location, 0, 25)
+	b.LocationLabel = locationLabel
+
+	trigger := 0.0
+	triggerLabel := "none"
+	switch c.TriggerState {
+	case string(triggerOFReclaim), string(triggerImpulseCont), string(triggerStackedBid), string(triggerStackedAsk):
+		trigger = 18
+		triggerLabel = "clean_trigger"
+	case string(triggerFailReclaim), string(triggerExhaustion):
+		trigger = 14
+		triggerLabel = "reversal_trigger"
+	default:
+		switch strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle)) {
+		case "pullback_long", "pullback_short", "breakout_hold_long", "breakout_hold_short":
+			trigger = 14
+			triggerLabel = "style_confirmed"
+		case "momentum_ignite_long", "momentum_ignite_short":
+			trigger = 10
+			triggerLabel = "momentum_only"
+		}
+	}
+	if c.ReclaimHold || c.RetestHold || c.ClosedBreakHold {
+		trigger += 2
+	}
+	b.TriggerScore = clamp(trigger, 0, 20)
+	b.TriggerLabel = triggerLabel
+
+	flow := 5.0
+	flowLabel := "weak_confirm"
+	if c.VolumeRatio >= 1.50 {
+		flow = 12
+		flowLabel = "volume_expand"
+	} else if c.VolumeRatio >= 1.10 {
+		flow = 9
+		flowLabel = "volume_ok"
+	}
+	if strings.EqualFold(c.Side, "BUY") {
+		if c.OFIZ >= 0.25 {
+			flow += 3
+		} else if c.OFIZ < -0.10 {
+			flow = maxFloat(0, flow-5)
+			flowLabel = "flow_conflict"
+		}
+	} else {
+		if c.OFIZ <= -0.25 {
+			flow += 3
+		} else if c.OFIZ > 0.10 {
+			flow = maxFloat(0, flow-5)
+			flowLabel = "flow_conflict"
+		}
+	}
+	b.FlowScore = clamp(flow, 0, 15)
+	b.FlowLabel = flowLabel
+
+	rr := 0.0
+	rrLabel := "target_unknown"
+	entryPx := firstPositive(c.Sig.Entry, c.LastClose)
+	stopPx := c.Sig.Stop
+	tp1Px := c.Sig.TP1
+	if entryPx > 0 && stopPx > 0 && tp1Px > 0 {
+		risk := math.Abs(entryPx - stopPx)
+		reward := math.Abs(tp1Px - entryPx)
+		if risk > 0 {
+			rrMult := reward / risk
+			switch {
+			case rrMult >= 2.0:
+				rr = 15
+				rrLabel = "2r_plus"
+			case rrMult >= 1.5:
+				rr = 10
+				rrLabel = "1_5r_plus"
+			case rrMult >= 1.0:
+				rr = 5
+				rrLabel = "1r_only"
+			default:
+				rrLabel = "target_too_close"
+			}
+		}
+	}
+	b.RiskRewardScore = clamp(rr, 0, 15)
+	b.RiskRewardLabel = rrLabel
+
+	penalties := 0.0
+	penaltyReasons := make([]string, 0, 8)
+	entryStyle := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
+	if entryStyle == "avoid_chase" || c.EntryTiming == "late" {
+		penalties += 15
+		penaltyReasons = append(penaltyReasons, "late_chase")
+	}
+	if b.LocationLabel == "mid_range" {
+		penalties += 15
+		penaltyReasons = append(penaltyReasons, "middle_of_range")
+	}
+	if b.RiskRewardLabel == "target_too_close" {
+		penalties += 20
+		penaltyReasons = append(penaltyReasons, "target_too_close")
+	}
+	if c.ExtensionATR >= 1.50 {
+		penalties += 10
+		penaltyReasons = append(penaltyReasons, "extension_high")
+	}
+	if strings.EqualFold(c.Side, "SELL") && c.DayUTC24h < -20 && c.UTC4hPct < -8 && c.UTC1hPct < -3 {
+		penalties += 15
+		penaltyReasons = append(penaltyReasons, "late_all_red_short")
+	}
+	if strings.EqualFold(c.Side, "BUY") && c.DayUTC24h > 20 && c.EntryTiming == "late" {
+		penalties += 10
+		penaltyReasons = append(penaltyReasons, "late_pumped_long")
+	}
+	if b.FlowLabel == "flow_conflict" {
+		penalties += 5
+		penaltyReasons = append(penaltyReasons, "flow_conflict")
+	}
+	if b.TriggerScore < 10 {
+		penalties += 10
+		penaltyReasons = append(penaltyReasons, "weak_trigger")
+	}
+	if b.TrendLabel == "direct_conflict" {
+		penalties += 20
+		penaltyReasons = append(penaltyReasons, "trend_conflict")
+	}
+	b.PenaltyScore = -penalties
+	b.PenaltyReasons = penaltyReasons
+	b.FinalScore = clamp(b.TrendScore+b.LocationScore+b.TriggerScore+b.FlowScore+b.RiskRewardScore-penalties, 0, 100)
+	return b
 }
 
 func toFeatureSide(side string) features.Side {
@@ -22259,9 +22258,6 @@ func persistenceEligibilityScore(c candidate) float64 {
 	}
 	if c.PersistenceMomentum {
 		score += 0.10
-	}
-	if c.PriorDayLeaderBoost > 0 {
-		score += clamp(c.PriorDayLeaderBoost*envFloat("LIVE_PRIOR_DAY_PERSISTENCE_BOOST_WEIGHT", 0.12), 0, 0.18)
 	}
 	return clamp(score, 0, 1)
 }
