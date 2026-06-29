@@ -375,6 +375,117 @@ func TestScoreEntryBreakdownPrefersAlignedStructuredEntry(t *testing.T) {
 	}
 }
 
+func TestScoreEntryBreakdownPenalizesLateContinuationLong(t *testing.T) {
+	early := candidate{
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		SetupFamily:       "micro_pullback_continuation",
+		DayUTC24h:         9,
+		UTC4hPct:          2,
+		UTC1hPct:          0.8,
+		LastClose:         101,
+		SessionVWAP:       100.8,
+		EMA9:              100.7,
+		ExtensionATR:      0.45,
+		DistanceToVWAPPct: 0.18,
+		VolumeRatio:       1.7,
+		OFIZ:              0.32,
+		ReclaimHold:       true,
+		TriggerState:      string(triggerOFReclaim),
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.7,
+			TP1:   103.4,
+		},
+		Entry: inplay.Entry{
+			EntryStyle: "pullback_long",
+			State:      inplay.StateInPlay,
+			ScoreSlope: 0.24,
+		},
+		EntryTiming: "mid",
+	}
+	late := early
+	late.EntryTiming = "late"
+	late.DistanceToVWAPPct = 1.15
+	late.ExtensionATR = 1.20
+	late.VolumeRatio = 1.05
+	late.OFIZ = 0.05
+
+	earlyScore := scoreEntryBreakdown(early)
+	lateScore := scoreEntryBreakdown(late)
+	if lateScore.FinalScore >= earlyScore.FinalScore {
+		t.Fatalf("expected late continuation long to score lower, got late=%.2f early=%.2f", lateScore.FinalScore, earlyScore.FinalScore)
+	}
+	if !strings.Contains(strings.Join(lateScore.PenaltyReasons, ","), "late_continuation_long") {
+		t.Fatalf("expected late continuation penalty reasons, got %+v", lateScore.PenaltyReasons)
+	}
+}
+
+func TestPaperSameSetupCooldownBlocksWeakRepeat(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	now := time.Date(2026, 6, 29, 1, 0, 0, 0, time.UTC)
+	paper.closedTradeLedger["t1"] = paperClosedTradeRecord{
+		TradeID: "t1",
+		Symbol:  "SYNUSDT",
+		Side:    "BUY",
+		Identity: paperClosedTradeIdentity{
+			SetupFamily: "micro_pullback_continuation",
+		},
+		Exit: paperClosedTradeExit{
+			ExitTs:            now.Add(-10 * time.Minute),
+			NetPnL:            -0.40,
+			EntryOutcomeLabel: EntryOutcomeWeakProof,
+		},
+	}
+	reason := paper.sameSymbolSetupCooldownReason("SYNUSDT", now, candidate{
+		Side:        "BUY",
+		SetupFamily: "micro_pullback_continuation",
+		Strat:       "pullback_reclaim",
+	})
+	if !strings.Contains(reason, "same_setup_cooldown") {
+		t.Fatalf("expected same setup cooldown, got %q", reason)
+	}
+}
+
+func TestPaperSameSymbolCooldownBlocksClusteredWeakRepeats(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	now := time.Date(2026, 6, 29, 2, 0, 0, 0, time.UTC)
+	paper.closedTradeLedger["t1"] = paperClosedTradeRecord{
+		TradeID: "t1",
+		Symbol:  "SYNUSDT",
+		Side:    "BUY",
+		Identity: paperClosedTradeIdentity{
+			SetupFamily: "micro_pullback_continuation",
+		},
+		Exit: paperClosedTradeExit{
+			ExitTs:            now.Add(-45 * time.Minute),
+			NetPnL:            -0.30,
+			EntryOutcomeLabel: EntryOutcomeNoProof,
+		},
+	}
+	paper.closedTradeLedger["t2"] = paperClosedTradeRecord{
+		TradeID: "t2",
+		Symbol:  "SYNUSDT",
+		Side:    "BUY",
+		Identity: paperClosedTradeIdentity{
+			SetupFamily: "reset_impulse_breakout",
+		},
+		Exit: paperClosedTradeExit{
+			ExitTs:            now.Add(-12 * time.Minute),
+			NetPnL:            -0.20,
+			EntryOutcomeLabel: EntryOutcomeWeakProof,
+		},
+	}
+	reason := paper.sameSymbolSetupCooldownReason("SYNUSDT", now, candidate{
+		Side:        "BUY",
+		SetupFamily: "breakout_retest",
+		Strat:       "impulse_breakout",
+	})
+	if !strings.Contains(reason, "same_symbol_side_cooldown") {
+		t.Fatalf("expected same symbol side cooldown, got %q", reason)
+	}
+}
+
 func TestRecordClosedTradeUsesAggregateStopOutcome(t *testing.T) {
 	paper := testCleanupPaperTrader(t)
 	now := time.Now().UTC()

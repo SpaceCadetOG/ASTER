@@ -2597,8 +2597,6 @@ func main() {
 				hk := localMaintNow.Format("2006-01-02 15")
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", notifyAccum.RenderHourlyReport(localMaintNow, snap))
 						lastPulseSentAt = now
 						lastHourlyKey = hk
 					}
@@ -12409,6 +12407,63 @@ func (p *paperTrader) hadRecentStopLoss(symbol string, now time.Time, cooldown t
 	return now.Sub(t) < cooldown
 }
 
+func weakEntryOutcome(outcome EntryOutcome) bool {
+	switch outcome {
+	case EntryOutcomeNoProof, EntryOutcomeWeakProof:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *paperTrader) sameSymbolSetupCooldownReason(raw string, now time.Time, c candidate) string {
+	if p == nil || len(p.closedTradeLedger) == 0 {
+		return ""
+	}
+	side := strings.ToUpper(strings.TrimSpace(c.Side))
+	setupFamily := firstNonEmpty(strings.TrimSpace(c.SetupFamily), strings.TrimSpace(c.Strat), "unknown")
+	const (
+		setupCooldown   = 30 * time.Minute
+		symbolWindow    = 60 * time.Minute
+		symbolCooldown  = 60 * time.Minute
+		symbolLossLimit = 2
+	)
+	var (
+		latestSetupExit time.Time
+		latestWeakExit  time.Time
+		weakExitCount   int
+	)
+	for _, rec := range p.closedTradeLedger {
+		if !strings.EqualFold(strings.TrimSpace(rec.Symbol), raw) || !strings.EqualFold(strings.TrimSpace(rec.Side), side) {
+			continue
+		}
+		exitTs := rec.Exit.ExitTs
+		if exitTs.IsZero() || exitTs.After(now) {
+			continue
+		}
+		weakOrLoss := rec.Exit.NetPnL < 0 || weakEntryOutcome(rec.Exit.EntryOutcomeLabel)
+		if weakOrLoss && now.Sub(exitTs) <= symbolWindow {
+			weakExitCount++
+			if exitTs.After(latestWeakExit) {
+				latestWeakExit = exitTs
+			}
+		}
+		if !weakOrLoss || !strings.EqualFold(strings.TrimSpace(rec.Identity.SetupFamily), setupFamily) {
+			continue
+		}
+		if exitTs.After(latestSetupExit) {
+			latestSetupExit = exitTs
+		}
+	}
+	if !latestSetupExit.IsZero() && now.Sub(latestSetupExit) < setupCooldown {
+		return fmt.Sprintf("same_setup_cooldown:%s", setupFamily)
+	}
+	if weakExitCount >= symbolLossLimit && !latestWeakExit.IsZero() && now.Sub(latestWeakExit) < symbolCooldown {
+		return fmt.Sprintf("same_symbol_side_cooldown:%s:%d_recent_weak_or_loss", side, weakExitCount)
+	}
+	return ""
+}
+
 func (p *paperTrader) blocksHarvestReentry(symbol string, now time.Time, c candidate) (bool, string) {
 	if p == nil || p.harvestLock <= 0 || p.lastHarvestAt == nil {
 		return false, ""
@@ -12645,6 +12700,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	}
 	if _, exists := p.positions[raw]; exists {
 		return nil, fmt.Errorf("symbol_already_open")
+	}
+	if reason := p.sameSymbolSetupCooldownReason(raw, now, c); reason != "" {
+		fmt.Printf("paper enter advisory: %s, continuing\n", reason)
+		return nil, fmt.Errorf("%s", reason)
 	}
 	if reason := p.symbolLossBlockReason(raw, now, c); reason != "" {
 		fmt.Printf("paper enter advisory: %s, continuing\n", reason)
@@ -18232,6 +18291,34 @@ func scoreEntryBreakdown(c candidate) EntryScoreBreakdown {
 	if b.TrendLabel == "direct_conflict" {
 		penalties += 20
 		penaltyReasons = append(penaltyReasons, "trend_conflict")
+	}
+	isLateContinuationLong := strings.EqualFold(c.Side, "BUY") &&
+		c.EntryTiming == "late" &&
+		(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)) == "pullback_reclaim" ||
+			firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)) == "impulse_breakout" ||
+			c.SetupFamily == "micro_pullback_continuation" ||
+			c.SetupFamily == "deep_pullback_reclaim" ||
+			c.SetupFamily == "breakout_retest" ||
+			c.SetupFamily == "reset_impulse_breakout")
+	if isLateContinuationLong {
+		penalties += 8
+		penaltyReasons = append(penaltyReasons, "late_continuation_long")
+		if distVWAP >= 0.90 {
+			penalties += 8
+			penaltyReasons = append(penaltyReasons, "late_continuation_vwap_stretch")
+		}
+		if c.ExtensionATR >= 1.00 {
+			penalties += 8
+			penaltyReasons = append(penaltyReasons, "late_continuation_extension")
+		}
+		if b.LocationScore < 17 {
+			penalties += 10
+			penaltyReasons = append(penaltyReasons, "late_continuation_weak_location")
+		}
+		if b.FlowScore < 10 {
+			penalties += 8
+			penaltyReasons = append(penaltyReasons, "late_continuation_weak_flow")
+		}
 	}
 	b.PenaltyScore = -penalties
 	b.PenaltyReasons = penaltyReasons
