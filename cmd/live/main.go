@@ -12687,7 +12687,12 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 			_ = p.save()
 			fmt.Printf("paper slot replace: closed %s %s reason=%s\n", replacePos.Symbol, replacePos.Side, reason)
 		} else {
-			fmt.Printf("paper enter advisory: max paper positions reached (%d), continuing\n", p.maxOpen)
+			fmt.Printf("paper enter advisory: max paper positions reached (%d), rejecting\n", p.maxOpen)
+			return nil, fmt.Errorf("max_open_reached")
+		}
+		if len(p.positions) >= p.maxOpen {
+			fmt.Printf("paper enter advisory: max paper positions still reached after replacement (%d), rejecting\n", p.maxOpen)
+			return nil, fmt.Errorf("max_open_reached")
 		}
 	}
 	free := p.freeForEntries()

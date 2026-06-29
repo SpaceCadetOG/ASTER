@@ -486,6 +486,46 @@ func TestPaperSameSymbolCooldownBlocksClusteredWeakRepeats(t *testing.T) {
 	}
 }
 
+func TestPaperMaybeEnterRejectsWhenAtMaxOpen(t *testing.T) {
+	paper := testCleanupPaperTrader(t)
+	paper.maxOpen = 1
+	paper.positions["BTCUSDT"] = &paperPosition{
+		Symbol:     "BTCUSDT",
+		Side:       "BUY",
+		Entry:      100,
+		Qty:        1,
+		InitialQty: 1,
+		Margin:     10,
+		Leverage:   5,
+		OpenedAt:   time.Now().UTC().Add(-5 * time.Minute),
+	}
+
+	_, err := paper.MaybeEnter(time.Now().UTC(), candidate{
+		Side:        "BUY",
+		Strat:       "impulse_breakout",
+		StrategyID:  "impulse_breakout",
+		SetupFamily: "reset_impulse_breakout",
+		Conf:        0.9,
+		Entry: inplay.Entry{
+			Symbol:       "ETHUSDT",
+			CurrentGrade: "A",
+			State:        inplay.StateInPlay,
+		},
+	}, 0, 10, 5, map[string]symbolMeta{
+		"ETHUSDT": {LastPrice: 100},
+		"BTCUSDT": {LastPrice: 101},
+	}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
+	if err == nil || !strings.Contains(err.Error(), "max_open_reached") {
+		t.Fatalf("expected max_open_reached error, got %v", err)
+	}
+	if len(paper.positions) != 1 {
+		t.Fatalf("expected open position count to remain capped, got %d", len(paper.positions))
+	}
+	if _, ok := paper.positions["ETHUSDT"]; ok {
+		t.Fatalf("unexpected ETHUSDT position opened despite max-open cap")
+	}
+}
+
 func TestRecordClosedTradeUsesAggregateStopOutcome(t *testing.T) {
 	paper := testCleanupPaperTrader(t)
 	now := time.Now().UTC()
