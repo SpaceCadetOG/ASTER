@@ -2616,8 +2616,6 @@ func main() {
 				if localMaintNow.Hour() > overnightReportHour || (localMaintNow.Hour() == overnightReportHour && localMaintNow.Minute() >= overnightReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != lastOvernightReportDay {
-						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", notifyAccum.RenderOvernightReport(localMaintNow, snap))
 						lastOvernightReportDay = dayKey
 					}
 				}
@@ -2626,8 +2624,6 @@ func main() {
 				if localMaintNow.Hour() > dailyReportHour || (localMaintNow.Hour() == dailyReportHour && localMaintNow.Minute() >= dailyReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != last1900ReportDay {
-						snap := buildNotifySnapshot(modeLabel, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
-						tg.Sendf("%s", notifyAccum.RenderDailyReport(localMaintNow, snap))
 						last1900ReportDay = dayKey
 					}
 				}
