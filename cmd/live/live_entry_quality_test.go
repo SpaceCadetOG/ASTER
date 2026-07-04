@@ -6,6 +6,7 @@ import (
 
 	exitmgr "go-machine/internal/execution"
 	"go-machine/internal/inplay"
+	"go-machine/internal/strategies"
 )
 
 func TestLiveEligibilityQualityRejectUsesQualityScoreTooLow(t *testing.T) {
@@ -47,6 +48,106 @@ func TestLiveEligibilityQualityRejectUsesQualityScoreTooLow(t *testing.T) {
 	}
 }
 
+func TestLiveEligibilityProjectedWeakProofRejectsEntry(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 83,
+			ScoreSlope:   0.03,
+			State:        inplay.StateInPlay,
+			Rank:         1,
+			EntryStyle:   "pullback_long",
+		},
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		Conf:              0.76,
+		CombinedScore:     0.76,
+		DayUTC24h:         6,
+		UTC4hPct:          1.0,
+		UTC1hPct:          0.3,
+		LastClose:         101,
+		SessionVWAP:       100.6,
+		EMA9:              100.5,
+		ExtensionATR:      0.80,
+		DistanceToVWAPPct: 0.60,
+		VolumeRatio:       1.0,
+		OFIZ:              0.02,
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.8,
+			TP1:   102.4,
+		},
+	}
+
+	summary := newEligibilitySummary(cand)
+	summary.FullEntryAllowed = true
+	chooseFinalDecision(&summary, ladderPlan{})
+
+	if got := summary.FinalDecision; got != "reject" {
+		t.Fatalf("expected reject, got %q", got)
+	}
+	if got := summary.FinalReason; got != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", got)
+	}
+	if !containsString(summary.Quality.QualityFlags, "projected_weak_proof") {
+		t.Fatalf("expected projected_weak_proof flag, got %+v", summary.Quality.QualityFlags)
+	}
+}
+
+func TestLiveEligibilityProjectedNoProofRejectsEntry(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
+
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "B",
+			CurrentScore: 70,
+			ScoreSlope:   -0.01,
+			State:        inplay.StateHeating,
+			Rank:         2,
+			EntryStyle:   "none",
+		},
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		Conf:              0.58,
+		CombinedScore:     0.58,
+		DayUTC24h:         1,
+		UTC4hPct:          -0.4,
+		UTC1hPct:          -0.2,
+		LastClose:         101,
+		SessionVWAP:       102,
+		EMA9:              101.8,
+		ExtensionATR:      1.05,
+		DistanceToVWAPPct: 1.20,
+		VolumeRatio:       0.85,
+		OFIZ:              -0.04,
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.9,
+			TP1:   102.0,
+		},
+	}
+
+	summary := newEligibilitySummary(cand)
+	summary.FullEntryAllowed = true
+	chooseFinalDecision(&summary, ladderPlan{})
+
+	if got := summary.FinalDecision; got != "reject" {
+		t.Fatalf("expected reject, got %q", got)
+	}
+	if got := summary.FinalReason; got != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", got)
+	}
+	if !containsString(summary.Quality.QualityFlags, "projected_no_proof") {
+		t.Fatalf("expected projected_no_proof flag, got %+v", summary.Quality.QualityFlags)
+	}
+}
+
 func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
@@ -56,16 +157,33 @@ func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 			Symbol:       "BTCUSDT",
 			CurrentGrade: "A",
 			CurrentScore: 95,
-			ScoreSlope:   0.01,
+			ScoreSlope:   0.18,
 			State:        inplay.StateInPlay,
 			Rank:         1,
+			EntryStyle:   "pullback_long",
 		},
-		Side:            "BUY",
-		Strat:           "continuation_fast",
-		Conf:            0.80,
-		CombinedScore:   0.80,
-		RejectReason:    "weak_slope",
-		ClosedBreakHold: true,
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		Conf:              0.80,
+		CombinedScore:     0.80,
+		RejectReason:      "weak_slope",
+		ClosedBreakHold:   true,
+		ReclaimHold:       true,
+		DayUTC24h:         12,
+		UTC4hPct:          4,
+		UTC1hPct:          1.5,
+		LastClose:         101,
+		SessionVWAP:       100.9,
+		EMA9:              100.7,
+		ExtensionATR:      0.45,
+		DistanceToVWAPPct: 0.10,
+		VolumeRatio:       1.8,
+		OFIZ:              0.45,
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.5,
+			TP1:   104.5,
+		},
 	}
 
 	summary := newEligibilitySummary(cand)
@@ -75,7 +193,7 @@ func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 	if got := summary.FinalDecision; got != "full_entry" {
 		t.Fatalf("expected full_entry, got %q", got)
 	}
-	if got := summary.FinalReason; got != "continuation_fast" {
+	if got := summary.FinalReason; got != "pullback_reclaim" {
 		t.Fatalf("expected strategy reason preserved, got %q", got)
 	}
 	if got := summary.Quality.BlockReason; got != "" {
@@ -83,6 +201,49 @@ func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 	}
 	if summary.AdjustedConfidence >= cand.Conf {
 		t.Fatalf("expected adjusted confidence to reflect penalty, before=%.2f after=%.2f", cand.Conf, summary.AdjustedConfidence)
+	}
+}
+
+func TestProjectedProofOutcomeClassifiesGoodAndStrong(t *testing.T) {
+	strong := candidate{
+		Side:              "BUY",
+		DayUTC24h:         12,
+		UTC4hPct:          4,
+		UTC1hPct:          1.5,
+		LastClose:         101,
+		SessionVWAP:       100.9,
+		EMA9:              100.7,
+		ExtensionATR:      0.45,
+		DistanceToVWAPPct: 0.10,
+		VolumeRatio:       1.8,
+		OFIZ:              0.45,
+		ReclaimHold:       true,
+		TriggerState:      string(triggerOFReclaim),
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.5,
+			TP1:   104.5,
+		},
+		Entry: inplay.Entry{
+			EntryStyle: "pullback_long",
+			State:      inplay.StateInPlay,
+			ScoreSlope: 0.22,
+		},
+	}
+	if got := projectedProofOutcome(strong); got != EntryOutcomeStrongProof {
+		t.Fatalf("expected strong projection, got %s", got)
+	}
+
+	good := strong
+	good.VolumeRatio = 1.2
+	good.OFIZ = 0.12
+	good.ReclaimHold = false
+	good.ClosedBreakHold = true
+	good.TriggerState = string(triggerImpulseCont)
+	good.ExtensionATR = 0.75
+	good.DistanceToVWAPPct = 0.35
+	if got := projectedProofOutcome(good); got != EntryOutcomeGoodProof {
+		t.Fatalf("expected good projection, got %s", got)
 	}
 }
 

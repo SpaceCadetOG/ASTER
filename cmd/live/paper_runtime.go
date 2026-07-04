@@ -608,6 +608,12 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 		addEntryQualityReason(&acc, c, reason)
 	}
 	addEntryQualityHeuristics(&acc, c)
+	switch projectedProofOutcome(c) {
+	case EntryOutcomeNoProof:
+		appendQualityPenalty(&acc, "projected_no_proof", 1.0)
+	case EntryOutcomeWeakProof:
+		appendQualityPenalty(&acc, "projected_weak_proof", 1.0)
+	}
 	acc.ScoreAfterPenalties = clamp(acc.ScoreBefore-acc.PenaltyTotal, 0, 1)
 	if len(acc.HardBlockReasons) > 0 {
 		acc.BlockReason = "hard_safety_block"
@@ -615,6 +621,29 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 		acc.BlockReason = "quality_score_too_low"
 	}
 	return acc
+}
+
+func projectedProofOutcome(c candidate) EntryOutcome {
+	breakdown := c.EntryScoreBreakdown
+	if breakdown.FinalScore <= 0 {
+		breakdown = scoreEntryBreakdown(c)
+	}
+	switch {
+	case breakdown.FinalScore >= 85 &&
+		breakdown.LocationScore >= 17 &&
+		breakdown.TriggerScore >= 14 &&
+		breakdown.FlowScore >= 10:
+		return EntryOutcomeStrongProof
+	case breakdown.FinalScore >= 72 &&
+		breakdown.LocationScore >= 14 &&
+		breakdown.TriggerScore >= 12 &&
+		breakdown.FlowScore >= 8:
+		return EntryOutcomeGoodProof
+	case breakdown.FinalScore >= 58:
+		return EntryOutcomeWeakProof
+	default:
+		return EntryOutcomeNoProof
+	}
 }
 
 func addEntryQualityReason(acc *strategies.EntryQualityAccumulator, c candidate, reason string) {

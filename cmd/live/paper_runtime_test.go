@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -296,6 +297,14 @@ func TestBuildEntryQualityAccumulatorAllowsPenaltyOnlyCandidate(t *testing.T) {
 		CombinedScore:   0.72,
 		Conf:            0.72,
 		ClosedBreakHold: true,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:      20,
+			LocationScore:   15,
+			TriggerScore:    13,
+			FlowScore:       9,
+			RiskRewardScore: 12,
+			FinalScore:      74,
+		},
 		Entry: inplay.Entry{
 			ScoreSlope: 0.20,
 		},
@@ -1152,7 +1161,7 @@ func TestWeakSlopePenaltyReducedForNormalCandidate(t *testing.T) {
 	if !containsString(quality.QualityFlags, "weak_slope") {
 		t.Fatalf("expected weak_slope flag, got %+v", quality.QualityFlags)
 	}
-	if delta := quality.PenaltyTotal - base.PenaltyTotal; delta != 0.03 {
+	if delta := quality.PenaltyTotal - base.PenaltyTotal; math.Abs(delta-0.03) > 1e-9 {
 		t.Fatalf("expected reduced weak_slope penalty increment 0.03, got %.2f (base=%.2f total=%.2f)", delta, base.PenaltyTotal, quality.PenaltyTotal)
 	}
 }
