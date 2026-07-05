@@ -363,6 +363,7 @@ type livePriceQuote struct {
 	LastPrice float64
 	BidPrice  float64
 	AskPrice  float64
+	MidPrice  float64
 	SpreadBps float64
 	UpdatedAt time.Time
 }
@@ -389,6 +390,53 @@ type liveAccountPosition struct {
 	StopPrice        float64
 	HoldMin          float64
 	EntryReason      string
+}
+
+func liveMoveBps(side string, fromPrice, toPrice float64) float64 {
+	if fromPrice <= 0 || toPrice <= 0 {
+		return 0
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
+		return ((fromPrice - toPrice) / fromPrice) * 10000.0
+	}
+	return ((toPrice - fromPrice) / fromPrice) * 10000.0
+}
+
+func liveFillSlippageBps(side string, intendedEntry, actualFill float64) float64 {
+	if intendedEntry <= 0 || actualFill <= 0 {
+		return 0
+	}
+	if strings.EqualFold(strings.TrimSpace(side), "SELL") {
+		return ((intendedEntry - actualFill) / intendedEntry) * 10000.0
+	}
+	return ((actualFill - intendedEntry) / intendedEntry) * 10000.0
+}
+
+func liveQuoteSnapshotMid(q livePriceQuote) float64 {
+	if q.MidPrice > 0 {
+		return q.MidPrice
+	}
+	if q.BidPrice > 0 && q.AskPrice > 0 {
+		return (q.BidPrice + q.AskPrice) / 2
+	}
+	return firstPositive(q.LastPrice, q.MarkPrice)
+}
+
+func projectedProofFromLivePosition(p *livePosition) EntryOutcome {
+	if p == nil {
+		return EntryOutcomeNoProof
+	}
+	score := p.CombinedScore * 100.0
+	switch {
+	case score >= 85 && p.TriggerScore >= 14 && p.ExecutionScore >= 14:
+		return EntryOutcomeStrongProof
+	case score >= 72 && p.TriggerScore >= 10 && p.ExecutionScore >= 10:
+		return EntryOutcomeGoodProof
+	case score >= 58:
+		return EntryOutcomeWeakProof
+	default:
+		return EntryOutcomeNoProof
+	}
 }
 
 type liveAccountSnapshot struct {
@@ -1256,6 +1304,50 @@ type livePosition struct {
 	EntryTiming              string           `json:"entryTiming,omitempty"`
 	CandidateAgeSeconds      float64          `json:"candidateAgeSeconds,omitempty"`
 	EntryDistanceToVWAPPct   float64          `json:"entryDistanceToVwapPct,omitempty"`
+	DecisionAt               time.Time        `json:"decisionAt,omitempty"`
+	OrderSubmittedAt         time.Time        `json:"orderSubmittedAt,omitempty"`
+	EntryFilledAt            time.Time        `json:"entryFilledAt,omitempty"`
+	IntendedEntryPrice       float64          `json:"intendedEntryPrice,omitempty"`
+	SignalBidPrice           float64          `json:"signalBidPrice,omitempty"`
+	SignalAskPrice           float64          `json:"signalAskPrice,omitempty"`
+	SignalMidPrice           float64          `json:"signalMidPrice,omitempty"`
+	SpreadBpsAtSignal        float64          `json:"spreadBpsAtSignal,omitempty"`
+	SubmitBidPrice           float64          `json:"submitBidPrice,omitempty"`
+	SubmitAskPrice           float64          `json:"submitAskPrice,omitempty"`
+	SubmitMidPrice           float64          `json:"submitMidPrice,omitempty"`
+	SpreadBpsAtSubmit        float64          `json:"spreadBpsAtSubmit,omitempty"`
+	FillBidPrice             float64          `json:"fillBidPrice,omitempty"`
+	FillAskPrice             float64          `json:"fillAskPrice,omitempty"`
+	FillMidPrice             float64          `json:"fillMidPrice,omitempty"`
+	SpreadBpsAtFill          float64          `json:"spreadBpsAtFill,omitempty"`
+	SlippageAbs              float64          `json:"slippageAbs,omitempty"`
+	SlippageBps              float64          `json:"slippageBps,omitempty"`
+	SlippageVsMidBps         float64          `json:"slippageVsMidBps,omitempty"`
+	DecisionToFillMs         float64          `json:"decisionToFillMs,omitempty"`
+	SubmitToFillMs           float64          `json:"submitToFillMs,omitempty"`
+	EntryCandlePositionPct   float64          `json:"entryCandlePositionPct,omitempty"`
+	Price5sAfterFill         float64          `json:"price5sAfterFill,omitempty"`
+	Price15sAfterFill        float64          `json:"price15sAfterFill,omitempty"`
+	Price30sAfterFill        float64          `json:"price30sAfterFill,omitempty"`
+	Price60sAfterFill        float64          `json:"price60sAfterFill,omitempty"`
+	Price180sAfterFill       float64          `json:"price180sAfterFill,omitempty"`
+	Move5sAfterFillBps       float64          `json:"move5sAfterFillBps,omitempty"`
+	Move15sAfterFillBps      float64          `json:"move15sAfterFillBps,omitempty"`
+	Move30sAfterFillBps      float64          `json:"move30sAfterFillBps,omitempty"`
+	Move60sAfterFillBps      float64          `json:"move60sAfterFillBps,omitempty"`
+	Move180sAfterFillBps     float64          `json:"move180sAfterFillBps,omitempty"`
+	MFEFirst5sR              float64          `json:"mfeFirst5sR,omitempty"`
+	MAEFirst5sR              float64          `json:"maeFirst5sR,omitempty"`
+	MFEFirst15sR             float64          `json:"mfeFirst15sR,omitempty"`
+	MAEFirst15sR             float64          `json:"maeFirst15sR,omitempty"`
+	MFEFirst30sR             float64          `json:"mfeFirst30sR,omitempty"`
+	MAEFirst30sR             float64          `json:"maeFirst30sR,omitempty"`
+	MFEFirst60sR             float64          `json:"mfeFirst60sR,omitempty"`
+	MAEFirst60sR             float64          `json:"maeFirst60sR,omitempty"`
+	MFEFirst180sR            float64          `json:"mfeFirst180sR,omitempty"`
+	MAEFirst180sR            float64          `json:"maeFirst180sR,omitempty"`
+	PostFillDirection60s     string           `json:"postFillDirection60s,omitempty"`
+	MarketContactClass       string           `json:"marketContactClass,omitempty"`
 	StopReason               string           `json:"stopReason,omitempty"`
 	StopDistancePct          float64          `json:"stopDistancePct,omitempty"`
 	RegimeTag                string           `json:"regimeTag,omitempty"`
@@ -7320,7 +7412,13 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 		return nil
 	}
 	if err := ensureCSVWithHeader(m.tradesCSV, []string{
-		"ts", "symbol", "side", "source", "action", "reason", "qty", "fill_px", "entry_px", "pnl", "pnl_pct", "state", "hold_min",
+		"ts", "symbol", "side", "source", "action", "reason", "qty", "fill_px", "entry_px", "intended_entry_px", "pnl", "pnl_pct", "state", "hold_min",
+		"projected_proof", "entry_timing", "setup_family", "exec_bucket",
+		"spread_bps_signal", "spread_bps_submit", "spread_bps_fill", "slippage_abs", "slippage_bps", "slippage_vs_mid_bps",
+		"decision_to_fill_ms", "submit_to_fill_ms", "entry_candle_position_pct",
+		"move_5s_bps", "move_15s_bps", "move_30s_bps", "move_60s_bps", "move_180s_bps",
+		"mfe_5s_r", "mae_5s_r", "mfe_15s_r", "mae_15s_r", "mfe_30s_r", "mae_30s_r", "mfe_60s_r", "mae_60s_r", "mfe_180s_r", "mae_180s_r",
+		"post_fill_direction_60s", "market_contact_class",
 	}); err != nil {
 		return err
 	}
@@ -7341,10 +7439,41 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 		fmt.Sprintf("%.8f", qty),
 		fmt.Sprintf("%.8f", fillPx),
 		fmt.Sprintf("%.8f", p.EntryPrice),
+		fmt.Sprintf("%.8f", p.IntendedEntryPrice),
 		fmt.Sprintf("%.8f", pnl),
 		fmt.Sprintf("%.8f", pct),
 		string(p.State),
 		fmt.Sprintf("%.2f", holdMin),
+		string(projectedProofFromLivePosition(p)),
+		p.EntryTiming,
+		p.EntrySetupFamily,
+		p.ExecBucket,
+		fmt.Sprintf("%.4f", p.SpreadBpsAtSignal),
+		fmt.Sprintf("%.4f", p.SpreadBpsAtSubmit),
+		fmt.Sprintf("%.4f", p.SpreadBpsAtFill),
+		fmt.Sprintf("%.8f", p.SlippageAbs),
+		fmt.Sprintf("%.4f", p.SlippageBps),
+		fmt.Sprintf("%.4f", p.SlippageVsMidBps),
+		fmt.Sprintf("%.2f", p.DecisionToFillMs),
+		fmt.Sprintf("%.2f", p.SubmitToFillMs),
+		fmt.Sprintf("%.4f", p.EntryCandlePositionPct),
+		fmt.Sprintf("%.4f", p.Move5sAfterFillBps),
+		fmt.Sprintf("%.4f", p.Move15sAfterFillBps),
+		fmt.Sprintf("%.4f", p.Move30sAfterFillBps),
+		fmt.Sprintf("%.4f", p.Move60sAfterFillBps),
+		fmt.Sprintf("%.4f", p.Move180sAfterFillBps),
+		fmt.Sprintf("%.4f", p.MFEFirst5sR),
+		fmt.Sprintf("%.4f", p.MAEFirst5sR),
+		fmt.Sprintf("%.4f", p.MFEFirst15sR),
+		fmt.Sprintf("%.4f", p.MAEFirst15sR),
+		fmt.Sprintf("%.4f", p.MFEFirst30sR),
+		fmt.Sprintf("%.4f", p.MAEFirst30sR),
+		fmt.Sprintf("%.4f", p.MFEFirst60sR),
+		fmt.Sprintf("%.4f", p.MAEFirst60sR),
+		fmt.Sprintf("%.4f", p.MFEFirst180sR),
+		fmt.Sprintf("%.4f", p.MAEFirst180sR),
+		p.PostFillDirection60s,
+		firstNonEmpty(p.MarketContactClass, classifyLiveMarketContact(p, reason)),
 	})
 	w.Flush()
 	if m.eventLog != nil {
@@ -7378,6 +7507,7 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 			MarkPx:       p.LastMark,
 			PnLUSD:       pnl,
 			PnLPct:       pct,
+			Slippage:     p.SlippageBps,
 			Reason:       strings.ToUpper(strings.TrimSpace(reason)),
 		})
 	}
@@ -9587,8 +9717,11 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		State:                  execPendingEntry,
 		CreatedAt:              now,
 		UpdatedAt:              now,
+		DecisionAt:             now,
+		OrderSubmittedAt:       now,
 		EntryOrderID:           orderID,
 		EntryPrice:             price,
+		IntendedEntryPrice:     price,
 		Qty:                    qty,
 		Margin:                 margin,
 		DeployedMargin:         margin,
@@ -9632,6 +9765,15 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		ReentryCount:           reentryCount,
 		ManagePhase:            managePhaseContinuation,
 	}
+	quote := m.priceQuoteForSymbol(rawSym, price)
+	p.SignalBidPrice = quote.BidPrice
+	p.SignalAskPrice = quote.AskPrice
+	p.SignalMidPrice = liveQuoteSnapshotMid(quote)
+	p.SpreadBpsAtSignal = quote.SpreadBps
+	p.SubmitBidPrice = quote.BidPrice
+	p.SubmitAskPrice = quote.AskPrice
+	p.SubmitMidPrice = liveQuoteSnapshotMid(quote)
+	p.SpreadBpsAtSubmit = quote.SpreadBps
 	if planGeom.StopDistancePct > 0 {
 		p.CustomRiskPct = planGeom.StopDistancePct / 100.0
 		baseRisk := abs(planGeom.EntryPrice - planGeom.StopPrice)
@@ -9969,6 +10111,7 @@ func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[
 				return true, nil
 			}
 			updateFavorableRLive(p, mark)
+			updateLiveMarketContactTelemetry(now, p, mark)
 			if m.updateLiveTargetHits(p, mark) {
 				changed = true
 			}
@@ -19458,11 +19601,126 @@ func (m *liveExecManager) priceQuoteForSymbol(symbol string, remoteMark float64)
 	if q.LastPrice <= 0 {
 		q.LastPrice = mid
 	}
+	q.MidPrice = mid
 	if bid > 0 && ask > 0 {
 		q.SpreadBps = ((ask - bid) / ((ask + bid) / 2)) * 10000.0
 	}
 	q.UpdatedAt = time.Now().UTC()
 	return q
+}
+
+func (m *liveExecManager) entryCandlePositionPct(symbol string, px float64) float64 {
+	if m == nil || m.featureCache == nil || px <= 0 {
+		return 0
+	}
+	bars, err := m.featureCache.candleSeries(symbol, types.TF1m, 2)
+	if err != nil || len(bars) == 0 {
+		return 0
+	}
+	bar := bars[len(bars)-1]
+	lo := bar.L
+	hi := bar.H
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if hi <= lo {
+		return 0.5
+	}
+	return clamp((px-lo)/(hi-lo), 0, 1)
+}
+
+func (m *liveExecManager) captureLiveEntryTelemetry(now time.Time, p *livePosition, fillPx float64) {
+	if m == nil || p == nil {
+		return
+	}
+	if p.EntryFilledAt.IsZero() {
+		p.EntryFilledAt = now
+	}
+	q := m.priceQuoteForSymbol(p.Symbol, p.LastMark)
+	p.FillBidPrice = q.BidPrice
+	p.FillAskPrice = q.AskPrice
+	p.FillMidPrice = liveQuoteSnapshotMid(q)
+	p.SpreadBpsAtFill = q.SpreadBps
+	if fillPx > 0 {
+		p.SlippageAbs = fillPx - p.IntendedEntryPrice
+		p.SlippageBps = liveFillSlippageBps(p.Side, p.IntendedEntryPrice, fillPx)
+		if p.FillMidPrice > 0 {
+			p.SlippageVsMidBps = liveFillSlippageBps(p.Side, p.FillMidPrice, fillPx)
+		}
+		p.EntryCandlePositionPct = m.entryCandlePositionPct(p.Symbol, fillPx)
+	}
+	if !p.DecisionAt.IsZero() {
+		p.DecisionToFillMs = now.Sub(p.DecisionAt).Seconds() * 1000.0
+	}
+	if !p.OrderSubmittedAt.IsZero() {
+		p.SubmitToFillMs = now.Sub(p.OrderSubmittedAt).Seconds() * 1000.0
+	}
+}
+
+func captureLiveContactWindow(side string, entryPrice, mark, mfe, mae float64, priceField, moveField, mfeField, maeField *float64) {
+	if priceField == nil || moveField == nil || mfeField == nil || maeField == nil {
+		return
+	}
+	if *priceField > 0 || mark <= 0 {
+		return
+	}
+	*priceField = mark
+	*moveField = liveMoveBps(side, entryPrice, mark)
+	*mfeField = mfe
+	*maeField = mae
+}
+
+func updateLiveMarketContactTelemetry(now time.Time, p *livePosition, mark float64) {
+	if p == nil || p.EntryFilledAt.IsZero() || mark <= 0 {
+		return
+	}
+	elapsed := now.Sub(p.EntryFilledAt)
+	if elapsed >= 5*time.Second {
+		captureLiveContactWindow(p.Side, p.EntryPrice, mark, p.MaxFavorableR, p.MaxAdverseR, &p.Price5sAfterFill, &p.Move5sAfterFillBps, &p.MFEFirst5sR, &p.MAEFirst5sR)
+	}
+	if elapsed >= 15*time.Second {
+		captureLiveContactWindow(p.Side, p.EntryPrice, mark, p.MaxFavorableR, p.MaxAdverseR, &p.Price15sAfterFill, &p.Move15sAfterFillBps, &p.MFEFirst15sR, &p.MAEFirst15sR)
+	}
+	if elapsed >= 30*time.Second {
+		captureLiveContactWindow(p.Side, p.EntryPrice, mark, p.MaxFavorableR, p.MaxAdverseR, &p.Price30sAfterFill, &p.Move30sAfterFillBps, &p.MFEFirst30sR, &p.MAEFirst30sR)
+	}
+	if elapsed >= 60*time.Second {
+		captureLiveContactWindow(p.Side, p.EntryPrice, mark, p.MaxFavorableR, p.MaxAdverseR, &p.Price60sAfterFill, &p.Move60sAfterFillBps, &p.MFEFirst60sR, &p.MAEFirst60sR)
+		switch {
+		case p.Move60sAfterFillBps > 8:
+			p.PostFillDirection60s = "YES"
+		case p.Move60sAfterFillBps < -8:
+			p.PostFillDirection60s = "NO"
+		default:
+			p.PostFillDirection60s = "CHOP"
+		}
+	}
+	if elapsed >= 180*time.Second {
+		captureLiveContactWindow(p.Side, p.EntryPrice, mark, p.MaxFavorableR, p.MaxAdverseR, &p.Price180sAfterFill, &p.Move180sAfterFillBps, &p.MFEFirst180sR, &p.MAEFirst180sR)
+	}
+}
+
+func classifyLiveMarketContact(p *livePosition, closeReason string) string {
+	if p == nil {
+		return "unknown"
+	}
+	reason := strings.ToUpper(strings.TrimSpace(closeReason))
+	switch {
+	case p.Move30sAfterFillBps <= -12 && p.MFEFirst30sR < 0.25:
+		return "immediate_rejection"
+	case (strings.Contains(reason, "STOP") || strings.Contains(reason, "SL")) && p.MaxFavorableR >= 0.75:
+		return "stop_sweep_then_continuation"
+	case p.EntryCandlePositionPct >= 0.85 && strings.EqualFold(p.Side, "BUY") && p.MaxFavorableR < 0.50:
+		return "late_entry_exhaustion"
+	case p.EntryCandlePositionPct <= 0.15 && strings.EqualFold(p.Side, "SELL") && p.MaxFavorableR < 0.50:
+		return "late_entry_exhaustion"
+	case p.SlippageBps > maxFloat(12, p.SpreadBpsAtSignal*1.5) && p.Move30sAfterFillBps < 0:
+		return "fill_quality_failure"
+	case p.Move60sAfterFillBps > 10 && p.MFEFirst60sR >= 0.75:
+		return "clean_continuation"
+	default:
+		return "chop_no_edge"
+	}
 }
 
 func (m *liveExecManager) mergeLiveAccountSnapshot(now time.Time, acct accountSnapshot) liveAccountSnapshot {
@@ -20675,6 +20933,9 @@ func markLivePositionClosed(p *livePosition, now time.Time, reason string) {
 }
 
 func (m *liveExecManager) markPositionClosed(now time.Time, p *livePosition, reason string) {
+	if p != nil {
+		p.MarketContactClass = classifyLiveMarketContact(p, reason)
+	}
 	markLivePositionClosed(p, now, reason)
 	if m != nil {
 		m.recordExecutionGovernorExit(now, p, reason)

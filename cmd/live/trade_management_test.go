@@ -375,6 +375,59 @@ func TestScoreEntryBreakdownPrefersAlignedStructuredEntry(t *testing.T) {
 	}
 }
 
+func TestUpdateLiveMarketContactTelemetryCapturesInitialWindows(t *testing.T) {
+	now := time.Now().UTC()
+	pos := &livePosition{
+		Side:          "BUY",
+		EntryPrice:    100,
+		EntryFilledAt: now.Add(-65 * time.Second),
+		MaxFavorableR: 0.9,
+		MaxAdverseR:   0.2,
+	}
+	updateLiveMarketContactTelemetry(now, pos, 101.2)
+	if pos.Price5sAfterFill <= 0 || pos.Price60sAfterFill <= 0 {
+		t.Fatalf("expected early contact windows to be captured, got %+v", pos)
+	}
+	if pos.PostFillDirection60s != "YES" {
+		t.Fatalf("expected positive 60s direction, got %q", pos.PostFillDirection60s)
+	}
+}
+
+func TestClassifyLiveMarketContact(t *testing.T) {
+	t.Run("immediate rejection", func(t *testing.T) {
+		pos := &livePosition{
+			Side:                "BUY",
+			Move30sAfterFillBps: -18,
+			MFEFirst30sR:        0.10,
+		}
+		if got := classifyLiveMarketContact(pos, "POSITION_FLAT_REMOTE"); got != "immediate_rejection" {
+			t.Fatalf("expected immediate_rejection, got %q", got)
+		}
+	})
+
+	t.Run("late entry exhaustion", func(t *testing.T) {
+		pos := &livePosition{
+			Side:                   "BUY",
+			EntryCandlePositionPct: 0.92,
+			MaxFavorableR:          0.20,
+		}
+		if got := classifyLiveMarketContact(pos, "POSITION_FLAT_REMOTE"); got != "late_entry_exhaustion" {
+			t.Fatalf("expected late_entry_exhaustion, got %q", got)
+		}
+	})
+
+	t.Run("clean continuation", func(t *testing.T) {
+		pos := &livePosition{
+			Side:                "BUY",
+			Move60sAfterFillBps: 15,
+			MFEFirst60sR:        1.1,
+		}
+		if got := classifyLiveMarketContact(pos, "TP1_HIT"); got != "clean_continuation" {
+			t.Fatalf("expected clean_continuation, got %q", got)
+		}
+	})
+}
+
 func TestScoreEntryBreakdownPenalizesLateContinuationLong(t *testing.T) {
 	early := candidate{
 		Side:              "BUY",

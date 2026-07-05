@@ -193,6 +193,7 @@ func (m *liveExecManager) transitionPendingToOpen(now time.Time, p *livePosition
 	if avgPx > 0 {
 		p.EntryPrice = avgPx
 	}
+	m.captureLiveEntryTelemetry(now, p, p.EntryPrice)
 	p.FilledQty = qty
 	p.RemainingQty = qty
 	p.State = execOpen
