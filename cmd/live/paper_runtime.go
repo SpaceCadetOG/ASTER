@@ -313,16 +313,27 @@ func hasEntryScoreBreakdownData(b EntryScoreBreakdown) bool {
 		strings.TrimSpace(b.TrendLabel) != "" || strings.TrimSpace(b.LocationLabel) != "" || strings.TrimSpace(b.TriggerLabel) != "" || strings.TrimSpace(b.FlowLabel) != "" || strings.TrimSpace(b.RiskRewardLabel) != ""
 }
 
+func normalizeEntryScoreBreakdown(b EntryScoreBreakdown) EntryScoreBreakdown {
+	if b.FinalScore > 0 {
+		return b
+	}
+	componentTotal := b.TrendScore + b.LocationScore + b.TriggerScore + b.FlowScore + b.RiskRewardScore + b.PenaltyScore
+	if componentTotal > 0 || (b.PenaltyScore < 0 && (b.TrendScore > 0 || b.LocationScore > 0 || b.TriggerScore > 0 || b.FlowScore > 0 || b.RiskRewardScore > 0)) {
+		b.FinalScore = clamp(componentTotal, 0, 100)
+	}
+	return b
+}
+
 func candidateHasProofInputs(c candidate) bool {
 	return hasEntryScoreBreakdownData(c.EntryScoreBreakdown)
 }
 
 func resolvedEntryScoreBreakdown(c candidate) EntryScoreBreakdown {
-	breakdown := c.EntryScoreBreakdown
+	breakdown := normalizeEntryScoreBreakdown(c.EntryScoreBreakdown)
 	if hasEntryScoreBreakdownData(breakdown) {
 		return breakdown
 	}
-	breakdown = scoreEntryBreakdown(c)
+	breakdown = normalizeEntryScoreBreakdown(scoreEntryBreakdown(c))
 	if hasEntryScoreBreakdownData(breakdown) {
 		return breakdown
 	}

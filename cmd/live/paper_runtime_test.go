@@ -433,6 +433,48 @@ func TestBuildEntryQualityAccumulatorZeroFinalScoreBlocks(t *testing.T) {
 	}
 }
 
+func TestResolvedEntryScoreBreakdownDerivesMissingFinalScore(t *testing.T) {
+	cand := candidate{
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		StrategyID:        "pullback_reclaim",
+		SetupFamily:       "micro_pullback_continuation",
+		CombinedScore:     0,
+		Conf:              0.82,
+		DayUTC24h:         12,
+		UTC4hPct:          1.3,
+		UTC1hPct:          0.4,
+		LastClose:         101,
+		SessionVWAP:       100.8,
+		EMA9:              100.7,
+		VolumeRatio:       1.4,
+		OFIZ:              0.2,
+		DistanceToVWAPPct: 0.2,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:      20,
+			LocationScore:   17,
+			TriggerScore:    14,
+			FlowScore:       12,
+			RiskRewardScore: 12,
+			PenaltyScore:    -1,
+			TrendLabel:      "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99,
+			TP1:   104.5,
+		},
+	}
+
+	breakdown := resolvedEntryScoreBreakdown(cand)
+	if got, want := breakdown.FinalScore, 74.0; got != want {
+		t.Fatalf("expected derived final score %.1f, got %.1f", want, got)
+	}
+	if got := projectedProofOutcome(cand); got != EntryOutcomeGoodProof {
+		t.Fatalf("expected GOOD_PROOF from derived score, got %s", got)
+	}
+}
+
 func TestBuildEntryQualityAccumulatorInsufficientProofRoomBlocks(t *testing.T) {
 	cand := candidate{
 		Side:          "BUY",
