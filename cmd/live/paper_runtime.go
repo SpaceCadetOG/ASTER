@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go-machine/adapters/aster"
@@ -112,25 +113,21 @@ type paperDecisionCtx struct {
 }
 
 func buildPaperExecutionDecision(ctx paperDecisionCtx) strategies.ExecutionDecision {
-	riskDec := paperRiskDecision(ctx)
-	preflight := paperPreflightVerdict(ctx)
-	admission := strategies.AdmissionSummary{
-		LifecycleStage: ctx.Candidate.LifecycleStage,
-		TriggerStage:   ctx.Candidate.TriggerStage,
-		TriggerState:   ctx.Candidate.TriggerState,
-		CandidateGrade: ctx.Candidate.Entry.CurrentGrade,
-		CandidateScore: ctx.Candidate.Entry.CurrentScore,
-		FinalRank:      ctx.Candidate.FinalRank,
-	}
-	return strategies.NewExecutionDecision(
-		ctx.Candidate.Entry.Symbol,
-		ctx.Candidate.Sig,
-		riskDec,
-		preflight,
-		admission,
-		"paper",
-		firstNonEmpty(strings.TrimSpace(ctx.Candidate.Strat), "unknown"),
-	)
+	preflightReason := paperBaselineHardRejectReason(ctx)
+	return buildSharedRuntimeDecision(sharedRuntimeDecisionContext{
+		Candidate:             ctx.Candidate,
+		MetaBySymbol:          ctx.MetaBySymbol,
+		RiskShell:             ctx.RiskShell,
+		RiskFallbackStopPct:   ctx.RiskFallbackStopPct,
+		RiskHoldHours:         ctx.RiskHoldHours,
+		LeverageMode:          ctx.LeverageMode,
+		LeverageFixed:         ctx.LeverageFixed,
+		LeverageMin:           ctx.LeverageMin,
+		MaxLeverage:           ctx.MaxLeverage,
+		EffectiveMargin:       ctx.EffectiveMargin,
+		PreflightRejectReason: preflightReason,
+		PreflightSource:       "paper",
+	}).ExecutionDecision
 }
 
 func paperRiskDecision(ctx paperDecisionCtx) risk.Decision {
@@ -244,6 +241,176 @@ func buildPaperQualityLogOnly(c candidate) strategies.EntryQualityAccumulator {
 	return acc
 }
 
+type recentProofOutcomeStats struct {
+	NoWeakCount     int
+	GoodStrongCount int
+}
+
+type proofOutcomeMemory struct {
+	mu    sync.RWMutex
+	byDay map[string]map[string]recentProofOutcomeStats
+}
+
+var runtimeProofMemory = &proofOutcomeMemory{byDay: map[string]map[string]recentProofOutcomeStats{}}
+
+func proofMemoryDay(ts time.Time) string {
+	return ts.UTC().Format("2006-01-02")
+}
+
+func proofMemoryKey(symbol, side, strategy, setup string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" +
+		strings.ToUpper(strings.TrimSpace(side)) + "|" +
+		strings.ToLower(strings.TrimSpace(strategy)) + "|" +
+		strings.ToLower(strings.TrimSpace(setup))
+}
+
+func candidateProofMemoryKey(c candidate) string {
+	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))
+	return proofMemoryKey(raw, c.Side, firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), c.SetupFamily)
+}
+
+func rebuildRuntimeProofMemory(ledger map[string]paperClosedTradeRecord) {
+	runtimeProofMemory.mu.Lock()
+	defer runtimeProofMemory.mu.Unlock()
+	runtimeProofMemory.byDay = map[string]map[string]recentProofOutcomeStats{}
+	for _, rec := range ledger {
+		recordRuntimeProofMemoryLocked(rec)
+	}
+}
+
+func recordRuntimeProofMemory(rec paperClosedTradeRecord) {
+	runtimeProofMemory.mu.Lock()
+	defer runtimeProofMemory.mu.Unlock()
+	recordRuntimeProofMemoryLocked(rec)
+}
+
+func recordRuntimeProofMemoryLocked(rec paperClosedTradeRecord) {
+	day := proofMemoryDay(rec.Exit.ExitTs)
+	if runtimeProofMemory.byDay[day] == nil {
+		runtimeProofMemory.byDay[day] = map[string]recentProofOutcomeStats{}
+	}
+	key := proofMemoryKey(rec.Symbol, rec.Side, rec.Identity.Strategy, rec.Identity.SetupFamily)
+	stats := runtimeProofMemory.byDay[day][key]
+	if weakEntryOutcome(rec.Exit.EntryOutcomeLabel) {
+		stats.NoWeakCount++
+	} else {
+		stats.GoodStrongCount++
+	}
+	runtimeProofMemory.byDay[day][key] = stats
+}
+
+func recentRuntimeProofStats(now time.Time, c candidate) recentProofOutcomeStats {
+	runtimeProofMemory.mu.RLock()
+	defer runtimeProofMemory.mu.RUnlock()
+	if runtimeProofMemory.byDay == nil {
+		return recentProofOutcomeStats{}
+	}
+	return runtimeProofMemory.byDay[proofMemoryDay(now)][candidateProofMemoryKey(c)]
+}
+
+func hasEntryScoreBreakdownData(b EntryScoreBreakdown) bool {
+	return b.FinalScore > 0 || b.TrendScore > 0 || b.LocationScore > 0 || b.TriggerScore > 0 || b.FlowScore > 0 || b.RiskRewardScore > 0 || b.PenaltyScore != 0 || len(b.PenaltyReasons) > 0 ||
+		strings.TrimSpace(b.TrendLabel) != "" || strings.TrimSpace(b.LocationLabel) != "" || strings.TrimSpace(b.TriggerLabel) != "" || strings.TrimSpace(b.FlowLabel) != "" || strings.TrimSpace(b.RiskRewardLabel) != ""
+}
+
+func candidateHasProofInputs(c candidate) bool {
+	return hasEntryScoreBreakdownData(c.EntryScoreBreakdown)
+}
+
+func resolvedEntryScoreBreakdown(c candidate) EntryScoreBreakdown {
+	breakdown := c.EntryScoreBreakdown
+	if hasEntryScoreBreakdownData(breakdown) {
+		return breakdown
+	}
+	breakdown = scoreEntryBreakdown(c)
+	if hasEntryScoreBreakdownData(breakdown) {
+		return breakdown
+	}
+	if c.CombinedScore > 0 {
+		breakdown.FinalScore = clamp(c.CombinedScore*100.0, 0, 100)
+	}
+	return breakdown
+}
+
+func candidateProofRoomR(c candidate) float64 {
+	entry := firstPositive(c.Sig.Entry, c.LastClose)
+	stop := c.Sig.Stop
+	if entry <= 0 || stop <= 0 || entry == stop {
+		return 0
+	}
+	risk := math.Abs(entry - stop)
+	if risk <= 0 {
+		return 0
+	}
+	targets := []float64{}
+	if c.Sig.TP1 > 0 {
+		targets = append(targets, c.Sig.TP1)
+	}
+	if c.Sig.VPTargetLevel > 0 {
+		targets = append(targets, c.Sig.VPTargetLevel)
+	}
+	best := 0.0
+	for _, target := range targets {
+		move := 0.0
+		if strings.EqualFold(c.Side, "BUY") {
+			move = target - entry
+		} else {
+			move = entry - target
+		}
+		if move <= 0 {
+			continue
+		}
+		if best <= 0 || move < best {
+			best = move
+		}
+	}
+	if best <= 0 {
+		return 0
+	}
+	return best / risk
+}
+
+func executionProofRejectReason(now time.Time, c candidate) string {
+	if !isExecutableStrategy(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat))) {
+		return ""
+	}
+	if c.Sig.Entry <= 0 || c.Sig.Stop <= 0 || c.Sig.TP1 <= 0 {
+		return ""
+	}
+	breakdown := resolvedEntryScoreBreakdown(c)
+	if !hasEntryScoreBreakdownData(breakdown) {
+		return ""
+	}
+	quality := buildEntryQualityAccumulator(c, nil)
+	return strings.TrimSpace(quality.BlockReason)
+}
+
+func emitEntryProofCheck(now time.Time, c candidate, decision strategies.ExecutionDecision, executionPath string) {
+	breakdown := resolvedEntryScoreBreakdown(c)
+	proof := projectedProofOutcome(c)
+	proofRoom := candidateProofRoomR(c)
+	stats := recentRuntimeProofStats(now, c)
+	fmt.Printf(
+		"ENTRY_PROOF_CHECK symbol=%s side=%s strategy=%s setup=%s final_score=%.1f projected_proof=%s proof_room_r=%.2f trigger_score=%.1f flow_score=%.1f location_score=%.1f trend_score=%.1f recent_symbol_setup_no_weak_count=%d quality_block_reason=%s decision_approved=%t rejects=%s execution_path=%s\n",
+		strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
+		strings.ToUpper(strings.TrimSpace(c.Side)),
+		firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat), "unknown"),
+		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "unknown"),
+		breakdown.FinalScore,
+		proof,
+		proofRoom,
+		breakdown.TriggerScore,
+		breakdown.FlowScore,
+		breakdown.LocationScore,
+		breakdown.TrendScore,
+		stats.NoWeakCount,
+		firstNonEmpty(strings.TrimSpace(decision.Quality.BlockReason), "none"),
+		decision.Approved,
+		strings.Join(decision.Rejects, "|"),
+		firstNonEmpty(strings.TrimSpace(executionPath), "unknown"),
+	)
+}
+
 type paperEnterFunc func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error)
 
 type paperDispatchHooks struct {
@@ -277,6 +444,7 @@ func dispatchPaperDecision(mode runtimeOperatingMode, now time.Time, decision st
 	if mode != runtimeModePaper {
 		return paperDispatchResult{}
 	}
+	emitEntryProofCheck(now, c, decision, "paper_dispatch")
 	if !decision.Approved {
 		return paperDispatchResult{RejectReason: firstNonEmpty(decision.RejectReason, "not_approved")}
 	}
@@ -608,36 +776,64 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 		addEntryQualityReason(&acc, c, reason)
 	}
 	addEntryQualityHeuristics(&acc, c)
-	switch projectedProofOutcome(c) {
-	case EntryOutcomeNoProof:
-		appendQualityPenalty(&acc, "projected_no_proof", 1.0)
-	case EntryOutcomeWeakProof:
-		appendQualityPenalty(&acc, "projected_weak_proof", 1.0)
+	if candidateHasProofInputs(c) {
+		breakdown := resolvedEntryScoreBreakdown(c)
+		if breakdown.FinalScore <= 0 && c.CombinedScore <= 0 {
+			appendQualityPenalty(&acc, "entry_score_zero", 1.0)
+		}
+		switch projectedProofOutcome(c) {
+		case EntryOutcomeNoProof:
+			appendQualityPenalty(&acc, "projected_no_proof", 1.0)
+		case EntryOutcomeWeakProof:
+			appendQualityPenalty(&acc, "projected_weak_proof", 1.0)
+		}
+		proofRoomR := candidateProofRoomR(c)
+		if proofRoomR > 0 && proofRoomR < 1.0 {
+			appendQualityPenalty(&acc, "insufficient_proof_room", 1.0)
+		}
+		proofStats := recentRuntimeProofStats(time.Now().UTC(), c)
+		if proofStats.NoWeakCount >= 2 && proofStats.GoodStrongCount == 0 {
+			appendHardBlock(&acc, "symbol_setup_failed_proof_recently")
+		}
+		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "impulse_breakout") &&
+			(strings.EqualFold(strings.TrimSpace(c.EntryTiming), "late") || containsString(acc.QualityFlags, "avoid_chase") || containsString(acc.QualityFlags, "late_chase_fading_impulse") || containsString(acc.QualityFlags, "late_chase_rapid_expansion")) {
+			appendQualityPenalty(&acc, "late_impulse_chase", 1.0)
+		}
+		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "exhaustion_reversal") &&
+			strings.EqualFold(strings.TrimSpace(c.SetupFamily), "reversal_exhaustion") &&
+			projectedProofOutcome(c) != EntryOutcomeStrongProof {
+			appendQualityPenalty(&acc, "exhaustion_reversal_requires_strong_proof", 1.0)
+		}
+		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "pullback_reclaim") {
+			if (breakdown.FlowScore > 0 || breakdown.TriggerScore > 0) && (breakdown.FlowScore < 8 || breakdown.TriggerScore < 12) {
+				appendQualityPenalty(&acc, "pullback_flow_trigger_unconfirmed", 1.0)
+			}
+		}
 	}
 	acc.ScoreAfterPenalties = clamp(acc.ScoreBefore-acc.PenaltyTotal, 0, 1)
-	if len(acc.HardBlockReasons) > 0 {
+	switch {
+	case containsString(acc.HardBlockReasons, "symbol_setup_failed_proof_recently"):
+		acc.BlockReason = "symbol_setup_failed_proof_recently"
+	case len(acc.HardBlockReasons) > 0:
 		acc.BlockReason = "hard_safety_block"
-	} else if acc.ScoreAfterPenalties < acc.MinScore {
+	case acc.ScoreAfterPenalties < acc.MinScore:
 		acc.BlockReason = "quality_score_too_low"
 	}
 	return acc
 }
 
 func projectedProofOutcome(c candidate) EntryOutcome {
-	breakdown := c.EntryScoreBreakdown
-	if breakdown.FinalScore <= 0 {
-		breakdown = scoreEntryBreakdown(c)
-	}
+	breakdown := resolvedEntryScoreBreakdown(c)
 	switch {
 	case breakdown.FinalScore >= 85 &&
-		breakdown.LocationScore >= 17 &&
-		breakdown.TriggerScore >= 14 &&
-		breakdown.FlowScore >= 10:
+		(breakdown.LocationScore == 0 || breakdown.LocationScore >= 17) &&
+		(breakdown.TriggerScore == 0 || breakdown.TriggerScore >= 14) &&
+		(breakdown.FlowScore == 0 || breakdown.FlowScore >= 10):
 		return EntryOutcomeStrongProof
 	case breakdown.FinalScore >= 72 &&
-		breakdown.LocationScore >= 14 &&
-		breakdown.TriggerScore >= 12 &&
-		breakdown.FlowScore >= 8:
+		(breakdown.LocationScore == 0 || breakdown.LocationScore >= 14) &&
+		(breakdown.TriggerScore == 0 || breakdown.TriggerScore >= 12) &&
+		(breakdown.FlowScore == 0 || breakdown.FlowScore >= 8):
 		return EntryOutcomeGoodProof
 	case breakdown.FinalScore >= 58:
 		return EntryOutcomeWeakProof

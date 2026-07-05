@@ -76,6 +76,14 @@ func TestLiveEligibilityProjectedWeakProofRejectsEntry(t *testing.T) {
 		DistanceToVWAPPct: 0.60,
 		VolumeRatio:       1.0,
 		OFIZ:              0.02,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 14,
+			TriggerScore:  12,
+			FlowScore:     8,
+			FinalScore:    58,
+			TrendLabel:    "scored",
+		},
 		Sig: strategies.Signal{
 			Entry: 101,
 			Stop:  99.8,
@@ -126,6 +134,14 @@ func TestLiveEligibilityProjectedNoProofRejectsEntry(t *testing.T) {
 		DistanceToVWAPPct: 1.20,
 		VolumeRatio:       0.85,
 		OFIZ:              -0.04,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 8,
+			TriggerScore:  10,
+			FlowScore:     5,
+			FinalScore:    40,
+			TrendLabel:    "scored",
+		},
 		Sig: strategies.Signal{
 			Entry: 101,
 			Stop:  99.9,
@@ -279,6 +295,28 @@ func TestPlaceEntryRejectsUnresolvedStrategyBeforeSubmit(t *testing.T) {
 	err := (*liveExecManager)(nil).PlaceEntry(candidate{Strat: "none"}, 0, 10, 5, ladderPlan{})
 	if err == nil || err.Error() != "setup_unresolved" {
 		t.Fatalf("expected setup_unresolved, got %v", err)
+	}
+}
+
+func TestPlaceEntryRejectsProjectedNoProofBeforeSubmit(t *testing.T) {
+	err := (*liveExecManager)(nil).PlaceEntry(candidate{
+		Entry:       inplay.Entry{Symbol: "BTCUSDT"},
+		Side:        "BUY",
+		Strat:       "pullback_reclaim",
+		StrategyID:  "pullback_reclaim",
+		SetupFamily: "micro_pullback_continuation",
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			FinalScore: 40,
+			TrendLabel: "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.9,
+			TP1:   102.0,
+		},
+	}, 0, 10, 5, ladderPlan{})
+	if err == nil || err.Error() != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %v", err)
 	}
 }
 

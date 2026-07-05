@@ -349,6 +349,159 @@ func TestBuildEntryQualityAccumulatorBlocksWhenPenaltyDropsBelowMinScore(t *test
 	}
 }
 
+func TestBuildEntryQualityAccumulatorProjectedNoProofBlocks(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	cand := candidate{
+		Side:          "BUY",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		SetupFamily:   "micro_pullback_continuation",
+		CombinedScore: 0.58,
+		Conf:          0.58,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			FinalScore: 40,
+			TrendLabel: "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.9,
+			TP1:   102.0,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if quality.BlockReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
+	}
+	if !containsString(quality.QualityFlags, "projected_no_proof") {
+		t.Fatalf("expected projected_no_proof flag, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorProjectedWeakProofBlocks(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
+	cand := candidate{
+		Side:          "BUY",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		SetupFamily:   "micro_pullback_continuation",
+		CombinedScore: 0.76,
+		Conf:          0.76,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 14,
+			TriggerScore:  12,
+			FlowScore:     8,
+			FinalScore:    58,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.8,
+			TP1:   102.4,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if quality.BlockReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
+	}
+	if !containsString(quality.QualityFlags, "projected_weak_proof") {
+		t.Fatalf("expected projected_weak_proof flag, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorZeroFinalScoreBlocks(t *testing.T) {
+	cand := candidate{
+		Side:        "BUY",
+		Strat:       "pullback_reclaim",
+		StrategyID:  "pullback_reclaim",
+		SetupFamily: "micro_pullback_continuation",
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendLabel: "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 100,
+			Stop:  99,
+			TP1:   102,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if quality.BlockReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
+	}
+	if !containsString(quality.QualityFlags, "entry_score_zero") {
+		t.Fatalf("expected entry_score_zero flag, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorInsufficientProofRoomBlocks(t *testing.T) {
+	cand := candidate{
+		Side:          "BUY",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		SetupFamily:   "micro_pullback_continuation",
+		CombinedScore: 0.9,
+		Conf:          0.9,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    20,
+			LocationScore: 20,
+			TriggerScore:  16,
+			FlowScore:     12,
+			FinalScore:    88,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 100,
+			Stop:  99,
+			TP1:   100.5,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if quality.BlockReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
+	}
+	if !containsString(quality.QualityFlags, "insufficient_proof_room") {
+		t.Fatalf("expected insufficient_proof_room flag, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorRecentFailedProofBlocks(t *testing.T) {
+	rebuildRuntimeProofMemory(nil)
+	t.Cleanup(func() { rebuildRuntimeProofMemory(nil) })
+	now := time.Now().UTC()
+	keyRec := func(id string) paperClosedTradeRecord {
+		return paperClosedTradeRecord{
+			TradeID: id,
+			Symbol:  "BTCUSDT",
+			Side:    "BUY",
+			Identity: paperClosedTradeIdentity{
+				Strategy:    "pullback_reclaim",
+				SetupFamily: "micro_pullback_continuation",
+			},
+			Exit: paperClosedTradeExit{
+				ExitTs:            now,
+				EntryOutcomeLabel: EntryOutcomeNoProof,
+			},
+		}
+	}
+	recordRuntimeProofMemory(keyRec("a"))
+	recordRuntimeProofMemory(keyRec("b"))
+	cand := candidate{
+		Entry:               inplay.Entry{Symbol: "BTCUSDT"},
+		Side:                "BUY",
+		Strat:               "pullback_reclaim",
+		StrategyID:          "pullback_reclaim",
+		SetupFamily:         "micro_pullback_continuation",
+		CombinedScore:       0.95,
+		Conf:                0.95,
+		EntryScoreBreakdown: EntryScoreBreakdown{TrendScore: 20, LocationScore: 20, TriggerScore: 16, FlowScore: 12, FinalScore: 88, TrendLabel: "scored"},
+		Sig:                 strategies.Signal{Entry: 100, Stop: 99, TP1: 102},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if quality.BlockReason != "symbol_setup_failed_proof_recently" {
+		t.Fatalf("expected symbol_setup_failed_proof_recently, got %q", quality.BlockReason)
+	}
+}
+
 func TestBuildEntryQualityAccumulatorPreservesHardSafetyBlock(t *testing.T) {
 	cand := candidate{
 		Strat:         "continuation_fast",
@@ -787,6 +940,29 @@ func TestDispatchPaperDecisionUnresolvedDoesNotCallMaybeEnter(t *testing.T) {
 	}
 }
 
+func TestMaybeEnterRejectsProjectedNoProofBeforeOpen(t *testing.T) {
+	paper := testPaperRuntimePaper()
+	_, err := paper.MaybeEnter(time.Now().UTC(), candidate{
+		Entry:       inplay.Entry{Symbol: "BTCUSDT"},
+		Side:        "BUY",
+		Strat:       "pullback_reclaim",
+		StrategyID:  "pullback_reclaim",
+		SetupFamily: "micro_pullback_continuation",
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			FinalScore: 40,
+			TrendLabel: "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.9,
+			TP1:   102.0,
+		},
+	}, 0, 50, 3, map[string]symbolMeta{"BTCUSDT": {LastPrice: 101}}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
+	if err == nil || err.Error() != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low, got %v", err)
+	}
+}
+
 func TestSelectTopRuntimeCandidatePrefersExecutableStrategy(t *testing.T) {
 	unresolved := candidate{}
 	unresolved.Entry.Symbol = "ETHUSDT"
@@ -950,7 +1126,7 @@ func TestPaperDecisionRejectReasonClassifiesInactiveFallbackExecutionGap(t *test
 	}
 }
 
-func TestFallbackExecutableCandidateBuildsApprovedPaperDecision(t *testing.T) {
+func TestFallbackExecutableCandidateProjectedNoProofIsRejected(t *testing.T) {
 	now := time.Now().UTC()
 	cand := applySimpleContinuationFallbackAt(candidate{
 		Side:        "BUY",
@@ -974,8 +1150,11 @@ func TestFallbackExecutableCandidateBuildsApprovedPaperDecision(t *testing.T) {
 	ctx.Now = now
 	ctx.Candidate = cand
 	decision := buildPaperExecutionDecision(ctx)
-	if !decision.Approved {
-		t.Fatalf("expected fallback executable candidate to build approved decision, got %+v", decision)
+	if decision.Approved {
+		t.Fatalf("expected projected weak/no proof fallback candidate to be rejected, got %+v", decision)
+	}
+	if decision.RejectReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low reject, got %+v", decision)
 	}
 }
 

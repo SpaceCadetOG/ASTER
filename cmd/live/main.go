@@ -338,46 +338,7 @@ type runtimeProfileConfig struct {
 	EffectiveSharedManagement bool
 }
 
-type setupBlueprint struct {
-	SetupFamily    string
-	SetupSource    string
-	TradeHorizon   string
-	StrategyFamily string
-}
-
-var setupBlueprints = map[string]setupBlueprint{
-	"lsr":                         {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"bos_pb":                      {SetupFamily: "breakout_retest", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"ob_r":                        {SetupFamily: "deep_pullback_reclaim", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"fvg_c":                       {SetupFamily: "micro_pullback_continuation", SetupSource: "market_structure", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"fa":                          {SetupFamily: "reversal_exhaustion", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
-	"failed_auction_magnet":       {SetupFamily: "reversal_exhaustion", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
-	"od":                          {SetupFamily: "reset_impulse_breakout", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"volume_clusters":             {SetupFamily: "deep_pullback_reclaim", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"multiple_nodes":              {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "swing", StrategyFamily: "cont"},
-	"trades_filter":               {SetupFamily: "micro_pullback_continuation", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"stacked_imbalances":          {SetupFamily: "reset_impulse_breakout", SetupSource: "order_flow", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"unfinished_business":         {SetupFamily: "breakout_retest", SetupSource: "order_flow", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"vwap_confluence":             {SetupFamily: "micro_pullback_continuation", SetupSource: "vwap", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"daily_open_sr":               {SetupFamily: "breakout_retest", SetupSource: "vwap", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"pd_levels_retest":            {SetupFamily: "deep_pullback_reclaim", SetupSource: "vwap", TradeHorizon: "swing", StrategyFamily: "cont"},
-	"vp_accumulation":             {SetupFamily: "deep_pullback_reclaim", SetupSource: "volume_profile", TradeHorizon: "swing", StrategyFamily: "cont"},
-	"vp_trend":                    {SetupFamily: "micro_pullback_continuation", SetupSource: "volume_profile", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"vp_rejection":                {SetupFamily: "breakout_retest", SetupSource: "volume_profile", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"vp_reversal":                 {SetupFamily: "reversal_exhaustion", SetupSource: "volume_profile", TradeHorizon: "intraday_swing", StrategyFamily: "rev"},
-	"momentum_ignite_long":        {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"momentum_ignite_short":       {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"reset_impulse_long":          {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"reset_impulse_short":         {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"impulse_long":                {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"impulse_short":               {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"continuation_fast":           {SetupFamily: "micro_pullback_continuation", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"micro_pullback_continuation": {SetupFamily: "micro_pullback_continuation", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "cont"},
-	"breakout_retest":             {SetupFamily: "breakout_retest", SetupSource: "technical_analysis", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"deep_pullback_reclaim":       {SetupFamily: "deep_pullback_reclaim", SetupSource: "technical_analysis", TradeHorizon: "intraday_swing", StrategyFamily: "cont"},
-	"reset_impulse_breakout":      {SetupFamily: "reset_impulse_breakout", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "ignite"},
-	"reversal_exhaustion":         {SetupFamily: "reversal_exhaustion", SetupSource: "technical_analysis", TradeHorizon: "intraday", StrategyFamily: "rev"},
-}
+type setupBlueprint = strategies.SetupBlueprint
 
 type positionView struct {
 	Symbol   string
@@ -2874,59 +2835,21 @@ func main() {
 		if watcher != nil {
 			wallSignals = watcher.WallSignals()
 		}
-		liveObserveOnlyMode := operatingMode == runtimeModeLive
-		if liveObserveOnlyMode {
-			st := liveStatus{
-				Generated:     now,
-				Mode:          string(runtimeModeLive),
-				ModeState:     "scanner_only",
-				DryRun:        dryRun,
-				LiveEnabled:   safety.enableLiveTrading,
-				LongInPlay:    len(longInPlay),
-				ShortInPlay:   len(shortInPlay),
-				AvailableUSDT: acct.AvailableUSDT,
-				Exec:          liveExecSnapshot{},
-				Live:          liveAccountSnapshot{},
-			}
-			st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
-			if execMgr != nil {
-				st.Exec = execMgr.Snapshot(10)
-				st.Live = execMgr.LiveAccountSnapshot(10)
-			}
-			if paper.enabled {
-				st.PaperSummary = paper.Summary(metaBySymbol)
-				st.Paper = buildLivePaperSnapshot(runtimeModeLive, paper, metaBySymbol, eventLog, 12)
-			}
-			if best, ok := selectTopRuntimeCandidate(cands); ok {
-				st.TopSymbol = strings.ToUpper(aster.RawSymbol(best.Entry.Symbol))
-				st.TopSide = best.Side
-				st.TopGrade = best.Entry.CurrentGrade
-				st.TopScore = best.Entry.CurrentScore
-				st.TopSlope = best.Entry.ScoreSlope
-				st.TopDecision = "live"
-				st.TopDecisionWhy = "scanner_only_manual_execution"
-				st.TopRejectReason = ""
-			} else {
-				st.TopDecision = "live"
-				st.TopDecisionWhy = "scanner_only_no_candidates"
-				st.TopRejectReason = ""
-			}
-			statusStore.Set(st)
-			waitAndReport()
-			continue
-		}
-
 		st := liveStatus{
 			Generated:     now,
-			Mode:          surfacedRuntimeMode(runtimeModePaper),
-			ModeState:     "paper_enabled",
+			Mode:          surfacedRuntimeMode(operatingMode),
 			DryRun:        dryRun,
-			LiveEnabled:   false,
+			LiveEnabled:   operatingMode == runtimeModeLive && safety.enableLiveTrading,
 			LongInPlay:    len(longInPlay),
 			ShortInPlay:   len(shortInPlay),
 			AvailableUSDT: acct.AvailableUSDT,
 			Exec:          liveExecSnapshot{},
 			Live:          liveAccountSnapshot{},
+		}
+		if operatingMode == runtimeModeLive {
+			st.ModeState = "live_enabled"
+		} else {
+			st.ModeState = "paper_enabled"
 		}
 		st.ScannerLongs, st.ScannerShorts, st.ScannerBias = topScanSnapshot(longInPlay, shortInPlay, metaBySymbol, 5)
 		if execMgr != nil {
@@ -2935,11 +2858,15 @@ func main() {
 		}
 		if paper != nil && paper.enabled {
 			st.PaperSummary = paper.Summary(metaBySymbol)
-			st.Paper = buildLivePaperSnapshot(runtimeModePaper, paper, metaBySymbol, eventLog, 12)
+			st.Paper = buildLivePaperSnapshot(operatingMode, paper, metaBySymbol, eventLog, 12)
 		}
 		best, ok := selectTopRuntimeCandidate(cands)
 		if !ok {
-			st.TopDecision = "paper_enabled"
+			if operatingMode == runtimeModeLive {
+				st.TopDecision = "live_enabled"
+			} else {
+				st.TopDecision = "paper_enabled"
+			}
 			st.TopDecisionWhy = "no_candidates"
 			statusStore.Set(st)
 			waitAndReport()
@@ -2957,6 +2884,15 @@ func main() {
 		st.TopExecution = best.ExecutionScore
 		st.TopCombined = best.CombinedScore
 		st.TopRegimeTag = best.Sig.RegimeTag
+		if operatingMode == runtimeModeLive {
+			dispatch := dispatchLiveRuntimeDecision(now, best, metaBySymbol, execMgr, riskShell, riskFallbackStopPct, riskHoldHours, leverageMode, leverageFixed, leverageMin, leverageMax, effectiveMargin, entryBps, liveRuntimeDispatchHooks{})
+			emitLiveDecisionEvent(eventLog, now, best, dispatch.Decision)
+			recordCandidateDecision(cmdCtx, best, firstNonEmpty(dispatch.Decision.RejectReason, dispatch.RejectReason))
+			applyLiveDecisionStatus(&st, best, dispatch)
+			statusStore.Set(st)
+			waitAndReport()
+			continue
+		}
 		currentSideEntries := longCurrent
 		if strings.EqualFold(best.Side, "SELL") {
 			currentSideEntries = shortCurrent
@@ -6344,6 +6280,7 @@ func (p *paperTrader) load() error {
 	}
 	if st.ClosedTrades != nil {
 		p.closedTradeLedger = st.ClosedTrades
+		rebuildRuntimeProofMemory(p.closedTradeLedger)
 	}
 	if st.PostExitTrackers != nil {
 		p.postExitTrackers = st.PostExitTrackers
@@ -9453,6 +9390,9 @@ func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 
 }
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
+	if reason := executionProofRejectReason(time.Now().UTC(), c); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
 		return fmt.Errorf("%s", reason)
 	}
@@ -9514,17 +9454,20 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		m.recordOrderLegalityFailure(rawSym, legalityReason, time.Now().UTC())
 		return fmt.Errorf("%s", legalityReason)
 	}
-	stopReason := ""
-	stopDistancePct := 0.0
-	if m.hybridStopCfg.Enabled {
-		stopRes := exitmgr.ComputeHybridStop(m.hybridStopCfg, hybridStopInputForCandidate(c, price, c.Sig.TP1))
-		if stopRes.Rejected {
-			return fmt.Errorf("%s", stopRes.RejectReason)
-		}
-		if stopRes.StopPrice > 0 {
-			stopReason = stopRes.StopReason
-			stopDistancePct = stopRes.StopDistancePct
-		}
+	planGeom, err := buildSharedTradePlan(c, price, c.VolumeUSD, sharedTradePlanConfig{
+		MinStopPct:    m.minStopPct,
+		MaxStopPct:    m.maxStopPct,
+		MinTP1RR:      m.minTP1RR,
+		RiskOnMargin:  m.riskOnMargin,
+		RiskMarginPct: m.riskMarginPct,
+		TP1R:          m.tp1R,
+		TP2R:          m.tp2R,
+		TP3R:          m.tp3R,
+		HybridStopCfg: m.hybridStopCfg,
+		FrontRunner:   m.exitManager,
+	})
+	if err != nil {
+		return err
 	}
 	if lev <= 0 {
 		lev = 1
@@ -9677,8 +9620,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		EntryTiming:            c.EntryTiming,
 		CandidateAgeSeconds:    c.CandidateAgeSeconds,
 		EntryDistanceToVWAPPct: c.DistanceToVWAPPct,
-		StopReason:             stopReason,
-		StopDistancePct:        stopDistancePct,
+		StopReason:             planGeom.StopReason,
+		StopDistancePct:        planGeom.StopDistancePct,
 		RegimeTag:              c.Sig.RegimeTag,
 		EntrySetupFamily:       c.SetupFamily,
 		EntrySetupSource:       c.SetupSource,
@@ -9689,8 +9632,15 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		ReentryCount:           reentryCount,
 		ManagePhase:            managePhaseContinuation,
 	}
-	if stopDistancePct > 0 {
-		p.CustomRiskPct = stopDistancePct / 100.0
+	if planGeom.StopDistancePct > 0 {
+		p.CustomRiskPct = planGeom.StopDistancePct / 100.0
+		baseRisk := abs(planGeom.EntryPrice - planGeom.StopPrice)
+		if baseRisk > 0 && planGeom.TP1Price > 0 {
+			p.CustomTP1R = abs(planGeom.TP1Price-planGeom.EntryPrice) / baseRisk
+		}
+		if baseRisk > 0 && planGeom.TP2Price > 0 {
+			p.CustomTP2R = abs(planGeom.TP2Price-planGeom.EntryPrice) / baseRisk
+		}
 	} else if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
 		risk := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
 		if risk > 0 {
@@ -9708,7 +9658,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	m.recordExecutionGovernorEntry(now, c)
 	_ = m.save()
 	fmt.Printf("live: entry submitted %s %s qty=%s px=%s orderId=%d reason=%s stop_reason=%s\n",
-		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, firstNonEmpty(strings.TrimSpace(p.EntryReason), "manual"), firstNonEmpty(stopReason, "generic"))
+		rawSym, p.Side, vals.Get("quantity"), vals.Get("price"), orderID, firstNonEmpty(strings.TrimSpace(p.EntryReason), "manual"), firstNonEmpty(planGeom.StopReason, "generic"))
 	if m.tg != nil {
 		title := "ENTRY SUBMITTED"
 		if plan.IsReentry {
@@ -11185,68 +11135,30 @@ func (m *liveExecManager) calcTrailStopForPosition(p *livePosition, sideBuy bool
 		return 0
 	}
 	trailMode := strings.ToLower(strings.TrimSpace(envStr("LIVE_TRAIL_MODE", "hybrid")))
-	pct := m.trailStopPct / 100.0
-	if postTP3 && m.trailStopPctTP3 > 0 {
-		pct = m.trailStopPctTP3 / 100.0
-	}
-	if pct <= 0 {
-		pct = 0.01
-	}
-	dist := ref * pct
-	floorDist := ref * (m.trailPctMin / 100.0)
 	atrDist := 0.0
 	if p != nil && p.Symbol != "" {
 		atrPct := estimateATRPctWithCache(m.featureCache, p.Symbol, maxInt(m.atrLen*4, 64), m.atrLen)
 		if atrPct > 0 {
-			atrDist = ref * atrPct * trailATRMultForContext(p.EntryReason, atrPct, p.EntryVolumeUSD)
+			atrDist = atrPct
 		}
 	}
 	structDist := 0.0
 	if p != nil {
 		structDist = structureTrailDistance(ref, p.VPTargetLevel)
 	}
-	switch trailMode {
-	case "structure":
-		if structDist > 0 {
-			dist = maxFloat(floorDist, structDist)
-		}
-	case "atr":
-		if atrDist > 0 {
-			dist = maxFloat(floorDist, atrDist)
-		}
-	default:
-		if atrDist > 0 {
-			dist = maxFloat(floorDist, atrDist)
-		}
-		if structDist > 0 {
-			dist = maxFloat(dist, structDist)
-		}
-	}
+	ctx := sharedTrailContext{}
 	if p != nil {
-		dist *= trailProfileMultiplier(p.ExitProfile)
-		if p.Sponsored {
-			dist *= envFloat("LIVE_TRAIL_SPONSORED_MULT", 1.15)
-		} else if p.HitTP1 {
-			dist *= envFloat("LIVE_TRAIL_UNSPONSORED_MULT", 0.85)
-			if p.WeakSponsorStreak >= envInt("LIVE_TRAIL_WEAK_SPONSOR_STREAK", 2) {
-				dist *= envFloat("LIVE_TRAIL_WEAK_SPONSOR_MULT", 0.75)
-			}
-		}
-		if confluenceRefreshActive(time.Now().UTC(), p.LastConfluenceRefresh) {
-			dist *= envFloat("LIVE_TRAIL_CONFLUENCE_REFRESH_MULT", 1.30)
+		ctx = sharedTrailContext{
+			EntryReason:           p.EntryReason,
+			EntryVolumeUSD:        p.EntryVolumeUSD,
+			ExitProfile:           p.ExitProfile,
+			Sponsored:             p.Sponsored,
+			HitTP1:                p.HitTP1,
+			WeakSponsorStreak:     p.WeakSponsorStreak,
+			LastConfluenceRefresh: p.LastConfluenceRefresh,
 		}
 	}
-	if postTP3 {
-		if p != nil && p.Sponsored {
-			dist *= envFloat("LIVE_TRAIL_SPONSORED_POST_TP3_MULT", 1.25)
-		} else {
-			dist *= envFloat("LIVE_TRAIL_UNSPONSORED_POST_TP3_MULT", 0.95)
-		}
-	}
-	if sideBuy {
-		return ref - dist
-	}
-	return ref + dist
+	return calcSharedTrailStop(sideBuy, ref, trailMode, m.trailStopPct, m.trailPctMin, m.trailStopPctTP3, postTP3, atrDist, structDist, ctx)
 }
 
 func (m *liveExecManager) checkOrderFilled(symbol string, orderID int64) (bool, float64, float64, error) {
@@ -12665,6 +12577,9 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	if p == nil || !p.enabled {
 		return nil, nil
 	}
+	if reason := executionProofRejectReason(now, c); reason != "" {
+		return nil, fmt.Errorf("%s", reason)
+	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
 		fmt.Printf("paper enter advisory: %s, continuing\n", reason)
 	}
@@ -12797,96 +12712,26 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 	} else if free < margin+entryFee {
 		fmt.Printf("paper enter advisory: paper margin+fee exceeds free balance, continuing\n")
 	}
-	stopPct := p.stopPct / 100.0
-	if p.riskOnMargin {
-		if riskPct := marginRiskStopPct(margin, lev, p.riskMarginPct); riskPct > 0 {
-			stopPct = riskPct
-		}
-	}
-	stopPct = clamp(stopPct, p.minStopPct/100.0, p.maxStopPct/100.0)
-	tp1R := p.tp1R
-	tp2R := p.tp2R
-	tp3R := p.tp3R
-	if c.Sig.Entry > 0 && c.Sig.Stop > 0 {
-		riskPct := abs(c.Sig.Entry-c.Sig.Stop) / c.Sig.Entry
-		if riskPct > 0 {
-			stopPct = clamp(riskPct, p.minStopPct/100.0, p.maxStopPct/100.0)
-			baseRisk := abs(c.Sig.Entry - c.Sig.Stop)
-			if baseRisk > 0 && c.Sig.TP1 > 0 {
-				tp1R = abs(c.Sig.TP1-c.Sig.Entry) / baseRisk
-			}
-			if baseRisk > 0 && c.Sig.TP2 > 0 {
-				tp2R = abs(c.Sig.TP2-c.Sig.Entry) / baseRisk
-			}
-		}
-	}
-	stopPct, tp1R, tp2R, tp3R = adjustBracketParams(
-		c.Strat,
-		c.Entry.CurrentGrade,
-		c.Entry.State,
-		c.Conf,
-		m.VolumeUSD,
-		stopPct,
-		tp1R,
-		tp2R,
-		tp3R,
-		p.minStopPct/100.0,
-		p.maxStopPct/100.0,
-	)
-	if c.Sig.Stop <= 0 {
-		stopPct = clamp(widenStopPctForVolatility(stopPct, c.ATRPct, m.VolumeUSD), p.minStopPct/100.0, p.maxStopPct/100.0)
-	}
-	stopReason := ""
-	stopDistancePct := stopPct * 100.0
-	if p.hybridStopCfg.Enabled {
-		stopRes := exitmgr.ComputeHybridStop(p.hybridStopCfg, hybridStopInputForCandidate(c, entry, c.Sig.TP1))
-		if stopRes.Rejected {
-			return nil, fmt.Errorf("%s", stopRes.RejectReason)
-		}
-		if stopRes.StopPrice > 0 {
-			stopPct = clamp(stopRes.StopDistancePct/100.0, p.minStopPct/100.0, p.maxStopPct/100.0)
-			stopReason = stopRes.StopReason
-			stopDistancePct = stopRes.StopDistancePct
-		}
+	plan, err := buildSharedTradePlan(c, entry, m.VolumeUSD, sharedTradePlanConfig{
+		MinStopPct:    p.minStopPct,
+		MaxStopPct:    p.maxStopPct,
+		MinTP1RR:      p.minTP1RR,
+		RiskOnMargin:  p.riskOnMargin,
+		RiskMarginPct: p.riskMarginPct,
+		TP1R:          p.tp1R,
+		TP2R:          p.tp2R,
+		TP3R:          p.tp3R,
+		HybridStopCfg: p.hybridStopCfg,
+		FrontRunner:   p.exitManager,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if envBool("LIVE_REJECT_FRAGILE_STOPS", true) {
-		stopReasonL := strings.ToLower(strings.TrimSpace(stopReason))
+		stopReasonL := strings.ToLower(strings.TrimSpace(plan.StopReason))
 		if strings.Contains(stopReasonL, "rr_low") || strings.Contains(stopReasonL, "max_width") {
-			fmt.Printf("paper enter advisory: fragile stop rejected: %s, continuing\n", firstNonEmpty(stopReason, "unknown"))
+			fmt.Printf("paper enter advisory: fragile stop rejected: %s, continuing\n", firstNonEmpty(plan.StopReason, "unknown"))
 		}
-	}
-	tp1Pct := stopPct * tp1R
-	tp2Pct := stopPct * tp2R
-	tp3Pct := stopPct * tp3R
-	stop := entry
-	tp1 := entry
-	tp2 := entry
-	tp3 := entry
-	if strings.EqualFold(c.Side, "BUY") {
-		stop = entry * (1 - stopPct)
-		tp1 = entry * (1 + tp1Pct)
-		tp2 = entry * (1 + tp2Pct)
-		tp3 = entry * (1 + tp3Pct)
-	} else {
-		stop = entry * (1 + stopPct)
-		tp1 = entry * (1 - tp1Pct)
-		tp2 = entry * (1 - tp2Pct)
-		tp3 = entry * (1 - tp3Pct)
-	}
-	if p.exitManager != nil {
-		tp1 = p.exitManager.FrontRunTarget(c.Side, tp1, c.Sig.VPTargetLevel)
-		tp2 = p.exitManager.FrontRunTarget(c.Side, tp2, c.Sig.VPTargetLevel)
-		tp3 = p.exitManager.FrontRunTarget(c.Side, tp3, c.Sig.VPTargetLevel)
-	}
-	tp1, tp2, tp3 = enforceTPProgression(c.Side, tp1, tp2, tp3)
-	stop, tp1, tp2, tp3 = sanitizeBracketGeometry(entry, c.Side, stop, tp1, tp2, tp3)
-	if stop <= 0 || tp1 <= 0 || tp2 <= 0 || tp3 <= 0 {
-		return nil, fmt.Errorf("invalid paper bracket levels")
-	}
-	risk := abs(entry - stop)
-	reward := abs(tp1 - entry)
-	if risk <= 0 || reward/risk < p.minTP1RR {
-		return nil, fmt.Errorf("paper tp1 rr below minimum")
 	}
 	p.balance -= entryFee
 	pos := &paperPosition{
@@ -12898,10 +12743,10 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		InitialQty:             qty,
 		Margin:                 margin,
 		Leverage:               lev,
-		Stop:                   stop,
-		TP1:                    tp1,
-		TP2:                    tp2,
-		TP3:                    tp3,
+		Stop:                   plan.StopPrice,
+		TP1:                    plan.TP1Price,
+		TP2:                    plan.TP2Price,
+		TP3:                    plan.TP3Price,
 		TrailRef:               entry,
 		OpenedAt:               now,
 		EntryReason:            c.Strat,
@@ -12941,21 +12786,21 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		PostPumpBreakdown:      shortCtx.PostPumpBreakdown,
 		LateChaseBlocked:       shortCtx.LateChaseBlocked,
 		OpposingFriction:       c.Sig.VPTargetLevel,
-		StopReason:             stopReason,
-		StopDistancePct:        stopDistancePct,
+		StopReason:             plan.StopReason,
+		StopDistancePct:        plan.StopDistancePct,
 		EntrySetupFamily:       c.SetupFamily,
 		EntrySetupSource:       c.SetupSource,
 		EntryTradeHorizon:      c.TradeHorizon,
 		ExecBucket:             executionGovernorBucketForCandidate(c),
-		OriginalStop:           stop,
-		OriginalTP1:            tp1,
-		OriginalTP2:            tp2,
-		OriginalTP3:            tp3,
+		OriginalStop:           plan.StopPrice,
+		OriginalTP1:            plan.TP1Price,
+		OriginalTP2:            plan.TP2Price,
+		OriginalTP3:            plan.TP3Price,
 	}
 	p.positions[raw] = pos
 	_ = p.save()
 	fmt.Printf("paper entered %s %s entry=%.6f qty=%.6f lev=%dx tp1=%.6f tp2=%.6f tp3=%.6f sl=%.6f fee=%.4f setup=%s setup_source=%s trade_horizon=%s strategy=%s session=%s entry_timing=%s candidate_age_seconds=%.0f distance_to_vwap=%.4f atr_extension=%.3f final_score=%.1f trend=%.1f location=%.1f trigger=%.1f flow=%.1f rr=%.1f penalty=%.1f reason=%s stop_reason=%s\n",
-		raw, c.Side, entry, qty, lev, tp1, tp2, tp3, stop, entryFee,
+		raw, c.Side, entry, qty, lev, plan.TP1Price, plan.TP2Price, plan.TP3Price, plan.StopPrice, entryFee,
 		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "none"),
 		firstNonEmpty(strings.TrimSpace(c.SetupSource), "unknown"),
 		firstNonEmpty(strings.TrimSpace(c.TradeHorizon), "unknown"),
@@ -12973,7 +12818,7 @@ func (p *paperTrader) MaybeEnter(now time.Time, c candidate, entryBps, margin fl
 		c.EntryScoreBreakdown.RiskRewardScore,
 		c.EntryScoreBreakdown.PenaltyScore,
 		firstNonEmpty(strings.TrimSpace(c.Strat), "manual"),
-		firstNonEmpty(stopReason, "generic"))
+		firstNonEmpty(plan.StopReason, "generic"))
 	return pos, nil
 }
 
@@ -14076,6 +13921,7 @@ func (p *paperTrader) recordClosedTrade(now time.Time, pos *paperPosition, exitP
 		"60m": {PeakPrice: rec.Exit.RealizedExitPrice, TroughPrice: rec.Exit.RealizedExitPrice},
 	})
 	p.closedTradeLedger[rec.TradeID] = rec
+	recordRuntimeProofMemory(rec)
 	p.startPostExitObservation(rec)
 }
 
@@ -14393,68 +14239,30 @@ func (p *paperTrader) calcTrailStopForPosition(pos *paperPosition, sideBuy bool,
 		return 0
 	}
 	trailMode := strings.ToLower(strings.TrimSpace(envStr("LIVE_PAPER_TRAIL_MODE", envStr("LIVE_TRAIL_MODE", "hybrid"))))
-	pct := p.trailStopPct / 100.0
-	if postTP3 && p.trailStopPctTP3 > 0 {
-		pct = p.trailStopPctTP3 / 100.0
-	}
-	if pct <= 0 {
-		pct = 0.01
-	}
-	dist := ref * pct
-	floorDist := ref * (p.trailPctMin / 100.0)
 	atrDist := 0.0
 	if pos != nil && pos.Symbol != "" {
 		atrPct := estimateATRPctWithCache(p.featureCache, pos.Symbol, maxInt(p.atrLen*4, 64), p.atrLen)
 		if atrPct > 0 {
-			atrDist = ref * atrPct * trailATRMultForContext(pos.EntryReason, atrPct, pos.EntryVolumeUSD)
+			atrDist = atrPct
 		}
 	}
 	structDist := 0.0
 	if pos != nil {
 		structDist = structureTrailDistance(ref, pos.OpposingFriction)
 	}
-	switch trailMode {
-	case "structure":
-		if structDist > 0 {
-			dist = maxFloat(floorDist, structDist)
-		}
-	case "atr":
-		if atrDist > 0 {
-			dist = maxFloat(floorDist, atrDist)
-		}
-	default:
-		if atrDist > 0 {
-			dist = maxFloat(floorDist, atrDist)
-		}
-		if structDist > 0 {
-			dist = maxFloat(dist, structDist)
-		}
-	}
+	ctx := sharedTrailContext{}
 	if pos != nil {
-		dist *= trailProfileMultiplier(pos.ExitProfile)
-		if pos.Sponsored {
-			dist *= envFloat("LIVE_TRAIL_SPONSORED_MULT", 1.15)
-		} else if pos.HitTP1 {
-			dist *= envFloat("LIVE_TRAIL_UNSPONSORED_MULT", 0.85)
-			if pos.WeakSponsorStreak >= envInt("LIVE_TRAIL_WEAK_SPONSOR_STREAK", 2) {
-				dist *= envFloat("LIVE_TRAIL_WEAK_SPONSOR_MULT", 0.75)
-			}
-		}
-		if confluenceRefreshActive(time.Now().UTC(), pos.LastConfluenceRefresh) {
-			dist *= envFloat("LIVE_TRAIL_CONFLUENCE_REFRESH_MULT", 1.30)
+		ctx = sharedTrailContext{
+			EntryReason:           pos.EntryReason,
+			EntryVolumeUSD:        pos.EntryVolumeUSD,
+			ExitProfile:           pos.ExitProfile,
+			Sponsored:             pos.Sponsored,
+			HitTP1:                pos.HitTP1,
+			WeakSponsorStreak:     pos.WeakSponsorStreak,
+			LastConfluenceRefresh: pos.LastConfluenceRefresh,
 		}
 	}
-	if postTP3 {
-		if pos != nil && pos.Sponsored {
-			dist *= envFloat("LIVE_TRAIL_SPONSORED_POST_TP3_MULT", 1.25)
-		} else {
-			dist *= envFloat("LIVE_TRAIL_UNSPONSORED_POST_TP3_MULT", 0.95)
-		}
-	}
-	if sideBuy {
-		return ref - dist
-	}
-	return ref + dist
+	return calcSharedTrailStop(sideBuy, ref, trailMode, p.trailStopPct, p.trailPctMin, p.trailStopPctTP3, postTP3, atrDist, structDist, ctx)
 }
 
 func (p *paperTrader) feeRateBpsForReason(reason string) float64 {
@@ -15474,37 +15282,9 @@ func strategyFamily(c candidate) string {
 	}
 }
 
-func setupBlueprintForLabel(label string) (setupBlueprint, bool) {
-	label = strings.ToLower(strings.TrimSpace(label))
-	if label == "" {
-		return setupBlueprint{}, false
-	}
-	bp, ok := setupBlueprints[label]
-	return bp, ok
-}
-
 func resolveSetupBlueprint(c candidate, now time.Time) (setupBlueprint, bool) {
 	_ = now
-	labels := []string{
-		c.Strat,
-		c.SetupFamily,
-		c.Entry.EntryStyle,
-	}
-	for _, label := range labels {
-		if bp, ok := setupBlueprintForLabel(label); ok {
-			return bp, true
-		}
-	}
-	style := strings.ToLower(strings.TrimSpace(c.Entry.EntryStyle))
-	switch style {
-	case "breakout_hold_long", "breakout_hold_short":
-		return setupBlueprints["breakout_retest"], true
-	case "pullback_long", "pullback_short":
-		return setupBlueprints["micro_pullback_continuation"], true
-	case "reversal_watch_long", "reversal_watch_short", "leader_unwind_short":
-		return setupBlueprints["reversal_exhaustion"], true
-	}
-	return setupBlueprint{}, false
+	return strategies.ResolveSetupBlueprint(c.Strat, c.SetupFamily, c.Entry.EntryStyle)
 }
 
 func annotateCandidateSetupBlueprint(c *candidate, now time.Time) {
