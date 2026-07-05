@@ -23,10 +23,13 @@ bin/
 /out/
 /reports/
 /logs/
+/collected_logs/
+/out.paper_closed_trades*.jsonl
 /codebase.txt
 /.gocache/
 /.gomodcache/
 .DS_Store
+__pycache__/
 /frontend/ui/node_modules/
 /frontend/ui/.next/
 /frontend/ui/.next.stale-*/

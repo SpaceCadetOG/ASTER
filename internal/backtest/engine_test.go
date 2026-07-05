@@ -3,6 +3,9 @@ package backtest
 import (
 	"testing"
 	"time"
+
+	"go-machine/internal/features"
+	"go-machine/internal/strategies"
 )
 
 func TestRealizeBacktestExitStagesAndRunner(t *testing.T) {
@@ -65,5 +68,52 @@ func TestRealizeBacktestExitStagesAndRunner(t *testing.T) {
 	}
 	if closeTrade.ExitTs.IsZero() || closeTrade.HoldMins <= 0 {
 		t.Fatalf("expected finalized exit metadata, got %+v", closeTrade)
+	}
+}
+
+func TestEvalCandidatesPromotedStrategyUsesSharedBlueprint(t *testing.T) {
+	base := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	candles := make([]features.Candle, 0, 16)
+	for i := 0; i < 14; i++ {
+		price := 99.0 + float64(i)*0.02
+		candles = append(candles, features.Candle{
+			Ts: base.Add(time.Duration(i) * time.Minute),
+			O:  price,
+			H:  price + 0.15,
+			L:  price - 0.15,
+			C:  price,
+			V:  100,
+		})
+	}
+	candles = append(candles,
+		features.Candle{Ts: base.Add(14 * time.Minute), O: 99.2, H: 99.4, L: 99.0, C: 99.1, V: 100},
+		features.Candle{Ts: base.Add(15 * time.Minute), O: 99.1, H: 101.3, L: 99.0, C: 101.1, V: 140},
+	)
+	ctx := strategies.Context{
+		ScannerScore: 92,
+		Candles:      candles,
+		Snapshot: features.Snapshot{
+			Flow: features.FlowState{WhaleDelta1m: 1.2},
+		},
+	}
+	cands := evalCandidates("vwap_confluence", nil, ctx)
+	if len(cands) != 1 {
+		t.Fatalf("expected one candidate, got %d", len(cands))
+	}
+	if !cands[0].Signal.Active {
+		t.Fatalf("expected active promoted strategy signal, got %+v", cands[0].Signal)
+	}
+	if cands[0].Signal.Name != "vwap_confluence" {
+		t.Fatalf("expected promoted strategy name to be preserved, got %q", cands[0].Signal.Name)
+	}
+	bp, ok := strategies.ResolveSetupBlueprint(cands[0].Signal.Name, "", "")
+	if !ok {
+		t.Fatalf("expected shared blueprint for promoted strategy")
+	}
+	if bp.SetupFamily != "micro_pullback_continuation" {
+		t.Fatalf("expected micro_pullback_continuation, got %q", bp.SetupFamily)
+	}
+	if bp.SetupSource != "vwap" {
+		t.Fatalf("expected vwap source, got %q", bp.SetupSource)
 	}
 }

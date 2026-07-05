@@ -1,0 +1,64 @@
+{
+  "model_type": "linear",
+  "model_version": "take_trade_v1_example",
+  "bias": 0.0,
+  "weights": {
+    "day_utc_24h_pct": 0.01,
+    "utc_4h_pct": 0.02,
+    "utc_1h_pct": 0.02,
+    "volume_ratio": 0.15,
+    "distance_to_vwap_pct": -0.08,
+    "atr_pct": -0.10,
+    "extension_atr": -0.12,
+    "spread_bps": -0.05,
+    "book_imbalance": 0.10,
+    "ofi_z": 0.12,
+    "combined_score": 1.50,
+    "trade_quality": 0.90,
+    "candidate_age_seconds": -0.001
+  },
+  "category_biases": {
+    "side": {
+      "BUY": 0.05,
+      "SELL": 0.00
+    },
+    "strategy_id": {
+      "vp_trend": 0.10,
+      "vp_rejection": -0.03,
+      "unknown": 0.00
+    },
+    "setup_family": {
+      "cont": 0.08,
+      "rev": -0.04,
+      "unknown": 0.00
+    },
+    "session_label": {
+      "london": 0.04,
+      "new_york": 0.06,
+      "unknown": 0.00
+    },
+    "entry_timing": {
+      "fresh": 0.10,
+      "early": 0.04,
+      "late": -0.08,
+      "unknown": 0.00
+    }
+  },
+  "outputs": {
+    "probability_scale": 1.0,
+    "expected_r_scale": 3.0,
+    "expected_max_r_scale": 2.0,
+    "reclaim_scale": 1.0,
+    "reentry_scale": 1.0,
+    "stop_profiles": [
+      { "min_score": 0.75, "label": "wide" },
+      { "min_score": 0.35, "label": "normal" },
+      { "min_score": -999.0, "label": "tight" }
+    ],
+    "exit_profiles": [
+      { "min_score": 1.50, "label": "runner" },
+      { "min_score": 0.75, "label": "balanced" },
+      { "min_score": -999.0, "label": "fast" }
+    ]
+  }
+}

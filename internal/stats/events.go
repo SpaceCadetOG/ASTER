@@ -52,6 +52,14 @@ type Event struct {
 	Trigger           float64   `json:"trigger_score,omitempty"`
 	Execution         float64   `json:"execution_score,omitempty"`
 	Combined          float64   `json:"combined_score,omitempty"`
+	ModelVersion      string    `json:"model_version,omitempty"`
+	MLTakeProb        float64   `json:"ml_take_trade_probability,omitempty"`
+	MLExpectedR       float64   `json:"ml_expected_r,omitempty"`
+	MLExpectedMaxR    float64   `json:"ml_expected_max_r,omitempty"`
+	MLStopReclaimProb float64   `json:"ml_stopout_then_reclaim_probability,omitempty"`
+	MLReentryProb     float64   `json:"ml_reentry_after_stop_probability,omitempty"`
+	MLStopProfile     string    `json:"ml_suggested_stop_profile,omitempty"`
+	MLExitProfile     string    `json:"ml_suggested_exit_profile,omitempty"`
 	StopDistPct       float64   `json:"stop_distance_pct,omitempty"`
 	LoopMs            float64   `json:"loop_ms,omitempty"`
 	CacheHits         int64     `json:"cache_hits,omitempty"`

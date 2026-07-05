@@ -382,6 +382,29 @@ func (r *RESTAuth) OpenOrders(symbol string) ([]map[string]any, error) {
 	return out, nil
 }
 
+func (r *RESTAuth) UserTrades(symbol string, limit int) ([]map[string]any, error) {
+	q := url.Values{}
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" {
+		return nil, fmt.Errorf("symbol required")
+	}
+	q.Set("symbol", sym)
+	if limit <= 0 {
+		limit = 50
+	}
+	q.Set("limit", strconv.Itoa(limit))
+	paths := []string{"/fapi/v1/userTrades"}
+	b, err := r.doSignedGETAny(paths, q)
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	if err := decodeJSONNumbers(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *RESTAuth) PositionRisk(symbol string) ([]map[string]any, error) {
 	q := url.Values{}
 	sym := strings.ToUpper(strings.TrimSpace(symbol))

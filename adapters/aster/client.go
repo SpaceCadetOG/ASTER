@@ -201,6 +201,38 @@ func (c *Client) priceTicker(symbol string) (float64, error) {
 	return numToFloat(pt.Price)
 }
 
+type aggTrade struct {
+	Symbol        string      `json:"s"`
+	Price         json.Number `json:"p"`
+	Qty           json.Number `json:"q"`
+	FirstTradeID  int64       `json:"f"`
+	LastTradeID   int64       `json:"l"`
+	TradeTime     int64       `json:"T"`
+	IsBuyerMaker  bool        `json:"m"`
+	Ignore        bool        `json:"M"`
+	AggregateID   int64       `json:"a"`
+}
+
+func (c *Client) RecentAggTrades(symbol string, limit int) ([]aggTrade, error) {
+	if strings.TrimSpace(symbol) == "" {
+		return nil, fmt.Errorf("symbol required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var out []aggTrade
+	if err := c.fetchJSON(c.buildURL("/aggTrades", map[string]string{
+		"symbol": strings.ToUpper(strings.TrimSpace(symbol)),
+		"limit":  strconv.Itoa(limit),
+	}), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) openInterestUSD(symbol string, lastPrice float64) (*float64, error) {
 	if lastPrice <= 0 {
 		return nil, nil
