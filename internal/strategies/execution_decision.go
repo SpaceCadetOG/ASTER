@@ -67,25 +67,24 @@ func NewExecutionDecision(symbol string, sig Signal, riskDec risk.Decision, pref
 		Provenance:   append([]string(nil), provenance...),
 	}
 	rejects := make([]string, 0, 4)
-	if rr := strings.TrimSpace(sig.RejectReason); rr != "" {
+	if rr := firstDecisionReject(sig.RejectReason); rr != "" {
 		rejects = append(rejects, rr)
+	} else if !sig.Active {
+		rejects = append(rejects, "signal_inactive")
 	}
 	if !riskDec.Approved {
-		if rr := strings.TrimSpace(riskDec.RejectReason); rr != "" {
-			rejects = append(rejects, rr)
-		}
+		appendDecisionReject(&rejects, firstDecisionReject(riskDec.RejectReason, "risk_reject"))
 	}
 	if preflight.Checked && !preflight.Approved {
-		if rr := strings.TrimSpace(preflight.Reason); rr != "" {
-			rejects = append(rejects, rr)
-		}
+		appendDecisionReject(&rejects, firstDecisionReject(preflight.Reason, "preflight_reject"))
 	}
-	if rr := strings.TrimSpace(preflight.Quality.BlockReason); rr != "" && !containsDecisionReject(rejects, rr) {
-		rejects = append(rejects, rr)
-	}
+	appendDecisionReject(&rejects, preflight.Quality.BlockReason)
 	out.Rejects = rejects
 	out.RejectReason = firstDecisionReject(sig.RejectReason, riskDec.RejectReason, preflight.Reason, preflight.Quality.BlockReason)
-	out.Approved = sig.Active && strings.TrimSpace(sig.RejectReason) == "" && riskDec.Approved && (!preflight.Checked || preflight.Approved)
+	if out.RejectReason == "" && len(rejects) > 0 {
+		out.RejectReason = rejects[0]
+	}
+	out.Approved = len(rejects) == 0
 	return out
 }
 
@@ -124,4 +123,12 @@ func containsDecisionReject(in []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func appendDecisionReject(rejects *[]string, reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || containsDecisionReject(*rejects, reason) {
+		return
+	}
+	*rejects = append(*rejects, reason)
 }

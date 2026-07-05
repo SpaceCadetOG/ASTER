@@ -58,3 +58,74 @@ func TestExecutionDecisionRejectPropagation(t *testing.T) {
 		t.Fatalf("risk decision not preserved")
 	}
 }
+
+func TestExecutionDecisionQualityBlockDisablesApproval(t *testing.T) {
+	sig := Signal{
+		Active: true,
+		Name:   "x",
+		Side:   features.SideLong,
+		Entry:  100,
+		Stop:   99,
+		TP1:    101,
+	}
+	dec := NewExecutionDecision("solusdt", sig, risk.Decision{Approved: true}, PreflightVerdict{
+		Checked:  true,
+		Approved: true,
+		Quality: EntryQualityAccumulator{
+			BlockReason: "quality_score_too_low",
+		},
+	}, AdmissionSummary{}, "test")
+	if dec.Approved {
+		t.Fatalf("expected quality block to disable approval")
+	}
+	if dec.RejectReason != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low reject reason, got %q", dec.RejectReason)
+	}
+	if len(dec.Rejects) != 1 || dec.Rejects[0] != "quality_score_too_low" {
+		t.Fatalf("expected quality reject to propagate, got %+v", dec.Rejects)
+	}
+}
+
+func TestExecutionDecisionInactiveSignalProducesReject(t *testing.T) {
+	dec := NewExecutionDecision("xrpusdt", Signal{
+		Active: false,
+		Name:   "x",
+		Side:   features.SideLong,
+	}, risk.Decision{Approved: true}, PreflightVerdict{
+		Checked:  true,
+		Approved: true,
+	}, AdmissionSummary{}, "test")
+	if dec.Approved {
+		t.Fatalf("expected inactive signal to be rejected")
+	}
+	if dec.RejectReason != "signal_inactive" {
+		t.Fatalf("expected signal_inactive reject reason, got %q", dec.RejectReason)
+	}
+	if len(dec.Rejects) != 1 || dec.Rejects[0] != "signal_inactive" {
+		t.Fatalf("expected signal_inactive reject list, got %+v", dec.Rejects)
+	}
+}
+
+func TestExecutionDecisionRiskRejectWithoutReasonStillDisablesApproval(t *testing.T) {
+	sig := Signal{
+		Active: true,
+		Name:   "x",
+		Side:   features.SideShort,
+		Entry:  100,
+		Stop:   101,
+		TP1:    99,
+	}
+	dec := NewExecutionDecision("adausdt", sig, risk.Decision{Approved: false}, PreflightVerdict{
+		Checked:  true,
+		Approved: true,
+	}, AdmissionSummary{}, "test")
+	if dec.Approved {
+		t.Fatalf("expected risk reject to disable approval")
+	}
+	if dec.RejectReason != "risk_reject" {
+		t.Fatalf("expected risk_reject fallback reason, got %q", dec.RejectReason)
+	}
+	if len(dec.Rejects) != 1 || dec.Rejects[0] != "risk_reject" {
+		t.Fatalf("expected risk_reject in rejects, got %+v", dec.Rejects)
+	}
+}
