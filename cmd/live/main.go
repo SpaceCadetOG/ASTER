@@ -2650,6 +2650,10 @@ func main() {
 				hk := localMaintNow.Format("2006-01-02 15")
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
+						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						if report := notifyAccum.RenderHourlyReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
+							tg.Sendf("%s", report)
+						}
 						lastPulseSentAt = now
 						lastHourlyKey = hk
 					}
@@ -2669,6 +2673,10 @@ func main() {
 				if localMaintNow.Hour() > overnightReportHour || (localMaintNow.Hour() == overnightReportHour && localMaintNow.Minute() >= overnightReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != lastOvernightReportDay {
+						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						if report := notifyAccum.RenderOvernightReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
+							tg.Sendf("%s", report)
+						}
 						lastOvernightReportDay = dayKey
 					}
 				}
@@ -2677,6 +2685,10 @@ func main() {
 				if localMaintNow.Hour() > dailyReportHour || (localMaintNow.Hour() == dailyReportHour && localMaintNow.Minute() >= dailyReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != last1900ReportDay {
+						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						if report := notifyAccum.RenderDailyReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
+							tg.Sendf("%s", report)
+						}
 						last1900ReportDay = dayKey
 					}
 				}
