@@ -9533,7 +9533,11 @@ func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
 	if reason := executionProofRejectReason(time.Now().UTC(), c); reason != "" {
-		return fmt.Errorf("%s", reason)
+		if reason != "quality_score_too_low" && reason != "symbol_setup_failed_proof_recently" {
+			return fmt.Errorf("%s", reason)
+		}
+		fmt.Printf("live entry advisory: proof_reject=%s symbol=%s side=%s, continuing\n",
+			reason, strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), strings.ToUpper(strings.TrimSpace(c.Side)))
 	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
 		fmt.Printf("live entry advisory: strategy_reject=%s symbol=%s side=%s, continuing\n",

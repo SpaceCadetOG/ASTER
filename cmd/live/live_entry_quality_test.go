@@ -330,8 +330,8 @@ func TestPlaceEntryRejectsProjectedNoProofBeforeSubmit(t *testing.T) {
 			TP1:   102.0,
 		},
 	}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %v", err)
+	if err == nil || err.Error() != "execution manager not ready" {
+		t.Fatalf("expected venue-boundary error after advisory proof reject, got %v", err)
 	}
 }
 

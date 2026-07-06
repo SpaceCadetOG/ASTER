@@ -108,6 +108,20 @@ func liveExecutionAdapter(execMgr *liveExecManager, c candidate, entryBps, margi
 	return execMgr.PlaceEntry(c, entryBps, margin, leverage, plan)
 }
 
+func liveBypassesDecisionReject(decision strategies.ExecutionDecision) bool {
+	reason := strings.TrimSpace(firstNonEmpty(
+		decision.RejectReason,
+		decision.Preflight.Reason,
+		decision.Quality.BlockReason,
+	))
+	switch reason {
+	case "quality_score_too_low", "symbol_setup_failed_proof_recently":
+		return true
+	default:
+		return false
+	}
+}
+
 func dispatchLiveRuntimeDecision(now time.Time, c candidate, meta map[string]symbolMeta, execMgr *liveExecManager, riskShell risk.Config, riskFallbackStopPct, riskHoldHours float64, leverageMode string, leverageFixed, leverageMin, leverageMax int, effectiveMargin, entryBps float64, hooks liveRuntimeDispatchHooks) liveRuntimeDispatchResult {
 	result := liveRuntimeDispatchResult{
 		Decision: buildSharedRuntimeDecision(sharedRuntimeDecisionContext{
@@ -126,8 +140,14 @@ func dispatchLiveRuntimeDecision(now time.Time, c candidate, meta map[string]sym
 	}
 	emitEntryProofCheck(now, c, result.Decision, "live_dispatch")
 	if !result.Decision.Approved {
-		result.RejectReason = firstNonEmpty(result.Decision.RejectReason, "not_approved")
-		return result
+		if !liveBypassesDecisionReject(result.Decision) {
+			result.RejectReason = firstNonEmpty(result.Decision.RejectReason, "not_approved")
+			return result
+		}
+		fmt.Printf("live dispatch advisory: bypassing decision reject=%s symbol=%s side=%s\n",
+			firstNonEmpty(result.Decision.RejectReason, "not_approved"),
+			strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
+			strings.ToUpper(strings.TrimSpace(c.Side)))
 	}
 	entryRef := result.Decision.Entry
 	raw := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol)))

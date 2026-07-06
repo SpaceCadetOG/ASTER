@@ -346,8 +346,62 @@ func TestProjectedProofQualityRejectMatchesPaperAndLive(t *testing.T) {
 	if paperDec.RejectReason != "quality_score_too_low" {
 		t.Fatalf("expected paper reject reason quality_score_too_low, got %q", paperDec.RejectReason)
 	}
-	if liveDispatch.RejectReason != paperDec.RejectReason {
-		t.Fatalf("expected live reject reason %q, got %q", paperDec.RejectReason, liveDispatch.RejectReason)
+	if liveDispatch.RejectReason != "execution manager not ready" {
+		t.Fatalf("expected live quality reject to be bypassed through venue boundary, got %q", liveDispatch.RejectReason)
+	}
+}
+
+func TestLiveDispatchBypassesQualityRejectAndEntersAdapter(t *testing.T) {
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 83,
+			ScoreSlope:   0.03,
+			State:        inplay.StateInPlay,
+			Rank:         1,
+			EntryStyle:   "pullback_long",
+		},
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		StrategyID:        "pullback_reclaim",
+		Conf:              0.76,
+		CombinedScore:     0.76,
+		DayUTC24h:         6,
+		UTC4hPct:          1.0,
+		UTC1hPct:          0.3,
+		LastClose:         101,
+		SessionVWAP:       100.6,
+		EMA9:              100.5,
+		ExtensionATR:      0.80,
+		DistanceToVWAPPct: 0.60,
+		VolumeRatio:       1.0,
+		OFIZ:              0.02,
+		Sig: strategies.Signal{
+			Active:       true,
+			Name:         "pullback_reclaim",
+			Side:         features.SideLong,
+			Entry:        101,
+			Stop:         99.8,
+			TP1:          102.4,
+			RejectReason: "quality_score_too_low",
+		},
+	}
+	meta := map[string]symbolMeta{
+		"BTCUSDT": {LastPrice: 101, FundingRate: 0.001},
+	}
+	adapterCalls := 0
+	liveDispatch := dispatchLiveRuntimeDecision(time.Now().UTC(), cand, meta, testLiveDispatchManager(), risk.DefaultConfig(), 3, 8, "fixed", 2, 2, 5, 5, 0, liveRuntimeDispatchHooks{
+		Adapter: func(c candidate, entryBps, margin float64, leverage int, plan ladderPlan) error {
+			adapterCalls++
+			return nil
+		},
+	})
+	if !liveDispatch.Attempted || !liveDispatch.Entered {
+		t.Fatalf("expected live dispatch to proceed despite quality reject, got %+v", liveDispatch)
+	}
+	if adapterCalls != 1 {
+		t.Fatalf("expected adapter call, got %d", adapterCalls)
 	}
 }
 
