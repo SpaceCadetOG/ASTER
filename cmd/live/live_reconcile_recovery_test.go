@@ -26,7 +26,7 @@ func testRecoveryManager(dir string) *liveExecManager {
 
 func TestRecentBotEntryRecoveryPreservesBotSource(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 7, 6, 6, 40, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	mgr := testRecoveryManager(dir)
 	botPos := &livePosition{
 		Symbol:                 "LITUSDT",
@@ -93,9 +93,9 @@ func TestRecentBotEntryRecoveryPreservesBotSource(t *testing.T) {
 
 func TestRecentBotEntryRecoveryExpires(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 7, 6, 6, 40, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	mgr := testRecoveryManager(dir)
-	mgr.recentBotEntries[positionLookupKey("LITUSDT", "BUY")] = recentBotEntryMemory{
+	mgr.recentBotEntries[positionLookupKey("LITUSDT", "LONG")] = recentBotEntryMemory{
 		Symbol:     "LITUSDT",
 		Side:       "BUY",
 		OccurredAt: now.Add(-recentBotEntryTTL()).Add(-time.Minute),

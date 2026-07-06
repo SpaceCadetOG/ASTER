@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"go-machine/adapters/aster"
 	exitmgr "go-machine/internal/execution"
 	"go-machine/internal/inplay"
 	"go-machine/internal/strategies"
@@ -164,6 +165,58 @@ func TestLiveEligibilityProjectedNoProofRejectsEntry(t *testing.T) {
 	}
 }
 
+func TestPlaceEntryDisablesLiveAdds(t *testing.T) {
+	mgr := &liveExecManager{
+		rest: &aster.RESTAuth{},
+		accountReport: accountReport{
+			Generated: time.Now().UTC(),
+			Summary:   AccountSummary{Timestamp: time.Now().UTC()},
+			Health:    "ok",
+		},
+		positions: map[string]*livePosition{
+			"BTCUSDT": {
+				Symbol:      "BTCUSDT",
+				Side:        "BUY",
+				State:       execOpen,
+				EntrySource: "BOT",
+				EntryReason: "pullback_reclaim",
+			},
+		},
+	}
+	err := mgr.PlaceEntry(candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 95,
+			ScoreSlope:   0.20,
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_long",
+		},
+		Side:            "BUY",
+		Strat:           "pullback_reclaim",
+		StrategyID:      "pullback_reclaim",
+		Conf:            0.90,
+		CombinedScore:   0.90,
+		DayUTC24h:       12,
+		UTC4hPct:        4,
+		UTC1hPct:        1.5,
+		LastClose:       101,
+		SessionVWAP:     100.9,
+		EMA9:            100.7,
+		ExtensionATR:    0.35,
+		ReclaimHold:     true,
+		ClosedBreakHold: true,
+		Sig: strategies.Signal{
+			Entry: 101,
+			Stop:  99.5,
+			TP1:   104.5,
+		},
+	}, 0, 10, 5, ladderPlan{})
+	if err == nil || err.Error() != "live_add_disabled" {
+		t.Fatalf("expected live_add_disabled, got %v", err)
+	}
+}
+
 func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
@@ -308,8 +361,8 @@ func TestLiveEligibilityHardStateBlockStillWins(t *testing.T) {
 
 func TestPlaceEntryTreatsUnresolvedStrategyAsAdvisoryBeforeSubmit(t *testing.T) {
 	err := (*liveExecManager)(nil).PlaceEntry(candidate{Strat: "none"}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "execution manager not ready" {
-		t.Fatalf("expected venue-boundary error after advisory strategy reject, got %v", err)
+	if err == nil || err.Error() != "setup_unresolved" {
+		t.Fatalf("expected setup_unresolved hard reject, got %v", err)
 	}
 }
 
@@ -330,8 +383,8 @@ func TestPlaceEntryRejectsProjectedNoProofBeforeSubmit(t *testing.T) {
 			TP1:   102.0,
 		},
 	}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "execution manager not ready" {
-		t.Fatalf("expected venue-boundary error after advisory proof reject, got %v", err)
+	if err == nil || err.Error() != "quality_score_too_low" {
+		t.Fatalf("expected quality_score_too_low hard reject, got %v", err)
 	}
 }
 

@@ -375,6 +375,9 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
 		p.UpdatedAt = now
 		p.UnknownExitChecks = 0
+		if m.skipQuarantinedProtectionRepair(now, p) {
+			return true, false, nil
+		}
 		return true, false, m.ensureExitOrders(p)
 	}
 	if view.QtyAbs > p.RemainingQty+eps {
@@ -400,6 +403,9 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		p.FilledQty = maxFloat(p.FilledQty, view.QtyAbs)
 		p.UpdatedAt = now
 		p.UnknownExitChecks = 0
+		if m.skipQuarantinedProtectionRepair(now, p) {
+			return true, false, nil
+		}
 		if err := m.ensureExitOrders(p); err != nil {
 			return true, false, err
 		}
@@ -439,6 +445,9 @@ func (m *liveExecManager) syncOpenFromRemote(now time.Time, p *livePosition, row
 		if p.RemainingQty <= fillEpsilon(p.Qty) {
 			changed, err := m.closeFromRemoteSnapshot(now, p, fillPx, "POSITION_FLAT_REMOTE")
 			return changed, true, err
+		}
+		if m.skipQuarantinedProtectionRepair(now, p) {
+			return true, false, nil
 		}
 		if err := m.ensureExitOrders(p); err != nil {
 			return true, false, err

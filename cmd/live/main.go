@@ -5440,6 +5440,24 @@ func (m *liveExecManager) clearOrderLegalityFailures(symbol string) {
 	delete(m.symbolQuarantineTill, raw)
 }
 
+func (m *liveExecManager) skipQuarantinedProtectionRepair(now time.Time, p *livePosition) bool {
+	if m == nil || p == nil {
+		return false
+	}
+	if hasLiveProtectiveOrder(p) || p.PendingExitOrderID > 0 {
+		p.ProtectionRetryAfter = time.Time{}
+		return false
+	}
+	if !m.symbolQuarantined(p.Symbol, now) {
+		p.ProtectionRetryAfter = time.Time{}
+		return false
+	}
+	if p.ProtectionRetryAfter.IsZero() || !p.ProtectionRetryAfter.After(now) {
+		p.ProtectionRetryAfter = now.Add(30 * time.Second)
+	}
+	return now.Before(p.ProtectionRetryAfter)
+}
+
 func (m *liveExecManager) degradedEntryReason(now time.Time, symbol string) string {
 	if m == nil {
 		return degradedReconcileStaleReason
@@ -9709,15 +9727,10 @@ func (m *liveExecManager) fib50Level(symbol string, side features.Side) float64 
 
 func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev int, plan ladderPlan) error {
 	if reason := executionProofRejectReason(time.Now().UTC(), c); reason != "" {
-		if reason != "quality_score_too_low" && reason != "symbol_setup_failed_proof_recently" {
-			return fmt.Errorf("%s", reason)
-		}
-		fmt.Printf("live entry advisory: proof_reject=%s symbol=%s side=%s, continuing\n",
-			reason, strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), strings.ToUpper(strings.TrimSpace(c.Side)))
+		return fmt.Errorf("%s", reason)
 	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
-		fmt.Printf("live entry advisory: strategy_reject=%s symbol=%s side=%s, continuing\n",
-			reason, strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), strings.ToUpper(strings.TrimSpace(c.Side)))
+		return fmt.Errorf("%s", reason)
 	}
 	c.Strat = canonicalExecutionStrategy(c.Strat, c.Side)
 	if m == nil || m.rest == nil {
@@ -9741,9 +9754,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		if !botManagedPosition(existing) {
 			return fmt.Errorf("manual position already active for %s", rawSym)
 		}
-		if existing.PendingAddOrderID > 0 {
-			return fmt.Errorf("pending add already exists for %s", rawSym)
-		}
+		return fmt.Errorf("live_add_disabled")
 	}
 	bid, ask, err := m.rest.BookTicker(rawSym)
 	if err != nil {
@@ -9864,34 +9875,6 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 	orderID := mapInt64(out["orderId"])
 	if orderID == 0 {
 		return fmt.Errorf("missing orderId from place response")
-	}
-	if hasExisting && m.isActive(existing) {
-		existing.PendingAddOrderID = orderID
-		existing.PendingAddPrice = price
-		existing.PendingAddQty = qty
-		existing.PendingAddMargin = margin
-		existing.PendingAddCreatedAt = now
-		existing.PendingAddEntryReason = c.Strat
-		existing.UpdatedAt = now
-		_ = m.save()
-		fmt.Printf("live: add submitted %s %s qty=%s px=%s orderId=%d add_count=%d deployed=%.2f\n",
-			rawSym, existing.Side, vals.Get("quantity"), vals.Get("price"), orderID, existing.AddCount, existing.DeployedMargin)
-		m.emitNotify(notify.Event{
-			Key:      "ADD_SUBMITTED",
-			Title:    "ADD SUBMITTED",
-			Class:    notify.ClassLifecycle,
-			Severity: notify.SeverityInfo,
-			Route:    notify.RouteNormal,
-			Symbol:   rawSym,
-			Message:  "additional size submitted",
-			Metadata: map[string]string{
-				"side":     displayPositionSide(existing.Side),
-				"qty":      vals.Get("quantity"),
-				"limit":    vals.Get("price"),
-				"deployed": fmt.Sprintf("%.2f->%.2f", existing.DeployedMargin, existing.DeployedMargin+margin),
-			},
-		})
-		return nil
 	}
 	entryReason := c.Strat
 	entryStrategyID := firstNonEmpty(strings.TrimSpace(c.StrategyID), "unknown")
@@ -10251,6 +10234,10 @@ func (m *liveExecManager) reconcilePendingExit(now time.Time, p *livePosition) (
 
 func (m *liveExecManager) reconcileOpen(now time.Time, p *livePosition, mom map[string]momentumView, flow map[string]flowMetrics, meta map[string]symbolMeta) (bool, error) {
 	changed := false
+	if m.skipQuarantinedProtectionRepair(now, p) {
+		p.UpdatedAt = now
+		return true, nil
+	}
 	closedByStop, err := m.reconcileExitOrders(now, p)
 	if err != nil {
 		return changed, err

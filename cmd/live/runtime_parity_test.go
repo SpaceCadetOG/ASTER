@@ -346,12 +346,12 @@ func TestProjectedProofQualityRejectMatchesPaperAndLive(t *testing.T) {
 	if paperDec.RejectReason != "quality_score_too_low" {
 		t.Fatalf("expected paper reject reason quality_score_too_low, got %q", paperDec.RejectReason)
 	}
-	if liveDispatch.RejectReason != "execution manager not ready" {
-		t.Fatalf("expected live quality reject to be bypassed through venue boundary, got %q", liveDispatch.RejectReason)
+	if liveDispatch.RejectReason != "quality_score_too_low" {
+		t.Fatalf("expected live quality reject to stop before venue boundary, got %q", liveDispatch.RejectReason)
 	}
 }
 
-func TestLiveDispatchBypassesQualityRejectAndEntersAdapter(t *testing.T) {
+func TestLiveDispatchBlocksQualityRejectBeforeAdapter(t *testing.T) {
 	cand := candidate{
 		Entry: inplay.Entry{
 			Symbol:       "BTCUSDT",
@@ -397,11 +397,11 @@ func TestLiveDispatchBypassesQualityRejectAndEntersAdapter(t *testing.T) {
 			return nil
 		},
 	})
-	if !liveDispatch.Attempted || !liveDispatch.Entered {
-		t.Fatalf("expected live dispatch to proceed despite quality reject, got %+v", liveDispatch)
+	if liveDispatch.Attempted || liveDispatch.Entered {
+		t.Fatalf("expected live dispatch to stop on quality reject, got %+v", liveDispatch)
 	}
-	if adapterCalls != 1 {
-		t.Fatalf("expected adapter call, got %d", adapterCalls)
+	if adapterCalls != 0 {
+		t.Fatalf("expected no adapter call, got %d", adapterCalls)
 	}
 }
 
