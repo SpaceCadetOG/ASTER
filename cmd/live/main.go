@@ -1420,8 +1420,40 @@ type livePosition struct {
 }
 
 type liveExecStore struct {
-	Positions       map[string]*livePosition  `json:"positions"`
-	GovernorRecords []executionGovernorRecord `json:"governorRecords,omitempty"`
+	Positions        map[string]*livePosition        `json:"positions"`
+	GovernorRecords  []executionGovernorRecord       `json:"governorRecords,omitempty"`
+	RecentBotEntries map[string]recentBotEntryMemory `json:"recentBotEntries,omitempty"`
+}
+
+type recentBotEntryMemory struct {
+	Symbol                 string    `json:"symbol"`
+	Side                   string    `json:"side"`
+	OccurredAt             time.Time `json:"occurredAt"`
+	EntryPrice             float64   `json:"entryPrice,omitempty"`
+	Qty                    float64   `json:"qty,omitempty"`
+	Margin                 float64   `json:"margin,omitempty"`
+	Leverage               int       `json:"leverage,omitempty"`
+	EntryReason            string    `json:"entryReason,omitempty"`
+	EntryStrategyID        string    `json:"entryStrategyId,omitempty"`
+	EntryGrade             string    `json:"entryGrade,omitempty"`
+	EntryState             string    `json:"entryState,omitempty"`
+	ExitProfile            string    `json:"exitProfile,omitempty"`
+	EntryConf              float64   `json:"entryConf,omitempty"`
+	DiscoveryScore         float64   `json:"discoveryScore,omitempty"`
+	TriggerScore           float64   `json:"triggerScore,omitempty"`
+	ExecutionScore         float64   `json:"executionScore,omitempty"`
+	CombinedScore          float64   `json:"combinedScore,omitempty"`
+	EntryVolumeUSD         float64   `json:"entryVolumeUsd,omitempty"`
+	EntryATRPct            float64   `json:"entryAtrPct,omitempty"`
+	EntryATRExtension      float64   `json:"entryAtrExtension,omitempty"`
+	EntrySession           string    `json:"entrySession,omitempty"`
+	EntryTiming            string    `json:"entryTiming,omitempty"`
+	CandidateAgeSeconds    float64   `json:"candidateAgeSeconds,omitempty"`
+	EntryDistanceToVWAPPct float64   `json:"entryDistanceToVWAPPct,omitempty"`
+	EntrySetupFamily       string    `json:"entrySetupFamily,omitempty"`
+	EntrySetupSource       string    `json:"entrySetupSource,omitempty"`
+	EntryTradeHorizon      string    `json:"entryTradeHorizon,omitempty"`
+	ExecBucket             string    `json:"execBucket,omitempty"`
 }
 
 type liveExecManager struct {
@@ -1504,6 +1536,7 @@ type liveExecManager struct {
 	entryBlockReason     string
 	healthyAccountReads  int
 	governorRecords      []executionGovernorRecord
+	recentBotEntries     map[string]recentBotEntryMemory
 	lastTransferStatus   string
 	lastRemoteImportAt   time.Time
 	lastFundsCheckAt     time.Time
@@ -6749,6 +6782,9 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 		m.recoverATRMult = 1.5
 	}
 	_ = m.load()
+	if m.recentBotEntries == nil {
+		m.recentBotEntries = map[string]recentBotEntryMemory{}
+	}
 	for _, p := range m.positions {
 		if p == nil {
 			continue
@@ -6777,6 +6813,131 @@ func newLiveExecManager(rest *aster.RESTAuth, tg *notify.Telegram) *liveExecMana
 
 func manualManageFingerprint(symbol, side string, qty, entry float64) string {
 	return positionLookupKey(symbol, side)
+}
+
+func recentBotEntryTTL() time.Duration {
+	return 45 * time.Minute
+}
+
+func trimRecentBotEntries(entries map[string]recentBotEntryMemory, now time.Time) map[string]recentBotEntryMemory {
+	if len(entries) == 0 {
+		return map[string]recentBotEntryMemory{}
+	}
+	ttl := recentBotEntryTTL()
+	out := make(map[string]recentBotEntryMemory, len(entries))
+	for key, rec := range entries {
+		if strings.TrimSpace(rec.Symbol) == "" || strings.TrimSpace(rec.Side) == "" {
+			continue
+		}
+		if !rec.OccurredAt.IsZero() && now.Sub(rec.OccurredAt) > ttl {
+			continue
+		}
+		out[key] = rec
+	}
+	return out
+}
+
+func (m *liveExecManager) rememberRecentBotEntry(now time.Time, p *livePosition) {
+	if m == nil || p == nil {
+		return
+	}
+	if m.recentBotEntries == nil {
+		m.recentBotEntries = map[string]recentBotEntryMemory{}
+	}
+	key := positionLookupKey(p.Symbol, p.Side)
+	m.recentBotEntries[key] = recentBotEntryMemory{
+		Symbol:                 strings.ToUpper(strings.TrimSpace(aster.RawSymbol(p.Symbol))),
+		Side:                   normalizePositionSide(p.Side),
+		OccurredAt:             now,
+		EntryPrice:             p.EntryPrice,
+		Qty:                    maxFloat(p.FilledQty, p.Qty),
+		Margin:                 maxFloat(p.DeployedMargin, p.Margin),
+		Leverage:               maxInt(1, p.Leverage),
+		EntryReason:            p.EntryReason,
+		EntryStrategyID:        p.EntryStrategyID,
+		EntryGrade:             p.EntryGrade,
+		EntryState:             p.EntryState,
+		ExitProfile:            p.ExitProfile,
+		EntryConf:              p.EntryConf,
+		DiscoveryScore:         p.DiscoveryScore,
+		TriggerScore:           p.TriggerScore,
+		ExecutionScore:         p.ExecutionScore,
+		CombinedScore:          p.CombinedScore,
+		EntryVolumeUSD:         p.EntryVolumeUSD,
+		EntryATRPct:            p.EntryATRPct,
+		EntryATRExtension:      p.EntryATRExtension,
+		EntrySession:           p.EntrySession,
+		EntryTiming:            p.EntryTiming,
+		CandidateAgeSeconds:    p.CandidateAgeSeconds,
+		EntryDistanceToVWAPPct: p.EntryDistanceToVWAPPct,
+		EntrySetupFamily:       p.EntrySetupFamily,
+		EntrySetupSource:       p.EntrySetupSource,
+		EntryTradeHorizon:      p.EntryTradeHorizon,
+		ExecBucket:             p.ExecBucket,
+	}
+}
+
+func (m *liveExecManager) recentBotEntryMatch(symbol, side string, qty, entry float64, now time.Time) (recentBotEntryMemory, bool) {
+	if m == nil || len(m.recentBotEntries) == 0 {
+		return recentBotEntryMemory{}, false
+	}
+	key := positionLookupKey(symbol, side)
+	rec, ok := m.recentBotEntries[key]
+	if !ok {
+		return recentBotEntryMemory{}, false
+	}
+	if !rec.OccurredAt.IsZero() && now.Sub(rec.OccurredAt) > recentBotEntryTTL() {
+		delete(m.recentBotEntries, key)
+		return recentBotEntryMemory{}, false
+	}
+	if rec.EntryPrice > 0 && entry > 0 && !entryWithinTolerance(rec.EntryPrice, entry) {
+		return recentBotEntryMemory{}, false
+	}
+	if rec.Qty > 0 && qty > 0 && !qtyWithinTolerance(rec.Qty, qty) {
+		return recentBotEntryMemory{}, false
+	}
+	return rec, true
+}
+
+func (m *liveExecManager) recoverBotRemotePosition(symbol, side string, qty, entry, margin float64, lev int, now time.Time) (*livePosition, bool) {
+	rec, ok := m.recentBotEntryMatch(symbol, side, qty, entry, now)
+	if !ok {
+		return nil, false
+	}
+	sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(symbol)))
+	p := m.newImportedRemotePosition(sym, side, qty, entry, margin, lev, now, "BOT")
+	p.EntryReason = firstNonEmpty(strings.TrimSpace(rec.EntryReason), "execution")
+	p.EntryStrategyID = firstNonEmpty(strings.TrimSpace(rec.EntryStrategyID), strings.TrimSpace(rec.EntryReason), "execution")
+	p.EntrySource = "BOT"
+	p.EntryGrade = rec.EntryGrade
+	p.EntryState = rec.EntryState
+	p.ExitProfile = rec.ExitProfile
+	p.EntryConf = rec.EntryConf
+	p.DiscoveryScore = rec.DiscoveryScore
+	p.TriggerScore = rec.TriggerScore
+	p.ExecutionScore = rec.ExecutionScore
+	p.CombinedScore = rec.CombinedScore
+	p.EntryVolumeUSD = rec.EntryVolumeUSD
+	p.EntryATRPct = rec.EntryATRPct
+	p.EntryATRExtension = rec.EntryATRExtension
+	p.EntrySession = rec.EntrySession
+	p.EntryTiming = rec.EntryTiming
+	p.CandidateAgeSeconds = rec.CandidateAgeSeconds
+	p.EntryDistanceToVWAPPct = rec.EntryDistanceToVWAPPct
+	p.EntrySetupFamily = rec.EntrySetupFamily
+	p.EntrySetupSource = rec.EntrySetupSource
+	p.EntryTradeHorizon = rec.EntryTradeHorizon
+	p.ExecBucket = rec.ExecBucket
+	p.CreatedAt = rec.OccurredAt
+	p.DecisionAt = rec.OccurredAt
+	p.OrderSubmittedAt = rec.OccurredAt
+	p.Managed = false
+	p.Protected = false
+	p.ManualManageState = ""
+	if err := m.initializeBracketLevels(p); err != nil {
+		return p, true
+	}
+	return p, true
 }
 
 func (m *liveExecManager) queueManualManagementRequest(symbol, side string, qty, entry, margin float64, lev int, now time.Time) bool {
@@ -7161,8 +7322,12 @@ func (m *liveExecManager) load() error {
 	if st.Positions == nil {
 		st.Positions = map[string]*livePosition{}
 	}
+	if st.RecentBotEntries == nil {
+		st.RecentBotEntries = map[string]recentBotEntryMemory{}
+	}
 	m.positions = st.Positions
 	m.governorRecords = trimExecutionGovernorRecords(st.GovernorRecords, time.Now().UTC())
+	m.recentBotEntries = trimRecentBotEntries(st.RecentBotEntries, time.Now().UTC())
 	return nil
 }
 
@@ -7174,8 +7339,9 @@ func (m *liveExecManager) save() error {
 		return err
 	}
 	st := liveExecStore{
-		Positions:       m.positions,
-		GovernorRecords: trimExecutionGovernorRecords(m.governorRecords, time.Now().UTC()),
+		Positions:        m.positions,
+		GovernorRecords:  trimExecutionGovernorRecords(m.governorRecords, time.Now().UTC()),
+		RecentBotEntries: trimRecentBotEntries(m.recentBotEntries, time.Now().UTC()),
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -7830,6 +7996,11 @@ func (m *liveExecManager) ReconcileBootState() (closedLocal int, importedRemote 
 			entry = rp.mark
 		}
 		if entry <= 0 || qty <= 0 {
+			continue
+		}
+		if recovered, ok := m.recoverBotRemotePosition(sym, side, qty, entry, rp.margin, rp.lev, now); ok {
+			m.positions[sym] = recovered
+			importedRemote++
 			continue
 		}
 		req := manualManageRequest{
@@ -8905,6 +9076,11 @@ func (m *liveExecManager) importRemotePositions(now time.Time) (int, error) {
 			}
 			continue
 		}
+		if recovered, ok := m.recoverBotRemotePosition(sym, side, qty, entry, margin, lev, now); ok {
+			m.positions[sym] = recovered
+			imported++
+			continue
+		}
 		if approvedReq, ok := m.approvedManualRequest(sym, side, qty, entry); ok {
 			if _, err := m.activateManualManagement(approvedReq, now, "MANUAL_APPROVED_RETRY"); err == nil {
 				imported++
@@ -9816,6 +9992,7 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 			}
 		}
 	}
+	m.rememberRecentBotEntry(now, p)
 	m.positions[rawSym] = p
 	m.recordExecutionGovernorEntry(now, c)
 	_ = m.save()
