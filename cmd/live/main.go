@@ -5541,6 +5541,47 @@ func validateOrderLegality(meta aster.SymbolMeta, qty, price float64) (float64, 
 	return qty, price, ""
 }
 
+func validateStopOrderLegality(meta aster.SymbolMeta, qty, stopPrice float64, positionSide string) (float64, float64, string) {
+	if stopPrice <= 0 {
+		return 0, 0, orderIllegalTickSizeReason
+	}
+	if meta.TickSize > 0 {
+		rounded := normalizeProtectiveStopToTick(positionSide, stopPrice, meta)
+		if rounded <= 0 {
+			return 0, 0, orderIllegalTickSizeReason
+		}
+		if math.Abs(rounded-stopPrice) > 1e-9 || !isMultipleOfStep(rounded, meta.TickSize) {
+			return 0, 0, orderIllegalTickSizeReason
+		}
+		stopPrice = rounded
+	}
+	if qty <= 0 {
+		return 0, 0, orderIllegalMinQtyReason
+	}
+	if meta.MaxQty > 0 && qty > meta.MaxQty {
+		qty = roundToPrecision(math.Floor(meta.MaxQty/maxFloat(meta.StepSize, 1e-12))*maxFloat(meta.StepSize, 1e-12), meta.QtyPrecision)
+		if qty <= 0 {
+			return 0, 0, orderIllegalMaxQtyReason
+		}
+	}
+	if meta.StepSize > 0 {
+		if !isMultipleOfStep(qty, meta.StepSize) {
+			return 0, 0, orderIllegalStepSizeReason
+		}
+	}
+	if meta.MinQty > 0 && qty < meta.MinQty {
+		return 0, 0, orderIllegalMinQtyReason
+	}
+	notional := qty * stopPrice
+	if meta.MinNotional > 0 && notional < meta.MinNotional {
+		return 0, 0, orderIllegalMinNotionalReason
+	}
+	if meta.MaxNotional > 0 && notional > meta.MaxNotional {
+		return 0, 0, orderIllegalMaxQtyReason
+	}
+	return qty, stopPrice, ""
+}
+
 func loadPostWinCooldownConfig() postWinCooldownConfig {
 	cfg := postWinCooldownConfig{
 		Enable:       envBool("LIVE_POST_WIN_COOLDOWN_ENABLE", true),
@@ -9318,7 +9359,64 @@ func (m *liveExecManager) placeOrReplaceStopWithRetry(p *livePosition) error {
 		}
 		time.Sleep(m.recoverStopBackoff)
 	}
+	if err != nil && p != nil && botManagedPosition(p) && p.RemainingQty > 0 && p.StopOrderID == 0 {
+		if closeErr := m.emergencyFlattenUnprotectedBotPosition(p, err.Error()); closeErr == nil {
+			return nil
+		}
+	}
 	return err
+}
+
+func (m *liveExecManager) emergencyFlattenUnprotectedBotPosition(p *livePosition, cause string) error {
+	if m == nil || m.rest == nil || p == nil || !botManagedPosition(p) || p.State == execClosed || p.RemainingQty <= 0 {
+		return nil
+	}
+	meta, err := m.rest.SymbolMeta(p.Symbol, true)
+	if err != nil {
+		return err
+	}
+	closeSide := "SELL"
+	if strings.EqualFold(p.Side, "SELL") {
+		closeSide = "BUY"
+	}
+	qty, _, err := m.rest.RoundQty(p.Symbol, p.RemainingQty)
+	if err != nil {
+		return err
+	}
+	vals := url.Values{}
+	vals.Set("symbol", p.Symbol)
+	vals.Set("side", closeSide)
+	vals.Set("type", "MARKET")
+	vals.Set("positionSide", "BOTH")
+	vals.Set("reduceOnly", "true")
+	vals.Set("quantity", formatFloat(qty, meta.QtyPrecision))
+	out, err := m.rest.PlaceOrder(vals)
+	if err != nil {
+		return err
+	}
+	p.StopOrderID = 0
+	p.Protected = false
+	p.StopReason = "PROTECTION_ATTACH_FAILED"
+	p.PendingExitOrderID = mapInt64(out["orderId"])
+	p.PendingExitPrice = p.LastMark
+	if p.PendingExitPrice <= 0 {
+		p.PendingExitPrice = p.EntryPrice
+	}
+	p.PendingExitQty = qty
+	p.PendingExitFilledQty = 0
+	p.PendingExitReason = "PROTECTION_ATTACH_FAILED"
+	p.PendingExitCreatedAt = time.Now().UTC()
+	p.PendingExitAction = "FORCE_FLAT_UNPROTECTED"
+	p.UpdatedAt = p.PendingExitCreatedAt
+	if m.tg != nil {
+		m.tg.Sendf("%s", notify.FormatRiskAlert(notify.RiskView{
+			RiskState:      "CRITICAL",
+			SymbolOrScope:  fmt.Sprintf("%s %s", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			RiskMessage:    "Live stop could not be attached, so the bot sent a reduce-only market close.",
+			OperatorAction: firstNonEmpty(strings.TrimSpace(cause), "PROTECTION_ATTACH_FAILED"),
+		}))
+	}
+	return m.save()
 }
 
 func (m *liveExecManager) forceFlatRecovered(p *livePosition) error {

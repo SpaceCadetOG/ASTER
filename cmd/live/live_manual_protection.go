@@ -412,7 +412,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 			return nil
 		}
 	}
-	legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, stopPx)
+	legalQty, legalStop, legalityReason := validateStopOrderLegality(meta, qty, stopPx, p.Side)
 	if legalityReason != "" {
 		if manualManagedTrade(p) && legalityReason == orderIllegalTickSizeReason {
 			repairMark := protectiveMark
@@ -424,7 +424,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 				if !protectiveStopExchangeSafe(p.Side, protectiveEntry, repairMark, retryStop, meta.TickSize) {
 					continue
 				}
-				if q2, s2, r2 := validateOrderLegality(meta, qty, retryStop); r2 == "" {
+				if q2, s2, r2 := validateStopOrderLegality(meta, qty, retryStop, p.Side); r2 == "" {
 					legalQty = q2
 					legalStop = s2
 					legalityReason = ""
@@ -486,7 +486,7 @@ func (m *liveExecManager) placeOrReplaceStop(p *livePosition) (err error) {
 						lastRetryStop = retryStop
 						continue
 					}
-					if legalQty, legalStop, legalityReason := validateOrderLegality(meta, qty, retryStop); legalityReason != "" {
+					if legalQty, legalStop, legalityReason := validateStopOrderLegality(meta, qty, retryStop, p.Side); legalityReason != "" {
 						m.recordOrderLegalityFailure(p.Symbol, legalityReason, now)
 						lastRetryStop = retryStop
 						qty = legalQty
