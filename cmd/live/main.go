@@ -10570,6 +10570,11 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 			}
 		}
 	}
+	// Protection must attach before optional TP ladder orders so a partial
+	// bracket-placement failure cannot leave a live position unprotected.
+	if err := m.placeOrReplaceStopWithRetry(p); err != nil {
+		return err
+	}
 	if !m.tpRatchetOnly {
 		var err error
 		if p.TP1Qty > 0 {
@@ -10587,9 +10592,6 @@ func (m *liveExecManager) placeInitialBrackets(p *livePosition) error {
 				return err
 			}
 		}
-	}
-	if err := m.placeOrReplaceStop(p); err != nil {
-		return err
 	}
 	return nil
 }
