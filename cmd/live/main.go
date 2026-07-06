@@ -23223,10 +23223,169 @@ func (c *telegramCommandCtx) blockedStrongLines(limit int) []string {
 	return out
 }
 
+func (c *telegramCommandCtx) handleEmergencyCloseCommand(cmd string, fields []string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	now := time.Now().UTC()
+	switch {
+	case strings.HasPrefix(cmd, "/closeall"):
+		closed := 0
+		if c.execMgr != nil {
+			snap := c.execMgr.LiveAccountSnapshot(64)
+			for _, pos := range snap.Positions {
+				if ok, err := c.execMgr.ForceCloseSymbol(pos.Symbol, "GROUND_ZERO_CLOSEALL"); err == nil && ok {
+					closed++
+				}
+			}
+			if closed > 0 {
+				return notify.BuildEventHTML("🧯", "CLOSE ALL SENT",
+					fmt.Sprintf("<b>Live positions queued:</b> %d", closed),
+					"Reduce-only close orders were sent.",
+				), true
+			}
+		}
+		if c.paper != nil && c.paper.enabled {
+			meta := c.getMeta()
+			for sym := range c.paper.positions {
+				if c.paper.ForceCloseSymbol(now, sym, meta, nil, "GROUND_ZERO_CLOSEALL") {
+					closed++
+				}
+			}
+			if closed > 0 {
+				return notify.BuildEventHTML("🧯", "CLOSE ALL SENT",
+					fmt.Sprintf("<b>Paper positions closed:</b> %d", closed),
+				), true
+			}
+		}
+		return notify.BuildEventHTML("📦", "NO POSITIONS", "No active positions to close."), true
+	case strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "):
+		if len(fields) < 2 {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>"), true
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return notify.BuildEventHTML("❓", "USAGE", "<code>/close SYMBOL</code>"), true
+		}
+		if c.execMgr != nil {
+			if ok, err := c.execMgr.ForceCloseSymbol(sym, "GROUND_ZERO_OPERATOR_CLOSE"); err != nil {
+				return notify.BuildEventHTML("❌", "CLOSE FAILED",
+					fmt.Sprintf("<b>%s</b>", cleanSymbol(sym)),
+					fmt.Sprintf("<b>Reason:</b> %s", err.Error()),
+				), true
+			} else if ok {
+				return notify.BuildEventHTML("🧯", "CLOSE SENT",
+					fmt.Sprintf("<b>%s</b>", cleanSymbol(sym)),
+					"Reduce-only close order was sent.",
+				), true
+			}
+		}
+		if c.paper != nil && c.paper.enabled {
+			if c.paper.ForceCloseSymbol(now, sym, c.getMeta(), nil, "GROUND_ZERO_OPERATOR_CLOSE") {
+				return notify.BuildEventHTML("🧯", "CLOSED",
+					fmt.Sprintf("<b>%s</b>", cleanSymbol(sym)),
+					"Paper position closed.",
+				), true
+			}
+		}
+		return notify.BuildEventHTML("📦", "POSITION NOT FOUND",
+			fmt.Sprintf("%s is not an active position.", cleanSymbol(sym)),
+		), true
+	}
+	return "", false
+}
+
+func (c *telegramCommandCtx) resolveManualManageCommand(rawMsg, cmd string, fields []string) (manualManageRequest, string, bool, error) {
+	if c == nil || c.execMgr == nil {
+		return manualManageRequest{}, "", false, fmt.Errorf("execution manager unavailable")
+	}
+	approve := cmd == "y" || cmd == "yes"
+	if strings.HasPrefix(cmd, "/manage") {
+		if len(fields) < 3 {
+			return manualManageRequest{}, "", false, fmt.Errorf("usage: /manage SYMBOL y|n")
+		}
+		sym := strings.ToUpper(strings.TrimSpace(aster.RawSymbol(fields[1])))
+		if sym == "" {
+			return manualManageRequest{}, "", false, fmt.Errorf("usage: /manage SYMBOL y|n")
+		}
+		action := strings.ToLower(strings.TrimSpace(fields[2]))
+		switch action {
+		case "y", "yes":
+			approve = true
+		case "n", "no":
+			approve = false
+		default:
+			return manualManageRequest{}, "", false, fmt.Errorf("usage: /manage SYMBOL y|n")
+		}
+		req, ok := c.execMgr.pendingManualRequest(sym)
+		if !ok {
+			return manualManageRequest{}, sym, approve, fmt.Errorf("no pending manual request for %s", cleanSymbol(sym))
+		}
+		return req, sym, approve, nil
+	}
+	pending := c.execMgr.pendingManualRequests(2)
+	if len(pending) != 1 {
+		return manualManageRequest{}, "", approve, fmt.Errorf("reply /manage SYMBOL y|n when multiple manual requests exist")
+	}
+	return pending[0], pending[0].Symbol, approve, nil
+}
+
+func (c *telegramCommandCtx) handleManualManageCommand(rawMsg, cmd string, fields []string) (string, bool) {
+	if !(cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no" || strings.HasPrefix(cmd, "/manage")) {
+		return "", false
+	}
+	if c.execMgr == nil {
+		return notify.BuildEventHTML("🛑", "MANAGE UNAVAILABLE", "Execution manager unavailable"), true
+	}
+	req, sym, approve, err := c.resolveManualManageCommand(rawMsg, cmd, fields)
+	if err != nil {
+		return notify.BuildEventHTML("❓", "USAGE", err.Error()), true
+	}
+	now := time.Now().UTC()
+	if approve {
+		p, err := c.execMgr.activateManualManagement(req, now, "MANUAL_OPERATOR_APPROVED")
+		if err != nil {
+			return notify.BuildEventHTML("❌", "MANAGE FAILED",
+				fmt.Sprintf("<b>%s</b>", cleanSymbol(sym)),
+				fmt.Sprintf("<b>Reason:</b> %s", err.Error()),
+			), true
+		}
+		return notify.BuildEventHTML("🛡️", "BOT MANAGEMENT ENABLED",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			"The bot will manage this exchange position.",
+		), true
+	}
+	if p, ok := c.execMgr.managedManualPositionBySymbol(sym); ok && p != nil {
+		if deactivated, ok := c.execMgr.deactivateManualManagement(sym, now); ok && deactivated != nil {
+			_ = c.execMgr.save()
+			return notify.BuildEventHTML("🧾", "BOT MANAGEMENT DISABLED",
+				fmt.Sprintf("<b>%s %s</b>", cleanSymbol(deactivated.Symbol), displayPositionSide(deactivated.Side)),
+				"Position remains visible, but bot management was turned off.",
+			), true
+		}
+	}
+	if p, err := c.execMgr.activatePassiveManualImport(req, now, "MANUAL_OPERATOR_DECLINED", false); err == nil && p != nil {
+		return notify.BuildEventHTML("🧾", "MANUAL POSITION LEFT PASSIVE",
+			fmt.Sprintf("<b>%s %s</b>", cleanSymbol(p.Symbol), displayPositionSide(p.Side)),
+			"Bot management was not enabled.",
+		), true
+	}
+	return notify.BuildEventHTML("🧾", "MANUAL POSITION LEFT PASSIVE",
+		fmt.Sprintf("<b>%s</b>", cleanSymbol(sym)),
+		"Bot management was not enabled.",
+	), true
+}
+
 func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 	rawMsg := strings.TrimSpace(msg)
 	cmd := strings.ToLower(rawMsg)
 	fields := strings.Fields(rawMsg)
+	if out, handled := c.handleEmergencyCloseCommand(cmd, fields); handled {
+		return out
+	}
+	if out, handled := c.handleManualManageCommand(rawMsg, cmd, fields); handled {
+		return out
+	}
 	switch {
 	case strings.HasPrefix(cmd, "/help"), strings.HasPrefix(cmd, "/start"):
 		lines := []string{
@@ -23283,10 +23442,10 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			)
 		}
 		return operatorOrderHTML(res)
-	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "), strings.HasPrefix(cmd, "/execute "), strings.HasPrefix(cmd, "/trade "), strings.HasPrefix(cmd, "/protect "), strings.HasPrefix(cmd, "/close "), strings.HasPrefix(cmd, "/flatten "), strings.HasPrefix(cmd, "/closeall"), cmd == "/mode live" || cmd == "/live" || cmd == "/mode paper" || cmd == "/paper":
+	case strings.HasPrefix(cmd, "/l "), strings.HasPrefix(cmd, "/s "), strings.HasPrefix(cmd, "/l3 "), strings.HasPrefix(cmd, "/l5 "), strings.HasPrefix(cmd, "/l10 "), strings.HasPrefix(cmd, "/l20 "), strings.HasPrefix(cmd, "/s3 "), strings.HasPrefix(cmd, "/s5 "), strings.HasPrefix(cmd, "/s10 "), strings.HasPrefix(cmd, "/s20 "), strings.HasPrefix(cmd, "/m "), strings.HasPrefix(cmd, "/p "), strings.HasPrefix(cmd, "/c "), strings.HasPrefix(cmd, "/execute "), strings.HasPrefix(cmd, "/trade "), strings.HasPrefix(cmd, "/protect "), cmd == "/mode live" || cmd == "/live" || cmd == "/mode paper" || cmd == "/paper":
 		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
 			"Ground-zero mode is active.",
-			"All order/trade commands are disabled.",
+			"New trade commands are disabled. Close/manage commands still work.",
 		)
 	case strings.HasPrefix(cmd, "/status"):
 		s := c.status.Snapshot()
@@ -23531,11 +23690,6 @@ func (c *telegramCommandCtx) handleCommand(_ string, msg string) string {
 			lines = append(lines, fmt.Sprintf("<b>Debug:</b> rawSide=%s | normalized=%s | pnlDelta=%+.2f", strings.ToUpper(strings.TrimSpace(p.Side)), normalizePositionSide(p.Side), p.UnrealizedPnL-p.ExchangeUnreal))
 		}
 		return notify.BuildEventHTML("📍", "POSITION DETAIL", lines...)
-	case cmd == "y" || cmd == "yes" || cmd == "n" || cmd == "no", strings.HasPrefix(cmd, "/manage"):
-		return notify.BuildEventHTML("🛑", "TRADING DISABLED",
-			"Ground-zero mode is active.",
-			"Management/trade commands are disabled.",
-		)
 	case cmd == "/mode":
 		modeDryRun := true
 		modeLiveEnabled := false

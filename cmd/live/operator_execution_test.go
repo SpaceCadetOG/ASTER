@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseOperatorOrderCommandLongLimitWithBracket(t *testing.T) {
 	req, err := parseOperatorOrderCommand("/long OUSDT usd=10 limit=123 sl=120 tp=129 lev=5")
@@ -52,5 +55,29 @@ func TestParseOperatorOrderCommandShortMarket(t *testing.T) {
 func TestParseOperatorOrderCommandRequiresUSD(t *testing.T) {
 	if _, err := parseOperatorOrderCommand("/long OUSDT limit=123"); err == nil {
 		t.Fatalf("expected usd requirement error")
+	}
+}
+
+func TestGroundZeroCloseCommandNotBlocked(t *testing.T) {
+	t.Setenv("LIVE_OPERATOR_EXECUTION_ENABLE", "0")
+	ctx := &telegramCommandCtx{}
+	out := ctx.handleCommand("", "/close SNDKUSDT")
+	if strings.Contains(out, "TRADING DISABLED") {
+		t.Fatalf("expected close command to bypass ground-zero trading block, got %q", out)
+	}
+	if !strings.Contains(out, "POSITION NOT FOUND") {
+		t.Fatalf("expected position-not-found response, got %q", out)
+	}
+}
+
+func TestGroundZeroManageCommandNotBlocked(t *testing.T) {
+	t.Setenv("LIVE_OPERATOR_EXECUTION_ENABLE", "0")
+	ctx := &telegramCommandCtx{execMgr: &liveExecManager{}}
+	out := ctx.handleCommand("", "/manage SNDKUSDT y")
+	if strings.Contains(out, "TRADING DISABLED") {
+		t.Fatalf("expected manage command to bypass ground-zero trading block, got %q", out)
+	}
+	if !strings.Contains(out, "no pending manual request") {
+		t.Fatalf("expected pending-request response, got %q", out)
 	}
 }
