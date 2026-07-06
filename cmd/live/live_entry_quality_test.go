@@ -220,6 +220,21 @@ func TestLiveEligibilityQualityPenaltyCanStillAllowEntry(t *testing.T) {
 	}
 }
 
+func TestLiveEntryDegradedReasonHardBlock(t *testing.T) {
+	if liveEntryDegradedReasonHardBlock(degradedAccountHealthPartialReason) {
+		t.Fatalf("expected partial account health to be advisory")
+	}
+	if liveEntryDegradedReasonHardBlock(degradedUserDataStaleReason) {
+		t.Fatalf("expected stale userdata to be advisory")
+	}
+	if liveEntryDegradedReasonHardBlock(degradedReconcileStaleReason) {
+		t.Fatalf("expected stale reconcile to be advisory")
+	}
+	if !liveEntryDegradedReasonHardBlock(degradedOrderLegalityQuarantineReason) {
+		t.Fatalf("expected legality quarantine to remain hard-blocking")
+	}
+}
+
 func TestProjectedProofOutcomeClassifiesGoodAndStrong(t *testing.T) {
 	strong := candidate{
 		Side:              "BUY",
@@ -291,10 +306,10 @@ func TestLiveEligibilityHardStateBlockStillWins(t *testing.T) {
 	}
 }
 
-func TestPlaceEntryRejectsUnresolvedStrategyBeforeSubmit(t *testing.T) {
+func TestPlaceEntryTreatsUnresolvedStrategyAsAdvisoryBeforeSubmit(t *testing.T) {
 	err := (*liveExecManager)(nil).PlaceEntry(candidate{Strat: "none"}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "setup_unresolved" {
-		t.Fatalf("expected setup_unresolved, got %v", err)
+	if err == nil || err.Error() != "execution manager not ready" {
+		t.Fatalf("expected venue-boundary error after advisory strategy reject, got %v", err)
 	}
 }
 

@@ -9524,7 +9524,8 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		return fmt.Errorf("%s", reason)
 	}
 	if reason := executionStrategyRejectReason(c); reason != "" {
-		return fmt.Errorf("%s", reason)
+		fmt.Printf("live entry advisory: strategy_reject=%s symbol=%s side=%s, continuing\n",
+			reason, strings.ToUpper(aster.RawSymbol(c.Entry.Symbol)), strings.ToUpper(strings.TrimSpace(c.Side)))
 	}
 	c.Strat = canonicalExecutionStrategy(c.Strat, c.Side)
 	if m == nil || m.rest == nil {
@@ -9535,7 +9536,10 @@ func (m *liveExecManager) PlaceEntry(c candidate, entryBps, margin float64, lev 
 		return fmt.Errorf("reentry disabled")
 	}
 	if reason := m.degradedEntryReason(time.Now().UTC(), rawSym); reason != "" {
-		return fmt.Errorf("%s", reason)
+		if liveEntryDegradedReasonHardBlock(reason) {
+			return fmt.Errorf("%s", reason)
+		}
+		fmt.Printf("live entry advisory: degraded_state=%s symbol=%s, continuing\n", reason, rawSym)
 	}
 	existing, hasExisting := m.trackedPosition(rawSym)
 	if hasExisting && m.isActive(existing) {
@@ -20110,6 +20114,15 @@ func placeEntry(rest *aster.RESTAuth, c candidate, entryBps, margin float64, lev
 	fmt.Printf("live: placed entry %s %s qty=%s price=%s -> %v\n",
 		rawSym, c.Side, vals.Get("quantity"), vals.Get("price"), out)
 	return nil
+}
+
+func liveEntryDegradedReasonHardBlock(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "", degradedAccountHealthPartialReason, degradedUserDataStaleReason, degradedReconcileStaleReason:
+		return false
+	default:
+		return true
+	}
 }
 
 func loadSafetyConfig(reserveUSDT, tradeMargin float64) safetyConfig {
