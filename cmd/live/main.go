@@ -1423,6 +1423,7 @@ type liveExecStore struct {
 	Positions        map[string]*livePosition        `json:"positions"`
 	GovernorRecords  []executionGovernorRecord       `json:"governorRecords,omitempty"`
 	RecentBotEntries map[string]recentBotEntryMemory `json:"recentBotEntries,omitempty"`
+	ManualRequests   map[string]manualManageRequest  `json:"manualRequests,omitempty"`
 }
 
 type recentBotEntryMemory struct {
@@ -7384,9 +7385,13 @@ func (m *liveExecManager) load() error {
 	if st.RecentBotEntries == nil {
 		st.RecentBotEntries = map[string]recentBotEntryMemory{}
 	}
+	if st.ManualRequests == nil {
+		st.ManualRequests = map[string]manualManageRequest{}
+	}
 	m.positions = st.Positions
 	m.governorRecords = trimExecutionGovernorRecords(st.GovernorRecords, time.Now().UTC())
 	m.recentBotEntries = trimRecentBotEntries(st.RecentBotEntries, time.Now().UTC())
+	m.manualRequests = repairManualRequestsFromPositions(st.ManualRequests, m.positions, time.Now().UTC())
 	return nil
 }
 
@@ -7401,12 +7406,55 @@ func (m *liveExecManager) save() error {
 		Positions:        m.positions,
 		GovernorRecords:  trimExecutionGovernorRecords(m.governorRecords, time.Now().UTC()),
 		RecentBotEntries: trimRecentBotEntries(m.recentBotEntries, time.Now().UTC()),
+		ManualRequests:   repairManualRequestsFromPositions(m.manualRequests, m.positions, time.Now().UTC()),
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(m.path, b, 0o644)
+}
+
+func repairManualRequestsFromPositions(existing map[string]manualManageRequest, positions map[string]*livePosition, now time.Time) map[string]manualManageRequest {
+	out := map[string]manualManageRequest{}
+	for key, req := range existing {
+		if strings.TrimSpace(req.Symbol) == "" || strings.TrimSpace(req.Side) == "" {
+			continue
+		}
+		if strings.TrimSpace(req.Key) == "" {
+			req.Key = key
+		}
+		out[req.Key] = req
+	}
+	for sym, pos := range positions {
+		if pos == nil || pos.State == execClosed || !manualPassivePosition(pos) {
+			continue
+		}
+		side := normalizePositionSide(pos.Side)
+		key := positionLookupKey(sym, side)
+		if _, ok := out[key]; ok {
+			continue
+		}
+		detectedAt := pos.CreatedAt
+		if detectedAt.IsZero() {
+			detectedAt = now
+		}
+		out[key] = manualManageRequest{
+			Key:         key,
+			Fingerprint: manualManageFingerprint(sym, side, maxFloat(pos.RemainingQty, pos.FilledQty), pos.EntryPrice),
+			Symbol:      strings.ToUpper(strings.TrimSpace(aster.RawSymbol(sym))),
+			Side:        side,
+			Qty:         maxFloat(pos.RemainingQty, pos.FilledQty),
+			Entry:       pos.EntryPrice,
+			Margin:      maxFloat(pos.DeployedMargin, pos.Margin),
+			Leverage:    maxInt(1, pos.Leverage),
+			Action:      "MANAGE",
+			DetectedAt:  detectedAt,
+			PromptedAt:  detectedAt,
+			Status:      manualRequestPending,
+		}
+	}
+	return out
 }
 
 func (m *liveExecManager) trackedPosition(symbol string) (*livePosition, bool) {

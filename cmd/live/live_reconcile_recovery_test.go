@@ -107,3 +107,45 @@ func TestRecentBotEntryRecoveryExpires(t *testing.T) {
 		t.Fatalf("expected stale bot recovery memory to expire")
 	}
 }
+
+func TestLoadRepairsPassiveManualRequestFromPersistedPosition(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	mgr := testRecoveryManager(dir)
+	mgr.manualRequests = map[string]manualManageRequest{}
+	mgr.positions["SNDKUSDT"] = &livePosition{
+		Symbol:            "SNDKUSDT",
+		Side:              "SHORT",
+		State:             execOpen,
+		CreatedAt:         now.Add(-10 * time.Minute),
+		UpdatedAt:         now,
+		EntryPrice:        1741.82,
+		Qty:               0.01,
+		FilledQty:         0.01,
+		RemainingQty:      0.01,
+		Margin:            3.48621163,
+		DeployedMargin:    3.48621163,
+		Leverage:          5,
+		EntryReason:       manualEntryReasonPassive,
+		EntrySource:       manualEntrySourcePassive,
+		ManualManageState: manualManageStatePassive,
+	}
+	if err := mgr.save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	loaded := testRecoveryManager(dir)
+	if err := loaded.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	req, ok := loaded.manualRequests[positionLookupKey("SNDKUSDT", "SHORT")]
+	if !ok {
+		t.Fatalf("expected passive manual request to be rebuilt")
+	}
+	if req.Status != manualRequestPending {
+		t.Fatalf("expected rebuilt request pending, got %q", req.Status)
+	}
+	if req.Symbol != "SNDKUSDT" || req.Side != "SHORT" {
+		t.Fatalf("unexpected rebuilt request: %+v", req)
+	}
+}
