@@ -349,7 +349,7 @@ func TestBuildEntryQualityAccumulatorBlocksWhenPenaltyDropsBelowMinScore(t *test
 	}
 }
 
-func TestBuildEntryQualityAccumulatorProjectedNoProofBlocks(t *testing.T) {
+func TestBuildEntryQualityAccumulatorProjectedNoProofDoesNotAddRuntimePenalty(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	cand := candidate{
 		Side:          "BUY",
@@ -369,15 +369,12 @@ func TestBuildEntryQualityAccumulatorProjectedNoProofBlocks(t *testing.T) {
 		},
 	}
 	quality := buildEntryQualityAccumulator(cand, nil)
-	if quality.BlockReason != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
-	}
-	if !containsString(quality.QualityFlags, "projected_no_proof") {
-		t.Fatalf("expected projected_no_proof flag, got %+v", quality.QualityFlags)
+	if containsString(quality.QualityFlags, "projected_no_proof") {
+		t.Fatalf("did not expect projected_no_proof runtime flag, got %+v", quality.QualityFlags)
 	}
 }
 
-func TestBuildEntryQualityAccumulatorProjectedWeakProofBlocks(t *testing.T) {
+func TestBuildEntryQualityAccumulatorProjectedWeakProofDoesNotAddRuntimePenalty(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	cand := candidate{
 		Side:          "BUY",
@@ -401,11 +398,8 @@ func TestBuildEntryQualityAccumulatorProjectedWeakProofBlocks(t *testing.T) {
 		},
 	}
 	quality := buildEntryQualityAccumulator(cand, nil)
-	if quality.BlockReason != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %q", quality.BlockReason)
-	}
-	if !containsString(quality.QualityFlags, "projected_weak_proof") {
-		t.Fatalf("expected projected_weak_proof flag, got %+v", quality.QualityFlags)
+	if containsString(quality.QualityFlags, "projected_weak_proof") {
+		t.Fatalf("did not expect projected_weak_proof runtime flag, got %+v", quality.QualityFlags)
 	}
 }
 

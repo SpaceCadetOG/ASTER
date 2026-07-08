@@ -396,32 +396,6 @@ func executionProofRejectReason(now time.Time, c candidate) string {
 	return strings.TrimSpace(quality.BlockReason)
 }
 
-func emitEntryProofCheck(now time.Time, c candidate, decision strategies.ExecutionDecision, executionPath string) {
-	breakdown := resolvedEntryScoreBreakdown(c)
-	proof := projectedProofOutcome(c)
-	proofRoom := candidateProofRoomR(c)
-	stats := recentRuntimeProofStats(now, c)
-	fmt.Printf(
-		"ENTRY_PROOF_CHECK symbol=%s side=%s strategy=%s setup=%s final_score=%.1f projected_proof=%s proof_room_r=%.2f trigger_score=%.1f flow_score=%.1f location_score=%.1f trend_score=%.1f recent_symbol_setup_no_weak_count=%d quality_block_reason=%s decision_approved=%t rejects=%s execution_path=%s\n",
-		strings.ToUpper(strings.TrimSpace(aster.RawSymbol(c.Entry.Symbol))),
-		strings.ToUpper(strings.TrimSpace(c.Side)),
-		firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat), "unknown"),
-		firstNonEmpty(strings.TrimSpace(c.SetupFamily), "unknown"),
-		breakdown.FinalScore,
-		proof,
-		proofRoom,
-		breakdown.TriggerScore,
-		breakdown.FlowScore,
-		breakdown.LocationScore,
-		breakdown.TrendScore,
-		stats.NoWeakCount,
-		firstNonEmpty(strings.TrimSpace(decision.Quality.BlockReason), "none"),
-		decision.Approved,
-		strings.Join(decision.Rejects, "|"),
-		firstNonEmpty(strings.TrimSpace(executionPath), "unknown"),
-	)
-}
-
 type paperEnterFunc func(time.Time, candidate, float64, float64, int, map[string]symbolMeta, map[string]aster.OrderBook, map[string]inplay.Entry) (*paperPosition, error)
 
 type paperDispatchHooks struct {
@@ -455,7 +429,6 @@ func dispatchPaperDecision(mode runtimeOperatingMode, now time.Time, decision st
 	if mode != runtimeModePaper {
 		return paperDispatchResult{}
 	}
-	emitEntryProofCheck(now, c, decision, "paper_dispatch")
 	if !decision.Approved {
 		return paperDispatchResult{RejectReason: firstNonEmpty(decision.RejectReason, "not_approved")}
 	}
@@ -791,12 +764,6 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 		breakdown := resolvedEntryScoreBreakdown(c)
 		if breakdown.FinalScore <= 0 && c.CombinedScore <= 0 {
 			appendQualityPenalty(&acc, "entry_score_zero", 1.0)
-		}
-		switch projectedProofOutcome(c) {
-		case EntryOutcomeNoProof:
-			appendQualityPenalty(&acc, "projected_no_proof", 1.0)
-		case EntryOutcomeWeakProof:
-			appendQualityPenalty(&acc, "projected_weak_proof", 1.0)
 		}
 		proofRoomR := candidateProofRoomR(c)
 		if proofRoomR > 0 && proofRoomR < 1.0 {

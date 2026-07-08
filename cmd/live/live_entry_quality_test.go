@@ -49,7 +49,7 @@ func TestLiveEligibilityQualityRejectUsesQualityScoreTooLow(t *testing.T) {
 	}
 }
 
-func TestLiveEligibilityProjectedWeakProofRejectsEntry(t *testing.T) {
+func TestLiveEligibilityProjectedWeakProofDoesNotAddRuntimeFlag(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
 
@@ -96,18 +96,18 @@ func TestLiveEligibilityProjectedWeakProofRejectsEntry(t *testing.T) {
 	summary.FullEntryAllowed = true
 	chooseFinalDecision(&summary, ladderPlan{})
 
-	if got := summary.FinalDecision; got != "reject" {
-		t.Fatalf("expected reject, got %q", got)
+	if got := summary.FinalDecision; got != "full_entry" {
+		t.Fatalf("expected full_entry once projected proof is runtime-neutral, got %q", got)
 	}
-	if got := summary.FinalReason; got != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %q", got)
+	if got := summary.FinalReason; got == "quality_score_too_low" {
+		t.Fatalf("did not expect projected proof to keep forcing quality_score_too_low, got %q", got)
 	}
-	if !containsString(summary.Quality.QualityFlags, "projected_weak_proof") {
-		t.Fatalf("expected projected_weak_proof flag, got %+v", summary.Quality.QualityFlags)
+	if containsString(summary.Quality.QualityFlags, "projected_weak_proof") {
+		t.Fatalf("did not expect projected_weak_proof runtime flag, got %+v", summary.Quality.QualityFlags)
 	}
 }
 
-func TestLiveEligibilityProjectedNoProofRejectsEntry(t *testing.T) {
+func TestLiveEligibilityProjectedNoProofDoesNotAddRuntimeFlag(t *testing.T) {
 	t.Setenv("LIVE_META_MIN_QUALITY", "0.52")
 	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.52")
 
@@ -154,14 +154,8 @@ func TestLiveEligibilityProjectedNoProofRejectsEntry(t *testing.T) {
 	summary.FullEntryAllowed = true
 	chooseFinalDecision(&summary, ladderPlan{})
 
-	if got := summary.FinalDecision; got != "reject" {
-		t.Fatalf("expected reject, got %q", got)
-	}
-	if got := summary.FinalReason; got != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %q", got)
-	}
-	if !containsString(summary.Quality.QualityFlags, "projected_no_proof") {
-		t.Fatalf("expected projected_no_proof flag, got %+v", summary.Quality.QualityFlags)
+	if containsString(summary.Quality.QualityFlags, "projected_no_proof") {
+		t.Fatalf("did not expect projected_no_proof runtime flag, got %+v", summary.Quality.QualityFlags)
 	}
 }
 

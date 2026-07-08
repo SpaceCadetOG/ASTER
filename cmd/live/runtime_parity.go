@@ -35,7 +35,6 @@ type sharedEntryDecision struct {
 	HardBlockReasons    []string
 	QualityFlags        []string
 	BlockReason         string
-	ProjectedProofClass EntryOutcome
 	ResolvedStrategy    string
 	TradePlan           sharedTradePlan
 	ExecutionDecision   strategies.ExecutionDecision
@@ -124,7 +123,6 @@ func dispatchLiveRuntimeDecision(now time.Time, c candidate, meta map[string]sym
 			PreflightSource:     "live",
 		}).ExecutionDecision,
 	}
-	emitEntryProofCheck(now, c, result.Decision, "live_dispatch")
 	if !result.Decision.Approved {
 		result.RejectReason = firstNonEmpty(result.Decision.RejectReason, "not_approved")
 		return result
@@ -276,13 +274,12 @@ func buildSharedRuntimeDecision(ctx sharedRuntimeDecisionContext) sharedEntryDec
 		firstNonEmpty(strings.TrimSpace(ctx.Candidate.Strat), "unknown"),
 	)
 	return sharedEntryDecision{
-		Allowed:             decision.Approved,
-		HardBlockReasons:    append([]string(nil), decision.Quality.HardBlockReasons...),
-		QualityFlags:        append([]string(nil), decision.Quality.QualityFlags...),
-		BlockReason:         decision.Quality.BlockReason,
-		ProjectedProofClass: projectedProofOutcome(ctx.Candidate),
-		ResolvedStrategy:    firstNonEmpty(strings.TrimSpace(ctx.Candidate.StrategyID), strings.TrimSpace(ctx.Candidate.Strat), "unknown"),
-		ExecutionDecision:   decision,
+		Allowed:           decision.Approved,
+		HardBlockReasons:  append([]string(nil), decision.Quality.HardBlockReasons...),
+		QualityFlags:      append([]string(nil), decision.Quality.QualityFlags...),
+		BlockReason:       decision.Quality.BlockReason,
+		ResolvedStrategy:  firstNonEmpty(strings.TrimSpace(ctx.Candidate.StrategyID), strings.TrimSpace(ctx.Candidate.Strat), "unknown"),
+		ExecutionDecision: decision,
 	}
 }
 
