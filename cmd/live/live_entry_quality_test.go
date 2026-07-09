@@ -159,6 +159,33 @@ func TestLiveEligibilityProjectedNoProofDoesNotAddRuntimeFlag(t *testing.T) {
 	}
 }
 
+func TestLiveEligibilitySummaryReusesCachedQualityWithoutSoftBlocks(t *testing.T) {
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 95,
+		},
+		Side:  "BUY",
+		Strat: "continuation_fast",
+		EntryQuality: strategies.EntryQualityAccumulator{
+			ScoreBefore:         0.88,
+			ScoreAfterPenalties: 0.81,
+			MinScore:            0.25,
+			QualityFlags:        []string{"cached_quality"},
+		},
+		EntryQualityComputed: true,
+	}
+
+	summary := newEligibilitySummary(cand)
+	if !containsString(summary.Quality.QualityFlags, "cached_quality") {
+		t.Fatalf("expected cached quality to be reused, got %+v", summary.Quality.QualityFlags)
+	}
+	if got := summary.AdjustedConfidence; got != 0.81 {
+		t.Fatalf("expected cached adjusted confidence 0.81, got %.2f", got)
+	}
+}
+
 func TestPlaceEntryDisablesLiveAdds(t *testing.T) {
 	mgr := &liveExecManager{
 		rest: &aster.RESTAuth{},
@@ -377,8 +404,8 @@ func TestPlaceEntryRejectsProjectedNoProofBeforeSubmit(t *testing.T) {
 			TP1:   102.0,
 		},
 	}, 0, 10, 5, ladderPlan{})
-	if err == nil || err.Error() != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low hard reject, got %v", err)
+	if err == nil || err.Error() != "reject_absolute_no_proof" {
+		t.Fatalf("expected reject_absolute_no_proof hard reject, got %v", err)
 	}
 }
 

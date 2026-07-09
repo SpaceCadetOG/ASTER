@@ -98,6 +98,8 @@ type candidate struct {
 	MLSuggestedExitProfile string
 	DistanceToVWAPPct      float64
 	EntryScoreBreakdown    EntryScoreBreakdown
+	EntryQuality           strategies.EntryQualityAccumulator
+	EntryQualityComputed   bool
 	QualityReasons         []string
 	LifecycleStage         string
 	LifecycleScans         int
@@ -2245,7 +2247,7 @@ func main() {
 	for _, line := range startupWarningLines(ladderCfg, safety, execMgr) {
 		fmt.Printf("  %s\n", line)
 	}
-	fmt.Printf("  min_grade=%s | mode=manual_scanner\n", strings.ToUpper(minGrade))
+	fmt.Printf("  min_grade=%s | mode=live_runtime\n", strings.ToUpper(minGrade))
 	if execMgr != nil {
 		fmt.Printf("  %s\n", compactAccountSummaryLine(execMgr.ensureAccountReportFresh(time.Now().UTC(), 30*time.Second)))
 	}
@@ -16265,6 +16267,21 @@ func canonicalSymbolBase(symbol string) string {
 	return s
 }
 
+func isHighAlphaAltCandidate(c candidate) bool {
+	base := canonicalSymbolBase(aster.RawSymbol(c.Entry.Symbol))
+	switch base {
+	case "BTC", "ETH", "SOL":
+		return false
+	}
+	if c.ExtensionATR >= 1.50 {
+		return true
+	}
+	if math.Abs(c.DayUTC24h) >= 12 || math.Abs(c.UTC1hPct) >= 2 {
+		return true
+	}
+	return c.VolumeUSD >= 1_000_000
+}
+
 func positionLookupKey(symbol, side string) string {
 	return canonicalSymbolBase(symbol) + "|" + normalizePositionSide(side)
 }
@@ -18295,6 +18312,10 @@ func annotateCandidateEntryContext(c *candidate, now time.Time) {
 	c.ExecutionScore = clamp((c.EntryScoreBreakdown.RiskRewardScore+c.EntryScoreBreakdown.PenaltyScore+15.0)/30.0, 0, 1)
 	c.CombinedScore = clamp(c.EntryScoreBreakdown.FinalScore/100.0, 0, 1)
 	c.TradeQuality = c.CombinedScore
+	c.EntryQualityComputed = false
+	c.EntryQuality = strategies.EntryQualityAccumulator{}
+	c.EntryQuality = buildEntryQualityAccumulator(*c, nil)
+	c.EntryQualityComputed = true
 	c.QualityReasons = append([]string(nil), c.EntryScoreBreakdown.PenaltyReasons...)
 }
 
@@ -18371,6 +18392,7 @@ func trendAlignment(side string, move float64) int {
 
 func scoreEntryBreakdown(c candidate) EntryScoreBreakdown {
 	b := EntryScoreBreakdown{}
+	highAlphaAlt := isHighAlphaAltCandidate(c)
 	align24 := trendAlignment(c.Side, c.DayUTC24h)
 	align4 := trendAlignment(c.Side, c.UTC4hPct)
 	align1 := trendAlignment(c.Side, c.UTC1hPct)
@@ -18521,16 +18543,32 @@ func scoreEntryBreakdown(c candidate) EntryScoreBreakdown {
 		penaltyReasons = append(penaltyReasons, "middle_of_range")
 	}
 	if b.RiskRewardLabel == "target_too_close" {
-		penalties += 20
-		penaltyReasons = append(penaltyReasons, "target_too_close")
+		penalty := 20.0
+		reason := "target_too_close"
+		if highAlphaAlt {
+			penalty = 5.0
+			reason = "target_too_close_alt_softened"
+		}
+		penalties += penalty
+		penaltyReasons = append(penaltyReasons, reason)
 	}
-	if c.ExtensionATR >= 1.50 {
+	extensionThreshold := 1.50
+	if highAlphaAlt {
+		extensionThreshold = 2.50
+	}
+	if c.ExtensionATR >= extensionThreshold {
 		penalties += 10
 		penaltyReasons = append(penaltyReasons, "extension_high")
 	}
 	if strings.EqualFold(c.Side, "SELL") && c.DayUTC24h < -20 && c.UTC4hPct < -8 && c.UTC1hPct < -3 {
-		penalties += 15
-		penaltyReasons = append(penaltyReasons, "late_all_red_short")
+		penalty := 15.0
+		reason := "late_all_red_short"
+		if highAlphaAlt {
+			penalty = 5.0
+			reason = "late_all_red_short_alt_softened"
+		}
+		penalties += penalty
+		penaltyReasons = append(penaltyReasons, reason)
 	}
 	if strings.EqualFold(c.Side, "BUY") && c.DayUTC24h > 20 && c.EntryTiming == "late" {
 		penalties += 10
@@ -22756,7 +22794,12 @@ func refreshEligibilityQuality(summary *EntryEligibilitySummary, c candidate) {
 	if summary == nil {
 		return
 	}
-	quality := buildEntryQualityAccumulator(c, summary.SoftBlocks)
+	var quality strategies.EntryQualityAccumulator
+	if len(summary.SoftBlocks) == 0 {
+		quality = resolvedEntryQualityAccumulator(c, nil)
+	} else {
+		quality = buildEntryQualityAccumulator(c, summary.SoftBlocks)
+	}
 	summary.Quality = quality
 	summary.AdjustedConfidence = quality.ScoreAfterPenalties
 	summary.ConfidencePenaltyReasons = formatEligibilityQualityPenalties(quality)
@@ -22773,7 +22816,7 @@ func formatEligibilityQualityPenalties(quality strategies.EntryQualityAccumulato
 	for _, flag := range quality.QualityFlags {
 		out = append(out, flag)
 	}
-	out = append(out, fmt.Sprintf("penalty_total=%.2f", quality.PenaltyTotal))
+	out = append(out, "penalty_total="+strconv.FormatFloat(quality.PenaltyTotal, 'f', 2, 64))
 	return out
 }
 

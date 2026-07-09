@@ -31,16 +31,17 @@ type sharedTradePlan struct {
 }
 
 type sharedEntryDecision struct {
-	Allowed             bool
-	HardBlockReasons    []string
-	QualityFlags        []string
-	BlockReason         string
-	ResolvedStrategy    string
-	TradePlan           sharedTradePlan
-	ExecutionDecision   strategies.ExecutionDecision
+	Allowed           bool
+	HardBlockReasons  []string
+	QualityFlags      []string
+	BlockReason       string
+	ResolvedStrategy  string
+	TradePlan         sharedTradePlan
+	ExecutionDecision strategies.ExecutionDecision
 }
 
 type sharedRuntimeDecisionContext struct {
+	Now                   time.Time
 	Candidate             candidate
 	MetaBySymbol          map[string]symbolMeta
 	RiskShell             risk.Config
@@ -110,6 +111,7 @@ func liveExecutionAdapter(execMgr *liveExecManager, c candidate, entryBps, margi
 func dispatchLiveRuntimeDecision(now time.Time, c candidate, meta map[string]symbolMeta, execMgr *liveExecManager, riskShell risk.Config, riskFallbackStopPct, riskHoldHours float64, leverageMode string, leverageFixed, leverageMin, leverageMax int, effectiveMargin, entryBps float64, hooks liveRuntimeDispatchHooks) liveRuntimeDispatchResult {
 	result := liveRuntimeDispatchResult{
 		Decision: buildSharedRuntimeDecision(sharedRuntimeDecisionContext{
+			Now:                 now,
 			Candidate:           c,
 			MetaBySymbol:        meta,
 			RiskShell:           riskShell,
@@ -321,9 +323,15 @@ func sharedRuntimeRiskDecision(ctx sharedRuntimeDecisionContext) risk.Decision {
 }
 
 func sharedRuntimePreflightVerdict(ctx sharedRuntimeDecisionContext) strategies.PreflightVerdict {
-	quality := buildEntryQualityAccumulator(ctx.Candidate, nil)
+	quality := resolvedEntryQualityAccumulator(ctx.Candidate, nil)
 	reasons := []string{}
 	if reason := strings.TrimSpace(ctx.PreflightRejectReason); reason != "" {
+		reasons = append(reasons, reason)
+	}
+	if reason := strings.TrimSpace(absoluteNoProofRejectReason(ctx.Candidate)); reason != "" {
+		reasons = append(reasons, reason)
+	}
+	if reason := strings.TrimSpace(staleSignalRejectReason(ctx.Now, ctx.Candidate)); reason != "" {
 		reasons = append(reasons, reason)
 	}
 	verdict := strategies.PreflightVerdict{
@@ -339,6 +347,54 @@ func sharedRuntimePreflightVerdict(ctx sharedRuntimeDecisionContext) strategies.
 		verdict.Reason = quality.BlockReason
 	}
 	return verdict
+}
+
+func absoluteNoProofRejectReason(c candidate) string {
+	if !isExecutableStrategy(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat))) {
+		return ""
+	}
+	if projectedProofOutcome(c) == EntryOutcomeNoProof {
+		return "reject_absolute_no_proof"
+	}
+	return ""
+}
+
+func candidateSignalGeneratedAt(c candidate, now time.Time) time.Time {
+	if !c.Entry.FirstSeen.IsZero() {
+		return c.Entry.FirstSeen
+	}
+	if !c.Entry.StateSince.IsZero() {
+		return c.Entry.StateSince
+	}
+	if c.CandidateAgeSeconds > 0 && !now.IsZero() {
+		return now.Add(-time.Duration(c.CandidateAgeSeconds * float64(time.Second)))
+	}
+	return time.Time{}
+}
+
+func maxAllowedSignalAge(c candidate) time.Duration {
+	if isHighAlphaAltCandidate(c) {
+		return 1500 * time.Millisecond
+	}
+	return 2 * time.Second
+}
+
+func staleSignalRejectReason(now time.Time, c candidate) string {
+	if now.IsZero() || !isExecutableStrategy(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat))) {
+		return ""
+	}
+	signalAt := candidateSignalGeneratedAt(c, now)
+	if signalAt.IsZero() {
+		return ""
+	}
+	age := now.Sub(signalAt)
+	if age <= 0 {
+		return ""
+	}
+	if age > maxAllowedSignalAge(c) {
+		return "abort_stale_signal_latency"
+	}
+	return ""
 }
 
 func buildSharedTradePlan(c candidate, entryPrice, volumeUSD float64, cfg sharedTradePlanConfig) (sharedTradePlan, error) {

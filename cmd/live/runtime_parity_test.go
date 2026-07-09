@@ -107,6 +107,28 @@ func TestPaperAndLiveSharedDecisionMatch(t *testing.T) {
 	}
 }
 
+func TestSharedRuntimePreflightVerdictReusesAnnotatedCandidateQuality(t *testing.T) {
+	cand := parityTestCandidate()
+	cand.CombinedScore = 0.05
+	cand.Conf = 0.05
+	cand.EntryQuality = strategies.EntryQualityAccumulator{
+		ScoreBefore:         0.82,
+		ScoreAfterPenalties: 0.82,
+		MinScore:            0.25,
+	}
+	cand.EntryQualityComputed = true
+
+	verdict := sharedRuntimePreflightVerdict(sharedRuntimeDecisionContext{
+		Candidate: cand,
+	})
+	if !verdict.Approved {
+		t.Fatalf("expected cached approved quality to be reused, got %+v", verdict)
+	}
+	if verdict.Quality.ScoreBefore != 0.82 {
+		t.Fatalf("expected cached quality to survive, got %+v", verdict.Quality)
+	}
+}
+
 func TestPaperAndLiveSharedTradePlanMatch(t *testing.T) {
 	cand := parityTestCandidate()
 	cfg := sharedTradePlanConfig{
@@ -348,6 +370,149 @@ func TestProjectedProofQualityRejectMatchesPaperAndLive(t *testing.T) {
 	}
 	if liveDispatch.RejectReason != "quality_score_too_low" {
 		t.Fatalf("expected live quality reject to stop before venue boundary, got %q", liveDispatch.RejectReason)
+	}
+}
+
+func TestProjectedNoProofRejectMatchesPaperAndLive(t *testing.T) {
+	now := time.Now().UTC()
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "BTCUSDT",
+			CurrentGrade: "B",
+			CurrentScore: 70,
+			ScoreSlope:   -0.01,
+			State:        inplay.StateHeating,
+			Rank:         2,
+			EntryStyle:   "none",
+			FirstSeen:    now.Add(-500 * time.Millisecond),
+		},
+		Side:          "BUY",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		Conf:          0.58,
+		CombinedScore: 0.58,
+		DayUTC24h:     1,
+		UTC4hPct:      -0.4,
+		UTC1hPct:      -0.2,
+		LastClose:     101,
+		SessionVWAP:   102,
+		EMA9:          101.8,
+		ExtensionATR:  1.05,
+		VolumeRatio:   0.85,
+		OFIZ:          -0.04,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 8,
+			TriggerScore:  10,
+			FlowScore:     5,
+			FinalScore:    40,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Active: true,
+			Name:   "pullback_reclaim",
+			Side:   features.SideLong,
+			Entry:  101,
+			Stop:   99.9,
+			TP1:    102.0,
+		},
+	}
+	meta := map[string]symbolMeta{
+		"BTCUSDT": {LastPrice: 101, FundingRate: 0.001},
+	}
+	paperDec := buildPaperExecutionDecision(paperDecisionCtx{
+		Now:                 now,
+		Candidate:           cand,
+		MetaBySymbol:        meta,
+		RiskShell:           risk.DefaultConfig(),
+		RiskFallbackStopPct: 3,
+		RiskHoldHours:       8,
+		LeverageMode:        "fixed",
+		LeverageFixed:       2,
+		LeverageMin:         2,
+		MaxLeverage:         5,
+		EffectiveMargin:     50,
+		Paper:               &paperTrader{enabled: true, positions: map[string]*paperPosition{}},
+	})
+	liveDispatch := dispatchLiveRuntimeDecision(now, cand, meta, testLiveDispatchManager(), risk.DefaultConfig(), 3, 8, "fixed", 2, 2, 5, 50, 0, liveRuntimeDispatchHooks{})
+	if paperDec.RejectReason != "reject_absolute_no_proof" {
+		t.Fatalf("expected paper no-proof reject, got %q", paperDec.RejectReason)
+	}
+	if liveDispatch.RejectReason != "reject_absolute_no_proof" {
+		t.Fatalf("expected live no-proof reject, got %q", liveDispatch.RejectReason)
+	}
+}
+
+func TestLiveDispatchRejectsStaleHighAlphaAltSignal(t *testing.T) {
+	now := time.Now().UTC()
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "ANSEMUSDT",
+			CurrentGrade: "A",
+			CurrentScore: 96,
+			ScoreSlope:   0.20,
+			State:        inplay.StateInPlay,
+			EntryStyle:   "momentum_ignite_short",
+			FirstSeen:    now.Add(-1600 * time.Millisecond),
+		},
+		Side:            "SELL",
+		Strat:           "impulse_breakout",
+		StrategyID:      "impulse_breakout",
+		SetupFamily:     "reset_impulse_breakout",
+		Conf:            0.88,
+		CombinedScore:   0.88,
+		DayUTC24h:       -18,
+		UTC4hPct:        -3,
+		UTC1hPct:        -1.5,
+		LastClose:       0.28,
+		SessionVWAP:     0.29,
+		EMA9:            0.285,
+		ExtensionATR:    1.7,
+		VolumeUSD:       8_000_000,
+		VolumeRatio:     1.5,
+		OFIZ:            -0.35,
+		ClosedBreakHold: true,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    20,
+			LocationScore: 17,
+			TriggerScore:  12,
+			FlowScore:     12,
+			FinalScore:    74,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Active: true,
+			Name:   "impulse_breakout",
+			Side:   features.SideShort,
+			Entry:  0.28,
+			Stop:   0.291,
+			TP1:    0.264,
+		},
+	}
+	meta := map[string]symbolMeta{
+		"ANSEMUSDT": {LastPrice: 0.28, FundingRate: 0.001},
+	}
+	dispatch := dispatchLiveRuntimeDecision(now, cand, meta, testLiveDispatchManager(), risk.DefaultConfig(), 3, 8, "fixed", 2, 2, 5, 50, 0, liveRuntimeDispatchHooks{})
+	if dispatch.RejectReason != "abort_stale_signal_latency" {
+		t.Fatalf("expected stale latency reject, got %q", dispatch.RejectReason)
+	}
+}
+
+func TestLiveDispatchAllowsFreshMajorWithinLatencyWindow(t *testing.T) {
+	now := time.Now().UTC()
+	cand := parityTestCandidate()
+	cand.Entry.FirstSeen = now.Add(-1600 * time.Millisecond)
+	adapterCalls := 0
+	dispatch := dispatchLiveRuntimeDecision(now, cand, map[string]symbolMeta{
+		"BTCUSDT": {LastPrice: 101, FundingRate: 0.001},
+	}, testLiveDispatchManager(), risk.DefaultConfig(), 3, 8, "fixed", 2, 2, 5, 50, 0, liveRuntimeDispatchHooks{
+		Adapter: func(c candidate, entryBps, margin float64, leverage int, plan ladderPlan) error {
+			adapterCalls++
+			return nil
+		},
+	})
+	if !dispatch.Entered || adapterCalls != 1 {
+		t.Fatalf("expected major candidate inside 2s window to enter, got dispatch=%+v calls=%d", dispatch, adapterCalls)
 	}
 }
 

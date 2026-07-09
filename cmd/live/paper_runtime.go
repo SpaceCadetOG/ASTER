@@ -115,6 +115,7 @@ type paperDecisionCtx struct {
 func buildPaperExecutionDecision(ctx paperDecisionCtx) strategies.ExecutionDecision {
 	preflightReason := paperBaselineHardRejectReason(ctx)
 	return buildSharedRuntimeDecision(sharedRuntimeDecisionContext{
+		Now:                   ctx.Now,
 		Candidate:             ctx.Candidate,
 		MetaBySymbol:          ctx.MetaBySymbol,
 		RiskShell:             ctx.RiskShell,
@@ -235,7 +236,7 @@ func paperHasOpenSymbol(p *paperTrader, raw string) bool {
 }
 
 func buildPaperQualityLogOnly(c candidate) strategies.EntryQualityAccumulator {
-	acc := buildEntryQualityAccumulator(c, nil)
+	acc := resolvedEntryQualityAccumulator(c, nil)
 	acc.BlockReason = ""
 	acc.HardBlockReasons = nil
 	return acc
@@ -343,6 +344,13 @@ func resolvedEntryScoreBreakdown(c candidate) EntryScoreBreakdown {
 	return breakdown
 }
 
+func resolvedEntryQualityAccumulator(c candidate, rejects []string) strategies.EntryQualityAccumulator {
+	if len(rejects) == 0 && c.EntryQualityComputed {
+		return c.EntryQuality
+	}
+	return buildEntryQualityAccumulator(c, rejects)
+}
+
 func candidateProofRoomR(c candidate) float64 {
 	entry := firstPositive(c.Sig.Entry, c.LastClose)
 	stop := c.Sig.Stop
@@ -385,6 +393,12 @@ func executionProofRejectReason(now time.Time, c candidate) string {
 	if !isExecutableStrategy(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat))) {
 		return ""
 	}
+	if reason := absoluteNoProofRejectReason(c); reason != "" {
+		return reason
+	}
+	if reason := staleSignalRejectReason(now, c); reason != "" {
+		return reason
+	}
 	if c.Sig.Entry <= 0 || c.Sig.Stop <= 0 || c.Sig.TP1 <= 0 {
 		return ""
 	}
@@ -392,7 +406,7 @@ func executionProofRejectReason(now time.Time, c candidate) string {
 	if !hasEntryScoreBreakdownData(breakdown) {
 		return ""
 	}
-	quality := buildEntryQualityAccumulator(c, nil)
+	quality := resolvedEntryQualityAccumulator(c, nil)
 	return strings.TrimSpace(quality.BlockReason)
 }
 
@@ -762,12 +776,25 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 	addEntryQualityHeuristics(&acc, c)
 	if candidateHasProofInputs(c) {
 		breakdown := resolvedEntryScoreBreakdown(c)
+		highAlphaAlt := isHighAlphaAltCandidate(c)
 		if breakdown.FinalScore <= 0 && c.CombinedScore <= 0 {
-			appendQualityPenalty(&acc, "entry_score_zero", 1.0)
+			penalty := 1.0
+			flag := "entry_score_zero"
+			if highAlphaAlt {
+				penalty = 0.20
+				flag = "entry_score_zero_alt_softened"
+			}
+			appendQualityPenalty(&acc, flag, penalty)
 		}
 		proofRoomR := candidateProofRoomR(c)
 		if proofRoomR > 0 && proofRoomR < 1.0 {
-			appendQualityPenalty(&acc, "insufficient_proof_room", 1.0)
+			penalty := 1.0
+			flag := "insufficient_proof_room"
+			if highAlphaAlt {
+				penalty = 0.10
+				flag = "insufficient_proof_room_alt_softened"
+			}
+			appendQualityPenalty(&acc, flag, penalty)
 		}
 		proofStats := recentRuntimeProofStats(time.Now().UTC(), c)
 		if proofStats.NoWeakCount >= 2 && proofStats.GoodStrongCount == 0 {
@@ -775,16 +802,34 @@ func buildEntryQualityAccumulator(c candidate, rejects []string) strategies.Entr
 		}
 		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "impulse_breakout") &&
 			(strings.EqualFold(strings.TrimSpace(c.EntryTiming), "late") || containsString(acc.QualityFlags, "avoid_chase") || containsString(acc.QualityFlags, "late_chase_fading_impulse") || containsString(acc.QualityFlags, "late_chase_rapid_expansion")) {
-			appendQualityPenalty(&acc, "late_impulse_chase", 1.0)
+			penalty := 1.0
+			flag := "late_impulse_chase"
+			if highAlphaAlt {
+				penalty = 0.15
+				flag = "late_impulse_chase_alt_softened"
+			}
+			appendQualityPenalty(&acc, flag, penalty)
 		}
 		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "exhaustion_reversal") &&
 			strings.EqualFold(strings.TrimSpace(c.SetupFamily), "reversal_exhaustion") &&
 			projectedProofOutcome(c) != EntryOutcomeStrongProof {
-			appendQualityPenalty(&acc, "exhaustion_reversal_requires_strong_proof", 1.0)
+			penalty := 1.0
+			flag := "exhaustion_reversal_requires_strong_proof"
+			if highAlphaAlt {
+				penalty = 0.15
+				flag = "exhaustion_reversal_alt_softened"
+			}
+			appendQualityPenalty(&acc, flag, penalty)
 		}
 		if strings.EqualFold(firstNonEmpty(strings.TrimSpace(c.StrategyID), strings.TrimSpace(c.Strat)), "pullback_reclaim") {
 			if (breakdown.FlowScore > 0 || breakdown.TriggerScore > 0) && (breakdown.FlowScore < 8 || breakdown.TriggerScore < 12) {
-				appendQualityPenalty(&acc, "pullback_flow_trigger_unconfirmed", 1.0)
+				penalty := 1.0
+				flag := "pullback_flow_trigger_unconfirmed"
+				if highAlphaAlt {
+					penalty = 0.10
+					flag = "pullback_flow_alt_softened"
+				}
+				appendQualityPenalty(&acc, flag, penalty)
 			}
 		}
 	}
@@ -839,10 +884,15 @@ func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candid
 	if acc == nil {
 		return
 	}
+	highAlphaAlt := isHighAlphaAltCandidate(c)
 	shortCtx := shortPhase2ContextForCandidate(c)
 	switch shortCtx.FilterReason {
 	case "short_block_late_chase", "short_block_post_pump_chase", "short_post_pump_structure_wait":
-		appendHardBlock(acc, shortCtx.FilterReason)
+		if highAlphaAlt {
+			appendQualityPenalty(acc, shortCtx.FilterReason+"_alt_softened", 0.10)
+		} else {
+			appendHardBlock(acc, shortCtx.FilterReason)
+		}
 	}
 	if blocksMaturePullbackLong(c) {
 		appendHardBlock(acc, "mature_pullback_long_needs_reclaim")
@@ -870,6 +920,9 @@ func addEntryQualityHeuristics(acc *strategies.EntryQualityAccumulator, c candid
 	}
 	if isContinuationStrategy(c) && candidateExtendedForBotAdd(c) && !hasFreshStructureReset(c) {
 		penalty := envFloat("LIVE_MINOR_EXTENSION_PENALTY", 0.03)
+		if isHighAlphaAltCandidate(c) {
+			penalty *= 0.5
+		}
 		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
 			c.Entry.CurrentScore >= envFloat("LIVE_MINOR_EXTENSION_ELITE_SCORE_MIN", 96.0) &&
 			(c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || c.Entry.Momentum) {
@@ -960,6 +1013,9 @@ func classifyQualityPenaltyReason(c candidate, reason string) (string, float64, 
 		return "late_chase_rapid_expansion", 0.12, true
 	case strings.Contains(raw, "late_chase_extended_no_reset"), strings.Contains(raw, "late_extension_no_reset"):
 		penalty := envFloat("LIVE_MINOR_EXTENSION_REJECT_PENALTY", 0.05)
+		if isHighAlphaAltCandidate(c) {
+			penalty *= 0.5
+		}
 		if gradeValue(c.Entry.CurrentGrade) >= gradeValue("A+") &&
 			c.Entry.CurrentScore >= envFloat("LIVE_MINOR_EXTENSION_ELITE_SCORE_MIN", 96.0) &&
 			(c.ReclaimHold || c.RetestHold || c.ClosedBreakHold || c.Entry.Momentum) {

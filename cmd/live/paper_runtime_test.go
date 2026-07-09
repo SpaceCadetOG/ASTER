@@ -427,6 +427,45 @@ func TestBuildEntryQualityAccumulatorZeroFinalScoreBlocks(t *testing.T) {
 	}
 }
 
+func TestBuildEntryQualityAccumulatorSoftensZeroFinalScoreForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_IGNITE", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "ANSEMUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 105,
+			EntryStyle:   "momentum_ignite_short",
+		},
+		Side:          "SELL",
+		Strat:         "impulse_breakout",
+		StrategyID:    "impulse_breakout",
+		SetupFamily:   "reset_impulse_breakout",
+		CombinedScore: 0,
+		Conf:          0.82,
+		DayUTC24h:     -20.9,
+		UTC4hPct:      -2.0,
+		UTC1hPct:      -5.1,
+		VolumeUSD:     7_940_000,
+		ExtensionATR:  1.7,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendLabel: "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 0.268,
+			Stop:  0.279,
+			TP1:   0.252,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "entry_score_zero_alt_softened") {
+		t.Fatalf("expected softened zero-score flag, got %+v", quality.QualityFlags)
+	}
+	if containsString(quality.QualityFlags, "entry_score_zero") {
+		t.Fatalf("expected raw zero-score kill switch to stay off for high-alpha alt, got %+v", quality.QualityFlags)
+	}
+}
+
 func TestResolvedEntryScoreBreakdownDerivesMissingFinalScore(t *testing.T) {
 	cand := candidate{
 		Side:              "BUY",
@@ -497,6 +536,184 @@ func TestBuildEntryQualityAccumulatorInsufficientProofRoomBlocks(t *testing.T) {
 	}
 	if !containsString(quality.QualityFlags, "insufficient_proof_room") {
 		t.Fatalf("expected insufficient_proof_room flag, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorSoftensInsufficientProofRoomForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_IGNITE", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "LABUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 98,
+			EntryStyle:   "momentum_ignite_short",
+		},
+		Side:          "SELL",
+		Strat:         "impulse_breakout",
+		StrategyID:    "impulse_breakout",
+		SetupFamily:   "reset_impulse_breakout",
+		CombinedScore: 0.82,
+		Conf:          0.82,
+		DayUTC24h:     -61,
+		UTC4hPct:      -11,
+		UTC1hPct:      -5,
+		VolumeUSD:     38_000_000,
+		ExtensionATR:  1.8,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 21,
+			TriggerScore:  12,
+			FlowScore:     12,
+			FinalScore:    70,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 2.20,
+			Stop:  2.40,
+			TP1:   2.08,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "insufficient_proof_room_alt_softened") {
+		t.Fatalf("expected softened proof-room flag, got %+v", quality.QualityFlags)
+	}
+	if containsString(quality.QualityFlags, "insufficient_proof_room") {
+		t.Fatalf("expected raw proof-room gate to stay off for high-alpha alt, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorSoftensLateImpulseChaseForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_IGNITE", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "ANSEMUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 102,
+			EntryStyle:   "momentum_ignite_short",
+			ScoreSlope:   0.22,
+		},
+		Side:          "SELL",
+		Strat:         "impulse_breakout",
+		StrategyID:    "impulse_breakout",
+		SetupFamily:   "reset_impulse_breakout",
+		CombinedScore: 0.78,
+		Conf:          0.78,
+		DayUTC24h:     -20.9,
+		UTC4hPct:      -2.0,
+		UTC1hPct:      -5.1,
+		VolumeUSD:     7_940_000,
+		ExtensionATR:  1.7,
+		EntryTiming:   "late",
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 21,
+			TriggerScore:  12,
+			FlowScore:     8,
+			FinalScore:    62,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 0.268,
+			Stop:  0.279,
+			TP1:   0.252,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "late_impulse_chase_alt_softened") {
+		t.Fatalf("expected softened late impulse flag, got %+v", quality.QualityFlags)
+	}
+	if quality.PenaltyTotal >= 0.40 {
+		t.Fatalf("expected softened late impulse penalty to stay below hard-block territory, got %.2f", quality.PenaltyTotal)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorSoftensExhaustionReversalProofGateForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_REV", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "LABUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 98,
+			EntryStyle:   "reversal_watch_long",
+		},
+		Side:          "BUY",
+		Strat:         "exhaustion_reversal",
+		StrategyID:    "exhaustion_reversal",
+		SetupFamily:   "reversal_exhaustion",
+		CombinedScore: 0.74,
+		Conf:          0.74,
+		DayUTC24h:     -18.0,
+		UTC4hPct:      -6.0,
+		UTC1hPct:      -1.2,
+		VolumeUSD:     42_000_000,
+		ExtensionATR:  1.6,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 17,
+			TriggerScore:  12,
+			FlowScore:     8,
+			FinalScore:    72,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 14.6,
+			Stop:  14.1,
+			TP1:   15.5,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "exhaustion_reversal_alt_softened") {
+		t.Fatalf("expected softened exhaustion reversal flag, got %+v", quality.QualityFlags)
+	}
+	if containsString(quality.QualityFlags, "exhaustion_reversal_requires_strong_proof") {
+		t.Fatalf("expected raw exhaustion proof gate to stay off for high-alpha alt, got %+v", quality.QualityFlags)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorSoftensPullbackFlowGateForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_CONT", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "LABUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 97,
+			EntryStyle:   "pullback_long",
+		},
+		Side:          "BUY",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		SetupFamily:   "micro_pullback_continuation",
+		CombinedScore: 0.72,
+		Conf:          0.72,
+		DayUTC24h:     9.0,
+		UTC4hPct:      3.2,
+		UTC1hPct:      -1.4,
+		VolumeUSD:     42_000_000,
+		ExtensionATR:  1.2,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    15,
+			LocationScore: 20,
+			TriggerScore:  11,
+			FlowScore:     7,
+			FinalScore:    67,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 14.8,
+			Stop:  14.3,
+			TP1:   15.6,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if !containsString(quality.QualityFlags, "pullback_flow_alt_softened") {
+		t.Fatalf("expected softened pullback-flow flag, got %+v", quality.QualityFlags)
+	}
+	if containsString(quality.QualityFlags, "pullback_flow_trigger_unconfirmed") {
+		t.Fatalf("expected raw pullback-flow gate to stay off for high-alpha alt, got %+v", quality.QualityFlags)
 	}
 }
 
@@ -616,6 +833,11 @@ func TestBuildEntryQualityAccumulatorAllowsMaturePullbackLongAfterReclaim(t *tes
 
 func TestBuildEntryQualityAccumulatorBlocksAllRedShortChaseWithoutBounceFailure(t *testing.T) {
 	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:     "BTCUSDT",
+			State:      inplay.StatePumping,
+			ScoreSlope: 0.07,
+		},
 		Strat:         "continuation_fast",
 		Side:          "SELL",
 		CombinedScore: 0.86,
@@ -623,14 +845,56 @@ func TestBuildEntryQualityAccumulatorBlocksAllRedShortChaseWithoutBounceFailure(
 		DayUTC24h:     -30,
 		UTC4hPct:      -12,
 		UTC1hPct:      -4,
-		Entry: inplay.Entry{
-			State:      inplay.StatePumping,
-			ScoreSlope: 0.07,
-		},
 	}
 	quality := buildEntryQualityAccumulator(cand, nil)
 	if !containsString(quality.HardBlockReasons, "short_block_late_chase") {
 		t.Fatalf("expected all-red short chase block, got %+v", quality.HardBlockReasons)
+	}
+}
+
+func TestBuildEntryQualityAccumulatorSoftensAllRedShortChaseForHighAlphaAlt(t *testing.T) {
+	t.Setenv("LIVE_META_MIN_QUALITY", "0.25")
+	t.Setenv("LIVE_META_MIN_QUALITY_IGNITE", "0.25")
+	cand := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "TACUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 99,
+			EntryStyle:   "momentum_ignite_short",
+			State:        inplay.StatePumping,
+			ScoreSlope:   0.07,
+		},
+		Side:          "SELL",
+		Strat:         "impulse_breakout",
+		StrategyID:    "impulse_breakout",
+		SetupFamily:   "reset_impulse_breakout",
+		CombinedScore: 0.78,
+		Conf:          0.78,
+		DayUTC24h:     -29.6,
+		UTC4hPct:      -9.8,
+		UTC1hPct:      -4.2,
+		VolumeUSD:     2_230_000,
+		ExtensionATR:  1.9,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    8,
+			LocationScore: 18,
+			TriggerScore:  12,
+			FlowScore:     8,
+			FinalScore:    68,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Entry: 0.003273,
+			Stop:  0.003473,
+			TP1:   0.002973,
+		},
+	}
+	quality := buildEntryQualityAccumulator(cand, nil)
+	if containsString(quality.HardBlockReasons, "short_block_late_chase") {
+		t.Fatalf("expected high-alpha alt short chase to avoid hard block, got %+v", quality.HardBlockReasons)
+	}
+	if !containsString(quality.QualityFlags, "short_block_late_chase_alt_softened") {
+		t.Fatalf("expected softened short-chase flag, got %+v", quality.QualityFlags)
 	}
 }
 
@@ -920,22 +1184,45 @@ func TestBuildPaperExecutionDecisionIgnoresThinBookRejects(t *testing.T) {
 }
 
 func TestPaperMaybeEnterAppliesPostPumpFreshShortSizeMultiplier(t *testing.T) {
+	t.Setenv("LIVE_DIRECTIONAL_CONFLICT_BLOCK_PCT", "1000")
 	paper := testPaperRuntimePaper()
 	now := time.Now().UTC()
 	cand := candidate{
-		Side:        "SELL",
-		Strat:       "pullback_reclaim",
-		DayUTC24h:   100,
-		UTC4hPct:    -8,
-		UTC1hPct:    -4,
-		SessionVWAP: 100,
-		LastClose:   98,
+		Side:          "SELL",
+		Strat:         "pullback_reclaim",
+		StrategyID:    "pullback_reclaim",
+		SetupFamily:   "breakout_retest",
+		DayUTC24h:     100,
+		UTC4hPct:      -8,
+		UTC1hPct:      -4,
+		SessionVWAP:   100,
+		LastClose:     98,
+		Conf:          0.82,
+		CombinedScore: 0.82,
 		Entry: inplay.Entry{
 			Symbol:       "BTCUSDT",
 			CurrentGrade: "A",
 			CurrentScore: 95,
 			ScoreSlope:   -0.10,
 			State:        inplay.StateCooling,
+			EntryStyle:   "pullback_short",
+		},
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    18,
+			LocationScore: 17,
+			TriggerScore:  16,
+			FlowScore:     12,
+			FinalScore:    84,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Active: true,
+			Name:   "pullback_reclaim",
+			Entry:  98,
+			Stop:   99.2,
+			TP1:    96.8,
+			TP2:    95.6,
+			TP3:    94.4,
 		},
 	}
 	pos, err := paper.MaybeEnter(now, cand, 0, 100, 5, map[string]symbolMeta{"BTCUSDT": {LastPrice: 98}}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
@@ -994,8 +1281,8 @@ func TestMaybeEnterRejectsProjectedNoProofBeforeOpen(t *testing.T) {
 			TP1:   102.0,
 		},
 	}, 0, 50, 3, map[string]symbolMeta{"BTCUSDT": {LastPrice: 101}}, map[string]aster.OrderBook{}, map[string]inplay.Entry{})
-	if err == nil || err.Error() != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low, got %v", err)
+	if err == nil || err.Error() != "reject_absolute_no_proof" {
+		t.Fatalf("expected reject_absolute_no_proof, got %v", err)
 	}
 }
 
@@ -1189,8 +1476,11 @@ func TestFallbackExecutableCandidateProjectedNoProofIsRejected(t *testing.T) {
 	if decision.Approved {
 		t.Fatalf("expected projected weak/no proof fallback candidate to be rejected, got %+v", decision)
 	}
-	if decision.RejectReason != "quality_score_too_low" {
-		t.Fatalf("expected quality_score_too_low reject, got %+v", decision)
+	if decision.RejectReason != "reject_absolute_no_proof" {
+		t.Fatalf("expected reject_absolute_no_proof reject, got %+v", decision)
+	}
+	if !containsString(decision.Rejects, "quality_score_too_low") {
+		t.Fatalf("expected quality_score_too_low to remain attached, got %+v", decision.Rejects)
 	}
 }
 
@@ -1212,15 +1502,35 @@ func testPaperDecision() (strategies.ExecutionDecision, candidate) {
 			CurrentGrade: "A",
 			CurrentScore: 98,
 			ScoreSlope:   0.6,
+			State:        inplay.StateInPlay,
+			EntryStyle:   "pullback_long",
 		},
-		Side:           "BUY",
-		Strat:          "exhaustion_reversal",
-		Conf:           0.7,
-		FinalRank:      12,
-		LifecycleStage: "READY",
-		TriggerStage:   "armed",
-		TriggerState:   "ready",
-		Sig:            sig,
+		Side:              "BUY",
+		Strat:             "pullback_reclaim",
+		StrategyID:        "pullback_reclaim",
+		SetupFamily:       "micro_pullback_continuation",
+		Conf:              0.84,
+		CombinedScore:     0.84,
+		FinalRank:         12,
+		LifecycleStage:    "READY",
+		TriggerStage:      "armed",
+		TriggerState:      "ready",
+		SessionLabel:      "LONDON",
+		LastClose:         100,
+		SessionVWAP:       99.6,
+		EMA9:              99.7,
+		ClosedBreakHold:   true,
+		VolumeRatio:       1.4,
+		DistanceToVWAPPct: 0.20,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    18,
+			LocationScore: 16,
+			TriggerScore:  15,
+			FlowScore:     11,
+			FinalScore:    82,
+			TrendLabel:    "scored",
+		},
+		Sig: sig,
 	}
 	decision := strategies.NewExecutionDecision(
 		cand.Entry.Symbol,

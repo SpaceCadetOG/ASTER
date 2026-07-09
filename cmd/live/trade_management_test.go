@@ -474,6 +474,48 @@ func TestScoreEntryBreakdownPenalizesLateContinuationLong(t *testing.T) {
 	}
 }
 
+func TestScoreEntryBreakdownSoftensHighAlphaAltShortPenalties(t *testing.T) {
+	alt := candidate{
+		Entry: inplay.Entry{
+			Symbol:       "TACUSDT",
+			CurrentGrade: "A+",
+			CurrentScore: 99,
+			EntryStyle:   "momentum_ignite_short",
+		},
+		Side:            "SELL",
+		Strat:           "impulse_breakout",
+		SetupFamily:     "reset_impulse_breakout",
+		DayUTC24h:       -35.8,
+		UTC4hPct:        -12.3,
+		UTC1hPct:        -5.0,
+		LastClose:       0.002853,
+		VolumeUSD:       1_660_000,
+		ExtensionATR:    2.0,
+		TriggerState:    string(triggerImpulseCont),
+		VolumeRatio:     1.7,
+		OFIZ:            -0.4,
+		ClosedBreakHold: true,
+		Sig: strategies.Signal{
+			Entry: 0.002853,
+			Stop:  0.003153,
+			TP1:   0.002553,
+		},
+	}
+	major := alt
+	major.Entry.Symbol = "ETHUSDT"
+	major.VolumeUSD = 396_000_000
+	major.ExtensionATR = 2.0
+
+	altScore := scoreEntryBreakdown(alt)
+	majorScore := scoreEntryBreakdown(major)
+	if altScore.FinalScore <= majorScore.FinalScore {
+		t.Fatalf("expected high-alpha alt short to retain higher score, got alt=%.2f major=%.2f", altScore.FinalScore, majorScore.FinalScore)
+	}
+	if !strings.Contains(strings.Join(altScore.PenaltyReasons, ","), "late_all_red_short_alt_softened") {
+		t.Fatalf("expected softened alt short penalty reason, got %+v", altScore.PenaltyReasons)
+	}
+}
+
 func TestPaperSameSetupCooldownBlocksWeakRepeat(t *testing.T) {
 	paper := testCleanupPaperTrader(t)
 	now := time.Date(2026, 6, 29, 1, 0, 0, 0, time.UTC)
@@ -554,15 +596,41 @@ func TestPaperMaybeEnterRejectsWhenAtMaxOpen(t *testing.T) {
 	}
 
 	_, err := paper.MaybeEnter(time.Now().UTC(), candidate{
-		Side:        "BUY",
-		Strat:       "impulse_breakout",
-		StrategyID:  "impulse_breakout",
-		SetupFamily: "reset_impulse_breakout",
-		Conf:        0.9,
+		Side:          "BUY",
+		Strat:         "impulse_breakout",
+		StrategyID:    "impulse_breakout",
+		SetupFamily:   "reset_impulse_breakout",
+		Conf:          0.9,
+		CombinedScore: 0.9,
 		Entry: inplay.Entry{
 			Symbol:       "ETHUSDT",
 			CurrentGrade: "A",
+			CurrentScore: 96,
+			ScoreSlope:   0.20,
 			State:        inplay.StateInPlay,
+			EntryStyle:   "breakout_hold_long",
+		},
+		ClosedBreakHold: true,
+		LastClose:       100,
+		SessionVWAP:     99.7,
+		EMA9:            99.8,
+		VolumeRatio:     1.5,
+		EntryScoreBreakdown: EntryScoreBreakdown{
+			TrendScore:    20,
+			LocationScore: 18,
+			TriggerScore:  16,
+			FlowScore:     12,
+			FinalScore:    88,
+			TrendLabel:    "scored",
+		},
+		Sig: strategies.Signal{
+			Active: true,
+			Name:   "impulse_breakout",
+			Entry:  100,
+			Stop:   98.8,
+			TP1:    101.4,
+			TP2:    102.6,
+			TP3:    103.8,
 		},
 	}, 0, 10, 5, map[string]symbolMeta{
 		"ETHUSDT": {LastPrice: 100},
