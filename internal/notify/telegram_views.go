@@ -61,6 +61,7 @@ type EntryView struct {
 type PositionView struct {
 	Symbol   string
 	Side     string
+	Reason   string
 	PnL      float64
 	Entry    float64
 	Price    float64
@@ -73,6 +74,7 @@ type PositionView struct {
 }
 
 type ExitView struct {
+	Mode                  string
 	Symbol                string
 	Side                  string
 	ExitReason            string
@@ -188,7 +190,7 @@ func FormatEntry(data EntryView) string {
 }
 
 func FormatPositionUpdate(data PositionView) string {
-	return strings.Join([]string{
+	lines := []string{
 		"📍 <b>POSITION UPDATE</b>",
 		fmt.Sprintf("<b>%s %s</b> · PnL <b>%s</b>",
 			htmlEscape(strings.ToUpper(strings.TrimSpace(data.Symbol))),
@@ -198,12 +200,20 @@ func FormatPositionUpdate(data PositionView) string {
 		fmt.Sprintf("Entry %s · Mark %s · %s", fmtPriceAdaptive(data.Entry), fmtPriceAdaptive(data.Price), fmtPct2(data.DayPct)),
 		fmt.Sprintf("Stop %s · Next TP %s", fmtMaybePrice(data.Stop), fmtMaybePrice(data.NextTP)),
 		fmt.Sprintf("Hold %s · %s @ %dx", htmlEscape(nonEmptyText(data.HoldTime, "-")), fmtUSDT(data.Margin), maxIntLocal(data.Leverage, 1)),
-	}, "\n")
+	}
+	if strings.TrimSpace(data.Reason) != "" {
+		lines = append(lines, fmt.Sprintf("Reason %s", htmlEscape(nonEmptyText(data.Reason, "-"))))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func FormatTPHit(data ExitView) string {
+	header := "✅ <b>TP HIT</b>"
+	if mode := strings.TrimSpace(displayMode(data.Mode)); mode != "" {
+		header = fmt.Sprintf("✅ <b>%s TAKE PROFIT</b>", htmlEscape(mode))
+	}
 	lines := []string{
-		"✅ <b>TP HIT</b>",
+		header,
 		fmt.Sprintf("<b>%s %s</b> · %s",
 			htmlEscape(strings.ToUpper(strings.TrimSpace(data.Symbol))),
 			htmlEscape(displaySide(data.Side)),
@@ -219,8 +229,12 @@ func FormatTPHit(data ExitView) string {
 }
 
 func FormatSLHit(data ExitView) string {
-	return strings.Join([]string{
-		"🛑 <b>STOP HIT</b>",
+	header := "🛑 <b>STOP HIT</b>"
+	if mode := strings.TrimSpace(displayMode(data.Mode)); mode != "" {
+		header = fmt.Sprintf("🛑 <b>%s EXIT</b>", htmlEscape(mode))
+	}
+	lines := []string{
+		header,
 		fmt.Sprintf("<b>%s %s</b> · %s",
 			htmlEscape(strings.ToUpper(strings.TrimSpace(data.Symbol))),
 			htmlEscape(displaySide(data.Side)),
@@ -228,12 +242,20 @@ func FormatSLHit(data ExitView) string {
 		),
 		fmt.Sprintf("Realized <b>%s</b> · %s", fmtPnL(data.RealizedPnL), fmtRMultiple(data.RMultiple)),
 		fmt.Sprintf("Stop %s · Hold %s", fmtMaybePrice(data.Stop), htmlEscape(nonEmptyText(data.HoldTime, "-"))),
-	}, "\n")
+	}
+	if strings.TrimSpace(data.RemainingPositionLine) != "" {
+		lines = append(lines, htmlEscape(strings.TrimSpace(data.RemainingPositionLine)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func FormatTradeClosed(data ExitView) string {
-	return strings.Join([]string{
-		"📤 <b>TRADE CLOSED</b>",
+	header := "📤 <b>TRADE CLOSED</b>"
+	if mode := strings.TrimSpace(displayMode(data.Mode)); mode != "" {
+		header = fmt.Sprintf("📤 <b>%s EXIT</b>", htmlEscape(mode))
+	}
+	lines := []string{
+		header,
 		fmt.Sprintf("<b>%s %s</b> · <b>%s</b>",
 			htmlEscape(strings.ToUpper(strings.TrimSpace(data.Symbol))),
 			htmlEscape(displaySide(data.Side)),
@@ -242,7 +264,11 @@ func FormatTradeClosed(data ExitView) string {
 		fmt.Sprintf("%s · Hold %s", fmtRMultiple(data.RMultiple), htmlEscape(nonEmptyText(data.HoldTime, "-"))),
 		fmt.Sprintf("Entry %s → Exit %s", fmtPriceAdaptive(data.Entry), fmtPriceAdaptive(data.ExitPrice)),
 		fmt.Sprintf("Reason %s", htmlEscape(humanExitReason(data.ExitReason))),
-	}, "\n")
+	}
+	if strings.TrimSpace(data.RemainingPositionLine) != "" {
+		lines = append(lines, htmlEscape(strings.TrimSpace(data.RemainingPositionLine)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func FormatRiskAlert(data RiskView) string {

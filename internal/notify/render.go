@@ -7,6 +7,9 @@ import (
 )
 
 func RenderEvent(event Event) string {
+	if structured := renderStructuredEvent(event); structured != "" {
+		return structured
+	}
 	switch event.Class {
 	case ClassCritical:
 		return renderTagged("CRITICAL", event)
@@ -17,6 +20,34 @@ func RenderEvent(event Event) string {
 	default:
 		return renderTagged("INFO", event)
 	}
+}
+
+func renderStructuredEvent(event Event) string {
+	switch strings.TrimSpace(event.Key) {
+	case "LIVE_STARTED":
+		lines := []string{}
+		if mode := strings.TrimSpace(event.Metadata["mode"]); mode != "" {
+			lines = append(lines, fmt.Sprintf("<b>Mode:</b> %s", strings.ToUpper(mode)))
+		}
+		if msg := strings.TrimSpace(event.Message); msg != "" {
+			lines = append(lines, msg)
+		}
+		if v := strings.TrimSpace(event.Metadata["scan_watch"]); v != "" {
+			lines = append(lines, fmt.Sprintf("<b>Scan/Watch:</b> %s", v))
+		}
+		if v := strings.TrimSpace(event.Metadata["starter_add_max"]); v != "" {
+			lines = append(lines, fmt.Sprintf("<b>Ladder:</b> %s", v))
+		}
+		if v := strings.TrimSpace(event.Metadata["min_avail_reentry"]); v != "" {
+			lines = append(lines, fmt.Sprintf("<b>Funds/Reentry:</b> %s", v))
+		}
+		title := strings.TrimSpace(event.Title)
+		if title == "" {
+			title = "SYSTEM STARTED"
+		}
+		return BuildEventHTML("🚦", title, lines...)
+	}
+	return ""
 }
 
 func renderTagged(tag string, event Event) string {
@@ -50,4 +81,3 @@ func writeMetadata(b *strings.Builder, md map[string]string) {
 		fmt.Fprintf(b, "%s: %s\n", k, md[k])
 	}
 }
-

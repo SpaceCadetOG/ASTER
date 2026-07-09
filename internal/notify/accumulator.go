@@ -11,6 +11,7 @@ import (
 type Snapshot struct {
 	Mode              string
 	Status            string
+	IssuesLine        string
 	RealizedToday     float64
 	UnrealizedNow     float64
 	FeesFundingToday  float64
@@ -84,6 +85,9 @@ func (a *Accumulator) RenderHourlyReport(now time.Time, snap Snapshot) string {
 		fmt.Sprintf("<b>PnL:</b> day %+.2f | open %+.2f | fees %.2f", snap.RealizedToday, snap.UnrealizedNow, snap.FeesFundingToday),
 		fmt.Sprintf("<b>Activity:</b> entries %d | exits %d | adds %d", a.hourly.Entries, a.hourly.Exits, a.hourly.Adds),
 	}
+	if strings.TrimSpace(snap.IssuesLine) != "" {
+		lines = append(lines, "<b>Mode Alert:</b> "+strings.TrimSpace(snap.IssuesLine))
+	}
 	if a.hourly.OrderErrors+a.hourly.UnknownExecs+a.hourly.ReconcileFailures+a.hourly.ProtectionFailures > 0 {
 		lines = append(lines, fmt.Sprintf("<b>Health:</b> err %d | unk %d | rec %d | prot %d",
 			a.hourly.OrderErrors, a.hourly.UnknownExecs, a.hourly.ReconcileFailures, a.hourly.ProtectionFailures))
@@ -119,6 +123,9 @@ func (a *Accumulator) RenderOvernightReport(now time.Time, snap Snapshot) string
 		fmt.Sprintf("<b>Mode:</b> %s | <b>Session:</b> %s", snap.Mode, snap.Status),
 		fmt.Sprintf("<b>Overnight:</b> realized %+.2f | open %+.2f", snap.RealizedToday, snap.UnrealizedNow),
 	}
+	if strings.TrimSpace(snap.IssuesLine) != "" {
+		lines = append(lines, "<b>Mode Alert:</b> "+strings.TrimSpace(snap.IssuesLine))
+	}
 	incidents := a.daily.OrderErrors + a.daily.UnknownExecs + a.daily.ReconcileFailures + a.daily.ProtectionFailures
 	if incidents > 0 {
 		lines = append(lines, fmt.Sprintf("<b>Incidents:</b> %d (err %d | unk %d | rec %d | prot %d)",
@@ -144,6 +151,9 @@ func (a *Accumulator) RenderDailyReport(now time.Time, snap Snapshot) string {
 		fmt.Sprintf("<b>Mode:</b> %s | <b>Session:</b> %s", snap.Mode, snap.Status),
 		fmt.Sprintf("<b>Daily:</b> realized %+.2f | carry %+.2f | fees %.2f", snap.RealizedToday, snap.UnrealizedNow, snap.FeesFundingToday),
 		fmt.Sprintf("<b>Activity:</b> entries %d | exits %d | adds %d", a.daily.Entries, a.daily.Exits, a.daily.Adds),
+	}
+	if strings.TrimSpace(snap.IssuesLine) != "" {
+		lines = append(lines, "<b>Mode Alert:</b> "+strings.TrimSpace(snap.IssuesLine))
 	}
 	issues := a.daily.OrderErrors + a.daily.UnknownExecs + a.daily.ReconcileFailures + a.daily.ProtectionFailures
 	if issues > 0 {

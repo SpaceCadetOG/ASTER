@@ -125,6 +125,7 @@ func TestFormatEntry(t *testing.T) {
 
 func TestFormatTradeClosed(t *testing.T) {
 	msg := FormatTradeClosed(ExitView{
+		Mode:        "paper",
 		Symbol:      "BTC",
 		Side:        "short",
 		RealizedPnL: 42.67,
@@ -134,11 +135,31 @@ func TestFormatTradeClosed(t *testing.T) {
 		ExitPrice:   103850.0,
 		ExitReason:  "momentum_exit",
 	})
-	if !strings.Contains(msg, "📤 <b>TRADE CLOSED</b>") {
-		t.Fatalf("expected trade closed header, got %q", msg)
+	if !strings.Contains(msg, "📤 <b>PAPER EXIT</b>") {
+		t.Fatalf("expected paper exit header, got %q", msg)
 	}
 	if !strings.Contains(msg, "Reason Momentum Exit") {
 		t.Fatalf("expected human exit reason, got %q", msg)
+	}
+}
+
+func TestFormatSLHitIncludesModeAndRemainingLine(t *testing.T) {
+	msg := FormatSLHit(ExitView{
+		Mode:                  "live",
+		Symbol:                "CASHCAT",
+		Side:                  "long",
+		ExitReason:            "STOP_HIT",
+		HoldTime:              "9m",
+		RealizedPnL:           -1.36,
+		RMultiple:             -1.40,
+		Stop:                  0.10899,
+		RemainingPositionLine: "Remaining 0.0000 · Day -3.16",
+	})
+	if !strings.Contains(msg, "🛑 <b>LIVE EXIT</b>") {
+		t.Fatalf("expected live exit header, got %q", msg)
+	}
+	if !strings.Contains(msg, "Remaining 0.0000 · Day -3.16") {
+		t.Fatalf("expected remaining/day line, got %q", msg)
 	}
 }
 

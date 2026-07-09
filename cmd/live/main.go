@@ -2233,11 +2233,8 @@ func main() {
 	}
 
 	pureMode := envBool("LIVE_PURE_MODE", true)
-	fmt.Printf("LIVE STARTED | mode=%s\n", map[bool]string{true: "PAPER", false: "LIVE"}[dryRun])
-	modeLabel := "LIVE"
-	if dryRun {
-		modeLabel = "PAPER"
-	}
+	modeLabel := runtimeTelegramMode(modeCtrl.operatingMode(), dryRun)
+	fmt.Printf("%s STARTED | mode=%s\n", modeLabel, modeLabel)
 	if modeCtrl.requestedOperatingMode() == runtimeModeLive {
 		fmt.Println("live: LIVE_RUNTIME_MODE=live selected; autonomous paper entry remains disabled outside paper mode")
 	}
@@ -2254,11 +2251,11 @@ func main() {
 	fmt.Println()
 	emitNotifyEvent(notifyDispatcher, notify.Event{
 		Key:      "LIVE_STARTED",
-		Title:    "LIVE STARTED",
+		Title:    modeLabel + " STARTED",
 		Class:    notify.ClassLifecycle,
 		Severity: notify.SeverityNotice,
 		Route:    notify.RouteNormal,
-		Message:  "live process started",
+		Message:  strings.ToLower(modeLabel) + " process started",
 		Metadata: map[string]string{
 			"mode":              modeLabel,
 			"scan_watch":        fmt.Sprintf("%s/%s", scanEvery, watchCfg.Every),
@@ -2686,7 +2683,7 @@ func main() {
 				hk := localMaintNow.Format("2006-01-02 15")
 				if localMaintNow.Minute() == 0 && hk != lastHourlyKey {
 					if shouldSendPulse(now, lastPulseSentAt, 10*time.Minute) {
-						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						snap := buildNotifySnapshot(operatingMode, dryRun, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
 						if report := notifyAccum.RenderHourlyReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
 							tg.Sendf("%s", report)
 						}
@@ -2709,7 +2706,7 @@ func main() {
 				if localMaintNow.Hour() > overnightReportHour || (localMaintNow.Hour() == overnightReportHour && localMaintNow.Minute() >= overnightReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != lastOvernightReportDay {
-						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						snap := buildNotifySnapshot(operatingMode, dryRun, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
 						if report := notifyAccum.RenderOvernightReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
 							tg.Sendf("%s", report)
 						}
@@ -2721,7 +2718,7 @@ func main() {
 				if localMaintNow.Hour() > dailyReportHour || (localMaintNow.Hour() == dailyReportHour && localMaintNow.Minute() >= dailyReportMinute) {
 					dayKey := localMaintNow.Format("2006-01-02")
 					if dayKey != last1900ReportDay {
-						snap := buildNotifySnapshot(strings.ToUpper(string(operatingMode)), localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
+						snap := buildNotifySnapshot(operatingMode, dryRun, localMaintNow, paper, execMgr, metaBySymbol, longInPlay, shortInPlay)
 						if report := notifyAccum.RenderDailyReport(localMaintNow, snap); strings.TrimSpace(report) != "" {
 							tg.Sendf("%s", report)
 						}
@@ -3137,9 +3134,10 @@ func parseHHMM(raw string, defHour, defMin int) (int, int) {
 	return h, m
 }
 
-func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liveExecManager, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) notify.Snapshot {
+func buildNotifySnapshot(mode runtimeOperatingMode, dryRun bool, now time.Time, p *paperTrader, m *liveExecManager, meta map[string]symbolMeta, longInPlay, shortInPlay []inplay.Entry) notify.Snapshot {
+	displayMode := runtimeTelegramMode(mode, dryRun)
 	snap := notify.Snapshot{
-		Mode:              firstNonEmpty(strings.TrimSpace(modeLabel), "LIVE"),
+		Mode:              displayMode,
 		Status:            fmt.Sprintf("session=%s", sessionTag(now)),
 		RealizedToday:     0,
 		UnrealizedNow:     0,
@@ -3147,7 +3145,28 @@ func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liv
 		OpenPositionLines: []string{},
 		WatchlistLines:    []string{},
 	}
-	if p != nil && p.enabled {
+	switch displayMode {
+	case "LIVE":
+		if m == nil {
+			snap.IssuesLine = "live runtime selected but live execution manager is unavailable"
+			break
+		}
+		live := m.LiveAccountSnapshot(8)
+		snap.RealizedToday = live.RealizedDay
+		snap.UnrealizedNow = live.OpenPnL
+		snap.FeesFundingToday = 0
+		for _, pos := range live.Positions {
+			snap.OpenPositionLines = append(snap.OpenPositionLines,
+				fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", pos.Symbol, pos.Side, firstNonEmpty(pos.EntryReason, "unknown"), pos.UnrealizedPnL))
+		}
+		if p != nil && p.enabled && len(p.positions) > 0 {
+			snap.IssuesLine = fmt.Sprintf("paper ledger still has %d open position(s) while runtime mode is LIVE", len(p.positions))
+		}
+	default:
+		if p == nil || !p.enabled {
+			snap.IssuesLine = "paper runtime selected but paper trader is unavailable"
+			break
+		}
 		dayKey := now.In(p.reportLoc).Format("2006-01-02")
 		if ds := p.dayStats[dayKey]; ds != nil {
 			snap.RealizedToday = ds.Net
@@ -3169,17 +3188,10 @@ func buildNotifySnapshot(modeLabel string, now time.Time, p *paperTrader, m *liv
 			snap.UnrealizedNow += upnl
 			snap.OpenPositionLines = append(snap.OpenPositionLines, fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", raw, pos.Side, firstNonEmpty(pos.EntryReason, "n/a"), upnl))
 		}
-	}
-	if m != nil {
-		live := m.LiveAccountSnapshot(8)
-		snap.RealizedToday = live.RealizedDay
-		snap.UnrealizedNow = live.OpenPnL
-		snap.FeesFundingToday = 0
-		if len(live.Positions) > 0 {
-			snap.OpenPositionLines = snap.OpenPositionLines[:0]
-			for _, pos := range live.Positions {
-				snap.OpenPositionLines = append(snap.OpenPositionLines,
-					fmt.Sprintf("%s %s | reason=%s | uPnL=%+.2f", pos.Symbol, pos.Side, firstNonEmpty(pos.EntryReason, "unknown"), pos.UnrealizedPnL))
+		if m != nil {
+			live := m.LiveAccountSnapshot(8)
+			if live.OpenCount > 0 {
+				snap.IssuesLine = fmt.Sprintf("paper runtime active while live account still has %d open position(s)", live.OpenCount)
 			}
 		}
 	}
@@ -3381,6 +3393,19 @@ func safeRMultiple(entry, stop, exit float64, side string) float64 {
 		return (entry - exit) / risk
 	}
 	return (exit - entry) / risk
+}
+
+func formatExitReceipt(action, reason string, exitView notify.ExitView) string {
+	actionU := strings.ToUpper(strings.TrimSpace(action))
+	reasonU := strings.ToUpper(strings.TrimSpace(reason))
+	switch {
+	case actionU == "TP" || strings.HasPrefix(reasonU, "TP"):
+		return notify.FormatTPHit(exitView)
+	case actionU == "STOP" || strings.Contains(reasonU, "STOP") || reasonU == "SL":
+		return notify.FormatSLHit(exitView)
+	default:
+		return notify.FormatTradeClosed(exitView)
+	}
 }
 
 func hasLiveProtectiveOrder(p *livePosition) bool {
@@ -7802,7 +7827,7 @@ func (m *liveExecManager) logFill(now time.Time, p *livePosition, action, reason
 }
 
 func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action, reason string, qty, fillPx, pnl, pct float64) {
-	if m == nil || p == nil || m.tg == nil || !m.fillReceipt {
+	if m == nil || p == nil || m.tg == nil {
 		return
 	}
 	loc := m.reportLoc
@@ -7817,6 +7842,9 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 	holdMin := now.Sub(p.CreatedAt).Minutes()
 	switch strings.ToUpper(strings.TrimSpace(action)) {
 	case "ENTRY", "ADD":
+		if !m.fillReceipt {
+			return
+		}
 		m.tg.Sendf("%s", notify.FormatEntry(notify.EntryView{
 			Mode:     "live",
 			Symbol:   cleanSymbol(p.Symbol),
@@ -7835,6 +7863,7 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 		return
 	}
 	exitView := notify.ExitView{
+		Mode:        "live",
 		Symbol:      cleanSymbol(p.Symbol),
 		Side:        p.Side,
 		ExitReason:  reason,
@@ -7849,16 +7878,7 @@ func (m *liveExecManager) sendFillReceipt(now time.Time, p *livePosition, action
 	if p.RemainingQty > 0 && !strings.EqualFold(strings.TrimSpace(action), "CLOSE") && !strings.EqualFold(strings.TrimSpace(action), "FORCE_CLOSE") {
 		exitView.RemainingPositionLine = fmt.Sprintf("Remaining %.4f · Day %+.2f", p.RemainingQty, dayRealized)
 	}
-	actionU := strings.ToUpper(strings.TrimSpace(action))
-	reasonU := strings.ToUpper(strings.TrimSpace(reason))
-	switch {
-	case actionU == "TP" || strings.HasPrefix(reasonU, "TP"):
-		m.tg.Sendf("%s", notify.FormatTPHit(exitView))
-	case actionU == "STOP" || strings.Contains(reasonU, "STOP") || reasonU == "SL":
-		m.tg.Sendf("%s", notify.FormatSLHit(exitView))
-	default:
-		m.tg.Sendf("%s", notify.FormatTradeClosed(exitView))
-	}
+	m.tg.Sendf("%s", formatExitReceipt(action, reason, exitView))
 }
 
 func (m *liveExecManager) DailyReceiptMessage(dayKey string, limit int) (string, bool) {
@@ -9652,6 +9672,7 @@ func (m *liveExecManager) liveTradeUpdateMessage(meta map[string]symbolMeta) str
 		positions = append(positions, notify.PositionView{
 			Symbol:   cleanSymbol(pos.Symbol),
 			Side:     pos.Side,
+			Reason:   firstNonEmpty(pos.EntryReason, "unknown"),
 			PnL:      pos.UnrealizedPnL,
 			Entry:    pos.EntryPrice,
 			Price:    firstPositive(pos.MarkPrice, pos.LastPrice, pos.EntryPrice),
@@ -14171,14 +14192,6 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 	feeRate := p.feeRateBpsForReason(reason)
 	fee := notional * feeRate / 10000.0
 	net := gross - fee
-	pct := 0.0
-	if pos.Entry > 0 {
-		if strings.EqualFold(pos.Side, "BUY") {
-			pct = ((exitPrice - pos.Entry) / pos.Entry) * 100.0
-		} else {
-			pct = ((pos.Entry - exitPrice) / pos.Entry) * 100.0
-		}
-	}
 	pos.Realized += net
 	pos.GrossRealized += gross
 	pos.FeesRealized += fee
@@ -14278,11 +14291,22 @@ func (p *paperTrader) exitPortion(now time.Time, pos *paperPosition, reason stri
 		if ds := p.dayStats[dayKey]; ds != nil {
 			realizedToday = ds.Net
 		}
-		p.onExit(fmt.Sprintf(
-			"%s <b>PAPER EXIT | %s %s</b>\n• <b>Qty:</b> %.6f | <b>Exit:</b> %s\n• <b>PnL:</b> %+.2f (%+.2f%%)\n• <b>Reason:</b> %s | <b>Hold:</b> %.1fm\n• <b>Remaining:</b> %.6f | <b>Session:</b> %s\n• <b>Realized Today:</b> %+.2f | <b>Balance:</b> $%.2f",
-			exitAlertEmoji(reasonU), symbol, pos.Side, qty, fmtPrice(exitPrice), net, pct, reasonU, holdMin, pos.Qty, sessionTag(now.In(loc)),
-			realizedToday, p.balance,
-		))
+		exitView := notify.ExitView{
+			Mode:        "paper",
+			Symbol:      cleanSymbol(symbol),
+			Side:        pos.Side,
+			ExitReason:  reasonU,
+			HoldTime:    fmt.Sprintf("%.0fm", holdMin),
+			RealizedPnL: net,
+			RMultiple:   safeRMultiple(pos.Entry, pos.Stop, exitPrice, pos.Side),
+			FillPrice:   exitPrice,
+			Stop:        pos.Stop,
+			Entry:       pos.Entry,
+			ExitPrice:   exitPrice,
+			RemainingPositionLine: fmt.Sprintf("Remaining %.4f · Session %s · Day %+.2f",
+				pos.Qty, sessionTag(now.In(loc)), realizedToday),
+		}
+		p.onExit(formatExitReceipt(reasonU, reasonU, exitView))
 	}
 	_ = p.logTrade(now, pos, exitPrice, qty, reason, gross, fee, net, holdMin, m, ob)
 	if pos.Qty <= 1e-10 {
@@ -14433,26 +14457,18 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 		return ""
 	}
 	if topN <= 0 {
-		topN = 5
+		topN = 3
 	}
-	type row struct {
-		sym    string
-		side   string
-		entry  float64
-		mark   float64
-		qty    float64
-		upnl   float64
-		rpnl   float64
-		margin float64
-		lev    int
-		upct   float64
-		ageMin int
-		reason string
-	}
-	rows := make([]row, 0, len(p.positions))
+	positions := make([]notify.PositionView, 0, len(p.positions))
 	totalUPnL := 0.0
 	for sym, pos := range p.positions {
 		mark := meta[sym].LastPrice
+		if mark <= 0 {
+			mark = pos.LastMark
+		}
+		if mark <= 0 {
+			mark = pos.Entry
+		}
 		upnl := 0.0
 		upct := 0.0
 		if strings.EqualFold(pos.Side, "BUY") {
@@ -14467,52 +14483,39 @@ func (p *paperTrader) TradeUpdateMessage(meta map[string]symbolMeta, topN int) s
 			}
 		}
 		totalUPnL += upnl
-		reason := strings.TrimSpace(pos.EntryReason)
-		if reason == "" {
-			reason = "-"
-		}
-		rows = append(rows, row{
-			sym:    sym,
-			side:   pos.Side,
-			entry:  pos.Entry,
-			mark:   mark,
-			qty:    pos.Qty,
-			upnl:   upnl,
-			rpnl:   pos.Realized,
-			margin: paperPositionMarginUsed(pos),
-			lev:    maxInt(pos.Leverage, 1),
-			upct:   upct,
-			ageMin: int(time.Since(pos.OpenedAt).Minutes()),
-			reason: reason,
+		positions = append(positions, notify.PositionView{
+			Symbol:   cleanSymbol(sym),
+			Side:     pos.Side,
+			Reason:   firstNonEmpty(strings.TrimSpace(pos.EntryReason), "-"),
+			PnL:      upnl,
+			Entry:    pos.Entry,
+			Price:    mark,
+			DayPct:   upct,
+			Stop:     pos.Stop,
+			NextTP:   firstPositive(pos.TP1, pos.TP2, pos.TP3),
+			HoldTime: fmt.Sprintf("%dm", int(time.Since(pos.OpenedAt).Minutes())),
+			Margin:   paperPositionMarginUsed(pos),
+			Leverage: maxInt(pos.Leverage, 1),
 		})
 	}
-	sort.Slice(rows, func(i, j int) bool { return abs(rows[i].upnl) > abs(rows[j].upnl) })
-	if len(rows) > topN {
-		rows = rows[:topN]
-	}
+	sort.Slice(positions, func(i, j int) bool { return abs(positions[i].PnL) > abs(positions[j].PnL) })
 	eq := p.balance + totalUPnL
 	dayKey := time.Now().In(p.reportLoc).Format("2006-01-02")
 	realizedToday := 0.0
 	if ds := p.dayStats[dayKey]; ds != nil {
 		realizedToday = ds.Net
 	}
-	var b strings.Builder
 	nowLocal := time.Now().In(p.reportLoc)
-	fmt.Fprintf(&b, "Paper Update (%s) session=%s\n", nowLocal.Format("15:04 MST"), sessionTag(nowLocal))
-	fmt.Fprintf(&b, "bal=$%.2f eq=$%.2f realized=%+.2f openPnL=%+.2f netDay=%+.2f open=%d/%d\n",
-		p.balance, eq, realizedToday, totalUPnL, realizedToday+totalUPnL, len(p.positions), p.maxOpen)
-	if len(rows) == 0 {
-		b.WriteString("open: none")
-		return b.String()
+	account := notify.AccountView{
+		Mode:          "PAPER",
+		Timestamp:     nowLocal.Format("15:04 MST"),
+		AvailableUSDT: p.balance,
+		Equity:        eq,
+		PaperPnL:      realizedToday + totalUPnL,
+		LivePnL:       0,
+		OpenPositions: len(positions),
 	}
-	b.WriteString("| Sym | Side | Margin | Qty | Entry | Mark | Lev | uPnL | rPnL | uPnL% | Age(m) | Reason |\n")
-	b.WriteString("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
-	for _, r := range rows {
-		fmt.Fprintf(&b, "| %s | %s | $%.2f | %.4f | %s | %s | %dx | %+.2f | %+.2f | %+.2f%% | %d | %s |\n",
-			r.sym, r.side, r.margin, r.qty, fmtPrice(r.entry), fmtPrice(r.mark), r.lev, r.upnl, r.rpnl, r.upct, r.ageMin, colorReasonTag(r.reason))
-	}
-	fmt.Fprintf(&b, "\nTotals: openPnL=%+.2f realizedToday=%+.2f netDay=%+.2f", totalUPnL, realizedToday, realizedToday+totalUPnL)
-	return strings.TrimSpace(b.String())
+	return positionUpdatesHTML("PAPER", account, positions, topN)
 }
 
 func (p *paperTrader) TradeUpdateSignature(meta map[string]symbolMeta, topN int) string {

@@ -38,6 +38,13 @@ func surfacedRuntimeMode(mode runtimeOperatingMode) string {
 	return string(mode)
 }
 
+func runtimeTelegramMode(mode runtimeOperatingMode, dryRun bool) string {
+	if mode == runtimeModeLive && !dryRun {
+		return "LIVE"
+	}
+	return "PAPER"
+}
+
 func surfacedPaperLabel(raw string) string {
 	value := strings.TrimSpace(raw)
 	if value == "" {

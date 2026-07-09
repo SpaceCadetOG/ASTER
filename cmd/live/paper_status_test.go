@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,5 +248,84 @@ func TestStatusMuxRepeatedCallsDoNotDeadlock(t *testing.T) {
 		if payload.Mode != "paper" {
 			t.Fatalf("unexpected payload on iteration %d: %+v", i, payload)
 		}
+	}
+}
+
+func TestBuildNotifySnapshotUsesLiveTruthInsteadOfPaperWhenLiveModeSelected(t *testing.T) {
+	now := time.Now().UTC()
+	paper := &paperTrader{
+		enabled:   true,
+		balance:   1005,
+		reportLoc: time.UTC,
+		positions: map[string]*paperPosition{
+			"BTCUSDT": {Symbol: "BTCUSDT", Side: "BUY", Entry: 100, Qty: 1, OpenedAt: now.Add(-5 * time.Minute), EntryReason: "paper_test"},
+		},
+		dayStats: map[string]*paperDayStats{
+			now.Format("2006-01-02"): {Net: 7.25},
+		},
+	}
+	execMgr := &liveExecManager{}
+	execMgr.liveAccount = liveAccountSnapshot{
+		Generated:     now,
+		AvailableUSDT: 12.5,
+		Equity:        11.8,
+		RealizedDay:   -1.5,
+		OpenPnL:       -0.4,
+		OpenCount:     1,
+		Positions: []liveAccountPosition{{
+			Symbol:        "CASHCATUSDT",
+			Side:          "BUY",
+			EntryReason:   "impulse_breakout",
+			UnrealizedPnL: -0.4,
+		}},
+	}
+
+	snap := buildNotifySnapshot(runtimeModeLive, false, now, paper, execMgr, map[string]symbolMeta{}, nil, nil)
+	if snap.Mode != "LIVE" {
+		t.Fatalf("expected LIVE mode, got %+v", snap)
+	}
+	if snap.RealizedToday != -1.5 || snap.UnrealizedNow != -0.4 {
+		t.Fatalf("expected live PnL truth, got %+v", snap)
+	}
+	if len(snap.OpenPositionLines) != 1 || !strings.Contains(snap.OpenPositionLines[0], "CASHCATUSDT") {
+		t.Fatalf("expected live open position lines, got %+v", snap.OpenPositionLines)
+	}
+	if !strings.Contains(snap.IssuesLine, "paper ledger still has 1 open position") {
+		t.Fatalf("expected mode mismatch warning, got %+v", snap)
+	}
+}
+
+func TestBuildNotifySnapshotUsesPaperTruthAndWarnsOnLiveCarry(t *testing.T) {
+	now := time.Now().UTC()
+	paper := &paperTrader{
+		enabled:   true,
+		balance:   1002,
+		reportLoc: time.UTC,
+		positions: map[string]*paperPosition{
+			"LABUSDT": {Symbol: "LABUSDT", Side: "SELL", Entry: 1.0, Qty: 2, OpenedAt: now.Add(-3 * time.Minute), EntryReason: "pullback_reclaim"},
+		},
+		dayStats: map[string]*paperDayStats{
+			now.Format("2006-01-02"): {Net: 3.2},
+		},
+	}
+	execMgr := &liveExecManager{}
+	execMgr.liveAccount = liveAccountSnapshot{
+		Generated:     now,
+		AvailableUSDT: 1.2,
+		Equity:        1.1,
+		RealizedDay:   -1.9,
+		OpenPnL:       -0.1,
+		OpenCount:     1,
+	}
+
+	snap := buildNotifySnapshot(runtimeModePaper, true, now, paper, execMgr, map[string]symbolMeta{"LABUSDT": {LastPrice: 0.9}}, nil, nil)
+	if snap.Mode != "PAPER" {
+		t.Fatalf("expected PAPER mode, got %+v", snap)
+	}
+	if snap.RealizedToday != 3.2 {
+		t.Fatalf("expected paper realized day, got %+v", snap)
+	}
+	if !strings.Contains(snap.IssuesLine, "paper runtime active while live account still has 1 open position") {
+		t.Fatalf("expected live carry warning, got %+v", snap)
 	}
 }

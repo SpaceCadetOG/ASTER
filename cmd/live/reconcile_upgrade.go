@@ -515,9 +515,8 @@ func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage 
 	p.UpdatedAt = now
 	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, deltaQty)
 	p.RealizedPnL += pnl
-	dayRealized := m.addDayRealized(now, pnl)
+	_ = m.addDayRealized(now, pnl)
 	reason := fmt.Sprintf("TP%d_PARTIAL", stage)
-	title := fmt.Sprintf("TP%d PARTIAL", stage)
 	switch stage {
 	case 1:
 		p.TP1FilledQty += deltaQty
@@ -525,7 +524,6 @@ func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage 
 			p.HitTP1 = true
 			p.TP1OrderID = 0
 			reason = "TP1_HIT"
-			title = "TP1 HIT"
 			p.State = execPartialTP1
 			if m.beLockBps > 0 {
 				p.StopPrice = beLockPrice(p.Side, p.EntryPrice, m.beLockBps)
@@ -538,7 +536,6 @@ func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage 
 			p.HitTP2 = true
 			p.TP2OrderID = 0
 			reason = "TP2_HIT"
-			title = "TP2 HIT"
 			p.State = execPartialTP2
 			m.maybeEnableTrail(p, 2)
 		}
@@ -548,16 +545,8 @@ func (m *liveExecManager) applyTPProgress(now time.Time, p *livePosition, stage 
 			p.HitTP3 = true
 			p.TP3OrderID = 0
 			reason = "TP3_HIT"
-			title = "TP3 HIT"
 			m.maybeEnableTrail(p, 3)
 		}
-	}
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("✅", title,
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", deltaQty, fmtPrice(fillPx)),
-			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-		))
 	}
 	_ = m.logFill(now, p, "TP", reason, deltaQty, fillPx, pnl, pct)
 	m.sendFillReceipt(now, p, "TP", reason, deltaQty, fillPx, pnl, pct)
@@ -577,21 +566,12 @@ func (m *liveExecManager) applyStopProgress(now time.Time, p *livePosition, delt
 	p.UpdatedAt = now
 	pnl, pct := realizedFromFill(p.Side, p.EntryPrice, fillPx, deltaQty)
 	p.RealizedPnL += pnl
-	dayRealized := m.addDayRealized(now, pnl)
+	_ = m.addDayRealized(now, pnl)
 	reason := "STOP_PARTIAL"
-	title := "STOP PARTIAL"
 	if final || p.RemainingQty <= fillEpsilon(p.Qty) {
 		p.StopOrderID = 0
 		reason = "STOP_HIT"
-		title = "STOP HIT"
 		m.markPositionClosed(now, p, "STOP_HIT")
-	}
-	if m.tg != nil {
-		m.tg.Sendf("%s", notify.BuildEventHTML("🛑", title,
-			fmt.Sprintf("<b>%s %s</b>", p.Symbol, p.Side),
-			fmt.Sprintf("<b>Qty:</b> %.6f | <b>Px:</b> %s", deltaQty, fmtPrice(fillPx)),
-			fmt.Sprintf("<b>PnL:</b> %+.2f (%+.2f%%) | <b>Day:</b> %+.2f", pnl, pct, dayRealized),
-		))
 	}
 	_ = m.logFill(now, p, "STOP", reason, deltaQty, fillPx, pnl, pct)
 	m.sendFillReceipt(now, p, "STOP", reason, deltaQty, fillPx, pnl, pct)
